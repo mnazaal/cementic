@@ -1,0 +1,39 @@
+version: '3.8'
+
+services:
+  postgres:
+    container_name: seman-postgres
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_DB: seman
+      POSTGRES_USER: seman
+      POSTGRES_PASSWORD: seman
+    ports:
+      - "5432:5432"
+    volumes:
+      - seman-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U seman -d seman"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  ollama:
+    container_name: seman-ollama
+    image: ollama/ollama:latest
+    ports:
+      - "11434:11434"
+    volumes:
+      - seman-ollama-data:/root/.ollama
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:11434/api/tags"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+volumes:
+  seman-postgres-data:
+    driver: local
+  seman-ollama-data:
+    driver: local
