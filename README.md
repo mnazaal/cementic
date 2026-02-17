@@ -7,7 +7,6 @@ Semantic search CLI tool for indexing and searching PDF documents using pgvector
 - **PDF to Markdown**: Converts PDFs to markdown using pymupdf4llm
 - **Background Conversion**: Daemon watches directories and auto-converts new PDFs
 - **Background Indexing**: Daemon computes embeddings and stores in PostgreSQL
-- **Pause/Resume**: Pause processing while keeping file watchers active
 - **Semantic Search**: Search with pgvectorscale (DiskANN) and embeddings
 - **No Raw SQL**: Pure SQLAlchemy ORM throughout
 
@@ -25,7 +24,7 @@ pipx install seman
 
 No manual setup is required for normal usage.
 
-When you run `seman convert start` or `seman index start`, seman can automatically:
+When you run `seman start`, seman can automatically:
 - Start PostgreSQL and Ollama containers (when using local hosts)
 - Wait for services to become healthy
 - Pull missing Ollama models
@@ -35,14 +34,20 @@ the model when `SEMAN_BOOTSTRAP_AUTO_DOWNLOAD_LLAMA_MODEL=true`.
 
 ## Usage
 
-### Recommended (Background)
+### Commands
 
 ```bash
 # Start converter + indexer in background
 seman start /path/to/pdfs --collection test
 
-# Check unified status
+# Detailed converter/indexer/queue status
 seman status
+
+# Search all collections
+seman search "your query"
+
+# Search specific collections
+seman search "your query" --collection work --collection personal
 
 # Stop both background processes
 seman stop
@@ -51,57 +56,6 @@ seman stop
 seman delete-collection test --force
 ```
 
-### Converting PDFs
-
-```bash
-# Start converter daemon watching directories
-seman convert start /path/to/pdfs /another/path
-
-# Assign documents to a collection
-seman convert start /path/to/work-pdfs --collection work
-seman convert start /path/to/personal-pdfs --collection personal
-
-# Check status
-seman status
-
-# Control converter
-seman convert pause
-seman convert resume
-seman convert stop
-```
-
-### Indexing (Computing Embeddings)
-
-```bash
-# Start indexer daemon
-seman index start
-
-# Check status
-seman status
-
-# Control indexer
-seman index pause
-seman index resume
-seman index stop
-```
-
-### Search
-
-```bash
-seman search "your query here"
-seman search "query" -n 20  # Top 20 results
-
-# Search a specific collection (repeat flag for multiple)
-seman search "query" --collection work
-seman search "query" --collection work --collection personal
-```
-
-### Infrastructure
-
-```bash
-seman infra up      # Start containers
-seman infra down    # Stop containers
-seman infra status  # Check container status
 ```
 
 ## Configuration

@@ -49,8 +49,8 @@ supervisor_state_path = _get_data_dir() / "supervisor.json"
 # Create sub-commands for convert and index
 convert_app = typer.Typer(help="PDF conversion commands")
 index_app = typer.Typer(help="Indexing commands (compute embeddings)")
-app.add_typer(convert_app, name="convert")
-app.add_typer(index_app, name="index")
+app.add_typer(convert_app, name="convert", hidden=True)
+app.add_typer(index_app, name="index", hidden=True)
 
 
 @dataclass
@@ -277,59 +277,6 @@ def stop_background() -> None:
     console.print(f"[green]Sent stop signal to {stopped} process(es)[/green]")
 
 
-@app.command()
-def infra_up() -> None:
-    """Start PostgreSQL and Ollama containers."""
-    try:
-        subprocess.run(
-            ["podman-compose", "up", "-d"],
-            check=True,
-            cwd=Path(__file__).parent.parent,
-        )
-        console.print("[green]Infrastructure started successfully[/green]")
-        console.print(f"PostgreSQL: localhost:{config.database.port}")
-    except subprocess.CalledProcessError as e:
-        console.print(f"[red]Failed to start infrastructure: {e}[/red]")
-        raise typer.Exit(1)
-
-
-@app.command()
-def infra_down() -> None:
-    """Stop PostgreSQL and Ollama containers."""
-    try:
-        subprocess.run(
-            ["podman-compose", "down"],
-            check=True,
-            cwd=Path(__file__).parent.parent,
-        )
-        console.print("[green]Infrastructure stopped successfully[/green]")
-    except subprocess.CalledProcessError as e:
-        console.print(f"[red]Failed to stop infrastructure: {e}[/red]")
-        raise typer.Exit(1)
-
-
-@app.command()
-def infra_status() -> None:
-    """Check infrastructure status."""
-    try:
-        result = subprocess.run(
-            [
-                "podman",
-                "ps",
-                "--filter",
-                "name=seman-",
-                "--format",
-                "table {{.Names}}\t{{.Status}}\t{{.Ports}}",
-            ],
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-        console.print(result.stdout)
-    except subprocess.CalledProcessError as e:
-        console.print(f"[red]Failed to get status: {e}[/red]")
-
-
 @convert_app.command("start")
 def convert_start(
     directories: List[str] = typer.Argument(..., help="Directories to watch for PDFs"),
@@ -353,34 +300,6 @@ def convert_start(
     except KeyboardInterrupt:
         console.print("\n[yellow]Shutting down converter...[/yellow]")
         daemon.stop()
-
-
-@convert_app.command("pause")
-def convert_pause() -> None:
-    """Pause PDF conversion (keep watching)."""
-    state_manager = _converter_state_manager()
-    state = state_manager.load()
-
-    if state.daemon_state != DaemonState.RUNNING:
-        console.print("[yellow]Converter is not running[/yellow]")
-        return
-
-    state_manager.update(daemon_state=DaemonState.PAUSED)
-    console.print("[green]Converter paused[/green]")
-
-
-@convert_app.command("resume")
-def convert_resume() -> None:
-    """Resume PDF conversion."""
-    state_manager = _converter_state_manager()
-    state = state_manager.load()
-
-    if state.daemon_state != DaemonState.PAUSED:
-        console.print("[yellow]Converter is not paused[/yellow]")
-        return
-
-    state_manager.update(daemon_state=DaemonState.RUNNING)
-    console.print("[green]Converter resumed[/green]")
 
 
 @convert_app.command("stop")
@@ -415,34 +334,6 @@ def index_start() -> None:
     except KeyboardInterrupt:
         console.print("\n[yellow]Shutting down indexer...[/yellow]")
         daemon.stop()
-
-
-@index_app.command("pause")
-def index_pause() -> None:
-    """Pause indexing (embedding generation)."""
-    state_manager = _embedder_state_manager()
-    state = state_manager.load()
-
-    if state.daemon_state != DaemonState.RUNNING:
-        console.print("[yellow]Indexer is not running[/yellow]")
-        return
-
-    state_manager.update(daemon_state=DaemonState.PAUSED)
-    console.print("[green]Indexer paused[/green]")
-
-
-@index_app.command("resume")
-def index_resume() -> None:
-    """Resume indexing."""
-    state_manager = _embedder_state_manager()
-    state = state_manager.load()
-
-    if state.daemon_state != DaemonState.PAUSED:
-        console.print("[yellow]Indexer is not paused[/yellow]")
-        return
-
-    state_manager.update(daemon_state=DaemonState.RUNNING)
-    console.print("[green]Indexer resumed[/green]")
 
 
 @index_app.command("stop")

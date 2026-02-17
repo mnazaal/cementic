@@ -10,54 +10,6 @@ from seman.cli import app
 runner = CliRunner()
 
 
-class TestInfraCommands:
-    """Test infrastructure management commands."""
-
-    @patch("seman.cli.subprocess.run")
-    def test_infra_up(self, mock_run):
-        """Test infra up command."""
-        mock_run.return_value = MagicMock(returncode=0)
-
-        result = runner.invoke(app, ["infra-up"])
-
-        assert result.exit_code == 0
-        mock_run.assert_called_once()
-        assert "podman-compose" in mock_run.call_args[0][0]
-        assert "up" in mock_run.call_args[0][0]
-
-    @patch("seman.cli.subprocess.run")
-    def test_infra_up_failure(self, mock_run):
-        """Test infra up command failure."""
-        from subprocess import CalledProcessError
-
-        mock_run.side_effect = CalledProcessError(1, "cmd")
-
-        result = runner.invoke(app, ["infra-up"])
-
-        assert result.exit_code == 1
-        assert "Failed" in result.output
-
-    @patch("seman.cli.subprocess.run")
-    def test_infra_down(self, mock_run):
-        """Test infra down command."""
-        mock_run.return_value = MagicMock(returncode=0)
-
-        result = runner.invoke(app, ["infra-down"])
-
-        assert result.exit_code == 0
-        mock_run.assert_called_once()
-
-    @patch("seman.cli.subprocess.run")
-    def test_infra_status(self, mock_run):
-        """Test infra status command."""
-        mock_run.return_value = MagicMock(returncode=0, stdout="CONTAINER STATUS")
-
-        result = runner.invoke(app, ["infra-status"])
-
-        assert result.exit_code == 0
-        assert "CONTAINER STATUS" in result.output
-
-
 class TestConvertCommands:
     """Test converter commands."""
 

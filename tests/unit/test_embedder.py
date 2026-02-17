@@ -220,32 +220,6 @@ class TestEmbedderStateManagement:
 
     @patch("seman.embedder.get_engine")
     @patch("seman.embedder.get_session_factory")
-    def test_pause_sets_state(self, mock_session_factory, mock_get_engine):
-        """Test pause updates state correctly."""
-        daemon = EmbedderDaemon()
-        daemon._pause_event = MagicMock()
-
-        with patch.object(daemon.state_manager, "update") as mock_update:
-            daemon.pause()
-
-            daemon._pause_event.set.assert_called_once()
-            mock_update.assert_called_with(daemon_state=DaemonState.PAUSED)
-
-    @patch("seman.embedder.get_engine")
-    @patch("seman.embedder.get_session_factory")
-    def test_resume_clears_pause(self, mock_session_factory, mock_get_engine):
-        """Test resume clears pause state."""
-        daemon = EmbedderDaemon()
-        daemon._pause_event = MagicMock()
-
-        with patch.object(daemon.state_manager, "update") as mock_update:
-            daemon.resume()
-
-            daemon._pause_event.clear.assert_called_once()
-            mock_update.assert_called_with(daemon_state=DaemonState.RUNNING)
-
-    @patch("seman.embedder.get_engine")
-    @patch("seman.embedder.get_session_factory")
     def test_stop_sets_shutdown(self, mock_session_factory, mock_get_engine):
         """Test stop sets shutdown event."""
         daemon = EmbedderDaemon()

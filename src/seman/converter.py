@@ -78,7 +78,6 @@ class ConverterDaemon:
         self.config = config or get_config()
         self.state_manager = StateManager(self.config.converter.state_path)
         self._shutdown_event = threading.Event()
-        self._pause_event = threading.Event()
         self.watcher: Optional[Observer] = None
         self._logger = self._setup_logging()
         self.Session = None
@@ -162,10 +161,6 @@ class ConverterDaemon:
 
     def _on_pdf_detected(self, pdf_path: str) -> None:
         """Handle detected PDF file."""
-        state = self.state_manager.load()
-        if self._pause_event.is_set() or state.daemon_state == DaemonState.PAUSED:
-            return
-
         try:
             self._process_pdf(pdf_path)
         except Exception as e:
@@ -192,12 +187,29 @@ class ConverterDaemon:
             )
             if existing:
                 if existing.file_hash == file_hash:
-                    self._logger.debug(f"Skipping unchanged file: {pdf_path}")
-                    return
-                else:
-                    # File changed, delete old chunks
-                    session.query(Chunk).filter_by(document_id=existing.id).delete()
-                    document = existing
+                    chunk_count = session.query(Chunk).filter_by(document_id=existing.id).count()
+                    expected_chunks = existing.total_chunks or 0
+                    is_complete = (
+                        existing.status in {"converted", "completed"}
+                        and expected_chunks > 0
+                        and chunk_count == expected_chunks
+                    )
+                    if is_complete:
+                        self._logger.debug(f"Skipping unchanged file: {pdf_path}")
+                        return
+
+                    self._logger.info(
+                        "Reprocessing incomplete unchanged file: %s "
+                        "(status=%s, chunks=%s, expected=%s)",
+                        pdf_path,
+                        existing.status,
+                        chunk_count,
+                        expected_chunks,
+                    )
+
+                # File changed or incomplete previous attempt: rebuild chunks
+                session.query(Chunk).filter_by(document_id=existing.id).delete()
+                document = existing
             else:
                 document = Document(source_path=pdf_path, collection=self.collection)
                 session.add(document)
@@ -206,6 +218,8 @@ class ConverterDaemon:
             # Update document metadata
             document.file_hash = file_hash
             document.status = "processing"
+            document.total_chunks = None
+            document.error_message = None
             session.commit()
 
             self.state_manager.update(current_file=pdf_path)
@@ -272,15 +286,3 @@ class ConverterDaemon:
 
         self.state_manager.update(daemon_state=DaemonState.STOPPED, pid=None)
         self._logger.info("Converter daemon stopped")
-
-    def pause(self) -> None:
-        """Pause processing."""
-        self._pause_event.set()
-        self.state_manager.update(daemon_state=DaemonState.PAUSED)
-        self._logger.info("Converter paused")
-
-    def resume(self) -> None:
-        """Resume processing."""
-        self._pause_event.clear()
-        self.state_manager.update(daemon_state=DaemonState.RUNNING)
-        self._logger.info("Converter resumed")

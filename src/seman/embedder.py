@@ -37,7 +37,6 @@ class EmbedderDaemon:
         self.config = config or get_config()
         self.state_manager = StateManager(self.config.embedder.state_path)
         self._shutdown_event = threading.Event()
-        self._pause_event = threading.Event()
         self._logger = self._setup_logging()
         self.Session = None
         self.embedder: Optional[Embedder] = None
@@ -129,14 +128,6 @@ class EmbedderDaemon:
             pending_futures = {}
 
             while not self._shutdown_event.is_set():
-                state = self.state_manager.load()
-                should_pause = state.daemon_state == DaemonState.PAUSED
-
-                # Check if paused
-                if self._pause_event.is_set() or should_pause:
-                    time.sleep(0.5)
-                    continue
-
                 # Submit new batches if we have capacity
                 while len(pending_futures) < self.config.embedder.max_workers:
                     batch = self._get_pending_batch()
@@ -286,18 +277,6 @@ class EmbedderDaemon:
         self._shutdown_event.set()
         self.state_manager.update(daemon_state=DaemonState.STOPPED, pid=None)
         self._logger.info("Embedder daemon stopped")
-
-    def pause(self) -> None:
-        """Pause processing."""
-        self._pause_event.set()
-        self.state_manager.update(daemon_state=DaemonState.PAUSED)
-        self._logger.info("Embedder paused")
-
-    def resume(self) -> None:
-        """Resume processing."""
-        self._pause_event.clear()
-        self.state_manager.update(daemon_state=DaemonState.RUNNING)
-        self._logger.info("Embedder resumed")
 
 
 if __name__ == "__main__":

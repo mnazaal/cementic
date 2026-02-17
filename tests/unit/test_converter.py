@@ -162,34 +162,55 @@ class TestConverterDaemon:
                         # the setup is correct
                         assert daemon is not None
 
+    @patch("seman.converter.get_engine")
+    @patch("seman.converter.create_tables")
+    @patch("seman.converter.get_session_factory")
+    def test_reprocesses_incomplete_unchanged_file(
+        self, mock_session_factory, mock_create_tables, mock_get_engine, temp_dir
+    ):
+        """Unchanged file is reprocessed if prior conversion was incomplete."""
+        mock_session = MagicMock()
+        mock_session.__enter__ = MagicMock(return_value=mock_session)
+        mock_session.__exit__ = MagicMock(return_value=False)
+        mock_session.return_value = mock_session
+        mock_session_factory.return_value = mock_session
+
+        pdf_path = temp_dir / "incomplete.pdf"
+        pdf_bytes = b"fake pdf content"
+        pdf_path.write_bytes(pdf_bytes)
+        expected_hash = hashlib.sha256(pdf_bytes).hexdigest()
+
+        existing_doc = MagicMock()
+        existing_doc.id = 99
+        existing_doc.file_hash = expected_hash
+        existing_doc.status = "processing"
+        existing_doc.total_chunks = None
+
+        mock_session.query.return_value.filter_by.return_value.first.return_value = existing_doc
+        mock_session.query.return_value.filter_by.return_value.count.return_value = 0
+
+        with patch(
+            "seman.converter.convert_pdf_to_markdown", return_value="markdown"
+        ) as mock_convert:
+            with patch("seman.converter.chunk_text", return_value=[]):
+                daemon = ConverterDaemon()
+                daemon.Session = mock_session
+                daemon._process_pdf(str(pdf_path))
+
+        mock_convert.assert_called_once_with(str(pdf_path))
+
 
 class TestConverterStateManagement:
     """Test converter state transitions."""
 
-    def test_pause_sets_state(self, temp_dir):
-        """Test pause updates state correctly."""
-        with patch("seman.converter.get_engine"):
-            with patch("seman.converter.create_tables"):
-                with patch("seman.converter.get_session_factory"):
-                    daemon = ConverterDaemon()
-                    daemon._pause_event = MagicMock()
+    def test_stop_sets_shutdown(self, temp_dir):
+        """Test stop sets shutdown event and state."""
+        daemon = ConverterDaemon()
+        daemon._shutdown_event = MagicMock()
+        daemon.watcher = None
 
-                    with patch.object(daemon.state_manager, "update") as mock_update:
-                        daemon.pause()
+        with patch.object(daemon.state_manager, "update") as mock_update:
+            daemon.stop()
 
-                        daemon._pause_event.set.assert_called_once()
-                        mock_update.assert_called_with(daemon_state=DaemonState.PAUSED)
-
-    def test_resume_clears_pause(self, temp_dir):
-        """Test resume clears pause state."""
-        with patch("seman.converter.get_engine"):
-            with patch("seman.converter.create_tables"):
-                with patch("seman.converter.get_session_factory"):
-                    daemon = ConverterDaemon()
-                    daemon._pause_event = MagicMock()
-
-                    with patch.object(daemon.state_manager, "update") as mock_update:
-                        daemon.resume()
-
-                        daemon._pause_event.clear.assert_called_once()
-                        mock_update.assert_called_with(daemon_state=DaemonState.RUNNING)
+            daemon._shutdown_event.set.assert_called_once()
+            mock_update.assert_called_with(daemon_state=DaemonState.STOPPED, pid=None)
