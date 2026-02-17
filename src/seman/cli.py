@@ -4,6 +4,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional
@@ -97,6 +98,19 @@ def _spawn_detached(command: List[str], log_file: Path) -> int:
             start_new_session=True,
         )
     return process.pid
+
+
+def _wait_for_exit(pids: List[int], timeout_seconds: float = 20.0) -> List[int]:
+    """Wait for PIDs to exit and return any still running."""
+    if not pids:
+        return []
+
+    deadline = time.time() + timeout_seconds
+    remaining = [pid for pid in pids if _is_pid_running(pid)]
+    while remaining and time.time() < deadline:
+        time.sleep(0.2)
+        remaining = [pid for pid in remaining if _is_pid_running(pid)]
+    return remaining
 
 
 @app.command("start")
@@ -224,12 +238,14 @@ def status() -> None:
             done = session.query(Chunk).filter_by(embedding_status="done").count()
             failed = session.query(Chunk).filter_by(embedding_status="failed").count()
             documents = session.query(Document).count()
+            processing_docs = session.query(Document).filter_by(status="processing").count()
             collections = session.query(Document.collection).distinct().count()
 
         queue_table = Table(title="Embedding Queue")
         queue_table.add_column("Field", style="cyan")
         queue_table.add_column("Value", style="magenta")
         queue_table.add_row("Documents", str(documents))
+        queue_table.add_row("Documents Processing", str(processing_docs))
         queue_table.add_row("Collections", str(collections))
         queue_table.add_row("Pending Chunks", str(pending))
         queue_table.add_row("Processing Chunks", str(processing))
@@ -250,42 +266,41 @@ def stop_background() -> None:
         console.print("[yellow]No background seman processes found[/yellow]")
         return
 
-    stopped = 0
+    signaled_pids: List[int] = []
     for proc in processes:
         pid = int(proc.get("pid", 0))
         if pid <= 0:
             continue
         try:
             os.kill(pid, 15)
-            stopped += 1
+            signaled_pids.append(pid)
         except (ProcessLookupError, OSError):
             continue
 
-    if supervisor_state_path.exists():
-        supervisor_state_path.unlink()
+    remaining = _wait_for_exit(signaled_pids)
 
-    console.print(f"[green]Sent stop signal to {stopped} process(es)[/green]")
+    if not remaining:
+        if supervisor_state_path.exists():
+            supervisor_state_path.unlink()
+        console.print(f"[green]Stopped {len(signaled_pids)} process(es)[/green]")
+        return
 
-
-@app.command()
-def reset(
-    force: bool = typer.Option(False, "--force", help="Skip confirmation prompt"),
-) -> None:
-    """Reset all indexing data (DANGEROUS!)."""
-    if not force:
-        confirm = typer.confirm("This will delete all indexed data. Are you sure?")
-        if not confirm:
-            raise typer.Abort()
-
-    # Reset state
-    converter_state_manager = _converter_state_manager()
-    embedder_state_manager = _embedder_state_manager()
-    converter_state_manager.reset()
-    embedder_state_manager.reset()
-    console.print("[yellow]Reset converter/indexer state files[/yellow]")
+    still_running = [
+        proc
+        for proc in processes
+        if isinstance(proc, dict) and int(proc.get("pid", 0)) in remaining
+    ]
+    _save_supervisor_state(
+        {
+            "collection": state.get("collection"),
+            "directories": state.get("directories", []),
+            "processes": still_running,
+        }
+    )
 
     console.print(
-        "[green]State reset. Use database tools to clear PostgreSQL data if needed.[/green]"
+        "[yellow]Stop timed out; still running PID(s): "
+        f"{', '.join(str(pid) for pid in remaining)}[/yellow]"
     )
 
 

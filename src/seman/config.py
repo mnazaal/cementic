@@ -98,7 +98,7 @@ class EmbedderConfig(BaseSettings):
         description="Seconds between polling for pending chunks",
     )
     processing_stale_seconds: int = Field(
-        default=300,
+        default=30,
         description="Seconds after which processing chunks are reset to pending",
     )
 

@@ -56,8 +56,6 @@ seman stop
 seman delete-collection test --force
 ```
 
-```
-
 ## Configuration
 
 Configuration is done via environment variables:
@@ -93,6 +91,7 @@ export SEMAN_EMBEDDER_LOG_FILE=~/.local/share/seman/indexer.log
 export SEMAN_EMBEDDER_MAX_WORKERS=1
 export SEMAN_EMBEDDER_BATCH_SIZE=32
 export SEMAN_EMBEDDER_POLL_INTERVAL=1.0
+export SEMAN_EMBEDDER_PROCESSING_STALE_SECONDS=30
 
 # Runtime bootstrap
 export SEMAN_BOOTSTRAP_AUTO_START_INFRA=true

@@ -23,6 +23,11 @@ class TestLegacyCommands:
         result = runner.invoke(app, ["index", "start"])
         assert result.exit_code != 0
 
+    def test_reset_command_removed(self):
+        """Reset command is removed from simplified CLI."""
+        result = runner.invoke(app, ["reset", "--force"])
+        assert result.exit_code != 0
+
 
 class TestSearchCommand:
     """Test search command."""
@@ -127,6 +132,35 @@ class TestBackgroundCommands:
         assert result.exit_code == 0
         assert "No background seman processes found" in result.output
 
+    @patch("seman.cli._wait_for_exit", return_value=[])
+    @patch("seman.cli.os.kill")
+    def test_stop_background_stops_and_clears_state(self, mock_kill, mock_wait, temp_dir: Path):
+        """Stop command waits for exit and removes supervisor state."""
+        state_path = temp_dir / "supervisor.json"
+        state_path.write_text('{"processes": [{"name": "converter", "pid": 1234}]}')
+
+        with patch("seman.cli.supervisor_state_path", state_path):
+            result = runner.invoke(app, ["stop"])
+
+        assert result.exit_code == 0
+        mock_kill.assert_called_once_with(1234, 15)
+        assert "Stopped 1 process(es)" in result.output
+        assert not state_path.exists()
+
+    @patch("seman.cli._wait_for_exit", return_value=[1234])
+    @patch("seman.cli.os.kill")
+    def test_stop_background_keeps_state_when_timeout(self, mock_kill, mock_wait, temp_dir: Path):
+        """Stop command keeps state for processes that did not stop yet."""
+        state_path = temp_dir / "supervisor.json"
+        state_path.write_text('{"processes": [{"name": "converter", "pid": 1234}]}')
+
+        with patch("seman.cli.supervisor_state_path", state_path):
+            result = runner.invoke(app, ["stop"])
+
+        assert result.exit_code == 0
+        assert "Stop timed out" in result.output
+        assert state_path.exists()
+
     @patch("seman.cli.get_session_factory")
     @patch("seman.cli.get_engine")
     @patch("seman.cli._embedder_state_manager")
@@ -151,7 +185,7 @@ class TestBackgroundCommands:
         mock_embedder_state_manager.return_value.load.return_value = embedder_state
 
         mock_session = MagicMock()
-        mock_session.query.return_value.filter_by.return_value.count.side_effect = [1, 2, 3, 4]
+        mock_session.query.return_value.filter_by.return_value.count.side_effect = [1, 2, 3, 4, 1]
         mock_get_session_factory.return_value = lambda: mock_session
 
         state_path = temp_dir / "supervisor.json"
