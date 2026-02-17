@@ -39,7 +39,7 @@ def sample_config_dict(temp_dir: Path) -> dict:
         },
         "llama_cpp": {
             "model_path": str(temp_dir / "test_model.gguf"),
-            "n_ctx": 2048,
+            "n_ctx": 512,
             "n_gpu_layers": 0,
             "embedding_dim": 768,
             "verbose": False,

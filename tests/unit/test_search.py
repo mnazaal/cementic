@@ -1,9 +1,6 @@
 """Tests for search functionality."""
 
-from pathlib import Path
 from unittest.mock import MagicMock, patch
-
-import pytest
 
 from seman.search import Searcher, SearchResult
 
@@ -29,6 +26,7 @@ class TestSearcher:
 
         # Setup query chain
         mock_query_result = MagicMock()
+        mock_query_result.join.return_value = mock_query_result
         mock_query_result.filter.return_value = mock_query_result
         mock_query_result.order_by.return_value = mock_query_result
         mock_query_result.limit.return_value = mock_query_result
@@ -57,7 +55,13 @@ class TestSearcher:
         # Setup mock session
         mock_session = MagicMock()
         mock_session_factory.return_value = lambda: mock_session
-        mock_session.query.return_value.filter.return_value.order_by.return_value.limit.return_value.all.return_value = []
+        mock_query_result = MagicMock()
+        mock_query_result.join.return_value = mock_query_result
+        mock_query_result.filter.return_value = mock_query_result
+        mock_query_result.order_by.return_value = mock_query_result
+        mock_query_result.limit.return_value = mock_query_result
+        mock_query_result.all.return_value = []
+        mock_session.query.return_value = mock_query_result
 
         # Test with llama-cpp config
         with patch("seman.search.Config") as mock_config_class:
@@ -90,6 +94,7 @@ class TestSearcher:
         mock_session.return_value = mock_session  # Make callable return itself
         mock_query = MagicMock()
         mock_session.query.return_value = mock_query
+        mock_query.join.return_value = mock_query
         mock_query.filter.return_value = mock_query
         mock_query.order_by.return_value = mock_query
         mock_query.limit.return_value = mock_query
@@ -103,12 +108,47 @@ class TestSearcher:
         # Verify limit was called with correct value
         mock_query.limit.assert_called_once_with(5)
 
+    @patch("seman.search.get_engine")
+    @patch("seman.search.get_session_factory")
+    @patch("seman.search.get_embedder")
+    def test_search_filters_by_collections(
+        self, mock_get_embedder, mock_session_factory, mock_get_engine
+    ):
+        """Test search applies collection filtering when requested."""
+        mock_embedder = MagicMock()
+        mock_embedder.embed.return_value = [0.1] * 768
+        mock_get_embedder.return_value = mock_embedder
+
+        mock_session = MagicMock()
+        mock_session.__enter__ = MagicMock(return_value=mock_session)
+        mock_session.__exit__ = MagicMock(return_value=False)
+        mock_session.return_value = mock_session
+        mock_query = MagicMock()
+        mock_session.query.return_value = mock_query
+        mock_query.join.return_value = mock_query
+        mock_query.filter.return_value = mock_query
+        mock_query.order_by.return_value = mock_query
+        mock_query.limit.return_value = mock_query
+        mock_query.all.return_value = []
+        mock_session_factory.return_value = mock_session
+
+        searcher = Searcher()
+        searcher.search("test", collections=["work", "personal"])
+
+        assert mock_query.filter.call_count >= 2
+
     def test_search_result_type(self):
         """Test that search results have correct type."""
         result = SearchResult(
-            source_path="/test.pdf", content="test content", score=0.95, page_start=1, page_end=2
+            collection="default",
+            source_path="/test.pdf",
+            content="test content",
+            score=0.95,
+            page_start=1,
+            page_end=2,
         )
 
+        assert result["collection"] == "default"
         assert result["source_path"] == "/test.pdf"
         assert result["content"] == "test content"
         assert result["score"] == 0.95

@@ -2,7 +2,7 @@
 
 import json
 from dataclasses import asdict, dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 from typing import List, Optional
@@ -25,7 +25,7 @@ class IndexingState:
     processed_count: int = 0
     failed_count: int = 0
     current_file: Optional[str] = None
-    last_updated: str = field(default_factory=lambda: datetime.utcnow().isoformat())
+    last_updated: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     pid: Optional[int] = None
 
     def to_dict(self) -> dict:
@@ -35,14 +35,25 @@ class IndexingState:
     @classmethod
     def from_dict(cls, data: dict) -> "IndexingState":
         """Create from dictionary."""
-        return cls(**data)
+        normalized = dict(data)
+        daemon_state = normalized.get("daemon_state", DaemonState.STOPPED)
+
+        if isinstance(daemon_state, str):
+            try:
+                normalized["daemon_state"] = DaemonState(daemon_state)
+            except ValueError:
+                normalized["daemon_state"] = DaemonState.STOPPED
+
+        return cls(**normalized)
 
 
 class StateManager:
     """Manages persistent state for pause/resume functionality."""
 
-    def __init__(self, state_path: Path) -> None:
+    def __init__(self, state_path: Optional[Path]) -> None:
         """Initialize state manager."""
+        if state_path is None:
+            raise ValueError("state_path cannot be None")
         self.state_path = state_path
         self.state_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -60,7 +71,7 @@ class StateManager:
 
     def save(self, state: IndexingState) -> None:
         """Save state to file."""
-        state.last_updated = datetime.utcnow().isoformat()
+        state.last_updated = datetime.now(timezone.utc).isoformat()
         with open(self.state_path, "w") as f:
             json.dump(state.to_dict(), f, indent=2)
 

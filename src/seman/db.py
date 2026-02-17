@@ -11,6 +11,7 @@ from sqlalchemy import (
     String,
     Text,
     create_engine,
+    text,
 )
 from sqlalchemy.orm import (
     DeclarativeBase,
@@ -36,7 +37,8 @@ class Document(Base):
     __tablename__ = "documents"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    source_path: Mapped[str] = mapped_column(String, unique=True, nullable=False)
+    collection: Mapped[str] = mapped_column(String(100), default="default", nullable=False)
+    source_path: Mapped[str] = mapped_column(String, nullable=False)
     file_hash: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     status: Mapped[str] = mapped_column(String(20), default="pending")
     # Status values:
@@ -54,8 +56,16 @@ class Document(Base):
         back_populates="document", cascade="all, delete-orphan"
     )
 
+    __table_args__ = (
+        Index("ix_documents_collection", "collection"),
+        Index("ix_documents_collection_source", "collection", "source_path", unique=True),
+    )
+
     def __repr__(self) -> str:
-        return f"<Document(id={self.id}, path={self.source_path}, status={self.status})>"
+        return (
+            f"<Document(id={self.id}, collection={self.collection}, "
+            f"path={self.source_path}, status={self.status})>"
+        )
 
 
 class Chunk(Base):
@@ -94,12 +104,6 @@ class Chunk(Base):
             "embedding_status",
             postgresql_where="embedding_status = 'pending'",
         ),
-        Index(
-            "ix_chunks_embedding_hnsw",
-            "embedding",
-            postgresql_using="hnsw",
-            postgresql_ops={"embedding": "vector_cosine_ops"},
-        ),
     )
 
     def __repr__(self) -> str:
@@ -107,22 +111,47 @@ class Chunk(Base):
 
 
 def get_engine(database_url: str) -> "Engine":
-    """Create database engine with pgvector extension."""
+    """Create database engine with pgvector and pgvectorscale extensions."""
     engine = create_engine(database_url, echo=False)
 
-    # Enable pgvector extension
+    # Enable extensions
     with engine.connect() as conn:
-        conn.execute("CREATE EXTENSION IF NOT EXISTS vector")
+        try:
+            conn.execute(text("CREATE EXTENSION IF NOT EXISTS vectorscale CASCADE"))
+        except Exception:
+            conn.rollback()
+            conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
         conn.commit()
 
     return engine
 
 
 def create_tables(engine: "Engine") -> None:
-    """Create all tables in the database."""
+    """Create all tables and vector indexes in the database."""
     Base.metadata.create_all(engine)
+
+    with engine.connect() as conn:
+        has_vectorscale = conn.execute(
+            text("SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'vectorscale')")
+        ).scalar()
+
+        if has_vectorscale:
+            conn.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS ix_chunks_embedding_diskann "
+                    "ON chunks USING diskann (embedding vector_cosine_ops)"
+                )
+            )
+        else:
+            conn.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS ix_chunks_embedding_hnsw "
+                    "ON chunks USING hnsw (embedding vector_cosine_ops)"
+                )
+            )
+        conn.commit()
 
 
 def get_session_factory(engine: "Engine") -> sessionmaker:
     """Get session factory bound to engine."""
-    return sessionmaker(bind=engine)
+    return sessionmaker(bind=engine, expire_on_commit=False)

@@ -2,8 +2,8 @@
 
 import hashlib
 import logging
+import os
 import signal
-import sys
 import threading
 import time
 from pathlib import Path
@@ -71,6 +71,7 @@ class ConverterDaemon:
         self.watcher: Optional[Observer] = None
         self._logger = self._setup_logging()
         self.Session = None
+        self.collection = "default"
 
     def _setup_logging(self) -> logging.Logger:
         """Setup logging."""
@@ -86,14 +87,13 @@ class ConverterDaemon:
         logger.addHandler(handler)
         return logger
 
-    def start(self, directories: List[str]) -> None:
+    def start(self, directories: List[str], collection: str = "default") -> None:
         """Start the converter daemon."""
+        self.collection = collection
         # Check if already running
         state = self.state_manager.load()
         if state.daemon_state == DaemonState.RUNNING and state.pid:
             try:
-                import os
-
                 os.kill(state.pid, 0)
                 self._logger.error(f"Converter already running with PID {state.pid}")
                 return
@@ -109,7 +109,7 @@ class ConverterDaemon:
         self.state_manager.update(
             daemon_state=DaemonState.RUNNING,
             watched_directories=directories,
-            pid=Path("/proc/self").stat().st_ino if sys.platform != "win32" else None,
+            pid=os.getpid(),
         )
 
         # Setup signal handlers
@@ -119,7 +119,9 @@ class ConverterDaemon:
         # Start file watcher
         self._start_watcher(directories)
 
-        self._logger.info(f"Converter daemon started watching: {directories}")
+        self._logger.info(
+            f"Converter daemon started watching: {directories} (collection={collection})"
+        )
 
         # Wait for shutdown
         try:
@@ -168,7 +170,14 @@ class ConverterDaemon:
 
         with self.Session() as session:
             # Check if already processed
-            existing = session.query(Document).filter_by(source_path=pdf_path).first()
+            existing = (
+                session.query(Document)
+                .filter_by(
+                    source_path=pdf_path,
+                    collection=self.collection,
+                )
+                .first()
+            )
             if existing:
                 if existing.file_hash == file_hash:
                     self._logger.debug(f"Skipping unchanged file: {pdf_path}")
@@ -178,7 +187,7 @@ class ConverterDaemon:
                     session.query(Chunk).filter_by(document_id=existing.id).delete()
                     document = existing
             else:
-                document = Document(source_path=pdf_path)
+                document = Document(source_path=pdf_path, collection=self.collection)
                 session.add(document)
                 session.flush()
 
@@ -219,7 +228,9 @@ class ConverterDaemon:
                 state = self.state_manager.load()
                 self.state_manager.update(processed_count=state.processed_count + 1)
 
-                self._logger.info(f"Converted: {pdf_path} ({len(chunks)} chunks)")
+                self._logger.info(
+                    f"Converted: {pdf_path} ({len(chunks)} chunks, collection={self.collection})"
+                )
 
             except Exception as e:
                 document.status = "failed"

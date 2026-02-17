@@ -1,10 +1,7 @@
 """Tests for configuration module."""
 
 import os
-from pathlib import Path
 from unittest.mock import patch
-
-import pytest
 
 from seman.config import Config, DatabaseConfig, LlamaCppConfig, get_config
 
@@ -43,7 +40,7 @@ class TestLlamaCppConfig:
     def test_default_values(self):
         """Test default llama.cpp configuration."""
         config = LlamaCppConfig()
-        assert config.n_ctx == 2048
+        assert config.n_ctx == 512
         assert config.n_gpu_layers == 0
         assert config.embedding_dim == 768
         assert config.verbose is False

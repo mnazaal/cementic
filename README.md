@@ -5,9 +5,10 @@ Semantic search CLI tool for indexing and searching PDF documents using pgvector
 ## Features
 
 - **PDF to Markdown**: Converts PDFs to markdown using pymupdf4llm
-- **Background Indexing**: Daemon watches directories and auto-indexes new PDFs
-- **Pause/Resume**: Pause indexing while keeping file watcher active
-- **Semantic Search**: Search with pgvectorscale and Ollama embeddings
+- **Background Conversion**: Daemon watches directories and auto-converts new PDFs
+- **Background Indexing**: Daemon computes embeddings and stores in PostgreSQL
+- **Pause/Resume**: Pause processing while keeping file watchers active
+- **Semantic Search**: Search with pgvectorscale (DiskANN) and embeddings
 - **No Raw SQL**: Pure SQLAlchemy ORM throughout
 
 ## Installation
@@ -22,46 +23,78 @@ pipx install seman
 
 ## Setup
 
-1. Start infrastructure (PostgreSQL + Ollama):
-```bash
-seman infra up
-```
+No manual setup is required for normal usage.
 
-2. Pull the embedding model:
-```bash
-podman exec seman-ollama ollama pull nomic-embed-text
-```
+When you run `seman convert start` or `seman index start`, seman can automatically:
+- Start PostgreSQL and Ollama containers (when using local hosts)
+- Wait for services to become healthy
+- Pull missing Ollama models
+
+For `llama.cpp`, seman validates `SEMAN_LLAMA_MODEL_PATH` and can optionally auto-download
+the model when `SEMAN_BOOTSTRAP_AUTO_DOWNLOAD_LLAMA_MODEL=true`.
 
 ## Usage
 
-### Start Indexing
+### Recommended (Background)
+
 ```bash
-# Start daemon watching directories
-seman index start /path/to/pdfs /another/path
+# Start converter + indexer in background
+seman start /path/to/pdfs --collection test
+
+# Check background process status
+seman ps
+
+# Stop both background processes
+seman stop
+```
+
+### Converting PDFs
+
+```bash
+# Start converter daemon watching directories
+seman convert start /path/to/pdfs /another/path
+
+# Assign documents to a collection
+seman convert start /path/to/work-pdfs --collection work
+seman convert start /path/to/personal-pdfs --collection personal
+
+# Check status
+seman convert status
+
+# Control converter
+seman convert pause
+seman convert resume
+seman convert stop
+```
+
+### Indexing (Computing Embeddings)
+
+```bash
+# Start indexer daemon
+seman index start
 
 # Check status
 seman index status
-```
 
-### Control Indexing
-```bash
-# Pause processing (keep watching)
+# Control indexer
 seman index pause
-
-# Resume processing
 seman index resume
-
-# Stop daemon completely
 seman index stop
 ```
 
 ### Search
+
 ```bash
 seman search "your query here"
 seman search "query" -n 20  # Top 20 results
+
+# Search a specific collection (repeat flag for multiple)
+seman search "query" --collection work
+seman search "query" --collection work --collection personal
 ```
 
 ### Infrastructure
+
 ```bash
 seman infra up      # Start containers
 seman infra down    # Stop containers
@@ -70,33 +103,58 @@ seman infra status  # Check container status
 
 ## Configuration
 
-Config file location: `~/.config/seman/config.yaml`
+Configuration is done via environment variables:
 
-Example:
-```yaml
-database:
-  host: localhost
-  port: 5432
-  name: seman
-  user: seman
+```bash
+# Database
+export SEMAN_DB_HOST=localhost
+export SEMAN_DB_PORT=5432
+export SEMAN_DB_NAME=seman
+export SEMAN_DB_USER=seman
+export SEMAN_DB_PASSWORD=seman
 
-ollama:
-  host: http://localhost:11434
-  model: nomic-embed-text
-  embedding_dim: 768
+# Ollama
+export SEMAN_OLLAMA_HOST=http://localhost:11434
+export SEMAN_OLLAMA_MODEL=nomic-embed-text
+export SEMAN_OLLAMA_EMBEDDING_DIM=768
 
-indexing:
-  chunk_size: 512
-  chunk_overlap: 128
-  max_workers: 4
+# Indexing
+export SEMAN_INDEX_CHUNK_SIZE=512
+export SEMAN_INDEX_CHUNK_OVERLAP=128
+export SEMAN_INDEX_EMBEDDER=llama-cpp  # or 'ollama'
+
+# llama.cpp
+export SEMAN_LLAMA_MODEL_PATH=./models/nomic-embed-text-v2-moe.Q8_0.gguf
+
+# Converter daemon
+export SEMAN_CONVERTER_PID_FILE=~/.local/share/seman/converter.pid
+export SEMAN_CONVERTER_LOG_FILE=~/.local/share/seman/converter.log
+
+# Indexer daemon (embedder config namespace)
+export SEMAN_EMBEDDER_PID_FILE=~/.local/share/seman/indexer.pid
+export SEMAN_EMBEDDER_LOG_FILE=~/.local/share/seman/indexer.log
+export SEMAN_EMBEDDER_MAX_WORKERS=1
+export SEMAN_EMBEDDER_BATCH_SIZE=32
+export SEMAN_EMBEDDER_POLL_INTERVAL=1.0
+
+# Runtime bootstrap
+export SEMAN_BOOTSTRAP_AUTO_START_INFRA=true
+export SEMAN_BOOTSTRAP_AUTO_PULL_OLLAMA_MODEL=true
+export SEMAN_BOOTSTRAP_AUTO_DOWNLOAD_LLAMA_MODEL=true
+export SEMAN_BOOTSTRAP_WAIT_TIMEOUT_SECONDS=90
+export SEMAN_BOOTSTRAP_LLAMA_MODEL_URL="https://huggingface.co/nomic-ai/nomic-embed-text-v2-moe-GGUF/resolve/main/nomic-embed-text-v2-moe.Q8_0.gguf"
 ```
+
+When using Nomic v2 models, seman automatically applies task prefixes for better retrieval quality:
+- document embeddings: `search_document: ...`
+- query embeddings: `search_query: ...`
 
 ## Architecture
 
-- **PostgreSQL + pgvector**: Stores document chunks and embeddings
-- **Ollama**: Generates embeddings using nomic-embed-text
-- **Native Daemon**: Python daemon watches directories and processes PDFs
-- **SQLite Queue**: Persistent job queue for pause/resume support
+- **PostgreSQL + pgvectorscale**: Stores document chunks and embeddings with DiskANN indexing
+- **Converter Daemon**: Watches directories, converts PDFs to markdown, creates chunks
+- **Indexer Daemon**: Generates embeddings for pending chunks using Ollama or llama.cpp
+- **Decoupled Design**: Converter and indexer run independently, communicating via database
 
 ## Development
 
@@ -109,5 +167,6 @@ pytest
 
 # Linting
 ruff check src/
+ruff format src/
 mypy src/
 ```

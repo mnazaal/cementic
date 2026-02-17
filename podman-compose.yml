@@ -3,7 +3,7 @@ version: '3.8'
 services:
   postgres:
     container_name: seman-postgres
-    image: pgvector/pgvector:pg16
+    image: timescale/timescaledb:latest-pg18
     environment:
       POSTGRES_DB: seman
       POSTGRES_USER: seman

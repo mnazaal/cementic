@@ -3,7 +3,7 @@
 from pathlib import Path
 from typing import Optional
 
-from platformdirs import user_config_dir, user_data_dir
+from platformdirs import user_data_dir
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -31,10 +31,10 @@ class LlamaCppConfig(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="SEMAN_LLAMA_")
 
     model_path: str = Field(
-        default="models/nomic-embed-text-v1.5.f16.gguf",
+        default="models/nomic-embed-text-v2-moe.Q8_0.gguf",
         description="Path to .gguf model file",
     )
-    n_ctx: int = Field(default=2048, description="Context window size")
+    n_ctx: int = Field(default=512, description="Context window size")
     n_gpu_layers: int = Field(
         default=0,
         description="Number of layers to offload to GPU (-1 for all)",
@@ -97,12 +97,49 @@ class EmbedderConfig(BaseSettings):
     )
 
 
+class BootstrapConfig(BaseSettings):
+    """Runtime bootstrap configuration for infra and models."""
+
+    model_config = SettingsConfigDict(env_prefix="SEMAN_BOOTSTRAP_")
+
+    auto_start_infra: bool = Field(
+        default=True,
+        description="Automatically start required containers",
+    )
+    auto_pull_ollama_model: bool = Field(
+        default=True,
+        description="Automatically pull Ollama model if missing",
+    )
+    auto_download_llama_model: bool = Field(
+        default=True,
+        description="Automatically download llama.cpp model if missing",
+    )
+    postgres_container: str = Field(default="seman-postgres", description="Postgres container name")
+    ollama_container: str = Field(default="seman-ollama", description="Ollama container name")
+    postgres_image: str = Field(
+        default="docker.io/timescale/timescaledb:latest-pg18",
+        description="Postgres container image",
+    )
+    ollama_image: str = Field(
+        default="docker.io/ollama/ollama:latest",
+        description="Ollama container image",
+    )
+    wait_timeout_seconds: int = Field(default=90, description="Maximum bootstrap wait time")
+    wait_interval_seconds: float = Field(default=2.0, description="Polling interval while waiting")
+    llama_model_url: str = Field(
+        default=(
+            "https://huggingface.co/nomic-ai/nomic-embed-text-v2-moe-GGUF/resolve/main/"
+            "nomic-embed-text-v2-moe.Q8_0.gguf"
+        ),
+        description="Default llama.cpp model download URL",
+    )
+
+
 class Config(BaseSettings):
     """Main configuration class."""
 
     model_config = SettingsConfigDict(
         env_prefix="SEMAN_",
-        yaml_file=Path(user_config_dir("seman", ensure_exists=True)) / "config.yaml",
     )
 
     database: DatabaseConfig = Field(default_factory=DatabaseConfig)
@@ -111,6 +148,7 @@ class Config(BaseSettings):
     indexing: IndexingConfig = Field(default_factory=IndexingConfig)
     converter: ConverterConfig = Field(default_factory=ConverterConfig)
     embedder: EmbedderConfig = Field(default_factory=EmbedderConfig)
+    bootstrap: BootstrapConfig = Field(default_factory=BootstrapConfig)
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)

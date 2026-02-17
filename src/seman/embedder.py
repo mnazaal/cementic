@@ -1,17 +1,18 @@
 """Embedder daemon that generates embeddings for chunks."""
 
 import logging
+import os
 import signal
-import sys
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 from typing import List, Optional
 
 from seman.config import Config, get_config
 from seman.db import Chunk, Document, get_engine, get_session_factory
 from seman.embedders import get_embedder
 from seman.embedders.base import Embedder
+from seman.embedding_text import format_document_text
 from seman.state import DaemonState, StateManager
 
 
@@ -71,8 +72,6 @@ class EmbedderDaemon:
         state = self.state_manager.load()
         if state.daemon_state == DaemonState.RUNNING and state.pid:
             try:
-                import os
-
                 os.kill(state.pid, 0)
                 self._logger.error(f"Embedder already running with PID {state.pid}")
                 return
@@ -96,7 +95,7 @@ class EmbedderDaemon:
         # Update state
         self.state_manager.update(
             daemon_state=DaemonState.RUNNING,
-            pid=Path("/proc/self").stat().st_ino if sys.platform != "win32" else None,
+            pid=os.getpid(),
         )
 
         # Setup signal handlers
@@ -176,7 +175,7 @@ class EmbedderDaemon:
         if not chunks:
             return
 
-        texts = [chunk.content for chunk in chunks]
+        texts = [format_document_text(chunk.content, self.config) for chunk in chunks]
 
         try:
             embeddings = self.embedder.embed_batch(texts)

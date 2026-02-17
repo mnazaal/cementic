@@ -1,9 +1,6 @@
 """Tests for state management module."""
 
 import json
-from pathlib import Path
-
-import pytest
 
 from seman.state import DaemonState, IndexingState, StateManager
 
@@ -54,6 +51,21 @@ class TestIndexingState:
         assert state.processed_count == 5
         assert state.current_file == "/test/file.pdf"
         assert state.pid == 5678
+
+    def test_from_dict_invalid_daemon_state_falls_back_to_stopped(self):
+        """Unknown daemon states should not crash deserialization."""
+        data = {
+            "daemon_state": "definitely-not-valid",
+            "watched_directories": [],
+            "processed_count": 0,
+            "failed_count": 0,
+            "current_file": None,
+            "last_updated": "2024-01-01T00:00:00",
+            "pid": None,
+        }
+
+        state = IndexingState.from_dict(data)
+        assert state.daemon_state == DaemonState.STOPPED
 
 
 class TestStateManager:
@@ -162,3 +174,26 @@ class TestStateManager:
         # Should return default state
         assert isinstance(state, IndexingState)
         assert state.daemon_state == DaemonState.STOPPED
+
+    def test_load_legacy_json_string_daemon_state(self, temp_dir):
+        """Loading old JSON with string daemon_state should return enum type."""
+        state_path = temp_dir / "state.json"
+        state_path.write_text(
+            json.dumps(
+                {
+                    "daemon_state": "running",
+                    "watched_directories": ["/tmp"],
+                    "processed_count": 1,
+                    "failed_count": 0,
+                    "current_file": None,
+                    "last_updated": "2024-01-01T00:00:00",
+                    "pid": 123,
+                }
+            )
+        )
+
+        manager = StateManager(state_path)
+        state = manager.load()
+
+        assert state.daemon_state == DaemonState.RUNNING
+        assert isinstance(state.daemon_state, DaemonState)

@@ -12,7 +12,7 @@ class LlamaCppEmbedder(Embedder):
     def __init__(
         self,
         model_path: str,
-        n_ctx: int = 2048,
+        n_ctx: int = 512,
         n_gpu_layers: int = 0,
         embedding_dim: int = 768,
         verbose: bool = False,
