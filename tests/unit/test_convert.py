@@ -15,7 +15,7 @@ def test_convert_uses_layout_and_disables_header_footer(temp_dir: Path) -> None:
 
     rapidocr = MagicMock()
     with patch("seman.convert.pymupdf._get_layout", object()):
-        with patch("seman.convert.rapidocr_api", rapidocr):
+        with patch("seman.convert._get_rapidocr_api", return_value=rapidocr):
             with patch("seman.convert.pymupdf4llm.to_markdown", return_value="markdown") as mock_md:
                 result = convert_pdf_to_markdown(str(pdf_path))
 
@@ -36,7 +36,7 @@ def test_convert_without_rapidocr_uses_default_ocr(temp_dir: Path) -> None:
     pdf_path.write_bytes(b"%PDF-1.4\n")
 
     with patch("seman.convert.pymupdf._get_layout", object()):
-        with patch("seman.convert.rapidocr_api", None):
+        with patch("seman.convert._get_rapidocr_api", return_value=None):
             with patch("seman.convert.pymupdf4llm.to_markdown", return_value="markdown") as mock_md:
                 result = convert_pdf_to_markdown(str(pdf_path))
 

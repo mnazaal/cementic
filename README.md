@@ -41,11 +41,14 @@ the model when `SEMAN_BOOTSTRAP_AUTO_DOWNLOAD_LLAMA_MODEL=true`.
 # Start converter + indexer in background
 seman start /path/to/pdfs --collection test
 
-# Check background process status
-seman ps
+# Check unified status
+seman status
 
 # Stop both background processes
 seman stop
+
+# Delete a collection and all indexed chunks/documents
+seman delete-collection test --force
 ```
 
 ### Converting PDFs
@@ -59,7 +62,7 @@ seman convert start /path/to/work-pdfs --collection work
 seman convert start /path/to/personal-pdfs --collection personal
 
 # Check status
-seman convert status
+seman status
 
 # Control converter
 seman convert pause
@@ -74,7 +77,7 @@ seman convert stop
 seman index start
 
 # Check status
-seman index status
+seman status
 
 # Control indexer
 seman index pause

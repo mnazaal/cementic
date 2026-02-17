@@ -1,6 +1,5 @@
 """Tests for embedder base class and implementations."""
 
-from typing import List, Optional
 from unittest.mock import MagicMock, patch
 
 import pytest

@@ -6,7 +6,11 @@ import signal
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
+from datetime import datetime, timedelta
 from typing import List, Optional
+
+from sqlalchemy import text
 
 from seman.config import Config, get_config
 from seman.db import Chunk, Document, get_engine, get_session_factory
@@ -16,13 +20,22 @@ from seman.embedding_text import format_document_text
 from seman.state import DaemonState, StateManager
 
 
+@dataclass
+class ClaimedChunk:
+    """Chunk payload claimed for embedding processing."""
+
+    id: int
+    document_id: int
+    content: str
+
+
 class EmbedderDaemon:
     """Daemon that generates embeddings for pending chunks."""
 
     def __init__(self, config: Optional[Config] = None) -> None:
         """Initialize embedder daemon."""
         self.config = config or get_config()
-        self.state_manager = StateManager(self.config.indexing.state_path)
+        self.state_manager = StateManager(self.config.embedder.state_path)
         self._shutdown_event = threading.Event()
         self._pause_event = threading.Event()
         self._logger = self._setup_logging()
@@ -81,6 +94,7 @@ class EmbedderDaemon:
         # Initialize database
         engine = get_engine(self.config.database.url)
         self.Session = get_session_factory(engine)
+        self._recover_stale_processing_chunks()
 
         # Initialize embedder
         try:
@@ -115,8 +129,11 @@ class EmbedderDaemon:
             pending_futures = {}
 
             while not self._shutdown_event.is_set():
+                state = self.state_manager.load()
+                should_pause = state.daemon_state == DaemonState.PAUSED
+
                 # Check if paused
-                if self._pause_event.is_set():
+                if self._pause_event.is_set() or should_pause:
                     time.sleep(0.5)
                     continue
 
@@ -148,29 +165,55 @@ class EmbedderDaemon:
         for future in pending_futures:
             future.cancel()
 
-    def _get_pending_batch(self) -> Optional[List[Chunk]]:
-        """Get a batch of pending chunks from the database."""
+    def _recover_stale_processing_chunks(self) -> None:
+        """Reset stale processing chunks so they can be retried."""
+        stale_before = datetime.now() - timedelta(
+            seconds=self.config.embedder.processing_stale_seconds
+        )
         with self.Session() as session:
-            chunks = (
-                session.query(Chunk)
-                .filter_by(embedding_status="pending")
-                .limit(self.config.embedder.batch_size)
-                .all()
-            )
-
-            if not chunks:
-                return None
-
-            # Mark as processing
-            chunk_ids = [c.id for c in chunks]
-            session.query(Chunk).filter(Chunk.id.in_(chunk_ids)).update(
-                {"embedding_status": "processing"}
+            session.query(Chunk).filter(
+                Chunk.embedding_status == "processing",
+                Chunk.updated_at < stale_before,
+            ).update(
+                {
+                    "embedding_status": "pending",
+                    "error_message": "Recovered from stale processing state",
+                },
+                synchronize_session=False,
             )
             session.commit()
 
-            return chunks
+    def _get_pending_batch(self) -> Optional[List[ClaimedChunk]]:
+        """Get a batch of pending chunks from the database."""
+        with self.Session() as session:
+            result = session.execute(
+                text(
+                    "WITH claimed AS ("
+                    "  SELECT id FROM chunks "
+                    "  WHERE embedding_status = 'pending' "
+                    "  ORDER BY id "
+                    "  FOR UPDATE SKIP LOCKED "
+                    "  LIMIT :batch_size"
+                    ") "
+                    "UPDATE chunks "
+                    "SET embedding_status = 'processing', updated_at = NOW() "
+                    "WHERE id IN (SELECT id FROM claimed) "
+                    "RETURNING id, document_id, content"
+                ),
+                {"batch_size": self.config.embedder.batch_size},
+            )
+            rows = result.fetchall()
+            session.commit()
 
-    def _process_batch(self, chunks: List[Chunk]) -> None:
+            if not rows:
+                return None
+
+            return [
+                ClaimedChunk(id=row.id, document_id=row.document_id, content=row.content)
+                for row in rows
+            ]
+
+    def _process_batch(self, chunks: List[ClaimedChunk]) -> None:
         """Process a batch of chunks."""
         if not chunks:
             return
@@ -199,13 +242,13 @@ class EmbedderDaemon:
             self._logger.info(f"Embedded batch of {len(chunks)} chunks")
 
             # Update document status if all chunks are done
-            self._update_document_status(chunks)
+            self._update_document_status({chunk.document_id for chunk in chunks})
 
         except Exception as e:
             self._logger.error(f"Failed to embed batch: {e}")
             raise
 
-    def _mark_batch_failed(self, chunks: List[Chunk], error: str) -> None:
+    def _mark_batch_failed(self, chunks: List[ClaimedChunk], error: str) -> None:
         """Mark a batch of chunks as failed."""
         with self.Session() as session:
             for chunk in chunks:
@@ -214,10 +257,8 @@ class EmbedderDaemon:
                 )
             session.commit()
 
-    def _update_document_status(self, chunks: List[Chunk]) -> None:
+    def _update_document_status(self, document_ids: set[int]) -> None:
         """Update document status if all chunks are embedded."""
-        document_ids = {chunk.document_id for chunk in chunks}
-
         with self.Session() as session:
             for doc_id in document_ids:
                 total_chunks = session.query(Chunk).filter_by(document_id=doc_id).count()

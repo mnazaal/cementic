@@ -74,6 +74,7 @@ class ConverterConfig(BaseSettings):
 
     pid_file: Optional[Path] = Field(default=None, description="PID file path")
     log_file: Optional[Path] = Field(default=None, description="Log file path")
+    state_path: Optional[Path] = Field(default=None, description="Converter state file path")
 
 
 class EmbedderConfig(BaseSettings):
@@ -83,6 +84,7 @@ class EmbedderConfig(BaseSettings):
 
     pid_file: Optional[Path] = Field(default=None, description="PID file path")
     log_file: Optional[Path] = Field(default=None, description="Log file path")
+    state_path: Optional[Path] = Field(default=None, description="Indexer state file path")
     max_workers: int = Field(
         default=1,
         description="Number of concurrent embedding workers",
@@ -94,6 +96,10 @@ class EmbedderConfig(BaseSettings):
     poll_interval: float = Field(
         default=1.0,
         description="Seconds between polling for pending chunks",
+    )
+    processing_stale_seconds: int = Field(
+        default=300,
+        description="Seconds after which processing chunks are reset to pending",
     )
 
 
@@ -164,11 +170,17 @@ class Config(BaseSettings):
         if self.converter.log_file is None:
             self.converter.log_file = data_dir / "converter.log"
 
+        if self.converter.state_path is None:
+            self.converter.state_path = data_dir / "converter_state.json"
+
         if self.embedder.pid_file is None:
             self.embedder.pid_file = data_dir / "embedder.pid"
 
         if self.embedder.log_file is None:
             self.embedder.log_file = data_dir / "embedder.log"
+
+        if self.embedder.state_path is None:
+            self.embedder.state_path = data_dir / "embedder_state.json"
 
 
 def get_config() -> Config:

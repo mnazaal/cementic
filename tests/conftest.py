@@ -17,7 +17,12 @@ def temp_dir() -> Generator[Path, None, None]:
 @pytest.fixture
 def sample_pdf_content() -> bytes:
     """Provide sample PDF content (minimal valid PDF structure)."""
-    return b"%PDF-1.4\n1 0 obj\n<<\n/Type /Catalog\n/Pages 2 0 R\n>>\nendobj\n2 0 obj\n<<\n/Type /Pages\n/Kids []\n/Count 0\n>>\nendobj\nxref\n0 3\n0000000000 65535 f\n0000000009 00000 n\n0000000058 00000 n\ntrailer\n<<\n/Size 3\n/Root 1 0 R\n>>\nstartxref\n107\n%%EOF"
+    return (
+        b"%PDF-1.4\n1 0 obj\n<<\n/Type /Catalog\n/Pages 2 0 R\n>>\nendobj\n"
+        b"2 0 obj\n<<\n/Type /Pages\n/Kids []\n/Count 0\n>>\nendobj\nxref\n0 3\n"
+        b"0000000000 65535 f\n0000000009 00000 n\n0000000058 00000 n\n"
+        b"trailer\n<<\n/Size 3\n/Root 1 0 R\n>>\nstartxref\n107\n%%EOF"
+    )
 
 
 @pytest.fixture

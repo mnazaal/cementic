@@ -1,13 +1,9 @@
 """Tests for converter daemon."""
 
 import hashlib
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-import pytest
-
 from seman.converter import ConverterDaemon, PDFEventHandler
-from seman.db import Chunk, Document
 from seman.state import DaemonState, IndexingState
 
 
@@ -35,10 +31,7 @@ class TestPDFEventHandler:
 
         time.sleep(2.5)
 
-        # Note: Current implementation processes all files (PDF check is in daemon, not handler)
-        # The _should_process method exists but is not currently used in the callback path
-        # This test documents current behavior
-        assert len(callback_called) == 1  # Handler processes all files, filtering happens elsewhere
+        assert len(callback_called) == 0
 
     def test_processes_pdfs(self):
         """Test that handler processes PDF files."""
@@ -62,6 +55,28 @@ class TestPDFEventHandler:
 
         assert len(callback_called) == 1
         assert callback_called[0] == "/path/to/document.pdf"
+
+    def test_debounce_coalesces_repeated_events(self):
+        """Repeated events for same PDF should trigger one callback."""
+        callback_called = []
+
+        def callback(path):
+            callback_called.append(path)
+
+        handler = PDFEventHandler(callback)
+
+        mock_event = MagicMock()
+        mock_event.is_directory = False
+        mock_event.src_path = "/path/to/document.pdf"
+
+        handler.on_modified(mock_event)
+        handler.on_modified(mock_event)
+
+        import time
+
+        time.sleep(2.5)
+
+        assert callback_called == ["/path/to/document.pdf"]
 
 
 class TestConverterDaemon:

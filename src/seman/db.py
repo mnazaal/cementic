@@ -111,10 +111,12 @@ class Chunk(Base):
 
 
 def get_engine(database_url: str) -> "Engine":
-    """Create database engine with pgvector and pgvectorscale extensions."""
-    engine = create_engine(database_url, echo=False)
+    """Create database engine."""
+    return create_engine(database_url, echo=False)
 
-    # Enable extensions
+
+def ensure_vector_extensions(engine: "Engine") -> None:
+    """Ensure vector-related PostgreSQL extensions are enabled."""
     with engine.connect() as conn:
         try:
             conn.execute(text("CREATE EXTENSION IF NOT EXISTS vectorscale CASCADE"))
@@ -123,11 +125,10 @@ def get_engine(database_url: str) -> "Engine":
             conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
         conn.commit()
 
-    return engine
-
 
 def create_tables(engine: "Engine") -> None:
     """Create all tables and vector indexes in the database."""
+    ensure_vector_extensions(engine)
     Base.metadata.create_all(engine)
 
     with engine.connect() as conn:

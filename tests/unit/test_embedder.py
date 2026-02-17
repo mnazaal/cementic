@@ -1,13 +1,9 @@
 """Tests for embedder daemon."""
 
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-import pytest
-
-from seman.db import Chunk, Document
-from seman.embedder import EmbedderDaemon
-from seman.state import DaemonState, IndexingState
+from seman.embedder import ClaimedChunk, EmbedderDaemon
+from seman.state import DaemonState
 
 
 class TestEmbedderDaemon:
@@ -27,16 +23,13 @@ class TestEmbedderDaemon:
         mock_session.return_value = mock_session
         mock_session_factory.return_value = mock_session
 
-        # Create mock chunks
-        mock_chunks = [
+        # Setup query mock
+        mock_result = MagicMock()
+        mock_result.fetchall.return_value = [
             MagicMock(id=1, content="chunk 1", document_id=1),
             MagicMock(id=2, content="chunk 2", document_id=1),
         ]
-
-        # Setup query mock
-        mock_query = MagicMock()
-        mock_query.filter_by.return_value.limit.return_value.all.return_value = mock_chunks
-        mock_session.query.return_value = mock_query
+        mock_session.execute.return_value = mock_result
 
         # Create daemon and test
         daemon = EmbedderDaemon()
@@ -49,6 +42,9 @@ class TestEmbedderDaemon:
         # Verify batch was retrieved
         assert batch is not None
         assert len(batch) == 2
+        assert batch[0].id == 1
+        assert batch[1].id == 2
+        assert mock_session.execute.called
 
     @patch("seman.embedder.get_engine")
     @patch("seman.embedder.get_session_factory")
@@ -72,19 +68,22 @@ class TestEmbedderDaemon:
 
         # Create mock chunks
         mock_chunks = [
-            MagicMock(id=1, content="chunk 1", document_id=1),
-            MagicMock(id=2, content="chunk 2", document_id=1),
+            ClaimedChunk(id=1, content="chunk 1", document_id=1),
+            ClaimedChunk(id=2, content="chunk 2", document_id=1),
         ]
 
         # Mock _update_document_status to avoid database calls
-        with patch.object(daemon, "_update_document_status"):
+        with patch.object(daemon, "_update_document_status") as mock_update_status:
             daemon._process_batch(mock_chunks)
 
         # Verify embeddings were generated
-        mock_embedder.embed_batch.assert_called_once_with(["chunk 1", "chunk 2"])
+        mock_embedder.embed_batch.assert_called_once_with(
+            ["search_document: chunk 1", "search_document: chunk 2"]
+        )
 
         # Verify database was updated
         assert mock_session.commit.called
+        mock_update_status.assert_called_once_with({1})
 
     @patch("seman.embedder.get_engine")
     @patch("seman.embedder.get_session_factory")
@@ -108,8 +107,8 @@ class TestEmbedderDaemon:
 
         # Create mock chunks
         mock_chunks = [
-            MagicMock(id=1, content="chunk 1", document_id=1),
-            MagicMock(id=2, content="chunk 2", document_id=2),
+            ClaimedChunk(id=1, content="chunk 1", document_id=1),
+            ClaimedChunk(id=2, content="chunk 2", document_id=2),
         ]
 
         # Mock _update_document_status
@@ -141,11 +140,27 @@ class TestEmbedderDaemon:
         daemon.Session = mock_session
 
         # Create mock chunks
-        mock_chunks = [MagicMock(document_id=1)]
-
-        daemon._update_document_status(mock_chunks)
+        daemon._update_document_status({1})
 
         # Verify document status was updated to completed
+        assert mock_session.commit.called
+
+    @patch("seman.embedder.get_engine")
+    @patch("seman.embedder.get_session_factory")
+    def test_recover_stale_processing_chunks(self, mock_session_factory, mock_get_engine):
+        """Test stale processing chunks are reset to pending."""
+        mock_session = MagicMock()
+        mock_session.__enter__ = MagicMock(return_value=mock_session)
+        mock_session.__exit__ = MagicMock(return_value=False)
+        mock_session.return_value = mock_session
+        mock_session_factory.return_value = mock_session
+
+        daemon = EmbedderDaemon()
+        daemon.Session = mock_session
+
+        daemon._recover_stale_processing_chunks()
+
+        assert mock_session.query.called
         assert mock_session.commit.called
 
     def test_init_embedder_llama_cpp(self):
@@ -160,7 +175,7 @@ class TestEmbedderDaemon:
                     daemon = EmbedderDaemon()
                     daemon.config.indexing.embedder = "llama-cpp"
 
-                    embedder = daemon._init_embedder()
+                    daemon._init_embedder()
 
                     mock_get_embedder.assert_called_once()
                     assert mock_get_embedder.call_args[0][0] == "llama-cpp"
@@ -177,7 +192,7 @@ class TestEmbedderDaemon:
                     daemon = EmbedderDaemon()
                     daemon.config.indexing.embedder = "ollama"
 
-                    embedder = daemon._init_embedder()
+                    daemon._init_embedder()
 
                     mock_get_embedder.assert_called_once()
                     assert mock_get_embedder.call_args[0][0] == "ollama"

@@ -12,10 +12,15 @@ except ImportError:
 
 import pymupdf4llm
 
-try:
-    from pymupdf4llm.ocr import rapidocr_api
-except ImportError:
-    rapidocr_api = None
+
+def _get_rapidocr_api():
+    """Lazily import RapidOCR API adapter."""
+    try:
+        from pymupdf4llm.ocr import rapidocr_api
+
+        return rapidocr_api
+    except ImportError:
+        return None
 
 
 def convert_pdf_to_markdown(
@@ -42,6 +47,7 @@ def convert_pdf_to_markdown(
         )
 
     ocr_kwargs = {}
+    rapidocr_api = _get_rapidocr_api()
     if rapidocr_api is not None:
         ocr_kwargs = {
             "use_ocr": True,

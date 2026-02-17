@@ -129,6 +129,18 @@ class TestStateManager:
         assert loaded.processed_count == 100
         assert loaded.pid == 1234
 
+    def test_update_can_clear_optional_fields(self, temp_dir):
+        """Test that update can explicitly clear fields using None."""
+        state_path = temp_dir / "state.json"
+        manager = StateManager(state_path)
+
+        manager.update(current_file="/tmp/file.pdf", pid=1234)
+        manager.update(current_file=None, pid=None)
+
+        loaded = manager.load()
+        assert loaded.current_file is None
+        assert loaded.pid is None
+
     def test_reset(self, temp_dir):
         """Test resetting state."""
         state_path = temp_dir / "state.json"

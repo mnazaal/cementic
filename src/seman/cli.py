@@ -15,7 +15,7 @@ from rich.table import Table
 from seman.bootstrap import Bootstrapper
 from seman.config import get_config
 from seman.converter import ConverterDaemon
-from seman.db import Chunk, get_engine, get_session_factory
+from seman.db import Chunk, Document, get_engine, get_session_factory
 from seman.embedder import EmbedderDaemon
 from seman.search import Searcher
 from seman.state import DaemonState, StateManager
@@ -28,10 +28,20 @@ config = get_config()
 
 def _get_data_dir() -> Path:
     """Return seman data directory path."""
-    state_path = config.indexing.state_path
+    state_path = config.converter.state_path or config.embedder.state_path
     if state_path is None:
         raise RuntimeError("State path is not configured")
     return state_path.parent
+
+
+def _converter_state_manager() -> StateManager:
+    """Create state manager for converter daemon."""
+    return StateManager(config.converter.state_path)
+
+
+def _embedder_state_manager() -> StateManager:
+    """Create state manager for indexer daemon."""
+    return StateManager(config.embedder.state_path)
 
 
 supervisor_state_path = _get_data_dir() / "supervisor.json"
@@ -155,36 +165,89 @@ def start_background(
     console.print(f"- converter PID: {convert_pid}")
     console.print(f"- indexer PID: {index_pid}")
     console.print(f"- collection: {collection}")
-    console.print("Use `seman ps` to check processes and `seman stop` to stop both.")
+    console.print("Use `seman status` to check progress and `seman stop` to stop both.")
 
 
-@app.command("ps")
-def process_status() -> None:
-    """Show background seman process status."""
+@app.command("status")
+def status() -> None:
+    """Show detailed converter/indexer status and embedding queue."""
     state = _load_supervisor_state()
     processes = state.get("processes", [])
 
+    converter_state = _converter_state_manager().load()
+    indexer_state = _embedder_state_manager().load()
+
+    watched_directories = getattr(converter_state, "watched_directories", []) or []
+    if not isinstance(watched_directories, list):
+        watched_directories = [str(watched_directories)]
+
+    converter_running = bool(converter_state.pid and _is_pid_running(converter_state.pid))
+    indexer_running = bool(indexer_state.pid and _is_pid_running(indexer_state.pid))
+
+    converter_table = Table(title="Converter Status")
+    converter_table.add_column("Field", style="cyan")
+    converter_table.add_column("Value", style="magenta")
+    converter_table.add_row("State", _daemon_state_text(converter_state.daemon_state))
+    converter_table.add_row("PID", str(converter_state.pid) if converter_state.pid else "N/A")
+    converter_table.add_row("Process", "running" if converter_running else "stopped")
+    converter_table.add_row("Watched Directories", "\n".join(watched_directories) or "None")
+    converter_table.add_row(
+        "Current File", str(getattr(converter_state, "current_file", None) or "None")
+    )
+    converter_table.add_row("Processed", str(converter_state.processed_count))
+    converter_table.add_row("Failed", str(converter_state.failed_count))
+    console.print(converter_table)
+
+    indexer_table = Table(title="Indexer Status")
+    indexer_table.add_column("Field", style="cyan")
+    indexer_table.add_column("Value", style="magenta")
+    indexer_table.add_row("State", _daemon_state_text(indexer_state.daemon_state))
+    indexer_table.add_row("PID", str(indexer_state.pid) if indexer_state.pid else "N/A")
+    indexer_table.add_row("Process", "running" if indexer_running else "stopped")
+    indexer_table.add_row(
+        "Current File", str(getattr(indexer_state, "current_file", None) or "None")
+    )
+    console.print(indexer_table)
+
+    supervisor_table = Table(title="Supervisor")
+    supervisor_table.add_column("Field", style="cyan")
+    supervisor_table.add_column("Value", style="magenta")
     if not processes:
-        console.print("[yellow]No background seman processes found[/yellow]")
-        return
-
-    table = Table(title="Seman Background Processes")
-    table.add_column("Name", style="cyan")
-    table.add_column("PID", style="magenta")
-    table.add_column("Status", style="green")
-    table.add_column("Log", style="white")
-
-    for proc in processes:
-        pid = int(proc.get("pid", 0))
-        status = "running" if _is_pid_running(pid) else "stopped"
-        table.add_row(
-            str(proc.get("name", "unknown")),
-            str(pid),
-            status,
-            str(proc.get("log_file", "")),
+        supervisor_table.add_row("State", "not started")
+    else:
+        running_count = sum(
+            1
+            for proc in processes
+            if isinstance(proc, dict) and _is_pid_running(int(proc.get("pid", 0)))
         )
+        supervisor_table.add_row("State", f"{running_count}/{len(processes)} running")
+        supervisor_table.add_row("Collection", str(state.get("collection", "N/A")))
+        supervisor_table.add_row("Directories", "\n".join(state.get("directories", [])) or "None")
+    console.print(supervisor_table)
 
-    console.print(table)
+    try:
+        engine = get_engine(config.database.url)
+        session_factory = get_session_factory(engine)
+        with session_factory() as session:
+            pending = session.query(Chunk).filter_by(embedding_status="pending").count()
+            processing = session.query(Chunk).filter_by(embedding_status="processing").count()
+            done = session.query(Chunk).filter_by(embedding_status="done").count()
+            failed = session.query(Chunk).filter_by(embedding_status="failed").count()
+            documents = session.query(Document).count()
+            collections = session.query(Document.collection).distinct().count()
+
+        queue_table = Table(title="Embedding Queue")
+        queue_table.add_column("Field", style="cyan")
+        queue_table.add_column("Value", style="magenta")
+        queue_table.add_row("Documents", str(documents))
+        queue_table.add_row("Collections", str(collections))
+        queue_table.add_row("Pending Chunks", str(pending))
+        queue_table.add_row("Processing Chunks", str(processing))
+        queue_table.add_row("Completed Chunks", str(done))
+        queue_table.add_row("Failed Chunks", str(failed))
+        console.print(queue_table)
+    except Exception as e:
+        console.print(f"[yellow]Queue status unavailable: {e}[/yellow]")
 
 
 @app.command("stop")
@@ -295,7 +358,7 @@ def convert_start(
 @convert_app.command("pause")
 def convert_pause() -> None:
     """Pause PDF conversion (keep watching)."""
-    state_manager = StateManager(config.indexing.state_path)
+    state_manager = _converter_state_manager()
     state = state_manager.load()
 
     if state.daemon_state != DaemonState.RUNNING:
@@ -309,7 +372,7 @@ def convert_pause() -> None:
 @convert_app.command("resume")
 def convert_resume() -> None:
     """Resume PDF conversion."""
-    state_manager = StateManager(config.indexing.state_path)
+    state_manager = _converter_state_manager()
     state = state_manager.load()
 
     if state.daemon_state != DaemonState.PAUSED:
@@ -320,30 +383,10 @@ def convert_resume() -> None:
     console.print("[green]Converter resumed[/green]")
 
 
-@convert_app.command("status")
-def convert_status() -> None:
-    """Show converter status."""
-    state_manager = StateManager(config.indexing.state_path)
-    state = state_manager.load()
-
-    table = Table(title="Converter Status")
-    table.add_column("Field", style="cyan")
-    table.add_column("Value", style="magenta")
-
-    table.add_row("State", _daemon_state_text(state.daemon_state))
-    table.add_row("PID", str(state.pid) if state.pid else "N/A")
-    table.add_row("Watched Directories", "\n".join(state.watched_directories) or "None")
-    table.add_row("Current File", state.current_file or "None")
-    table.add_row("Processed", str(state.processed_count))
-    table.add_row("Failed", str(state.failed_count))
-
-    console.print(table)
-
-
 @convert_app.command("stop")
 def convert_stop() -> None:
     """Stop the converter daemon."""
-    state_manager = StateManager(config.indexing.state_path)
+    state_manager = _converter_state_manager()
     state = state_manager.load()
 
     if state.pid:
@@ -377,7 +420,7 @@ def index_start() -> None:
 @index_app.command("pause")
 def index_pause() -> None:
     """Pause indexing (embedding generation)."""
-    state_manager = StateManager(config.indexing.state_path)
+    state_manager = _embedder_state_manager()
     state = state_manager.load()
 
     if state.daemon_state != DaemonState.RUNNING:
@@ -391,7 +434,7 @@ def index_pause() -> None:
 @index_app.command("resume")
 def index_resume() -> None:
     """Resume indexing."""
-    state_manager = StateManager(config.indexing.state_path)
+    state_manager = _embedder_state_manager()
     state = state_manager.load()
 
     if state.daemon_state != DaemonState.PAUSED:
@@ -402,41 +445,10 @@ def index_resume() -> None:
     console.print("[green]Indexer resumed[/green]")
 
 
-@index_app.command("status")
-def index_status() -> None:
-    """Show indexer status and queue."""
-    state_manager = StateManager(config.indexing.state_path)
-    state = state_manager.load()
-
-    # Get chunk statistics from database
-    engine = get_engine(config.database.url)
-    session_factory = get_session_factory(engine)
-
-    with session_factory() as session:
-        pending = session.query(Chunk).filter_by(embedding_status="pending").count()
-        processing = session.query(Chunk).filter_by(embedding_status="processing").count()
-        done = session.query(Chunk).filter_by(embedding_status="done").count()
-        failed = session.query(Chunk).filter_by(embedding_status="failed").count()
-
-    table = Table(title="Indexer Status")
-    table.add_column("Field", style="cyan")
-    table.add_column("Value", style="magenta")
-
-    table.add_row("State", _daemon_state_text(state.daemon_state))
-    table.add_row("PID", str(state.pid) if state.pid else "N/A")
-    table.add_row("Current File", state.current_file or "None")
-    table.add_row("Pending Chunks", str(pending))
-    table.add_row("Processing Chunks", str(processing))
-    table.add_row("Completed Chunks", str(done))
-    table.add_row("Failed Chunks", str(failed))
-
-    console.print(table)
-
-
 @index_app.command("stop")
 def index_stop() -> None:
     """Stop the indexer daemon."""
-    state_manager = StateManager(config.indexing.state_path)
+    state_manager = _embedder_state_manager()
     state = state_manager.load()
 
     if state.pid:
@@ -461,13 +473,58 @@ def reset(
             raise typer.Abort()
 
     # Reset state
-    state_manager = StateManager(config.indexing.state_path)
-    state_manager.reset()
-    console.print("[yellow]Reset state file[/yellow]")
+    converter_state_manager = _converter_state_manager()
+    embedder_state_manager = _embedder_state_manager()
+    converter_state_manager.reset()
+    embedder_state_manager.reset()
+    console.print("[yellow]Reset converter/indexer state files[/yellow]")
 
     console.print(
         "[green]State reset. Use database tools to clear PostgreSQL data if needed.[/green]"
     )
+
+
+@app.command("delete-collection")
+def delete_collection(
+    collection: str = typer.Argument(..., help="Collection name to delete"),
+    force: bool = typer.Option(False, "--force", help="Skip confirmation prompt"),
+) -> None:
+    """Delete all documents and chunks belonging to a collection."""
+    if not force:
+        confirm = typer.confirm(f"Delete collection '{collection}' and all associated chunks?")
+        if not confirm:
+            raise typer.Abort()
+
+    try:
+        engine = get_engine(config.database.url)
+        session_factory = get_session_factory(engine)
+
+        with session_factory() as session:
+            docs = session.query(Document).filter_by(collection=collection).all()
+            if not docs:
+                console.print(f"[yellow]Collection '{collection}' not found[/yellow]")
+                return
+
+            doc_ids = [doc.id for doc in docs]
+            deleted_chunks = (
+                session.query(Chunk)
+                .filter(Chunk.document_id.in_(doc_ids))
+                .delete(synchronize_session=False)
+            )
+            deleted_docs = (
+                session.query(Document)
+                .filter(Document.id.in_(doc_ids))
+                .delete(synchronize_session=False)
+            )
+            session.commit()
+
+        console.print(
+            "[green]Deleted collection "
+            f"'{collection}' ({deleted_docs} docs, {deleted_chunks} chunks)[/green]"
+        )
+    except Exception as e:
+        console.print(f"[red]Failed to delete collection '{collection}': {e}[/red]")
+        raise typer.Exit(1)
 
 
 @app.command()

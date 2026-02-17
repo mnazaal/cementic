@@ -1,6 +1,5 @@
 """Tests for text chunking module."""
 
-import pytest
 
 from seman.chunk import TextChunk, chunk_text
 

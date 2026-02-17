@@ -7,7 +7,7 @@ import signal
 import threading
 import time
 from pathlib import Path
-from typing import List, Optional, Set
+from typing import Any, List, Optional
 
 from watchdog.events import FileSystemEvent, FileSystemEventHandler
 from watchdog.observers import Observer
@@ -25,8 +25,7 @@ class PDFEventHandler(FileSystemEventHandler):
     def __init__(self, callback) -> None:
         """Initialize handler with callback."""
         self.callback = callback
-        self._pending_files: Set[str] = set()
-        self._last_event_time: dict = {}
+        self._timers: dict[str, Any] = {}
         self._debounce_seconds = 2.0
 
     def _should_process(self, file_path: str) -> bool:
@@ -38,25 +37,37 @@ class PDFEventHandler(FileSystemEventHandler):
 
     def _debounced_process(self, file_path: str) -> None:
         """Process file after debounce period."""
-        current_time = time.time()
-        self._last_event_time[file_path] = current_time
-        self._pending_files.add(file_path)
+        existing_timer = self._timers.pop(file_path, None)
+        if existing_timer:
+            existing_timer.cancel()
 
-        time.sleep(self._debounce_seconds)
+        timer = threading.Timer(self._debounce_seconds, self._run_callback, args=(file_path,))
+        timer.daemon = True
+        self._timers[file_path] = timer
+        timer.start()
 
-        if self._last_event_time.get(file_path) == current_time:
-            self._pending_files.discard(file_path)
-            self.callback(file_path)
+    def _run_callback(self, file_path: str) -> None:
+        """Run callback for a debounced file path."""
+        self._timers.pop(file_path, None)
+        self.callback(file_path)
 
     def on_created(self, event: FileSystemEvent) -> None:
         """Handle file creation events."""
-        if not event.is_directory:
-            self._debounced_process(event.src_path)
+        if event.is_directory:
+            return
+
+        src_path = event.src_path.decode() if isinstance(event.src_path, bytes) else event.src_path
+        if self._should_process(src_path):
+            self._debounced_process(src_path)
 
     def on_modified(self, event: FileSystemEvent) -> None:
         """Handle file modification events."""
-        if not event.is_directory:
-            self._debounced_process(event.src_path)
+        if event.is_directory:
+            return
+
+        src_path = event.src_path.decode() if isinstance(event.src_path, bytes) else event.src_path
+        if self._should_process(src_path):
+            self._debounced_process(src_path)
 
 
 class ConverterDaemon:
@@ -65,7 +76,7 @@ class ConverterDaemon:
     def __init__(self, config: Optional[Config] = None) -> None:
         """Initialize converter daemon."""
         self.config = config or get_config()
-        self.state_manager = StateManager(self.config.indexing.state_path)
+        self.state_manager = StateManager(self.config.converter.state_path)
         self._shutdown_event = threading.Event()
         self._pause_event = threading.Event()
         self.watcher: Optional[Observer] = None
@@ -151,7 +162,8 @@ class ConverterDaemon:
 
     def _on_pdf_detected(self, pdf_path: str) -> None:
         """Handle detected PDF file."""
-        if self._pause_event.is_set():
+        state = self.state_manager.load()
+        if self._pause_event.is_set() or state.daemon_state == DaemonState.PAUSED:
             return
 
         try:

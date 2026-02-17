@@ -5,7 +5,9 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
-from typing import List, Optional
+from typing import Any, List, Optional
+
+UNSET = object()
 
 
 class DaemonState(str, Enum):
@@ -77,27 +79,27 @@ class StateManager:
 
     def update(
         self,
-        daemon_state: Optional[DaemonState] = None,
-        watched_directories: Optional[List[str]] = None,
-        processed_count: Optional[int] = None,
-        failed_count: Optional[int] = None,
-        current_file: Optional[str] = None,
-        pid: Optional[int] = None,
+        daemon_state: Any = UNSET,
+        watched_directories: Any = UNSET,
+        processed_count: Any = UNSET,
+        failed_count: Any = UNSET,
+        current_file: Any = UNSET,
+        pid: Any = UNSET,
     ) -> IndexingState:
         """Update specific fields and save."""
         state = self.load()
 
-        if daemon_state is not None:
+        if daemon_state is not UNSET:
             state.daemon_state = daemon_state
-        if watched_directories is not None:
+        if watched_directories is not UNSET:
             state.watched_directories = watched_directories
-        if processed_count is not None:
+        if processed_count is not UNSET:
             state.processed_count = processed_count
-        if failed_count is not None:
+        if failed_count is not UNSET:
             state.failed_count = failed_count
-        if current_file is not None:
+        if current_file is not UNSET:
             state.current_file = current_file
-        if pid is not None:
+        if pid is not UNSET:
             state.pid = pid
 
         self.save(state)

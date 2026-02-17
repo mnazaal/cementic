@@ -77,46 +77,10 @@ class TestConvertCommands:
         mock_bootstrapper.ensure_for_convert.assert_called_once()
         mock_daemon.start.assert_called_once_with(["/path/to/pdfs"], collection="default")
 
-    def test_convert_status(self):
-        """Test convert status command."""
-        with patch("seman.cli.StateManager") as mock_state_manager:
-            mock_state = MagicMock()
-            mock_state.daemon_state.value = "running"
-            mock_state.pid = 1234
-            mock_state.watched_directories = ["/path"]
-            mock_state.current_file = None
-            mock_state.processed_count = 10
-            mock_state.failed_count = 0
-
-            mock_state_manager.return_value.load.return_value = mock_state
-
-            result = runner.invoke(app, ["convert", "status"])
-
-            assert result.exit_code == 0
-            assert "running" in result.output
-
-    def test_convert_status_with_string_daemon_state(self):
-        """Regression test: status works even if daemon_state is a raw string."""
-        with patch("seman.cli.StateManager") as mock_state_manager:
-            mock_state = MagicMock()
-            mock_state.daemon_state = "running"
-            mock_state.pid = 1234
-            mock_state.watched_directories = ["/path"]
-            mock_state.current_file = None
-            mock_state.processed_count = 10
-            mock_state.failed_count = 0
-
-            mock_state_manager.return_value.load.return_value = mock_state
-
-            result = runner.invoke(app, ["convert", "status"])
-
-            assert result.exit_code == 0
-            assert "running" in result.output
-
     @patch("seman.cli.os.kill")
     def test_convert_stop(self, mock_kill):
         """Test convert stop command."""
-        with patch("seman.cli.StateManager") as mock_state_manager:
+        with patch("seman.cli._converter_state_manager") as mock_state_manager:
             mock_state = MagicMock()
             mock_state.pid = 1234
             mock_state_manager.return_value.load.return_value = mock_state
@@ -146,44 +110,13 @@ class TestIndexCommands:
         mock_bootstrapper.ensure_for_index.assert_called_once()
         mock_daemon.start.assert_called_once()
 
-    def test_index_status(self):
-        """Test index status command."""
-        with patch("seman.cli.StateManager") as mock_state_manager:
-            with patch("seman.cli.get_engine"):
-                with patch("seman.cli.get_session_factory") as mock_session_factory:
-                    mock_session = MagicMock()
-                    mock_session.query.return_value.filter_by.return_value.count.return_value = 0
-                    mock_session_factory.return_value = lambda: mock_session
+    def test_subcommand_status_removed(self):
+        """Convert/index status now live under top-level status command."""
+        convert_result = runner.invoke(app, ["convert", "status"])
+        index_result = runner.invoke(app, ["index", "status"])
 
-                    mock_state = MagicMock()
-                    mock_state.daemon_state.value = "stopped"
-                    mock_state.pid = None
-                    mock_state.current_file = None
-                    mock_state_manager.return_value.load.return_value = mock_state
-
-                    result = runner.invoke(app, ["index", "status"])
-
-                    assert result.exit_code == 0
-
-    def test_index_status_with_string_daemon_state(self):
-        """Regression test: index status handles string daemon_state values."""
-        with patch("seman.cli.StateManager") as mock_state_manager:
-            with patch("seman.cli.get_engine"):
-                with patch("seman.cli.get_session_factory") as mock_session_factory:
-                    mock_session = MagicMock()
-                    mock_session.query.return_value.filter_by.return_value.count.return_value = 0
-                    mock_session_factory.return_value = lambda: mock_session
-
-                    mock_state = MagicMock()
-                    mock_state.daemon_state = "running"
-                    mock_state.pid = 9999
-                    mock_state.current_file = None
-                    mock_state_manager.return_value.load.return_value = mock_state
-
-                    result = runner.invoke(app, ["index", "status"])
-
-                    assert result.exit_code == 0
-                    assert "running" in result.output
+        assert convert_result.exit_code != 0
+        assert index_result.exit_code != 0
 
 
 class TestSearchCommand:
@@ -288,3 +221,81 @@ class TestBackgroundCommands:
 
         assert result.exit_code == 0
         assert "No background seman processes found" in result.output
+
+    @patch("seman.cli.get_session_factory")
+    @patch("seman.cli.get_engine")
+    @patch("seman.cli._embedder_state_manager")
+    @patch("seman.cli._converter_state_manager")
+    def test_status_command(
+        self,
+        mock_converter_state_manager,
+        mock_embedder_state_manager,
+        mock_get_engine,
+        mock_get_session_factory,
+        temp_dir: Path,
+    ):
+        """Status command renders daemon and queue summaries."""
+        converter_state = MagicMock()
+        converter_state.daemon_state = "running"
+        converter_state.pid = 1001
+        embedder_state = MagicMock()
+        embedder_state.daemon_state = "running"
+        embedder_state.pid = 1002
+
+        mock_converter_state_manager.return_value.load.return_value = converter_state
+        mock_embedder_state_manager.return_value.load.return_value = embedder_state
+
+        mock_session = MagicMock()
+        mock_session.query.return_value.filter_by.return_value.count.side_effect = [1, 2, 3, 4]
+        mock_get_session_factory.return_value = lambda: mock_session
+
+        state_path = temp_dir / "supervisor.json"
+        state_path.write_text('{"processes": [{"name": "converter", "pid": 1001}]}')
+
+        with patch("seman.cli.supervisor_state_path", state_path):
+            with patch("seman.cli._is_pid_running", return_value=True):
+                result = runner.invoke(app, ["status"])
+
+        assert result.exit_code == 0
+        assert "Converter Status" in result.output
+        assert "Indexer Status" in result.output
+        assert "Supervisor" in result.output
+        assert "Embedding Queue" in result.output
+
+
+class TestCollectionCommands:
+    """Test collection management commands."""
+
+    @patch("seman.cli.get_session_factory")
+    @patch("seman.cli.get_engine")
+    def test_delete_collection_success(self, mock_get_engine, mock_get_session_factory):
+        """Delete collection removes matching documents and chunks."""
+        mock_doc = MagicMock()
+        mock_doc.id = 1
+
+        mock_session = MagicMock()
+        mock_session.__enter__ = MagicMock(return_value=mock_session)
+        mock_session.__exit__ = MagicMock(return_value=False)
+        mock_session.query.return_value.filter_by.return_value.all.return_value = [mock_doc]
+        mock_session.query.return_value.filter.return_value.delete.side_effect = [5, 1]
+        mock_get_session_factory.return_value = lambda: mock_session
+
+        result = runner.invoke(app, ["delete-collection", "test", "--force"])
+
+        assert result.exit_code == 0
+        assert "Deleted collection 'test'" in result.output
+
+    @patch("seman.cli.get_session_factory")
+    @patch("seman.cli.get_engine")
+    def test_delete_collection_not_found(self, mock_get_engine, mock_get_session_factory):
+        """Deleting missing collection prints warning."""
+        mock_session = MagicMock()
+        mock_session.__enter__ = MagicMock(return_value=mock_session)
+        mock_session.__exit__ = MagicMock(return_value=False)
+        mock_session.query.return_value.filter_by.return_value.all.return_value = []
+        mock_get_session_factory.return_value = lambda: mock_session
+
+        result = runner.invoke(app, ["delete-collection", "missing", "--force"])
+
+        assert result.exit_code == 0
+        assert "not found" in result.output.lower()
