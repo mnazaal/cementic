@@ -129,6 +129,10 @@ class Bootstrapper:
             self._run(["podman", "start", self.config.bootstrap.postgres_container])
             return
 
+        data_path = self.config.bootstrap.postgres_data_path
+        if data_path is None:
+            raise RuntimeError("postgres_data_path is not configured")
+        data_path.mkdir(parents=True, exist_ok=True)
         self._run(
             [
                 "podman",
@@ -144,6 +148,8 @@ class Bootstrapper:
                 f"POSTGRES_PASSWORD={self.config.database.password}",
                 "-p",
                 f"{self.config.database.port}:5432",
+                "-v",
+                f"{data_path}:/var/lib/postgresql/data",
                 self.config.bootstrap.postgres_image,
             ]
         )
@@ -156,6 +162,10 @@ class Bootstrapper:
             self._run(["podman", "start", self.config.bootstrap.ollama_container])
             return
 
+        data_path = self.config.bootstrap.ollama_data_path
+        if data_path is None:
+            raise RuntimeError("ollama_data_path is not configured")
+        data_path.mkdir(parents=True, exist_ok=True)
         self._run(
             [
                 "podman",
@@ -165,6 +175,8 @@ class Bootstrapper:
                 self.config.bootstrap.ollama_container,
                 "-p",
                 "11434:11434",
+                "-v",
+                f"{data_path}:/root/.ollama",
                 self.config.bootstrap.ollama_image,
             ]
         )
@@ -195,6 +207,18 @@ class Bootstrapper:
     def _is_local_ollama(self) -> bool:
         host = self.config.ollama.host
         return "localhost" in host or "127.0.0.1" in host
+
+    def stop_containers(self, include_ollama: bool = True) -> None:
+        """Stop infrastructure containers."""
+        containers = [self.config.bootstrap.postgres_container]
+        if include_ollama:
+            containers.append(self.config.bootstrap.ollama_container)
+
+        for name in containers:
+            if self._container_running(name):
+                self._run(["podman", "stop", name])
+            elif self._container_exists(name):
+                pass
 
     def _run(self, command: list[str]) -> None:
         try:

@@ -118,11 +118,19 @@ class TestBackgroundCommands:
         mock_spawn.side_effect = [1111, 2222]
 
         with patch("seman.cli.supervisor_state_path", temp_dir / "supervisor.json"):
-            result = runner.invoke(app, ["start", "/path/to/pdfs", "--collection", "test"])
+            result = runner.invoke(app, ["start", str(temp_dir), "--collection", "test"])
 
         assert result.exit_code == 0
         assert mock_spawn.call_count == 2
         assert "Started seman in background" in result.output
+
+    def test_start_background_missing_directory(self, temp_dir: Path):
+        """Start command errors on missing directory."""
+        with patch("seman.cli.supervisor_state_path", temp_dir / "supervisor.json"):
+            result = runner.invoke(app, ["start", "/nonexistent/path", "--collection", "test"])
+
+        assert result.exit_code == 1
+        assert "does not exist" in result.output
 
     def test_stop_background_no_state(self, temp_dir: Path):
         """Stop command handles missing state file."""

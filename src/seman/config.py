@@ -132,6 +132,12 @@ class BootstrapConfig(BaseSettings):
     )
     wait_timeout_seconds: int = Field(default=90, description="Maximum bootstrap wait time")
     wait_interval_seconds: float = Field(default=2.0, description="Polling interval while waiting")
+    postgres_data_path: Optional[Path] = Field(
+        default=None, description="Path for postgres data volume"
+    )
+    ollama_data_path: Optional[Path] = Field(
+        default=None, description="Path for ollama data volume"
+    )
     llama_model_url: str = Field(
         default=(
             "https://huggingface.co/nomic-ai/nomic-embed-text-v2-moe-GGUF/resolve/main/"
@@ -181,6 +187,12 @@ class Config(BaseSettings):
 
         if self.embedder.state_path is None:
             self.embedder.state_path = data_dir / "embedder_state.json"
+
+        if self.bootstrap.postgres_data_path is None:
+            self.bootstrap.postgres_data_path = data_dir / "postgres-data"
+
+        if self.bootstrap.ollama_data_path is None:
+            self.bootstrap.ollama_data_path = data_dir / "ollama-data"
 
 
 def get_config() -> Config:

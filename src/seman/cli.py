@@ -113,6 +113,20 @@ def _wait_for_exit(pids: List[int], timeout_seconds: float = 20.0) -> List[int]:
     return remaining
 
 
+def _force_kill(pids: List[int]) -> List[int]:
+    """Send SIGKILL to PIDs and return any that couldn't be killed."""
+    remaining = []
+    for pid in pids:
+        try:
+            os.kill(pid, 9)
+        except (ProcessLookupError, OSError):
+            pass
+        else:
+            if _is_pid_running(pid):
+                remaining.append(pid)
+    return remaining
+
+
 @app.command("start")
 def start_background(
     directories: List[str] = typer.Argument(..., help="Directories to watch for PDFs"),
@@ -124,6 +138,12 @@ def start_background(
     ),
 ) -> None:
     """Start converter and indexer in the background."""
+    missing = [d for d in directories if not Path(d).is_dir()]
+    if missing:
+        for d in missing:
+            console.print(f"[red]Error: Directory does not exist: {d}[/red]")
+        raise typer.Exit(1)
+
     state = _load_supervisor_state()
     running = [
         proc
@@ -252,18 +272,36 @@ def status() -> None:
         queue_table.add_row("Completed Chunks", str(done))
         queue_table.add_row("Failed Chunks", str(failed))
         console.print(queue_table)
-    except Exception as e:
-        console.print(f"[yellow]Queue status unavailable: {e}[/yellow]")
+    except Exception:
+        queue_table = Table(title="Embedding Queue")
+        queue_table.add_column("Field", style="cyan")
+        queue_table.add_column("Value", style="magenta")
+        queue_table.add_row("Status", "[yellow]Database not reachable[/yellow]")
+        queue_table.add_row("Hint", "Run 'seman start' to start infrastructure")
+        console.print(queue_table)
 
 
 @app.command("stop")
-def stop_background() -> None:
-    """Stop background converter and indexer processes."""
+def stop_background(
+    include_infra: bool = typer.Option(
+        True,
+        "--include-infra/--no-infra",
+        help="Also stop infrastructure containers (Postgres/Ollama)",
+    ),
+    force: bool = typer.Option(
+        False,
+        "--force",
+        help="Force kill processes that don't stop gracefully",
+    ),
+) -> None:
+    """Stop background processes and optionally infrastructure containers."""
     state = _load_supervisor_state()
     processes = state.get("processes", [])
 
     if not processes:
         console.print("[yellow]No background seman processes found[/yellow]")
+        if include_infra:
+            _stop_infra_containers()
         return
 
     signaled_pids: List[int] = []
@@ -277,12 +315,32 @@ def stop_background() -> None:
         except (ProcessLookupError, OSError):
             continue
 
-    remaining = _wait_for_exit(signaled_pids)
+    timeout_seconds = float(config.bootstrap.wait_timeout_seconds)
+    remaining = _wait_for_exit(signaled_pids, timeout_seconds=timeout_seconds)
 
     if not remaining:
         if supervisor_state_path.exists():
             supervisor_state_path.unlink()
         console.print(f"[green]Stopped {len(signaled_pids)} process(es)[/green]")
+        if include_infra:
+            _stop_infra_containers()
+        return
+
+    if force:
+        killed = _force_kill(remaining)
+        time.sleep(0.5)
+        still_alive = [pid for pid in killed if _is_pid_running(pid)]
+        if supervisor_state_path.exists():
+            supervisor_state_path.unlink()
+        if still_alive:
+            console.print(
+                f"[red]Force killed {len(remaining) - len(still_alive)} process(es); "
+                f"could not kill: {', '.join(str(pid) for pid in still_alive)}[/red]"
+            )
+        else:
+            console.print(f"[green]Force stopped {len(remaining)} process(es)[/green]")
+        if include_infra:
+            _stop_infra_containers()
         return
 
     still_running = [
@@ -299,9 +357,23 @@ def stop_background() -> None:
     )
 
     console.print(
-        "[yellow]Stop timed out; still running PID(s): "
-        f"{', '.join(str(pid) for pid in remaining)}[/yellow]"
+        f"[yellow]Stop timed out after {timeout_seconds}s; "
+        f"still running PID(s): {', '.join(str(pid) for pid in remaining)}[/yellow]"
     )
+    console.print("[yellow]Use --force to kill stubborn processes[/yellow]")
+
+
+def _stop_infra_containers() -> None:
+    """Stop infrastructure containers helper."""
+    from seman.bootstrap import Bootstrapper
+
+    bootstrapper = Bootstrapper(config)
+    try:
+        include_ollama = config.indexing.embedder == "ollama"
+        bootstrapper.stop_containers(include_ollama=include_ollama)
+        console.print("[green]Infrastructure containers stopped[/green]")
+    except RuntimeError as e:
+        console.print(f"[yellow]Could not stop containers: {e}[/yellow]")
 
 
 @app.command("delete-collection")

@@ -49,8 +49,11 @@ seman search "your query"
 # Search specific collections
 seman search "your query" --collection work --collection personal
 
-# Stop both background processes
+# Stop both background processes and infrastructure
 seman stop
+
+# Or stop only processes, keep containers running
+seman stop --no-infra
 
 # Delete a collection and all indexed chunks/documents
 seman delete-collection test --force
