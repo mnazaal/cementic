@@ -10,65 +10,18 @@ from seman.cli import app
 runner = CliRunner()
 
 
-class TestConvertCommands:
-    """Test converter commands."""
+class TestLegacyCommands:
+    """Test removed legacy command surface."""
 
-    @patch("seman.cli.Bootstrapper")
-    @patch("seman.cli.ConverterDaemon")
-    def test_convert_start(self, mock_daemon_class, mock_bootstrapper_class):
-        """Test convert start command."""
-        mock_daemon = MagicMock()
-        mock_daemon_class.return_value = mock_daemon
-        mock_bootstrapper = MagicMock()
-        mock_bootstrapper_class.return_value = mock_bootstrapper
-
+    def test_convert_subcommands_removed(self):
+        """Legacy convert command should not be available."""
         result = runner.invoke(app, ["convert", "start", "/path/to/pdfs"])
+        assert result.exit_code != 0
 
-        assert result.exit_code == 0
-        mock_daemon_class.assert_called_once()
-        mock_bootstrapper.ensure_for_convert.assert_called_once()
-        mock_daemon.start.assert_called_once_with(["/path/to/pdfs"], collection="default")
-
-    @patch("seman.cli.os.kill")
-    def test_convert_stop(self, mock_kill):
-        """Test convert stop command."""
-        with patch("seman.cli._converter_state_manager") as mock_state_manager:
-            mock_state = MagicMock()
-            mock_state.pid = 1234
-            mock_state_manager.return_value.load.return_value = mock_state
-
-            result = runner.invoke(app, ["convert", "stop"])
-
-            assert result.exit_code == 0
-            mock_kill.assert_called_once_with(1234, 15)
-
-
-class TestIndexCommands:
-    """Test indexer commands."""
-
-    @patch("seman.cli.Bootstrapper")
-    @patch("seman.cli.EmbedderDaemon")
-    def test_index_start(self, mock_daemon_class, mock_bootstrapper_class):
-        """Test index start command."""
-        mock_daemon = MagicMock()
-        mock_daemon_class.return_value = mock_daemon
-        mock_bootstrapper = MagicMock()
-        mock_bootstrapper_class.return_value = mock_bootstrapper
-
+    def test_index_subcommands_removed(self):
+        """Legacy index command should not be available."""
         result = runner.invoke(app, ["index", "start"])
-
-        assert result.exit_code == 0
-        mock_daemon_class.assert_called_once()
-        mock_bootstrapper.ensure_for_index.assert_called_once()
-        mock_daemon.start.assert_called_once()
-
-    def test_subcommand_status_removed(self):
-        """Convert/index status now live under top-level status command."""
-        convert_result = runner.invoke(app, ["convert", "status"])
-        index_result = runner.invoke(app, ["index", "status"])
-
-        assert convert_result.exit_code != 0
-        assert index_result.exit_code != 0
+        assert result.exit_code != 0
 
 
 class TestSearchCommand:

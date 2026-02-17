@@ -12,13 +12,10 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
-from seman.bootstrap import Bootstrapper
 from seman.config import get_config
-from seman.converter import ConverterDaemon
 from seman.db import Chunk, Document, get_engine, get_session_factory
-from seman.embedder import EmbedderDaemon
 from seman.search import Searcher
-from seman.state import DaemonState, StateManager
+from seman.state import StateManager
 
 app = typer.Typer(help="Semantic search CLI tool")
 console = Console()
@@ -45,12 +42,6 @@ def _embedder_state_manager() -> StateManager:
 
 
 supervisor_state_path = _get_data_dir() / "supervisor.json"
-
-# Create sub-commands for convert and index
-convert_app = typer.Typer(help="PDF conversion commands")
-index_app = typer.Typer(help="Indexing commands (compute embeddings)")
-app.add_typer(convert_app, name="convert", hidden=True)
-app.add_typer(index_app, name="index", hidden=True)
 
 
 @dataclass
@@ -132,20 +123,19 @@ def start_background(
             console.print(f"- {proc.get('name')}: PID {proc.get('pid')}")
         raise typer.Exit(1)
 
-    base_cmd = [sys.executable, "-m", "seman.cli"]
+    base_cmd = [sys.executable, "-m", "seman.runner"]
     data_dir = _get_data_dir()
     convert_log = data_dir / "convert-background.log"
     index_log = data_dir / "index-background.log"
 
     convert_pid = _spawn_detached(
-        [*base_cmd, "convert", "start", *directories, "--collection", collection],
+        [*base_cmd, "converter", *directories, "--collection", collection],
         convert_log,
     )
     index_pid = _spawn_detached(
         [
             *base_cmd,
-            "index",
-            "start",
+            "indexer",
         ],
         index_log,
     )
@@ -275,82 +265,6 @@ def stop_background() -> None:
         supervisor_state_path.unlink()
 
     console.print(f"[green]Sent stop signal to {stopped} process(es)[/green]")
-
-
-@convert_app.command("start")
-def convert_start(
-    directories: List[str] = typer.Argument(..., help="Directories to watch for PDFs"),
-    collection: str = typer.Option(
-        "default",
-        "-c",
-        "--collection",
-        help="Collection name for indexed documents",
-    ),
-) -> None:
-    """Start the converter daemon (watches PDFs and converts to chunks)."""
-    daemon = ConverterDaemon(config)
-    bootstrapper = Bootstrapper(config)
-
-    try:
-        bootstrapper.ensure_for_convert()
-        daemon.start(directories, collection=collection)
-    except RuntimeError as e:
-        console.print(f"[red]Bootstrap failed: {e}[/red]")
-        raise typer.Exit(1)
-    except KeyboardInterrupt:
-        console.print("\n[yellow]Shutting down converter...[/yellow]")
-        daemon.stop()
-
-
-@convert_app.command("stop")
-def convert_stop() -> None:
-    """Stop the converter daemon."""
-    state_manager = _converter_state_manager()
-    state = state_manager.load()
-
-    if state.pid:
-        try:
-            os.kill(state.pid, 15)  # SIGTERM
-            console.print(f"[green]Sent stop signal to converter (PID {state.pid})[/green]")
-        except (OSError, ProcessLookupError):
-            console.print("[yellow]Converter process not found, cleaning up state[/yellow]")
-            state_manager.update(daemon_state=DaemonState.STOPPED, pid=None)
-    else:
-        console.print("[yellow]No converter PID found[/yellow]")
-
-
-@index_app.command("start")
-def index_start() -> None:
-    """Start the indexing daemon (generates embeddings for chunks)."""
-    daemon = EmbedderDaemon(config)
-    bootstrapper = Bootstrapper(config)
-
-    try:
-        bootstrapper.ensure_for_index()
-        daemon.start()
-    except RuntimeError as e:
-        console.print(f"[red]Bootstrap failed: {e}[/red]")
-        raise typer.Exit(1)
-    except KeyboardInterrupt:
-        console.print("\n[yellow]Shutting down indexer...[/yellow]")
-        daemon.stop()
-
-
-@index_app.command("stop")
-def index_stop() -> None:
-    """Stop the indexer daemon."""
-    state_manager = _embedder_state_manager()
-    state = state_manager.load()
-
-    if state.pid:
-        try:
-            os.kill(state.pid, 15)  # SIGTERM
-            console.print(f"[green]Sent stop signal to indexer (PID {state.pid})[/green]")
-        except (OSError, ProcessLookupError):
-            console.print("[yellow]Indexer process not found, cleaning up state[/yellow]")
-            state_manager.update(daemon_state=DaemonState.STOPPED, pid=None)
-    else:
-        console.print("[yellow]No indexer PID found[/yellow]")
 
 
 @app.command()
