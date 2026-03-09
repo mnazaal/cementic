@@ -5,9 +5,34 @@ from unittest.mock import MagicMock, patch
 
 from typer.testing import CliRunner
 
+from seman import cli as seman_cli
 from seman.cli import app
 
 runner = CliRunner()
+
+
+class TestRootHelp:
+    """Test top-level help behavior."""
+
+    def test_root_help_shown_with_no_args(self, monkeypatch, capsys):
+        """Running `seman` with no args should print root help."""
+        monkeypatch.setattr(seman_cli.sys, "argv", ["seman"])
+
+        seman_cli.main()
+        output = capsys.readouterr().out
+
+        assert "Usage: seman" in output
+        assert "Commands:" in output
+
+    def test_root_help_shown_with_short_help_flag(self, monkeypatch, capsys):
+        """Running `seman -h` should print root help."""
+        monkeypatch.setattr(seman_cli.sys, "argv", ["seman", "-h"])
+
+        seman_cli.main()
+        output = capsys.readouterr().out
+
+        assert "Usage: seman" in output
+        assert "Commands:" in output
 
 
 class TestLegacyCommands:
@@ -31,6 +56,13 @@ class TestLegacyCommands:
 
 class TestSearchCommand:
     """Test search command."""
+
+    def test_search_subcommand_help_disabled(self):
+        """Subcommand-level --help is intentionally disabled."""
+        result = runner.invoke(app, ["search", "--help"])
+
+        assert result.exit_code != 0
+        assert "No such option" in result.output
 
     @patch("seman.cli.Searcher")
     def test_search_basic(self, mock_searcher_class):
@@ -77,6 +109,13 @@ class TestSearchCommand:
         assert result.exit_code == 0
         mock_searcher.search.assert_called_once_with("query", top_k=20, collections=None)
 
+    def test_search_rejects_removed_top_k_long_flag(self):
+        """Search no longer supports --top-k long option."""
+        result = runner.invoke(app, ["search", "query", "--top-k", "20"])
+
+        assert result.exit_code != 0
+        assert "No such option" in result.output
+
     @patch("seman.cli.Searcher")
     def test_search_with_collection_filter(self, mock_searcher_class):
         """Test search with collection filters."""
@@ -97,6 +136,51 @@ class TestSearchCommand:
         )
 
     @patch("seman.cli.Searcher")
+    def test_search_with_space_separated_collection_filter(self, mock_searcher_class):
+        """Test search with one collection flag and multiple values."""
+        mock_searcher = MagicMock()
+        mock_searcher.search.return_value = []
+        mock_searcher_class.return_value = mock_searcher
+
+        result = runner.invoke(
+            app,
+            ["search", "query", "--collection", "work", "personal"],
+        )
+
+        assert result.exit_code == 0
+        mock_searcher.search.assert_called_once_with(
+            "query",
+            top_k=10,
+            collections=["work", "personal"],
+        )
+
+    @patch("seman.cli.Searcher")
+    def test_search_with_short_space_separated_collection_filter(self, mock_searcher_class):
+        """Test search with one short collection flag and multiple values."""
+        mock_searcher = MagicMock()
+        mock_searcher.search.return_value = []
+        mock_searcher_class.return_value = mock_searcher
+
+        result = runner.invoke(
+            app,
+            ["search", "query", "-c", "work", "personal"],
+        )
+
+        assert result.exit_code == 0
+        mock_searcher.search.assert_called_once_with(
+            "query",
+            top_k=10,
+            collections=["work", "personal"],
+        )
+
+    def test_search_with_trailing_collection_without_flag_errors(self):
+        """Search should error when trailing collections omit --collection."""
+        result = runner.invoke(app, ["search", "query", "personal"])
+
+        assert result.exit_code != 0
+        assert "Use --collection/-c" in result.output
+
+    @patch("seman.cli.Searcher")
     def test_search_error(self, mock_searcher_class):
         """Test search handles errors."""
         mock_searcher = MagicMock()
@@ -112,6 +196,13 @@ class TestSearchCommand:
 class TestBackgroundCommands:
     """Test top-level background process commands."""
 
+    def test_status_subcommand_help_disabled(self):
+        """Subcommand-level --help is intentionally disabled."""
+        result = runner.invoke(app, ["status", "--help"])
+
+        assert result.exit_code != 0
+        assert "No such option" in result.output
+
     @patch("seman.cli._spawn_detached")
     def test_start_background(self, mock_spawn, temp_dir: Path):
         """Start command spawns converter and indexer."""
@@ -123,6 +214,22 @@ class TestBackgroundCommands:
         assert result.exit_code == 0
         assert mock_spawn.call_count == 2
         assert "Started seman in background" in result.output
+
+    @patch("seman.cli._spawn_detached")
+    def test_start_background_accepts_multiple_directories(self, mock_spawn, temp_dir: Path):
+        """Start command accepts multiple directories."""
+        mock_spawn.side_effect = [1111, 2222]
+        second_dir = temp_dir / "second"
+        second_dir.mkdir()
+
+        with patch("seman.cli.supervisor_state_path", temp_dir / "supervisor.json"):
+            result = runner.invoke(app, ["start", str(temp_dir), str(second_dir)])
+
+        assert result.exit_code == 0
+        first_command = mock_spawn.call_args_list[0].args[0]
+        assert first_command[1:4] == ["-m", "seman.runner", "converter"]
+        assert first_command[4:6] == [str(temp_dir), str(second_dir)]
+        assert first_command[6:] == ["--collection", "default"]
 
     def test_start_background_missing_directory(self, temp_dir: Path):
         """Start command errors on missing directory."""

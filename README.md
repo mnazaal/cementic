@@ -47,7 +47,9 @@ seman status
 seman search "your query"
 
 # Search specific collections
-seman search "your query" --collection work --collection personal
+seman search "your query" --collection work personal
+# same with short flag
+seman search "your query" -c work personal
 
 # Stop both background processes and infrastructure
 seman stop

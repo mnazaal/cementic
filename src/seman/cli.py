@@ -6,6 +6,7 @@ import subprocess
 import sys
 import time
 from dataclasses import dataclass
+from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import List, Optional
 
@@ -18,10 +19,84 @@ from seman.db import Chunk, Document, get_engine, get_session_factory
 from seman.search import Searcher
 from seman.state import StateManager
 
-app = typer.Typer(help="Semantic search CLI tool")
+
+class SemanTyper(typer.Typer):
+    """Typer app with plain help formatting."""
+
+    def __init__(self, *args, **kwargs):
+        kwargs.setdefault("rich_markup_mode", None)
+        kwargs.setdefault("add_completion", False)
+        context_settings = dict(kwargs.get("context_settings") or {})
+        context_settings.setdefault("help_option_names", [])
+        kwargs["context_settings"] = context_settings
+        super().__init__(*args, **kwargs)
+
+
+app = SemanTyper(help="Semantic search CLI tool")
 console = Console()
 
 config = get_config()
+
+
+ROOT_HELP_TEXT = """Semantic search CLI tool for indexing and searching PDF documents.
+
+Usage: seman <COMMAND> [ARGS]...
+
+Arguments:
+  <COMMAND>
+          Command to run.
+  [ARGS]...
+          Arguments for the selected command.
+
+Commands:
+  start <DIR1> [<DIR2> ...] [-c, --collection <COLLECTION>]
+          Watch one or more directories and start converter + indexer in background.
+          -c, --collection <COLLECTION>
+                  Collection name to index into. [default: default]
+
+  status
+          Show converter, indexer, supervisor, and embedding queue status.
+
+  stop [--include-infra|--no-infra] [--force]
+          Stop background workers and optionally infrastructure containers.
+          --include-infra / --no-infra
+                  Also stop Postgres/Ollama containers. [default: include-infra]
+          --force
+                  Kill workers if graceful stop times out.
+
+  delete-collection <COLLECTION> [--force]
+          Delete all documents and chunks in one collection.
+          --force
+                  Skip confirmation prompt.
+
+  search <QUERY> [-n <N>] [-c, --collection <COLLECTION1> [<COLLECTION2> ...]]
+          Semantic search over indexed chunks.
+          -n <N>
+                  Number of results to return. [default: 10]
+          -c, --collection <COLLECTION>
+                  Filter by one or more collections.
+                  You can use one flag with multiple values: -c work personal.
+                  You can also repeat the flag: -c work -c personal.
+
+Examples:
+  seman start /path/to/dir1 /path/to/dir2 -c research
+  seman search "your query" -n 5 -c work personal
+
+Options:
+  -h, --help
+          Print help
+
+  -V, --version
+          Print version
+"""
+
+
+def _get_cli_version() -> str:
+    """Return installed seman version, or unknown."""
+    try:
+        return version("seman")
+    except PackageNotFoundError:
+        return "unknown"
 
 
 def _get_data_dir() -> Path:
@@ -68,6 +143,24 @@ def _daemon_state_text(value: object) -> str:
     if hasattr(value, "value"):
         return str(getattr(value, "value"))
     return str(value)
+
+
+def _build_collection_filters(
+    option_collections: Optional[List[str]],
+    trailing_collections: Optional[List[str]],
+) -> list[str] | None:
+    """Build collection filters from option and trailing values."""
+    option_values = list(option_collections or [])
+    trailing_values = list(trailing_collections or [])
+
+    if trailing_values and not option_values:
+        joined = " ".join(trailing_values)
+        raise typer.BadParameter(
+            f"Unexpected argument(s): {joined}. Use --collection/-c before collection names."
+        )
+
+    merged = [*option_values, *trailing_values]
+    return merged or None
 
 
 def _load_supervisor_state() -> dict:
@@ -127,7 +220,10 @@ def _force_kill(pids: List[int]) -> List[int]:
     return remaining
 
 
-@app.command("start")
+@app.command(
+    "start",
+    short_help="DIRECTORY... [-c|--collection COLLECTION]",
+)
 def start_background(
     directories: List[str] = typer.Argument(..., help="Directories to watch for PDFs"),
     collection: str = typer.Option(
@@ -192,7 +288,10 @@ def start_background(
     console.print("Use `seman status` to check progress and `seman stop` to stop both.")
 
 
-@app.command("status")
+@app.command(
+    "status",
+    short_help="(no flags)",
+)
 def status() -> None:
     """Show detailed converter/indexer status and embedding queue."""
     state = _load_supervisor_state()
@@ -281,7 +380,10 @@ def status() -> None:
         console.print(queue_table)
 
 
-@app.command("stop")
+@app.command(
+    "stop",
+    short_help="[--include-infra|--no-infra] [--force]",
+)
 def stop_background(
     include_infra: bool = typer.Option(
         True,
@@ -376,7 +478,10 @@ def _stop_infra_containers() -> None:
         console.print(f"[yellow]Could not stop containers: {e}[/yellow]")
 
 
-@app.command("delete-collection")
+@app.command(
+    "delete-collection",
+    short_help="COLLECTION [--force]",
+)
 def delete_collection(
     collection: str = typer.Argument(..., help="Collection name to delete"),
     force: bool = typer.Option(False, "--force", help="Skip confirmation prompt"),
@@ -419,22 +524,29 @@ def delete_collection(
         raise typer.Exit(1)
 
 
-@app.command()
+@app.command(
+    short_help="QUERY [-n N] [-c|--collection COLLECTION ...]",
+)
 def search(
     query: str = typer.Argument(..., help="Search query"),
-    top_k: int = typer.Option(10, "-n", "--top-k", help="Number of results"),
+    top_k: int = typer.Option(10, "-n", help="Number of results"),
     collections: Optional[List[str]] = typer.Option(
         None,
         "-c",
         "--collection",
-        help="Filter to one or more collections (defaults to all)",
+        help="Filter collections; supports '-c work personal' or repeated '-c'.",
+    ),
+    trailing_collections: Optional[List[str]] = typer.Argument(
+        None,
+        help="Additional collections after --collection/-c",
     ),
 ) -> None:
     """Search indexed documents."""
+    filters = _build_collection_filters(collections, trailing_collections)
     searcher = Searcher(config)
 
     try:
-        results = searcher.search(query, top_k=top_k, collections=collections or None)
+        results = searcher.search(query, top_k=top_k, collections=filters)
 
         if not results:
             console.print("[yellow]No results found[/yellow]")
@@ -468,6 +580,15 @@ def search(
 
 def main() -> None:
     """Entry point."""
+    argv = sys.argv[1:]
+    if not argv or (len(argv) == 1 and argv[0] in {"-h", "--help"}):
+        typer.echo(ROOT_HELP_TEXT.rstrip())
+        return
+
+    if len(argv) == 1 and argv[0] in {"-V", "--version"}:
+        typer.echo(_get_cli_version())
+        return
+
     app()
 
 
