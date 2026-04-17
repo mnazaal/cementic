@@ -1,17 +1,17 @@
-"""State management for pause/resume functionality."""
+"""Persistent worker state management."""
 
 import json
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
-from typing import Any, List, Optional
+from typing import Any, Optional
 
 UNSET = object()
 
 
 class DaemonState(str, Enum):
-    """State of the indexing daemon."""
+    """State of a background worker."""
 
     STOPPED = "stopped"
     RUNNING = "running"
@@ -19,34 +19,66 @@ class DaemonState(str, Enum):
 
 
 @dataclass
-class IndexingState:
-    """State of the indexing process."""
+class WorkerState:
+    """State of a background worker process."""
 
     daemon_state: DaemonState = DaemonState.STOPPED
-    watched_directories: List[str] = field(default_factory=list)
+    watched_directories: list[str] = field(default_factory=list)
     processed_count: int = 0
     failed_count: int = 0
     current_file: Optional[str] = None
     last_updated: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     pid: Optional[int] = None
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, object]:
         """Convert to dictionary."""
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, data: dict) -> "IndexingState":
+    def from_dict(cls, data: dict[str, object]) -> "WorkerState":
         """Create from dictionary."""
         normalized = dict(data)
-        daemon_state = normalized.get("daemon_state", DaemonState.STOPPED)
+        raw_daemon_state = normalized.get("daemon_state", DaemonState.STOPPED)
 
-        if isinstance(daemon_state, str):
+        if isinstance(raw_daemon_state, str):
             try:
-                normalized["daemon_state"] = DaemonState(daemon_state)
+                daemon_state_value: DaemonState = DaemonState(raw_daemon_state)
             except ValueError:
-                normalized["daemon_state"] = DaemonState.STOPPED
+                daemon_state_value = DaemonState.STOPPED
+        elif isinstance(raw_daemon_state, DaemonState):
+            daemon_state_value = raw_daemon_state
+        else:
+            daemon_state_value = DaemonState.STOPPED
 
-        return cls(**normalized)
+        raw_watched_directories = normalized.get("watched_directories", [])
+        watched_directories: list[str] = []
+        if isinstance(raw_watched_directories, list):
+            watched_directories = [str(path) for path in raw_watched_directories]
+
+        raw_current_file = normalized.get("current_file")
+        current_file = str(raw_current_file) if raw_current_file is not None else None
+
+        raw_last_updated = normalized.get("last_updated", datetime.now(timezone.utc).isoformat())
+        last_updated = str(raw_last_updated)
+
+        raw_processed_count = normalized.get("processed_count", 0)
+        processed_count = raw_processed_count if isinstance(raw_processed_count, int) else 0
+
+        raw_failed_count = normalized.get("failed_count", 0)
+        failed_count = raw_failed_count if isinstance(raw_failed_count, int) else 0
+
+        raw_pid = normalized.get("pid")
+        pid = raw_pid if isinstance(raw_pid, int) else None
+
+        return cls(
+            daemon_state=daemon_state_value,
+            watched_directories=watched_directories,
+            processed_count=processed_count,
+            failed_count=failed_count,
+            current_file=current_file,
+            last_updated=last_updated,
+            pid=pid,
+        )
 
 
 class StateManager:
@@ -59,19 +91,19 @@ class StateManager:
         self.state_path = state_path
         self.state_path.parent.mkdir(parents=True, exist_ok=True)
 
-    def load(self) -> IndexingState:
+    def load(self) -> WorkerState:
         """Load state from file."""
         if not self.state_path.exists():
-            return IndexingState()
+            return WorkerState()
 
         try:
             with open(self.state_path, "r") as f:
                 data = json.load(f)
-            return IndexingState.from_dict(data)
+            return WorkerState.from_dict(data)
         except (json.JSONDecodeError, KeyError, TypeError):
-            return IndexingState()
+            return WorkerState()
 
-    def save(self, state: IndexingState) -> None:
+    def save(self, state: WorkerState) -> None:
         """Save state to file."""
         state.last_updated = datetime.now(timezone.utc).isoformat()
         with open(self.state_path, "w") as f:
@@ -85,7 +117,7 @@ class StateManager:
         failed_count: Any = UNSET,
         current_file: Any = UNSET,
         pid: Any = UNSET,
-    ) -> IndexingState:
+    ) -> WorkerState:
         """Update specific fields and save."""
         state = self.load()
 

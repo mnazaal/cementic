@@ -1,232 +1,110 @@
-"""Tests for embedder daemon."""
+"""Tests for the pipeline worker."""
 
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-from seman.embedder import ClaimedChunk, EmbedderDaemon
-from seman.state import DaemonState
+from cementic.pipeline_worker import PipelineWorker
+from cementic.state import DaemonState
 
 
-class TestEmbedderDaemon:
-    """Test embedder daemon functionality."""
+class TestPipelineWorker:
+    """Test pipeline worker functionality."""
 
-    @patch("seman.embedder.get_engine")
-    @patch("seman.embedder.get_session_factory")
-    @patch("seman.embedder.EmbedderDaemon._init_embedder")
-    def test_get_pending_batch(self, mock_init_embedder, mock_session_factory, mock_get_engine):
-        """Test retrieving pending chunks."""
-        # Create mock session and chunks
-        mock_session = MagicMock()
-        # Make mock_session work as a context manager
-        mock_session.__enter__ = MagicMock(return_value=mock_session)
-        mock_session.__exit__ = MagicMock(return_value=False)
-        # Make mock_session callable and return itself
-        mock_session.return_value = mock_session
-        mock_session_factory.return_value = mock_session
+    def test_create_embedding_client_llama_cpp(self):
+        with patch(
+            "cementic.pipeline_worker.get_embedding_provider"
+        ) as mock_get_embedding_provider:
+            daemon = PipelineWorker()
+            daemon.config.pipeline.embedding_provider = "llama-cpp"
+            daemon._create_embedding_client()
+            assert mock_get_embedding_provider.call_args[0][0] == "llama-cpp"
 
-        # Setup query mock
-        mock_result = MagicMock()
-        mock_result.fetchall.return_value = [
-            MagicMock(id=1, content="chunk 1", document_id=1),
-            MagicMock(id=2, content="chunk 2", document_id=1),
-        ]
-        mock_session.execute.return_value = mock_result
+    def test_create_embedding_client_ollama(self):
+        with patch(
+            "cementic.pipeline_worker.get_embedding_provider"
+        ) as mock_get_embedding_provider:
+            daemon = PipelineWorker()
+            daemon.config.pipeline.embedding_provider = "ollama"
+            daemon._create_embedding_client()
+            assert mock_get_embedding_provider.call_args[0][0] == "ollama"
 
-        # Create daemon and test
-        daemon = EmbedderDaemon()
-        daemon.Session = mock_session
-        daemon.config.embedder.batch_size = 10
+    @patch("cementic.pipeline_worker.create_tables")
+    @patch("cementic.pipeline_worker.get_session_factory")
+    @patch("cementic.pipeline_worker.get_engine")
+    def test_start_sets_running_state(
+        self, mock_get_engine, mock_session_factory, mock_create_tables
+    ):
+        class StopLoopError(Exception):
+            pass
 
-        # Get pending batch
-        batch = daemon._get_pending_batch()
-
-        # Verify batch was retrieved
-        assert batch is not None
-        assert len(batch) == 2
-        assert batch[0].id == 1
-        assert batch[1].id == 2
-        assert mock_session.execute.called
-
-    @patch("seman.embedder.get_engine")
-    @patch("seman.embedder.get_session_factory")
-    def test_process_batch(self, mock_session_factory, mock_get_engine):
-        """Test processing a batch of chunks."""
-        # Setup mock embedder
-        mock_embedder = MagicMock()
-        mock_embedder.embed_batch.return_value = [[0.1] * 768, [0.2] * 768]
-
-        # Setup mock session
-        mock_session = MagicMock()
-        mock_session.__enter__ = MagicMock(return_value=mock_session)
-        mock_session.__exit__ = MagicMock(return_value=False)
-        mock_session.return_value = mock_session  # Make callable return itself
-        mock_session_factory.return_value = mock_session
-
-        # Create daemon
-        daemon = EmbedderDaemon()
-        daemon.Session = mock_session
-        daemon.embedder = mock_embedder
-
-        # Create mock chunks
-        mock_chunks = [
-            ClaimedChunk(id=1, content="chunk 1", document_id=1),
-            ClaimedChunk(id=2, content="chunk 2", document_id=1),
-        ]
-
-        # Mock _update_document_status to avoid database calls
-        with patch.object(daemon, "_update_document_status") as mock_update_status:
-            daemon._process_batch(mock_chunks)
-
-        # Verify embeddings were generated
-        mock_embedder.embed_batch.assert_called_once_with(
-            ["search_document: chunk 1", "search_document: chunk 2"]
+        daemon = PipelineWorker()
+        daemon.state_manager.load = MagicMock(
+            return_value=SimpleNamespace(daemon_state=DaemonState.STOPPED, pid=None)
         )
+        daemon.state_manager.update = MagicMock()
+        daemon._run_processing_loop = MagicMock(side_effect=StopLoopError)
 
-        # Verify database was updated
-        assert mock_session.commit.called
-        mock_update_status.assert_called_once_with({1})
+        mock_embedding_client = MagicMock()
+        mock_embedding_client.health_check.return_value = True
+        daemon._create_embedding_client = MagicMock(return_value=mock_embedding_client)
+        mock_session_factory.return_value = MagicMock()
 
-    @patch("seman.embedder.get_engine")
-    @patch("seman.embedder.get_session_factory")
-    def test_process_batch_handles_failures(self, mock_session_factory, mock_get_engine):
-        """Test batch processing handles embedding failures."""
-        # Setup mock embedder with one failure
-        mock_embedder = MagicMock()
-        mock_embedder.embed_batch.return_value = [[0.1] * 768, None]  # Second one fails
+        try:
+            daemon.start(collection="research")
+        except StopLoopError:
+            pass
 
-        # Setup mock session
-        mock_session = MagicMock()
-        mock_session.__enter__ = MagicMock(return_value=mock_session)
-        mock_session.__exit__ = MagicMock(return_value=False)
-        mock_session.return_value = mock_session  # Make callable return itself
-        mock_session_factory.return_value = mock_session
-
-        # Create daemon
-        daemon = EmbedderDaemon()
-        daemon.Session = mock_session
-        daemon.embedder = mock_embedder
-
-        # Create mock chunks
-        mock_chunks = [
-            ClaimedChunk(id=1, content="chunk 1", document_id=1),
-            ClaimedChunk(id=2, content="chunk 2", document_id=2),
+        assert daemon.collection == "research"
+        running_updates = [
+            call
+            for call in daemon.state_manager.update.call_args_list
+            if call.kwargs.get("daemon_state") == DaemonState.RUNNING
         ]
+        assert len(running_updates) == 1
 
-        # Mock _update_document_status
-        with patch.object(daemon, "_update_document_status"):
-            daemon._process_batch(mock_chunks)
-
-        # Verify database was updated for both chunks
-        assert mock_session.commit.called
-
-    @patch("seman.embedder.get_engine")
-    @patch("seman.embedder.get_session_factory")
-    def test_update_document_status(self, mock_session_factory, mock_get_engine):
-        """Test document status update when all chunks are done."""
-        # Setup mock session
+    def test_ensure_target_revision_commits(self):
+        daemon = PipelineWorker()
         mock_session = MagicMock()
-        mock_session.__enter__ = MagicMock(return_value=mock_session)
-        mock_session.__exit__ = MagicMock(return_value=False)
-        mock_session.return_value = mock_session  # Make callable return itself
-        mock_session_factory.return_value = mock_session
+        mock_session.__enter__.return_value = mock_session
+        mock_session.__exit__.return_value = False
+        mock_session.get.return_value = None
+        daemon.Session = MagicMock(return_value=mock_session)
 
-        # Setup query mocks for chunk counts
-        mock_session.query.return_value.filter_by.return_value.count.side_effect = [
-            3,
-            3,
-        ]  # total, done
+        with patch(
+            "cementic.pipeline_worker.get_target_revision", return_value=SimpleNamespace(id=7)
+        ) as mock_get_target:
+            revision_id = daemon._ensure_target_revision()
 
-        # Create daemon
-        daemon = EmbedderDaemon()
-        daemon.Session = mock_session
+        assert revision_id == 7
+        mock_get_target.assert_called_once()
+        mock_session.commit.assert_called_once()
 
-        # Create mock chunks
-        daemon._update_document_status({1})
-
-        # Verify document status was updated to completed
-        assert mock_session.commit.called
-
-    @patch("seman.embedder.get_engine")
-    @patch("seman.embedder.get_session_factory")
-    def test_recover_stale_processing_chunks(self, mock_session_factory, mock_get_engine):
-        """Test stale processing chunks are reset to pending."""
+    def test_mark_revision_ready_if_complete(self):
+        daemon = PipelineWorker()
+        revision = SimpleNamespace(status="building")
         mock_session = MagicMock()
-        mock_session.__enter__ = MagicMock(return_value=mock_session)
-        mock_session.__exit__ = MagicMock(return_value=False)
-        mock_session.return_value = mock_session
-        mock_session_factory.return_value = mock_session
+        mock_session.__enter__.return_value = mock_session
+        mock_session.__exit__.return_value = False
+        mock_session.get.return_value = revision
+        daemon.Session = MagicMock(return_value=mock_session)
 
-        daemon = EmbedderDaemon()
-        daemon.Session = mock_session
+        with patch.object(daemon, "_revision_complete", return_value=True):
+            with patch("cementic.pipeline_worker.mark_revision_ready") as mock_mark_ready:
+                daemon._mark_revision_ready_if_complete(3)
 
-        daemon._recover_stale_processing_chunks()
-
-        assert mock_session.query.called
-        assert mock_session.commit.called
-
-    def test_init_embedder_llama_cpp(self):
-        """Test initialization of llama.cpp embedder."""
-        with patch("seman.embedder.get_embedder") as mock_get_embedder:
-            mock_embedder = MagicMock()
-            mock_embedder.health_check.return_value = True
-            mock_get_embedder.return_value = mock_embedder
-
-            with patch("seman.embedder.get_engine"):
-                with patch("seman.embedder.get_session_factory"):
-                    daemon = EmbedderDaemon()
-                    daemon.config.indexing.embedder = "llama-cpp"
-
-                    daemon._init_embedder()
-
-                    mock_get_embedder.assert_called_once()
-                    assert mock_get_embedder.call_args[0][0] == "llama-cpp"
-
-    def test_init_embedder_ollama(self):
-        """Test initialization of Ollama embedder."""
-        with patch("seman.embedder.get_embedder") as mock_get_embedder:
-            mock_embedder = MagicMock()
-            mock_embedder.health_check.return_value = True
-            mock_get_embedder.return_value = mock_embedder
-
-            with patch("seman.embedder.get_engine"):
-                with patch("seman.embedder.get_session_factory"):
-                    daemon = EmbedderDaemon()
-                    daemon.config.indexing.embedder = "ollama"
-
-                    daemon._init_embedder()
-
-                    mock_get_embedder.assert_called_once()
-                    assert mock_get_embedder.call_args[0][0] == "ollama"
-
-    def test_init_embedder_health_check_failure(self):
-        """Test that embedder initializes but fails health check."""
-        with patch("seman.embedder.get_embedder") as mock_get_embedder:
-            mock_embedder = MagicMock()
-            mock_embedder.health_check.return_value = False
-            mock_get_embedder.return_value = mock_embedder
-
-            with patch("seman.embedder.get_engine"):
-                with patch("seman.embedder.get_session_factory"):
-                    daemon = EmbedderDaemon()
-                    daemon.config.indexing.embedder = "ollama"
-
-                    # _init_embedder returns the embedder; health check happens in start()
-                    result = daemon._init_embedder()
-                    assert result is mock_embedder
-                    assert result.health_check() is False
+        mock_mark_ready.assert_called_once_with(mock_session, revision)
+        mock_session.commit.assert_called_once()
 
 
-class TestEmbedderStateManagement:
-    """Test embedder state transitions."""
+class TestPipelineWorkerStateManagement:
+    """Test pipeline worker state transitions."""
 
-    @patch("seman.embedder.get_engine")
-    @patch("seman.embedder.get_session_factory")
-    def test_stop_sets_shutdown(self, mock_session_factory, mock_get_engine):
-        """Test stop sets shutdown event."""
-        daemon = EmbedderDaemon()
+    def test_stop_sets_shutdown(self):
+        daemon = PipelineWorker()
         daemon._shutdown_event = MagicMock()
 
         with patch.object(daemon.state_manager, "update") as mock_update:
             daemon.stop()
 
-            daemon._shutdown_event.set.assert_called_once()
-            mock_update.assert_called_with(daemon_state=DaemonState.STOPPED, pid=None)
+        daemon._shutdown_event.set.assert_called_once()
+        mock_update.assert_called_with(daemon_state=DaemonState.STOPPED, pid=None)

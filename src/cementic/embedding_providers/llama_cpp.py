@@ -1,13 +1,13 @@
-"""llama.cpp embedder implementation using llama-cpp-python."""
+"""llama.cpp embedding provider using llama-cpp-python."""
 
 from pathlib import Path
-from typing import List, Optional
+from typing import cast
 
-from seman.embedders.base import Embedder
+from cementic.embedding_providers.base import EmbeddingProvider
 
 
-class LlamaCppEmbedder(Embedder):
-    """Embedder using llama.cpp via llama-cpp-python."""
+class LlamaCppEmbeddingProvider(EmbeddingProvider):
+    """Embedding provider using llama.cpp via llama-cpp-python."""
 
     def __init__(
         self,
@@ -17,7 +17,7 @@ class LlamaCppEmbedder(Embedder):
         embedding_dim: int = 768,
         verbose: bool = False,
     ) -> None:
-        """Initialize llama.cpp embedder.
+        """Initialize the llama.cpp embedding provider.
 
         Args:
             model_path: Path to the .gguf model file
@@ -46,14 +46,15 @@ class LlamaCppEmbedder(Embedder):
             verbose=verbose,
         )
 
-    def embed(self, text: str) -> List[float]:
+    def embed(self, text: str) -> list[float]:
         """Generate embedding for a single text."""
         result = self._llm.create_embedding(text)
-        return result["data"][0]["embedding"]
+        embedding = cast(list[float], result["data"][0]["embedding"])
+        return embedding
 
-    def embed_batch(self, texts: List[str]) -> List[Optional[List[float]]]:
+    def embed_batch(self, texts: list[str]) -> list[list[float] | None]:
         """Generate embeddings for multiple texts."""
-        results = []
+        results: list[list[float] | None] = []
 
         for text in texts:
             try:
@@ -66,12 +67,7 @@ class LlamaCppEmbedder(Embedder):
 
     def health_check(self) -> bool:
         """Check if model is loaded and working."""
-        try:
-            # Try to create a simple embedding
-            _ = self.embed("test")
-            return True
-        except Exception:
-            return False
+        return hasattr(self, "_llm") and self._llm is not None
 
     @property
     def embedding_dim(self) -> int:

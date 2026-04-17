@@ -54,19 +54,18 @@ def sample_config_dict(temp_dir: Path) -> dict:
             "model": "nomic-embed-text",
             "embedding_dim": 768,
         },
-        "indexing": {
+        "pipeline": {
             "chunk_size": 512,
             "chunk_overlap": 128,
-            "embedder": "llama-cpp",
-            "state_path": str(temp_dir / "state.json"),
+            "embedding_provider": "llama-cpp",
         },
-        "converter": {
-            "pid_file": str(temp_dir / "converter.pid"),
-            "log_file": str(temp_dir / "converter.log"),
+        "source_watcher": {
+            "pid_file": str(temp_dir / "source_watcher.pid"),
+            "log_file": str(temp_dir / "source_watcher.log"),
         },
-        "embedder": {
-            "pid_file": str(temp_dir / "embedder.pid"),
-            "log_file": str(temp_dir / "embedder.log"),
+        "pipeline_worker": {
+            "pid_file": str(temp_dir / "pipeline_worker.pid"),
+            "log_file": str(temp_dir / "pipeline_worker.log"),
             "max_workers": 2,
             "batch_size": 16,
             "poll_interval": 0.1,

@@ -1,14 +1,13 @@
-"""Abstract base class for embedders."""
+"""Abstract base class for embedding providers."""
 
 from abc import ABC, abstractmethod
-from typing import List, Optional
 
 
-class Embedder(ABC):
+class EmbeddingProvider(ABC):
     """Abstract base class for embedding providers."""
 
     @abstractmethod
-    def embed(self, text: str) -> List[float]:
+    def embed(self, text: str) -> list[float]:
         """Generate embedding for a single text.
 
         Args:
@@ -20,7 +19,7 @@ class Embedder(ABC):
         pass
 
     @abstractmethod
-    def embed_batch(self, texts: List[str]) -> List[Optional[List[float]]]:
+    def embed_batch(self, texts: list[str]) -> list[list[float] | None]:
         """Generate embeddings for multiple texts.
 
         Args:
@@ -33,7 +32,7 @@ class Embedder(ABC):
 
     @abstractmethod
     def health_check(self) -> bool:
-        """Check if embedder is available and working.
+        """Check if the embedding provider is available and working.
 
         Returns:
             True if healthy, False otherwise

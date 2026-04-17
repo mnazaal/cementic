@@ -2,15 +2,15 @@
 
 import json
 
-from seman.state import DaemonState, IndexingState, StateManager
+from cementic.state import DaemonState, StateManager, WorkerState
 
 
-class TestIndexingState:
-    """Test IndexingState dataclass."""
+class TestWorkerState:
+    """Test WorkerState dataclass."""
 
     def test_default_state(self):
         """Test default state values."""
-        state = IndexingState()
+        state = WorkerState()
         assert state.daemon_state == DaemonState.STOPPED
         assert state.watched_directories == []
         assert state.processed_count == 0
@@ -20,7 +20,7 @@ class TestIndexingState:
 
     def test_to_dict(self):
         """Test conversion to dictionary."""
-        state = IndexingState(
+        state = WorkerState(
             daemon_state=DaemonState.RUNNING,
             watched_directories=["/path/1", "/path/2"],
             processed_count=10,
@@ -44,7 +44,7 @@ class TestIndexingState:
             "last_updated": "2024-01-01T00:00:00",
             "pid": 5678,
         }
-        state = IndexingState.from_dict(data)
+        state = WorkerState.from_dict(data)
 
         assert state.daemon_state == DaemonState.PAUSED
         assert state.watched_directories == ["/test"]
@@ -64,7 +64,7 @@ class TestIndexingState:
             "pid": None,
         }
 
-        state = IndexingState.from_dict(data)
+        state = WorkerState.from_dict(data)
         assert state.daemon_state == DaemonState.STOPPED
 
 
@@ -77,7 +77,7 @@ class TestStateManager:
         manager = StateManager(state_path)
 
         state = manager.load()
-        assert isinstance(state, IndexingState)
+        assert isinstance(state, WorkerState)
         assert state.daemon_state == DaemonState.STOPPED
 
     def test_save_and_load(self, temp_dir):
@@ -85,7 +85,7 @@ class TestStateManager:
         state_path = temp_dir / "state.json"
         manager = StateManager(state_path)
 
-        state = IndexingState(daemon_state=DaemonState.RUNNING, processed_count=42, pid=9999)
+        state = WorkerState(daemon_state=DaemonState.RUNNING, processed_count=42, pid=9999)
         manager.save(state)
 
         # Load it back
@@ -100,7 +100,7 @@ class TestStateManager:
         manager = StateManager(state_path)
 
         # Initial save
-        initial = IndexingState(daemon_state=DaemonState.STOPPED)
+        initial = WorkerState(daemon_state=DaemonState.STOPPED)
         manager.save(initial)
 
         # Update one field
@@ -147,7 +147,7 @@ class TestStateManager:
         manager = StateManager(state_path)
 
         # Create some state
-        state = IndexingState(daemon_state=DaemonState.RUNNING, processed_count=50)
+        state = WorkerState(daemon_state=DaemonState.RUNNING, processed_count=50)
         manager.save(state)
         assert state_path.exists()
 
@@ -184,7 +184,7 @@ class TestStateManager:
         state = manager.load()
 
         # Should return default state
-        assert isinstance(state, IndexingState)
+        assert isinstance(state, WorkerState)
         assert state.daemon_state == DaemonState.STOPPED
 
     def test_load_legacy_json_string_daemon_state(self, temp_dir):

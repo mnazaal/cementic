@@ -1,7 +1,7 @@
 """Tests for text chunking module."""
 
 
-from seman.chunk import TextChunk, chunk_text
+from cementic.chunk import TextChunk, chunk_text
 
 
 class TestChunkText:

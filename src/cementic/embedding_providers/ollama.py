@@ -1,14 +1,14 @@
-"""Ollama embedder implementation."""
+"""Ollama embedding provider implementation."""
 
-from typing import List, Optional
+# mypy: disable-error-code=import-untyped
 
 import requests
 
-from seman.embedders.base import Embedder
+from cementic.embedding_providers.base import EmbeddingProvider
 
 
-class OllamaEmbedder(Embedder):
-    """Embedder using Ollama API."""
+class OllamaEmbeddingProvider(EmbeddingProvider):
+    """Embedding provider using the Ollama API."""
 
     def __init__(
         self,
@@ -16,7 +16,7 @@ class OllamaEmbedder(Embedder):
         model: str = "nomic-embed-text",
         embedding_dim: int = 768,
     ) -> None:
-        """Initialize Ollama embedder.
+        """Initialize the Ollama embedding provider.
 
         Args:
             host: Ollama server URL
@@ -27,7 +27,7 @@ class OllamaEmbedder(Embedder):
         self.model = model
         self._embedding_dim = embedding_dim
 
-    def embed(self, text: str) -> List[float]:
+    def embed(self, text: str) -> list[float]:
         """Generate embedding for a single text."""
         response = requests.post(
             f"{self.host}/api/embeddings",
@@ -35,11 +35,13 @@ class OllamaEmbedder(Embedder):
             timeout=60,
         )
         response.raise_for_status()
-        return response.json()["embedding"]
+        payload = response.json()
+        embedding = payload["embedding"]
+        return [float(value) for value in embedding]
 
-    def embed_batch(self, texts: List[str]) -> List[Optional[List[float]]]:
+    def embed_batch(self, texts: list[str]) -> list[list[float] | None]:
         """Generate embeddings for multiple texts."""
-        results = []
+        results: list[list[float] | None] = []
 
         for text in texts:
             try:
@@ -57,7 +59,7 @@ class OllamaEmbedder(Embedder):
                 f"{self.host}/api/tags",
                 timeout=5,
             )
-            return response.status_code == 200
+            return bool(response.status_code == 200)
         except requests.RequestException:
             return False
 

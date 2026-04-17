@@ -1,8 +1,11 @@
-"""PDF to Markdown conversion using pymupdf4llm."""
+"""PDF extraction helpers using pymupdf4llm."""
+
+from __future__ import annotations
 
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Any
 
+# mypy: disable-error-code=import-untyped
 import pymupdf
 
 try:
@@ -13,7 +16,7 @@ except ImportError:
 import pymupdf4llm
 
 
-def _get_rapidocr_api():
+def _get_rapidocr_api() -> Any | None:
     """Lazily import RapidOCR API adapter."""
     try:
         from pymupdf4llm.ocr import rapidocr_api
@@ -23,11 +26,13 @@ def _get_rapidocr_api():
         return None
 
 
-def convert_pdf_to_markdown(
+def extract_pdf_markdown(
     pdf_path: str,
-    pages: Optional[Tuple[int, int]] = None,
+    pages: tuple[int, int] | None = None,
+    backend: str = "pymupdf4llm",
+    use_ocr: bool = True,
 ) -> str:
-    """Convert PDF to Markdown using pymupdf4llm.
+    """Extract PDF content as Markdown using pymupdf4llm.
 
     Args:
         pdf_path: Path to PDF file
@@ -36,6 +41,9 @@ def convert_pdf_to_markdown(
     Returns:
         Markdown content as string
     """
+    if backend != "pymupdf4llm":
+        raise ValueError(f"Unsupported extraction backend: {backend}")
+
     path = Path(pdf_path)
     if not path.exists():
         raise FileNotFoundError(f"PDF not found: {pdf_path}")
@@ -46,15 +54,12 @@ def convert_pdf_to_markdown(
             "Install it with: uv pip install pymupdf-layout"
         )
 
-    ocr_kwargs = {}
-    rapidocr_api = _get_rapidocr_api()
-    if rapidocr_api is not None:
-        ocr_kwargs = {
-            "use_ocr": True,
-            "ocr_function": rapidocr_api.exec_ocr,
-        }
+    ocr_kwargs: dict[str, Any] = {"use_ocr": use_ocr}
+    if use_ocr:
+        rapidocr_api = _get_rapidocr_api()
+        if rapidocr_api is not None:
+            ocr_kwargs["ocr_function"] = rapidocr_api.exec_ocr
 
-    # Convert PDF to markdown
     md_text = pymupdf4llm.to_markdown(
         str(path),
         pages=pages,

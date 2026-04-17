@@ -5,7 +5,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from seman.convert import convert_pdf_to_markdown
+from cementic.extract import extract_pdf_markdown
 
 
 def test_convert_uses_layout_and_disables_header_footer(temp_dir: Path) -> None:
@@ -14,10 +14,12 @@ def test_convert_uses_layout_and_disables_header_footer(temp_dir: Path) -> None:
     pdf_path.write_bytes(b"%PDF-1.4\n")
 
     rapidocr = MagicMock()
-    with patch("seman.convert.pymupdf._get_layout", object()):
-        with patch("seman.convert._get_rapidocr_api", return_value=rapidocr):
-            with patch("seman.convert.pymupdf4llm.to_markdown", return_value="markdown") as mock_md:
-                result = convert_pdf_to_markdown(str(pdf_path))
+    with patch("cementic.extract.pymupdf._get_layout", object()):
+        with patch("cementic.extract._get_rapidocr_api", return_value=rapidocr):
+            with patch(
+                "cementic.extract.pymupdf4llm.to_markdown", return_value="markdown"
+            ) as mock_md:
+                result = extract_pdf_markdown(str(pdf_path))
 
     assert result == "markdown"
     mock_md.assert_called_once_with(
@@ -35,10 +37,12 @@ def test_convert_without_rapidocr_uses_default_ocr(temp_dir: Path) -> None:
     pdf_path = temp_dir / "sample.pdf"
     pdf_path.write_bytes(b"%PDF-1.4\n")
 
-    with patch("seman.convert.pymupdf._get_layout", object()):
-        with patch("seman.convert._get_rapidocr_api", return_value=None):
-            with patch("seman.convert.pymupdf4llm.to_markdown", return_value="markdown") as mock_md:
-                result = convert_pdf_to_markdown(str(pdf_path))
+    with patch("cementic.extract.pymupdf._get_layout", object()):
+        with patch("cementic.extract._get_rapidocr_api", return_value=None):
+            with patch(
+                "cementic.extract.pymupdf4llm.to_markdown", return_value="markdown"
+            ) as mock_md:
+                result = extract_pdf_markdown(str(pdf_path))
 
     assert result == "markdown"
     mock_md.assert_called_once_with(
@@ -46,6 +50,7 @@ def test_convert_without_rapidocr_uses_default_ocr(temp_dir: Path) -> None:
         pages=None,
         header=False,
         footer=False,
+        use_ocr=True,
     )
 
 
@@ -54,6 +59,6 @@ def test_convert_requires_pymupdf_layout(temp_dir: Path) -> None:
     pdf_path = temp_dir / "sample.pdf"
     pdf_path.write_bytes(b"%PDF-1.4\n")
 
-    with patch("seman.convert.pymupdf._get_layout", None):
+    with patch("cementic.extract.pymupdf._get_layout", None):
         with pytest.raises(RuntimeError, match="pymupdf_layout"):
-            convert_pdf_to_markdown(str(pdf_path))
+            extract_pdf_markdown(str(pdf_path))

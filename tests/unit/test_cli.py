@@ -1,12 +1,14 @@
 """Tests for CLI commands."""
 
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+from sqlalchemy.exc import OperationalError
 from typer.testing import CliRunner
 
-from seman import cli as seman_cli
-from seman.cli import app
+from cementic import cli as cementic_cli
+from cementic.cli import app
 
 runner = CliRunner()
 
@@ -15,58 +17,133 @@ class TestRootHelp:
     """Test top-level help behavior."""
 
     def test_root_help_shown_with_no_args(self, monkeypatch, capsys):
-        """Running `seman` with no args should print root help."""
-        monkeypatch.setattr(seman_cli.sys, "argv", ["seman"])
-
-        seman_cli.main()
+        monkeypatch.setattr(cementic_cli.sys, "argv", ["cementic"])
+        cementic_cli.main()
         output = capsys.readouterr().out
+        assert "Usage: cementic" in output
+        assert "collection" in output
+        assert "Index and semantically search PDF collections" in output
 
-        assert "Usage: seman" in output
-        assert "Commands:" in output
-
-    def test_root_help_shown_with_short_help_flag(self, monkeypatch, capsys):
-        """Running `seman -h` should print root help."""
-        monkeypatch.setattr(seman_cli.sys, "argv", ["seman", "-h"])
-
-        seman_cli.main()
+    def test_collection_namespace_shows_help_with_no_subcommand(self, monkeypatch, capsys):
+        monkeypatch.setattr(cementic_cli.sys, "argv", ["cementic", "collection"])
+        cementic_cli.main()
         output = capsys.readouterr().out
+        assert "Inspect and manage collections" in output
+        assert "list" in output
+        assert "promote" in output
+        assert "revisions" in output
+        assert "remove" in output
 
-        assert "Usage: seman" in output
-        assert "Commands:" in output
+    def test_start_shows_help_with_no_args(self, monkeypatch, capsys):
+        monkeypatch.setattr(cementic_cli.sys, "argv", ["cementic", "start"])
+        cementic_cli.main()
+        output = capsys.readouterr().out
+        assert "Start background indexing" in output
+        assert "Usage: cementic start" in output
 
+    def test_search_shows_help_with_no_args(self, monkeypatch, capsys):
+        monkeypatch.setattr(cementic_cli.sys, "argv", ["cementic", "search"])
+        cementic_cli.main()
+        output = capsys.readouterr().out
+        assert "Run semantic search over indexed chunks" in output
+        assert "Usage: cementic search" in output
 
-class TestLegacyCommands:
-    """Test removed legacy command surface."""
+    def test_status_shows_help_with_no_args(self, monkeypatch, capsys):
+        monkeypatch.setattr(cementic_cli.sys, "argv", ["cementic", "status"])
+        with patch("cementic.cli.app") as mock_app:
+            cementic_cli.main()
+        output = capsys.readouterr().out
+        assert output == ""
+        mock_app.assert_called_once()
 
-    def test_convert_subcommands_removed(self):
-        """Legacy convert command should not be available."""
-        result = runner.invoke(app, ["convert", "start", "/path/to/pdfs"])
-        assert result.exit_code != 0
+    @patch("cementic.cli._llama_daemon_runtime_status", return_value="stopped")
+    @patch("cementic.cli.list_collections", return_value=[])
+    @patch("cementic.cli.get_session_factory")
+    @patch("cementic.cli.get_engine")
+    @patch("cementic.cli.load_worker_statuses")
+    @patch("cementic.cli._load_supervisor_state")
+    @patch("cementic.cli.build_supervisor_status")
+    def test_bare_status_runs_status_command(
+        self,
+        mock_build_supervisor_status,
+        mock_load_supervisor_state,
+        mock_load_worker_statuses,
+        mock_get_engine,
+        mock_get_session_factory,
+        mock_list_collections,
+        mock_daemon_status,
+    ):
+        mock_load_supervisor_state.return_value = {
+            "collection": "research",
+            "directories": ["/docs"],
+            "processes": [],
+        }
+        mock_load_worker_statuses.return_value = (
+            SimpleNamespace(
+                state="running",
+                pid="111",
+                process="running",
+                current_file="None",
+                watched_directories=["/docs"],
+                processed_count=3,
+                failed_count=1,
+            ),
+            SimpleNamespace(
+                state="running",
+                pid="222",
+                process="running",
+                current_file="None",
+                watched_directories=[],
+                processed_count=0,
+                failed_count=0,
+            ),
+        )
+        mock_build_supervisor_status.return_value = SimpleNamespace(
+            state="2/2 running",
+            collection="research",
+            directories=["/docs"],
+        )
+        mock_session = MagicMock()
+        mock_session.__enter__.return_value = mock_session
+        mock_session.__exit__.return_value = False
+        mock_get_session_factory.return_value = lambda: mock_session
 
-    def test_index_subcommands_removed(self):
-        """Legacy index command should not be available."""
-        result = runner.invoke(app, ["index", "start"])
-        assert result.exit_code != 0
+        result = runner.invoke(app, ["status"])
 
-    def test_reset_command_removed(self):
-        """Reset command is removed from simplified CLI."""
-        result = runner.invoke(app, ["reset", "--force"])
-        assert result.exit_code != 0
+        assert result.exit_code == 0
+        assert "session collection: research" in result.output
+        assert "collections:" in result.output
+        assert "- none" in result.output
+        mock_list_collections.assert_called_once_with(mock_session)
+        mock_daemon_status.assert_called_once_with()
+
+    def test_collection_promote_shows_help_with_no_args(self, monkeypatch, capsys):
+        monkeypatch.setattr(cementic_cli.sys, "argv", ["cementic", "collection", "promote"])
+        cementic_cli.main()
+        output = capsys.readouterr().out
+        assert "Promote a ready revision" in output
+        assert "Usage: cementic collection promote <COLLECTION>" in output
+
+    def test_collection_revisions_shows_help_with_no_args(self, monkeypatch, capsys):
+        monkeypatch.setattr(cementic_cli.sys, "argv", ["cementic", "collection", "revisions"])
+        cementic_cli.main()
+        output = capsys.readouterr().out
+        assert "Show revision history" in output
+        assert "Usage: cementic collection revisions <COLLECTION>" in output
+
+    def test_collection_remove_shows_help_with_no_args(self, monkeypatch, capsys):
+        monkeypatch.setattr(cementic_cli.sys, "argv", ["cementic", "collection", "remove"])
+        cementic_cli.main()
+        output = capsys.readouterr().out
+        assert "Remove one collection" in output
+        assert "Usage: cementic collection remove <COLLECTION>" in output
 
 
 class TestSearchCommand:
     """Test search command."""
 
-    def test_search_subcommand_help_disabled(self):
-        """Subcommand-level --help is intentionally disabled."""
-        result = runner.invoke(app, ["search", "--help"])
-
-        assert result.exit_code != 0
-        assert "No such option" in result.output
-
-    @patch("seman.cli.Searcher")
+    @patch("cementic.cli.Searcher")
     def test_search_basic(self, mock_searcher_class):
-        """Test basic search."""
         mock_searcher = MagicMock()
         mock_searcher.search.return_value = [
             {
@@ -82,274 +159,396 @@ class TestSearchCommand:
         result = runner.invoke(app, ["search", "test query"])
 
         assert result.exit_code == 0
+        assert "query: test query" in result.output
+        assert "results:" in result.output
+        assert "rank=1" in result.output
+        assert "source=/test.pdf" in result.output
         mock_searcher.search.assert_called_once_with("test query", top_k=10, collections=None)
-        assert "/test.pdf" in result.output
 
-    @patch("seman.cli.Searcher")
-    def test_search_no_results(self, mock_searcher_class):
-        """Test search with no results."""
+    @patch("cementic.cli.Searcher")
+    def test_search_shows_database_hint_when_database_unavailable(self, mock_searcher_class):
         mock_searcher = MagicMock()
-        mock_searcher.search.return_value = []
+        mock_searcher.search.side_effect = OperationalError("statement", {}, Exception("down"))
         mock_searcher_class.return_value = mock_searcher
 
-        result = runner.invoke(app, ["search", "nonexistent"])
-
-        assert result.exit_code == 0
-        assert "No results" in result.output
-
-    @patch("seman.cli.Searcher")
-    def test_search_with_top_k(self, mock_searcher_class):
-        """Test search with custom top_k."""
-        mock_searcher = MagicMock()
-        mock_searcher.search.return_value = []
-        mock_searcher_class.return_value = mock_searcher
-
-        result = runner.invoke(app, ["search", "query", "-n", "20"])
-
-        assert result.exit_code == 0
-        mock_searcher.search.assert_called_once_with("query", top_k=20, collections=None)
-
-    def test_search_rejects_removed_top_k_long_flag(self):
-        """Search no longer supports --top-k long option."""
-        result = runner.invoke(app, ["search", "query", "--top-k", "20"])
-
-        assert result.exit_code != 0
-        assert "No such option" in result.output
-
-    @patch("seman.cli.Searcher")
-    def test_search_with_collection_filter(self, mock_searcher_class):
-        """Test search with collection filters."""
-        mock_searcher = MagicMock()
-        mock_searcher.search.return_value = []
-        mock_searcher_class.return_value = mock_searcher
-
-        result = runner.invoke(
-            app,
-            ["search", "query", "--collection", "work", "--collection", "personal"],
-        )
-
-        assert result.exit_code == 0
-        mock_searcher.search.assert_called_once_with(
-            "query",
-            top_k=10,
-            collections=["work", "personal"],
-        )
-
-    @patch("seman.cli.Searcher")
-    def test_search_with_space_separated_collection_filter(self, mock_searcher_class):
-        """Test search with one collection flag and multiple values."""
-        mock_searcher = MagicMock()
-        mock_searcher.search.return_value = []
-        mock_searcher_class.return_value = mock_searcher
-
-        result = runner.invoke(
-            app,
-            ["search", "query", "--collection", "work", "personal"],
-        )
-
-        assert result.exit_code == 0
-        mock_searcher.search.assert_called_once_with(
-            "query",
-            top_k=10,
-            collections=["work", "personal"],
-        )
-
-    @patch("seman.cli.Searcher")
-    def test_search_with_short_space_separated_collection_filter(self, mock_searcher_class):
-        """Test search with one short collection flag and multiple values."""
-        mock_searcher = MagicMock()
-        mock_searcher.search.return_value = []
-        mock_searcher_class.return_value = mock_searcher
-
-        result = runner.invoke(
-            app,
-            ["search", "query", "-c", "work", "personal"],
-        )
-
-        assert result.exit_code == 0
-        mock_searcher.search.assert_called_once_with(
-            "query",
-            top_k=10,
-            collections=["work", "personal"],
-        )
-
-    def test_search_with_trailing_collection_without_flag_errors(self):
-        """Search should error when trailing collections omit --collection."""
-        result = runner.invoke(app, ["search", "query", "personal"])
-
-        assert result.exit_code != 0
-        assert "Use --collection/-c" in result.output
-
-    @patch("seman.cli.Searcher")
-    def test_search_error(self, mock_searcher_class):
-        """Test search handles errors."""
-        mock_searcher = MagicMock()
-        mock_searcher.search.side_effect = Exception("Search failed")
-        mock_searcher_class.return_value = mock_searcher
-
-        result = runner.invoke(app, ["search", "query"])
+        result = runner.invoke(app, ["search", "test query"])
 
         assert result.exit_code == 1
-        assert "failed" in result.output.lower()
+        assert "search failed: database not reachable" in result.output
+        assert "run `cementic start` to start infrastructure" in result.output
 
 
 class TestBackgroundCommands:
     """Test top-level background process commands."""
 
-    def test_status_subcommand_help_disabled(self):
-        """Subcommand-level --help is intentionally disabled."""
-        result = runner.invoke(app, ["status", "--help"])
+    @patch("cementic.cli._llama_daemon_runtime_status", return_value="running, pid=333")
+    @patch("cementic.cli.list_collections")
+    @patch("cementic.cli.load_pipeline_status")
+    @patch("cementic.cli.get_session_factory")
+    @patch("cementic.cli.get_engine")
+    @patch("cementic.cli.load_worker_statuses")
+    @patch("cementic.cli._load_supervisor_state")
+    @patch("cementic.cli.build_supervisor_status")
+    def test_status_command_shows_global_overview(
+        self,
+        mock_build_supervisor_status,
+        mock_load_supervisor_state,
+        mock_load_worker_statuses,
+        mock_get_engine,
+        mock_get_session_factory,
+        mock_load_pipeline_status,
+        mock_list_collections,
+        mock_daemon_status,
+    ):
+        mock_load_supervisor_state.return_value = {
+            "collection": "research",
+            "directories": ["/docs"],
+            "processes": [],
+        }
+        mock_load_worker_statuses.return_value = (
+            SimpleNamespace(
+                state="running",
+                pid="111",
+                process="running",
+                current_file="None",
+                watched_directories=["/docs"],
+                processed_count=3,
+                failed_count=1,
+            ),
+            SimpleNamespace(
+                state="running",
+                pid="222",
+                process="running",
+                current_file="/docs/a.pdf",
+                watched_directories=[],
+                processed_count=0,
+                failed_count=0,
+            ),
+        )
+        mock_build_supervisor_status.return_value = SimpleNamespace(
+            state="2/2 running",
+            collection="research",
+            directories=["/docs"],
+        )
+        mock_session = MagicMock()
+        mock_session.__enter__.return_value = mock_session
+        mock_session.__exit__.return_value = False
+        mock_get_session_factory.return_value = lambda: mock_session
+        mock_list_collections.return_value = [
+            SimpleNamespace(
+                name="research",
+                documents=10,
+                active_revision_label="rev-1",
+                building_revision_label="rev-2",
+            )
+        ]
+        mock_load_pipeline_status.side_effect = [
+            SimpleNamespace(
+                documents=10,
+                extracted_done=8,
+                chunked_done=7,
+                pending_embeddings=5,
+                processing_embeddings=1,
+                done_embeddings=20,
+                failed_embeddings=2,
+                active_revision_label="rev-1",
+                building_revision_label="rev-2",
+            )
+        ]
 
-        assert result.exit_code != 0
-        assert "No such option" in result.output
+        result = runner.invoke(app, ["status"])
 
-    @patch("seman.cli._spawn_detached")
+        assert result.exit_code == 0
+        assert "session collection: research" in result.output
+        assert "workers: 2/2 running" in result.output
+        assert "source watcher:" in result.output
+        assert "pipeline worker:" in result.output
+        assert "search daemon: running, pid=333" in result.output
+        assert "collections:" in result.output
+        assert "name=research" in result.output
+        assert "extracted=8" in result.output
+        assert "chunked=7" in result.output
+        assert "embedded=20" in result.output
+        assert "active=rev-1" in result.output
+        mock_list_collections.assert_called_once_with(mock_session)
+        mock_daemon_status.assert_called_once_with()
+        mock_load_pipeline_status.assert_called_once_with(cementic_cli.config, "research")
+
+    @patch("cementic.cli._llama_daemon_runtime_status", return_value="stopped")
+    @patch("cementic.cli.load_pipeline_status")
+    @patch("cementic.cli.load_worker_statuses")
+    @patch("cementic.cli._load_supervisor_state")
+    @patch("cementic.cli.build_supervisor_status")
+    def test_status_command_shows_one_collection_when_requested(
+        self,
+        mock_build_supervisor_status,
+        mock_load_supervisor_state,
+        mock_load_worker_statuses,
+        mock_load_pipeline_status,
+        mock_daemon_status,
+    ):
+        mock_load_supervisor_state.return_value = {
+            "collection": "research",
+            "directories": ["/docs"],
+            "processes": [],
+        }
+        mock_load_worker_statuses.return_value = (
+            SimpleNamespace(
+                state="running",
+                pid="111",
+                process="running",
+                current_file="None",
+                watched_directories=["/docs"],
+                processed_count=3,
+                failed_count=1,
+            ),
+            SimpleNamespace(
+                state="running",
+                pid="222",
+                process="running",
+                current_file="/docs/a.pdf",
+                watched_directories=[],
+                processed_count=0,
+                failed_count=0,
+            ),
+        )
+        mock_build_supervisor_status.return_value = SimpleNamespace(
+            state="2/2 running",
+            collection="research",
+            directories=["/docs"],
+        )
+        mock_load_pipeline_status.return_value = SimpleNamespace(
+            documents=10,
+            extracted_done=8,
+            chunked_done=7,
+            pending_embeddings=5,
+            processing_embeddings=1,
+            done_embeddings=20,
+            failed_embeddings=2,
+            active_revision_label="rev-1",
+            building_revision_label="rev-2",
+        )
+
+        result = runner.invoke(app, ["status", "--collection", "research"])
+
+        assert result.exit_code == 0
+        assert "session collection: research" in result.output
+        assert "collection: research" in result.output
+        assert "pipeline:" in result.output
+        assert "documents=10" in result.output
+        assert "active=rev-1" in result.output
+        mock_load_pipeline_status.assert_called_once_with(cementic_cli.config, "research")
+        mock_daemon_status.assert_called_once_with()
+
+    @patch("cementic.cli._llama_daemon_runtime_status", return_value="stopped")
+    @patch("cementic.cli.load_pipeline_status")
+    @patch("cementic.cli.load_worker_statuses")
+    @patch("cementic.cli._load_supervisor_state")
+    @patch("cementic.cli.build_supervisor_status")
+    def test_status_command_accepts_collection_short_flag(
+        self,
+        mock_build_supervisor_status,
+        mock_load_supervisor_state,
+        mock_load_worker_statuses,
+        mock_load_pipeline_status,
+        mock_daemon_status,
+    ):
+        mock_load_supervisor_state.return_value = {
+            "collection": "research",
+            "directories": ["/docs"],
+            "processes": [],
+        }
+        mock_load_worker_statuses.return_value = (
+            SimpleNamespace(
+                state="running",
+                pid="111",
+                process="running",
+                current_file="None",
+                watched_directories=["/docs"],
+                processed_count=3,
+                failed_count=1,
+            ),
+            SimpleNamespace(
+                state="running",
+                pid="222",
+                process="running",
+                current_file="None",
+                watched_directories=[],
+                processed_count=0,
+                failed_count=0,
+            ),
+        )
+        mock_build_supervisor_status.return_value = SimpleNamespace(
+            state="2/2 running",
+            collection="research",
+            directories=["/docs"],
+        )
+        mock_load_pipeline_status.return_value = SimpleNamespace(
+            documents=1,
+            extracted_done=1,
+            chunked_done=1,
+            pending_embeddings=0,
+            processing_embeddings=0,
+            done_embeddings=1,
+            failed_embeddings=0,
+            active_revision_label="rev-1",
+            building_revision_label="None",
+        )
+
+        result = runner.invoke(app, ["status", "-c", "research"])
+
+        assert result.exit_code == 0
+        assert "collection: research" in result.output
+        mock_load_pipeline_status.assert_called_once_with(cementic_cli.config, "research")
+
+    @patch("cementic.cli._spawn_detached")
     def test_start_background(self, mock_spawn, temp_dir: Path):
-        """Start command spawns converter and indexer."""
         mock_spawn.side_effect = [1111, 2222]
 
-        with patch("seman.cli.supervisor_state_path", temp_dir / "supervisor.json"):
-            result = runner.invoke(app, ["start", str(temp_dir), "--collection", "test"])
+        with patch("cementic.cli.supervisor_state_path", temp_dir / "supervisor.json"):
+            with patch("cementic.cli.Bootstrapper") as mock_bootstrapper:
+                mock_bootstrapper.return_value.ensure_for_convert.return_value = None
+                mock_bootstrapper.return_value.ensure_for_index.return_value = None
+                result = runner.invoke(app, ["start", str(temp_dir), "--collection", "test"])
 
         assert result.exit_code == 0
         assert mock_spawn.call_count == 2
-        assert "Started seman in background" in result.output
-
-    @patch("seman.cli._spawn_detached")
-    def test_start_background_accepts_multiple_directories(self, mock_spawn, temp_dir: Path):
-        """Start command accepts multiple directories."""
-        mock_spawn.side_effect = [1111, 2222]
-        second_dir = temp_dir / "second"
-        second_dir.mkdir()
-
-        with patch("seman.cli.supervisor_state_path", temp_dir / "supervisor.json"):
-            result = runner.invoke(app, ["start", str(temp_dir), str(second_dir)])
-
-        assert result.exit_code == 0
         first_command = mock_spawn.call_args_list[0].args[0]
-        assert first_command[1:4] == ["-m", "seman.runner", "converter"]
-        assert first_command[4:6] == [str(temp_dir), str(second_dir)]
-        assert first_command[6:] == ["--collection", "default"]
+        second_command = mock_spawn.call_args_list[1].args[0]
+        assert first_command[1:4] == ["-m", "cementic.runner", "source-watcher"]
+        assert second_command[1:4] == ["-m", "cementic.runner", "pipeline-worker"]
+        assert second_command[4:] == ["--collection", "test"]
 
-    def test_start_background_missing_directory(self, temp_dir: Path):
-        """Start command errors on missing directory."""
-        with patch("seman.cli.supervisor_state_path", temp_dir / "supervisor.json"):
-            result = runner.invoke(app, ["start", "/nonexistent/path", "--collection", "test"])
+    @patch("cementic.cli._spawn_detached")
+    def test_start_background_mentions_default_collection(self, mock_spawn, temp_dir: Path):
+        mock_spawn.side_effect = [1111, 2222]
 
-        assert result.exit_code == 1
-        assert "does not exist" in result.output
-
-    def test_stop_background_no_state(self, temp_dir: Path):
-        """Stop command handles missing state file."""
-        with patch("seman.cli.supervisor_state_path", temp_dir / "supervisor.json"):
-            result = runner.invoke(app, ["stop"])
+        with patch("cementic.cli.supervisor_state_path", temp_dir / "supervisor.json"):
+            with patch("cementic.cli.Bootstrapper") as mock_bootstrapper:
+                mock_bootstrapper.return_value.ensure_for_convert.return_value = None
+                mock_bootstrapper.return_value.ensure_for_index.return_value = None
+                result = runner.invoke(app, ["start", str(temp_dir)])
 
         assert result.exit_code == 0
-        assert "No background seman processes found" in result.output
+        assert "collection: default" in result.output
+        assert "documents will be indexed into 'default'" in result.output
 
-    @patch("seman.cli._wait_for_exit", return_value=[])
-    @patch("seman.cli.os.kill")
-    def test_stop_background_stops_and_clears_state(self, mock_kill, mock_wait, temp_dir: Path):
-        """Stop command waits for exit and removes supervisor state."""
-        state_path = temp_dir / "supervisor.json"
-        state_path.write_text('{"processes": [{"name": "converter", "pid": 1234}]}')
-
-        with patch("seman.cli.supervisor_state_path", state_path):
-            result = runner.invoke(app, ["stop"])
-
-        assert result.exit_code == 0
-        mock_kill.assert_called_once_with(1234, 15)
-        assert "Stopped 1 process(es)" in result.output
-        assert not state_path.exists()
-
-    @patch("seman.cli._wait_for_exit", return_value=[1234])
-    @patch("seman.cli.os.kill")
-    def test_stop_background_keeps_state_when_timeout(self, mock_kill, mock_wait, temp_dir: Path):
-        """Stop command keeps state for processes that did not stop yet."""
-        state_path = temp_dir / "supervisor.json"
-        state_path.write_text('{"processes": [{"name": "converter", "pid": 1234}]}')
-
-        with patch("seman.cli.supervisor_state_path", state_path):
-            result = runner.invoke(app, ["stop"])
-
-        assert result.exit_code == 0
-        assert "Stop timed out" in result.output
-        assert state_path.exists()
-
-    @patch("seman.cli.get_session_factory")
-    @patch("seman.cli.get_engine")
-    @patch("seman.cli._embedder_state_manager")
-    @patch("seman.cli._converter_state_manager")
-    def test_status_command(
-        self,
-        mock_converter_state_manager,
-        mock_embedder_state_manager,
-        mock_get_engine,
-        mock_get_session_factory,
-        temp_dir: Path,
-    ):
-        """Status command renders daemon and queue summaries."""
-        converter_state = MagicMock()
-        converter_state.daemon_state = "running"
-        converter_state.pid = 1001
-        embedder_state = MagicMock()
-        embedder_state.daemon_state = "running"
-        embedder_state.pid = 1002
-
-        mock_converter_state_manager.return_value.load.return_value = converter_state
-        mock_embedder_state_manager.return_value.load.return_value = embedder_state
-
+    @patch("cementic.cli.get_session_factory")
+    @patch("cementic.cli.get_engine")
+    def test_collection_promote_command(self, mock_get_engine, mock_get_session_factory):
+        revision = SimpleNamespace(collection="research", status="ready", label="rev-1")
+        revision_query = MagicMock()
+        revision_query.filter_by.return_value.order_by.return_value.first.return_value = revision
         mock_session = MagicMock()
-        mock_session.query.return_value.filter_by.return_value.count.side_effect = [1, 2, 3, 4, 1]
+        mock_session.__enter__.return_value = mock_session
+        mock_session.__exit__.return_value = False
+        mock_session.query.return_value = revision_query
         mock_get_session_factory.return_value = lambda: mock_session
 
-        state_path = temp_dir / "supervisor.json"
-        state_path.write_text('{"processes": [{"name": "converter", "pid": 1001}]}')
-
-        with patch("seman.cli.supervisor_state_path", state_path):
-            with patch("seman.cli._is_pid_running", return_value=True):
-                result = runner.invoke(app, ["status"])
+        with patch("cementic.cli.promote_ready_revision", return_value=revision) as mock_promote:
+            result = runner.invoke(app, ["collection", "promote", "research"])
 
         assert result.exit_code == 0
-        assert "Converter Status" in result.output
-        assert "Indexer Status" in result.output
-        assert "Supervisor" in result.output
-        assert "Embedding Queue" in result.output
+        assert "collection: research" in result.output
+        assert "status: promoted" in result.output
+        assert "revision: rev-1" in result.output
+        mock_promote.assert_called_once_with(mock_session, "research")
+
+    @patch("cementic.cli.get_session_factory")
+    @patch("cementic.cli.get_engine")
+    def test_collection_revisions_command(self, mock_get_engine, mock_get_session_factory):
+        extractor_profile = SimpleNamespace(name="pymupdf4llm")
+        chunk_profile = SimpleNamespace(fingerprint="abcdef123456")
+        embedding_profile = SimpleNamespace(provider="ollama", fingerprint="fedcba654321")
+        revision = SimpleNamespace(
+            id=3,
+            status="active",
+            label="rev-3",
+            extractor_profile=extractor_profile,
+            chunk_profile=chunk_profile,
+            embedding_profile=embedding_profile,
+        )
+        revision_query = MagicMock()
+        revision_query.filter_by.return_value.order_by.return_value.all.return_value = [revision]
+        mock_session = MagicMock()
+        mock_session.__enter__.return_value = mock_session
+        mock_session.__exit__.return_value = False
+        mock_session.query.return_value = revision_query
+        mock_get_session_factory.return_value = lambda: mock_session
+
+        result = runner.invoke(app, ["collection", "revisions", "research"])
+
+        assert result.exit_code == 0
+        assert "collection: research" in result.output
+        assert "revisions:" in result.output
+        assert "id=3" in result.output
+        assert "status=active" in result.output
+        assert "rev-3" in result.output
+        assert "pymupdf4llm" in result.output
+
+    @patch("cementic.cli.get_session_factory")
+    @patch("cementic.cli.get_engine")
+    def test_collection_list_command(self, mock_get_engine, mock_get_session_factory):
+        summary = SimpleNamespace(
+            name="research",
+            documents=10,
+            active_revision_label="rev-1",
+            building_revision_label="rev-2",
+        )
+        mock_session = MagicMock()
+        mock_session.__enter__.return_value = mock_session
+        mock_session.__exit__.return_value = False
+        mock_get_session_factory.return_value = lambda: mock_session
+
+        with patch("cementic.cli.list_collections", return_value=[summary]) as mock_list:
+            result = runner.invoke(app, ["collection", "list"])
+
+        assert result.exit_code == 0
+        assert "collections:" in result.output
+        assert "name=research" in result.output
+        assert "documents=10" in result.output
+        assert "active=rev-1" in result.output
+        assert "building=rev-2" in result.output
+        mock_list.assert_called_once_with(mock_session)
+
+    @patch("cementic.cli.get_engine")
+    def test_collection_list_shows_database_hint_when_database_unavailable(self, mock_get_engine):
+        mock_get_engine.side_effect = OperationalError("statement", {}, Exception("down"))
+
+        result = runner.invoke(app, ["collection", "list"])
+
+        assert result.exit_code == 1
+        assert "collection list failed: database not reachable" in result.output
+        assert "run `cementic start` to start infrastructure" in result.output
+
+    @patch("cementic.cli.get_engine")
+    def test_collection_promote_shows_database_hint_when_database_unavailable(
+        self, mock_get_engine
+    ):
+        mock_get_engine.side_effect = OperationalError("statement", {}, Exception("down"))
+
+        result = runner.invoke(app, ["collection", "promote", "research"])
+
+        assert result.exit_code == 1
+        assert "collection promote failed: database not reachable" in result.output
+        assert "run `cementic start` to start infrastructure" in result.output
 
 
 class TestCollectionCommands:
     """Test collection management commands."""
 
-    @patch("seman.cli.get_session_factory")
-    @patch("seman.cli.get_engine")
-    def test_delete_collection_success(self, mock_get_engine, mock_get_session_factory):
-        """Delete collection removes matching documents and chunks."""
-        mock_doc = MagicMock()
-        mock_doc.id = 1
-
+    @patch("cementic.cli.get_session_factory")
+    @patch("cementic.cli.get_engine")
+    def test_collection_remove_not_found(self, mock_get_engine, mock_get_session_factory):
         mock_session = MagicMock()
-        mock_session.__enter__ = MagicMock(return_value=mock_session)
-        mock_session.__exit__ = MagicMock(return_value=False)
-        mock_session.query.return_value.filter_by.return_value.all.return_value = [mock_doc]
-        mock_session.query.return_value.filter.return_value.delete.side_effect = [5, 1]
-        mock_get_session_factory.return_value = lambda: mock_session
-
-        result = runner.invoke(app, ["delete-collection", "test", "--force"])
-
-        assert result.exit_code == 0
-        assert "Deleted collection 'test'" in result.output
-
-    @patch("seman.cli.get_session_factory")
-    @patch("seman.cli.get_engine")
-    def test_delete_collection_not_found(self, mock_get_engine, mock_get_session_factory):
-        """Deleting missing collection prints warning."""
-        mock_session = MagicMock()
-        mock_session.__enter__ = MagicMock(return_value=mock_session)
-        mock_session.__exit__ = MagicMock(return_value=False)
+        mock_session.__enter__.return_value = mock_session
+        mock_session.__exit__.return_value = False
         mock_session.query.return_value.filter_by.return_value.all.return_value = []
         mock_get_session_factory.return_value = lambda: mock_session
 
-        result = runner.invoke(app, ["delete-collection", "missing", "--force"])
+        with patch("cementic.cli.delete_collection_records", return_value=None):
+            result = runner.invoke(app, ["collection", "remove", "missing", "--force"])
 
         assert result.exit_code == 0
-        assert "not found" in result.output.lower()
+        assert "collection: missing" in result.output
+        assert "status: not found" in result.output
