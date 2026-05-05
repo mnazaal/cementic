@@ -1,10 +1,16 @@
 """Test fixtures and configuration."""
 
+import os
 import tempfile
 from pathlib import Path
 from typing import Generator
 
 import pytest
+
+from cementic.embedding_providers.base import EmbeddingProvider
+
+# Ensure DB password env var is set for all tests
+os.environ.setdefault("CEMENTIC_DB_PASSWORD", "test-password")
 
 
 @pytest.fixture
@@ -29,6 +35,39 @@ def sample_pdf_content() -> bytes:
 def mock_embedding() -> list:
     """Provide a mock embedding vector."""
     return [0.1] * 768
+
+
+class FakeEmbeddingClient(EmbeddingProvider):
+    """Tiny deterministic embedding client for integration tests."""
+
+    TERMS = ["computer", "symbiosis", "man", "time", "machine", "learning",
+             "vector", "semantic", "neural", "network"]
+
+    def health_check(self) -> bool:
+        return True
+
+    def embed(self, text: str) -> list[float]:
+        lowered = text.lower().replace("search_document: ", "").replace("search_query: ", "")
+        return [float(lowered.count(term)) for term in self.TERMS]
+
+    def embed_batch(self, texts: list[str]) -> list[list[float] | None]:
+        return [self.embed(text) for text in texts]
+
+    @property
+    def embedding_dim(self) -> int:
+        return len(self.TERMS)
+
+
+@pytest.fixture
+def fake_embedding_client() -> FakeEmbeddingClient:
+    """Provide a deterministic fake embedding client."""
+    return FakeEmbeddingClient()
+
+
+@pytest.fixture
+def pdf_fixtures_dir() -> Path:
+    """Path to the PDF fixtures directory."""
+    return Path(__file__).parent / "fixtures"
 
 
 @pytest.fixture

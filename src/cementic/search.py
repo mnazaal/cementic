@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 
-# mypy: disable-error-code=import-untyped
+# mypy: disable-error-code="import-untyped"
 from typing import Any, Optional, TypedDict
 
 from pgvector.sqlalchemy import Vector

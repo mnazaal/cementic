@@ -11,7 +11,7 @@ class TestDatabaseConfig:
 
     def test_default_values(self):
         """Test default database configuration."""
-        config = DatabaseConfig()
+        config = DatabaseConfig(password="cementic")
         assert config.host == "localhost"
         assert config.port == 5432
         assert config.name == "cementic"
@@ -30,7 +30,11 @@ class TestDatabaseConfig:
         """Test environment variable override."""
         with patch.dict(
             os.environ,
-            {"CEMENTIC_DB_HOST": "envhost", "CEMENTIC_DB_PORT": "5434"},
+            {
+                "CEMENTIC_DB_HOST": "envhost",
+                "CEMENTIC_DB_PORT": "5434",
+                "CEMENTIC_DB_PASSWORD": "test-password",
+            },
         ):
             config = DatabaseConfig()
             assert config.host == "envhost"

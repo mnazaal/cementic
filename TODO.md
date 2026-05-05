@@ -1,4 +1,4 @@
-- Make `status` show collections.
-- If a collection C used embedding model M, make sure that search gives an error if 
-there is a model mismatch.
-- Make `status` output normal.
+- Make `status` show per-file breakdown when using `--verbose` flag.
+- Add failed extraction/chunk counts and progress percentages to status output.
+- Add `--json` flag for machine-readable status.
+- End-to-end integration tests for full CLI workflow.

@@ -19,11 +19,13 @@ from cementic.collections import (
     promote_ready_revision,
     remove_artifacts,
 )
-from cementic.config import get_config
+from cementic.config import Config, get_config
 from cementic.db import get_engine, get_session_factory
 from cementic.search import Searcher
 from cementic.status_service import (
     build_supervisor_status,
+    check_health,
+    load_file_progress,
     load_pipeline_status,
     load_worker_statuses,
 )
@@ -56,7 +58,15 @@ collection_app = CementicTyper(help="Inspect and manage collections")
 app.add_typer(collection_app, name="collection")
 console = Console()
 
-config = get_config()
+_config: Config | None = None
+
+
+def _get_config() -> Config:
+    """Lazy-load the config singleton."""
+    global _config
+    if _config is None:
+        _config = get_config()
+    return _config
 
 
 ROOT_HELP_TEXT = """Index and semantically search PDF collections.
@@ -226,11 +236,11 @@ Options:
 
 
 def _load_supervisor_state() -> dict[str, object]:
-    return load_supervisor_state(supervisor_state_path)
+    return load_supervisor_state(_get_supervisor_state_path())
 
 
 def _save_supervisor_state(state: dict[str, object]) -> None:
-    save_supervisor_state(supervisor_state_path, state)
+    save_supervisor_state(_get_supervisor_state_path(), state)
 
 
 def _supervisor_processes(state: dict[str, object]) -> list[dict[str, object]]:
@@ -271,13 +281,15 @@ def _get_cli_version() -> str:
 
 def _get_data_dir() -> Path:
     """Return cementic data directory path."""
-    state_path = config.source_watcher.state_path or config.pipeline_worker.state_path
+    state_path = _get_config().source_watcher.state_path or _get_config().pipeline_worker.state_path
     if state_path is None:
         raise RuntimeError("State path is not configured")
     return state_path.parent
 
 
-supervisor_state_path = _get_data_dir() / "supervisor.json"
+def _get_supervisor_state_path() -> Path:
+    """Lazy supervisor state path."""
+    return _get_data_dir() / "supervisor.json"
 
 
 @collection_app.callback(invoke_without_command=True)
@@ -319,7 +331,7 @@ def _print_database_unavailable(action: str) -> None:
 
 def _llama_daemon_runtime_status() -> str:
     """Return llama.cpp daemon runtime status."""
-    pid_file = config.llama_cpp.daemon_pid_file
+    pid_file = _get_config().llama_cpp.daemon_pid_file
     if pid_file is None or not pid_file.exists():
         return "stopped"
 
@@ -372,8 +384,187 @@ def _print_runtime_status(
     if pipeline_worker_status.current_file != "None":
         console.print(f"- current file: {pipeline_worker_status.current_file}")
 
-    if config.pipeline.embedding_provider == "llama-cpp":
+    if _get_config().pipeline.embedding_provider == "llama-cpp":
         console.print(f"search daemon: {_llama_daemon_runtime_status()}")
+
+
+def _print_health_section(health: Any) -> None:
+    """Print health check status."""
+    if health is None:
+        return
+    console.print("health:")
+    db_state = "[green]reachable[/green]" if health.db_reachable else "[red]unreachable[/red]"
+    console.print(f"- database: {db_state}")
+    embed_state = (
+        "[green]healthy[/green]" if health.embedding_healthy else "[red]unhealthy[/red]"
+    )
+    console.print(f"- embedding ({health.embedding_provider}): {embed_state}")
+    if health.llama_daemon != "N/A":
+        console.print(f"- llama daemon: {health.llama_daemon}")
+
+
+def _print_collection_detail(
+    collection: str,
+    pipeline_status: Any,
+    verbose: bool,
+) -> None:
+    """Print detailed pipeline status for one collection."""
+    console.print(f"collection: {collection}")
+    console.print("pipeline:")
+    console.print(f"- documents: {pipeline_status.documents}")
+    console.print(
+        f"- extraction: {pipeline_status.extracted_done}/{pipeline_status.documents}"
+        f" ({pipeline_status.extraction_pct}%)"
+    )
+    if pipeline_status.extracted_failed:
+        console.print(f"  [!] failed: {pipeline_status.extracted_failed}")
+    console.print(
+        f"- chunking: {pipeline_status.chunked_done}/{pipeline_status.extracted_done}"
+        f" ({pipeline_status.chunking_pct}%)"
+    )
+    if pipeline_status.chunked_failed:
+        console.print(f"  [!] failed: {pipeline_status.chunked_failed}")
+    console.print(
+        f"- embeddings: done={pipeline_status.done_embeddings}, "
+        f"processing={pipeline_status.processing_embeddings}, "
+        f"pending={pipeline_status.pending_embeddings}, "
+        f"failed={pipeline_status.failed_embeddings} "
+        f"(total chunks: {pipeline_status.total_chunks}, "
+        f"{pipeline_status.embedding_pct}% complete)"
+    )
+    console.print(
+        f"- revisions: active={pipeline_status.active_revision_label}, "
+        f"building={pipeline_status.building_revision_label}"
+    )
+
+    if verbose and collection:
+        try:
+            files = load_file_progress(_get_config(), collection)
+            if not files:
+                console.print("files: none")
+                return
+            console.print("files:")
+            for f in files:
+                status_line = (
+                    f"- {f.source_path} | extract={f.extraction_status}"
+                    f" | chunk={f.chunking_status}"
+                    f" | embeddings={f.embeddings_done}/{f.embeddings_total}"
+                )
+                if f.embeddings_failed:
+                    status_line += f" (failed: {f.embeddings_failed})"
+                if f.error_message:
+                    status_line += f" | error: {f.error_message[:80]}"
+                console.print(status_line)
+        except Exception as error:
+            if not _is_database_unavailable(error):
+                console.print(f"files: error - {error}")
+
+
+def _print_status_json(
+    supervisor_status: Any,
+    source_watcher_status: Any,
+    pipeline_worker_status: Any,
+    directories: list[str],
+    health: Any,
+    collection: str | None,
+    verbose: bool,
+) -> None:
+    """Print full status as JSON."""
+    import json as _json
+
+    output: dict[str, Any] = {
+        "supervisor": {
+            "state": supervisor_status.state,
+            "collection": supervisor_status.collection,
+            "directories": directories,
+        },
+        "source_watcher": {
+            "process": source_watcher_status.process,
+            "state": source_watcher_status.state,
+            "pid": source_watcher_status.pid,
+            "processed": source_watcher_status.processed_count,
+            "failed": source_watcher_status.failed_count,
+        },
+        "pipeline_worker": {
+            "process": pipeline_worker_status.process,
+            "state": pipeline_worker_status.state,
+            "pid": pipeline_worker_status.pid,
+        },
+    }
+
+    if health is not None:
+        output["health"] = {
+            "db_reachable": health.db_reachable,
+            "embedding_provider": health.embedding_provider,
+            "embedding_healthy": health.embedding_healthy,
+            "llama_daemon": health.llama_daemon,
+        }
+
+    try:
+        engine = get_engine(_get_config().database.url)
+        session_factory = get_session_factory(engine)
+        with session_factory() as session:
+            if collection is None:
+                rows = list_collections(session)
+                collections_data: dict[str, dict[str, Any]] = {}
+                for row in rows:
+                    ps = load_pipeline_status(_get_config(), row.name)
+                    collections_data[row.name] = {
+                        "documents": ps.documents,
+                        "extracted_done": ps.extracted_done,
+                        "extracted_failed": ps.extracted_failed,
+                        "chunked_done": ps.chunked_done,
+                        "chunked_failed": ps.chunked_failed,
+                        "total_chunks": ps.total_chunks,
+                        "pending_embeddings": ps.pending_embeddings,
+                        "processing_embeddings": ps.processing_embeddings,
+                        "done_embeddings": ps.done_embeddings,
+                        "failed_embeddings": ps.failed_embeddings,
+                        "extraction_pct": ps.extraction_pct,
+                        "chunking_pct": ps.chunking_pct,
+                        "embedding_pct": ps.embedding_pct,
+                        "active_revision_label": ps.active_revision_label,
+                        "building_revision_label": ps.building_revision_label,
+                    }
+                output["collections"] = collections_data
+            else:
+                ps = load_pipeline_status(_get_config(), collection)
+                output["pipeline"] = {
+                    "collection": collection,
+                    "documents": ps.documents,
+                    "extracted_done": ps.extracted_done,
+                    "extracted_failed": ps.extracted_failed,
+                    "chunked_done": ps.chunked_done,
+                    "chunked_failed": ps.chunked_failed,
+                    "total_chunks": ps.total_chunks,
+                    "pending_embeddings": ps.pending_embeddings,
+                    "processing_embeddings": ps.processing_embeddings,
+                    "done_embeddings": ps.done_embeddings,
+                    "failed_embeddings": ps.failed_embeddings,
+                    "extraction_pct": ps.extraction_pct,
+                    "chunking_pct": ps.chunking_pct,
+                    "embedding_pct": ps.embedding_pct,
+                    "active_revision_label": ps.active_revision_label,
+                    "building_revision_label": ps.building_revision_label,
+                }
+                if verbose:
+                    files = load_file_progress(_get_config(), collection)
+                    output["files"] = [
+                        {
+                            "source_path": f.source_path,
+                            "extraction_status": f.extraction_status,
+                            "chunking_status": f.chunking_status,
+                            "embeddings_done": f.embeddings_done,
+                            "embeddings_failed": f.embeddings_failed,
+                            "embeddings_total": f.embeddings_total,
+                            "error_message": f.error_message,
+                        }
+                        for f in files
+                    ]
+    except Exception:
+        pass
+
+    console.print(_json.dumps(output, indent=2, default=str))
 
 
 @app.command(
@@ -406,7 +597,7 @@ def start_background(
         raise typer.Exit(1)
 
     try:
-        bootstrapper = Bootstrapper(config)
+        bootstrapper = Bootstrapper(_get_config())
         bootstrapper.ensure_for_convert()
         bootstrapper.ensure_for_index()
     except RuntimeError as error:
@@ -458,7 +649,7 @@ def start_background(
 
 @app.command(
     "status",
-    short_help="[--collection COLLECTION]",
+    short_help="[--collection COLLECTION] [--verbose] [--json]",
 )
 def status(
     collection: Optional[str] = typer.Option(
@@ -467,21 +658,51 @@ def status(
         "--collection",
         help="Show detailed status for one collection",
     ),
+    verbose: bool = typer.Option(
+        False,
+        "--verbose",
+        "-v",
+        help="Show per-file pipeline progress",
+    ),
+    json_output: bool = typer.Option(
+        False,
+        "--json",
+        help="Output status as JSON",
+    ),
 ) -> None:
     """Show background worker status and collection progress."""
     state = _load_supervisor_state()
-    source_watcher_status, pipeline_worker_status = load_worker_statuses(config)
+    source_watcher_status, pipeline_worker_status = load_worker_statuses(_get_config())
     supervisor_status = build_supervisor_status(state)
     directories = supervisor_status.directories or source_watcher_status.watched_directories
+
+    try:
+        health = check_health(_get_config())
+    except Exception:
+        health = None
+
+    if json_output:
+        _print_status_json(
+            supervisor_status,
+            source_watcher_status,
+            pipeline_worker_status,
+            directories,
+            health,
+            collection,
+            verbose,
+        )
+        return
+
     _print_runtime_status(
         supervisor_status.collection,
         directories,
         source_watcher_status,
         pipeline_worker_status,
     )
+    _print_health_section(health)
 
     try:
-        engine = get_engine(config.database.url)
+        engine = get_engine(_get_config().database.url)
         session_factory = get_session_factory(engine)
         with session_factory() as session:
             if collection is None:
@@ -491,34 +712,39 @@ def status(
                     console.print("- none")
                     return
                 for row in rows:
-                    pipeline_status = load_pipeline_status(config, row.name)
+                    pipeline_status = load_pipeline_status(_get_config(), row.name)
                     console.print(
-                        f"- name={row.name}, documents={row.documents}, "
-                        f"extracted={pipeline_status.extracted_done}, "
-                        f"chunked={pipeline_status.chunked_done}, "
-                        f"embedded={pipeline_status.done_embeddings}, "
-                        f"active={row.active_revision_label or '-'}, "
+                        f"- name={row.name}, documents={pipeline_status.documents}, "
+                        f"extraction={pipeline_status.extracted_done}/{pipeline_status.documents}"
+                        f" ({pipeline_status.extraction_pct}%)"
+                    )
+                    if pipeline_status.extracted_failed:
+                        console.print(
+                            f"  [!] extraction failures: {pipeline_status.extracted_failed}"
+                        )
+                    console.print(
+                        f"  chunks={pipeline_status.chunked_done}/{pipeline_status.extracted_done}"
+                        f" ({pipeline_status.chunking_pct}%)"
+                    )
+                    if pipeline_status.chunked_failed:
+                        console.print(f"  [!] chunking failures: {pipeline_status.chunked_failed}")
+                    console.print(
+                        f"  embeddings={pipeline_status.done_embeddings}/"
+                        f"{pipeline_status.total_chunks}"
+                        f" ({pipeline_status.embedding_pct}%)"
+                    )
+                    if pipeline_status.failed_embeddings:
+                        console.print(
+                            f"  [!] embedding failures: {pipeline_status.failed_embeddings}"
+                        )
+                    console.print(
+                        f"  active={row.active_revision_label or '-'}, "
                         f"building={row.building_revision_label or '-'}"
                     )
                 return
 
-        pipeline_status = load_pipeline_status(config, collection)
-        console.print(f"collection: {collection}")
-        console.print("pipeline:")
-        console.print(
-            f"- documents={pipeline_status.documents}, extracted={pipeline_status.extracted_done}, "
-            f"chunked={pipeline_status.chunked_done}"
-        )
-        console.print(
-            f"- embeddings: pending={pipeline_status.pending_embeddings}, "
-            f"processing={pipeline_status.processing_embeddings}, "
-            f"done={pipeline_status.done_embeddings}, "
-            f"failed={pipeline_status.failed_embeddings}"
-        )
-        console.print(
-            f"- revisions: active={pipeline_status.active_revision_label}, "
-            f"building={pipeline_status.building_revision_label}"
-        )
+        pipeline_status = load_pipeline_status(_get_config(), collection)
+        _print_collection_detail(collection, pipeline_status, verbose)
     except Exception as error:
         if _is_database_unavailable(error):
             _print_database_unavailable("status")
@@ -563,12 +789,12 @@ def stop_background(
         except (ProcessLookupError, OSError):
             continue
 
-    timeout_seconds = float(config.bootstrap.wait_timeout_seconds)
+    timeout_seconds = float(_get_config().bootstrap.wait_timeout_seconds)
     remaining = _wait_for_exit(signaled_pids, timeout_seconds=timeout_seconds)
 
     if not remaining:
-        if supervisor_state_path.exists():
-            supervisor_state_path.unlink()
+        if _get_supervisor_state_path().exists():
+            _get_supervisor_state_path().unlink()
         console.print(f"stopped {len(signaled_pids)} process(es)")
         if include_infra:
             _stop_infra_containers()
@@ -578,8 +804,8 @@ def stop_background(
         killed = _force_kill(remaining)
         time.sleep(0.5)
         still_alive = [pid for pid in killed if _is_pid_running(pid)]
-        if supervisor_state_path.exists():
-            supervisor_state_path.unlink()
+        if _get_supervisor_state_path().exists():
+            _get_supervisor_state_path().unlink()
         if still_alive:
             console.print(
                 f"force killed {len(remaining) - len(still_alive)} process(es); "
@@ -611,9 +837,9 @@ def _stop_infra_containers() -> None:
     """Stop infrastructure containers helper."""
     from cementic.bootstrap import Bootstrapper
 
-    bootstrapper = Bootstrapper(config)
+    bootstrapper = Bootstrapper(_get_config())
     try:
-        include_ollama = config.pipeline.embedding_provider == "ollama"
+        include_ollama = _get_config().pipeline.embedding_provider == "ollama"
         bootstrapper.stop_containers(include_ollama=include_ollama)
         console.print("infrastructure containers stopped")
     except RuntimeError as e:
@@ -635,7 +861,7 @@ def remove_collection(
             raise typer.Abort()
 
     try:
-        engine = get_engine(config.database.url)
+        engine = get_engine(_get_config().database.url)
         session_factory = get_session_factory(engine)
 
         with session_factory() as session:
@@ -663,7 +889,7 @@ def remove_collection(
 def list_collection_command() -> None:
     """Show known collections."""
     try:
-        engine = get_engine(config.database.url)
+        engine = get_engine(_get_config().database.url)
         session_factory = get_session_factory(engine)
         with session_factory() as session:
             rows = list_collections(session)
@@ -693,7 +919,7 @@ def promote_collection(
 ) -> None:
     """Promote the ready pipeline revision for one collection."""
     try:
-        engine = get_engine(config.database.url)
+        engine = get_engine(_get_config().database.url)
         session_factory = get_session_factory(engine)
         with session_factory() as session:
             revision = promote_ready_revision(session, collection)
@@ -718,7 +944,7 @@ def list_collection_revision_command(
 ) -> None:
     """Show revision history for one collection."""
     try:
-        engine = get_engine(config.database.url)
+        engine = get_engine(_get_config().database.url)
         session_factory = get_session_factory(engine)
         with session_factory() as session:
             rows = list_collection_revisions(session, collection)
@@ -763,7 +989,7 @@ def search(
 ) -> None:
     """Search indexed documents."""
     filters = _build_collection_filters(collections, trailing_collections)
-    searcher = Searcher(config)
+    searcher = Searcher(_get_config())
 
     try:
         results = searcher.search(query, top_k=top_k, collections=filters)

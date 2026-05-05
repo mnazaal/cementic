@@ -58,6 +58,7 @@ class TestRootHelp:
 
     @patch("cementic.cli._llama_daemon_runtime_status", return_value="stopped")
     @patch("cementic.cli.list_collections", return_value=[])
+    @patch("cementic.cli.check_health")
     @patch("cementic.cli.get_session_factory")
     @patch("cementic.cli.get_engine")
     @patch("cementic.cli.load_worker_statuses")
@@ -70,6 +71,7 @@ class TestRootHelp:
         mock_load_worker_statuses,
         mock_get_engine,
         mock_get_session_factory,
+        mock_check_health,
         mock_list_collections,
         mock_daemon_status,
     ):
@@ -102,6 +104,12 @@ class TestRootHelp:
             state="2/2 running",
             collection="research",
             directories=["/docs"],
+        )
+        mock_check_health.return_value = SimpleNamespace(
+            db_reachable=False,
+            embedding_provider="llama-cpp",
+            embedding_healthy=True,
+            llama_daemon="running, pid=333",
         )
         mock_session = MagicMock()
         mock_session.__enter__.return_value = mock_session
@@ -182,8 +190,9 @@ class TestBackgroundCommands:
     """Test top-level background process commands."""
 
     @patch("cementic.cli._llama_daemon_runtime_status", return_value="running, pid=333")
-    @patch("cementic.cli.list_collections")
+    @patch("cementic.cli.check_health")
     @patch("cementic.cli.load_pipeline_status")
+    @patch("cementic.cli.list_collections")
     @patch("cementic.cli.get_session_factory")
     @patch("cementic.cli.get_engine")
     @patch("cementic.cli.load_worker_statuses")
@@ -196,8 +205,9 @@ class TestBackgroundCommands:
         mock_load_worker_statuses,
         mock_get_engine,
         mock_get_session_factory,
-        mock_load_pipeline_status,
         mock_list_collections,
+        mock_load_pipeline_status,
+        mock_check_health,
         mock_daemon_status,
     ):
         mock_load_supervisor_state.return_value = {
@@ -229,6 +239,12 @@ class TestBackgroundCommands:
             state="2/2 running",
             collection="research",
             directories=["/docs"],
+        )
+        mock_check_health.return_value = SimpleNamespace(
+            db_reachable=False,
+            embedding_provider="llama-cpp",
+            embedding_healthy=True,
+            llama_daemon="running, pid=333",
         )
         mock_session = MagicMock()
         mock_session.__enter__.return_value = mock_session
@@ -246,11 +262,17 @@ class TestBackgroundCommands:
             SimpleNamespace(
                 documents=10,
                 extracted_done=8,
+                extracted_failed=1,
                 chunked_done=7,
+                chunked_failed=1,
+                total_chunks=30,
                 pending_embeddings=5,
                 processing_embeddings=1,
                 done_embeddings=20,
                 failed_embeddings=2,
+                extraction_pct=80.0,
+                chunking_pct=87.5,
+                embedding_pct=66.7,
                 active_revision_label="rev-1",
                 building_revision_label="rev-2",
             )
@@ -264,17 +286,21 @@ class TestBackgroundCommands:
         assert "source watcher:" in result.output
         assert "pipeline worker:" in result.output
         assert "search daemon: running, pid=333" in result.output
+        assert "health:" in result.output
+        assert "database: unreachable" in result.output
+        assert "embedding (llama-cpp): healthy" in result.output
         assert "collections:" in result.output
         assert "name=research" in result.output
-        assert "extracted=8" in result.output
-        assert "chunked=7" in result.output
-        assert "embedded=20" in result.output
+        assert "extraction=8/10 (80.0%)" in result.output
+        assert "chunks=7/8 (87.5%)" in result.output
+        assert "embeddings=20/30 (66.7%)" in result.output
         assert "active=rev-1" in result.output
         mock_list_collections.assert_called_once_with(mock_session)
         mock_daemon_status.assert_called_once_with()
-        mock_load_pipeline_status.assert_called_once_with(cementic_cli.config, "research")
+        mock_load_pipeline_status.assert_called_once_with(cementic_cli._get_config(), "research")
 
     @patch("cementic.cli._llama_daemon_runtime_status", return_value="stopped")
+    @patch("cementic.cli.check_health")
     @patch("cementic.cli.load_pipeline_status")
     @patch("cementic.cli.load_worker_statuses")
     @patch("cementic.cli._load_supervisor_state")
@@ -285,6 +311,7 @@ class TestBackgroundCommands:
         mock_load_supervisor_state,
         mock_load_worker_statuses,
         mock_load_pipeline_status,
+        mock_check_health,
         mock_daemon_status,
     ):
         mock_load_supervisor_state.return_value = {
@@ -317,14 +344,26 @@ class TestBackgroundCommands:
             collection="research",
             directories=["/docs"],
         )
+        mock_check_health.return_value = SimpleNamespace(
+            db_reachable=True,
+            embedding_provider="llama-cpp",
+            embedding_healthy=True,
+            llama_daemon="running, pid=333",
+        )
         mock_load_pipeline_status.return_value = SimpleNamespace(
             documents=10,
             extracted_done=8,
+            extracted_failed=1,
             chunked_done=7,
+            chunked_failed=1,
+            total_chunks=30,
             pending_embeddings=5,
             processing_embeddings=1,
             done_embeddings=20,
             failed_embeddings=2,
+            extraction_pct=80.0,
+            chunking_pct=87.5,
+            embedding_pct=66.7,
             active_revision_label="rev-1",
             building_revision_label="rev-2",
         )
@@ -335,12 +374,16 @@ class TestBackgroundCommands:
         assert "session collection: research" in result.output
         assert "collection: research" in result.output
         assert "pipeline:" in result.output
-        assert "documents=10" in result.output
+        assert "documents: 10" in result.output
+        assert "extraction: 8/10 (80.0%)" in result.output
+        assert "chunking: 7/8 (87.5%)" in result.output
+        assert "done=20" in result.output
         assert "active=rev-1" in result.output
-        mock_load_pipeline_status.assert_called_once_with(cementic_cli.config, "research")
+        mock_load_pipeline_status.assert_called_once_with(cementic_cli._get_config(), "research")
         mock_daemon_status.assert_called_once_with()
 
     @patch("cementic.cli._llama_daemon_runtime_status", return_value="stopped")
+    @patch("cementic.cli.check_health")
     @patch("cementic.cli.load_pipeline_status")
     @patch("cementic.cli.load_worker_statuses")
     @patch("cementic.cli._load_supervisor_state")
@@ -351,6 +394,7 @@ class TestBackgroundCommands:
         mock_load_supervisor_state,
         mock_load_worker_statuses,
         mock_load_pipeline_status,
+        mock_check_health,
         mock_daemon_status,
     ):
         mock_load_supervisor_state.return_value = {
@@ -383,14 +427,26 @@ class TestBackgroundCommands:
             collection="research",
             directories=["/docs"],
         )
+        mock_check_health.return_value = SimpleNamespace(
+            db_reachable=True,
+            embedding_provider="llama-cpp",
+            embedding_healthy=True,
+            llama_daemon="running, pid=333",
+        )
         mock_load_pipeline_status.return_value = SimpleNamespace(
             documents=1,
             extracted_done=1,
+            extracted_failed=0,
             chunked_done=1,
+            chunked_failed=0,
+            total_chunks=1,
             pending_embeddings=0,
             processing_embeddings=0,
             done_embeddings=1,
             failed_embeddings=0,
+            extraction_pct=100.0,
+            chunking_pct=100.0,
+            embedding_pct=100.0,
             active_revision_label="rev-1",
             building_revision_label="None",
         )
@@ -399,13 +455,16 @@ class TestBackgroundCommands:
 
         assert result.exit_code == 0
         assert "collection: research" in result.output
-        mock_load_pipeline_status.assert_called_once_with(cementic_cli.config, "research")
+        mock_load_pipeline_status.assert_called_once_with(cementic_cli._get_config(), "research")
 
     @patch("cementic.cli._spawn_detached")
     def test_start_background(self, mock_spawn, temp_dir: Path):
         mock_spawn.side_effect = [1111, 2222]
+        mock_path = temp_dir / "supervisor.json"
 
-        with patch("cementic.cli.supervisor_state_path", temp_dir / "supervisor.json"):
+        with patch(
+            "cementic.cli._get_supervisor_state_path", return_value=mock_path
+        ):
             with patch("cementic.cli.Bootstrapper") as mock_bootstrapper:
                 mock_bootstrapper.return_value.ensure_for_convert.return_value = None
                 mock_bootstrapper.return_value.ensure_for_index.return_value = None
@@ -422,8 +481,11 @@ class TestBackgroundCommands:
     @patch("cementic.cli._spawn_detached")
     def test_start_background_mentions_default_collection(self, mock_spawn, temp_dir: Path):
         mock_spawn.side_effect = [1111, 2222]
+        mock_path = temp_dir / "supervisor.json"
 
-        with patch("cementic.cli.supervisor_state_path", temp_dir / "supervisor.json"):
+        with patch(
+            "cementic.cli._get_supervisor_state_path", return_value=mock_path
+        ):
             with patch("cementic.cli.Bootstrapper") as mock_bootstrapper:
                 mock_bootstrapper.return_value.ensure_for_convert.return_value = None
                 mock_bootstrapper.return_value.ensure_for_index.return_value = None

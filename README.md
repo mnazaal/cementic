@@ -4,9 +4,9 @@ Concrete semantic search for PDFs.
 
 `cementic` watches one or more directories, registers PDFs, extracts text, chunks that text, embeds the chunks, and serves semantic search over the active revision for each collection.
 
-## What changed in the architecture
+## How It Works
 
-The index is now built as a versioned pipeline:
+The index is built as a versioned pipeline:
 
 - extractor profile -> extracted document artifact
 - chunk profile -> chunk artifacts
@@ -26,10 +26,21 @@ This keeps old search available while a new extractor, chunking policy, or embed
 ## Installation
 
 ```bash
+# From PyPI (once published):
 uv tool install cementic
 # or
 pipx install cementic
+
+# From source (development):
+uv pip install -e ".[dev]"
 ```
+
+## Prerequisites
+
+- **Podman** or **Docker** — used to run PostgreSQL with pgvector + vectorscale
+- **Python 3.10+**
+- **8-16 GB RAM** recommended when using the default llama.cpp embedding backend (the model loads into memory)
+- **Disk space**: ~2 GB for the llama.cpp model, plus PostgreSQL data and artifact storage
 
 ## Setup
 
@@ -93,12 +104,12 @@ partial results from chunks whose embeddings are already available.
 Configuration is driven by environment variables.
 
 ```bash
-# Database
+# Database (required: set CEMENTIC_DB_PASSWORD before starting)
 export CEMENTIC_DB_HOST=localhost
 export CEMENTIC_DB_PORT=5432
 export CEMENTIC_DB_NAME=cementic
 export CEMENTIC_DB_USER=cementic
-export CEMENTIC_DB_PASSWORD=cementic
+export CEMENTIC_DB_PASSWORD=your-secure-password
 
 # Extraction
 export CEMENTIC_EXTRACT_BACKEND=pymupdf4llm

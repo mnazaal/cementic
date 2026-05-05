@@ -17,7 +17,9 @@ class DatabaseConfig(BaseSettings):
     port: int = Field(default=5432, description="Database port")
     name: str = Field(default="cementic", description="Database name")
     user: str = Field(default="cementic", description="Database user")
-    password: Optional[str] = Field(default="cementic", description="Database password")
+    password: str = Field(
+        ..., description="Database password (required — set CEMENTIC_DB_PASSWORD)"
+    )
 
     @property
     def url(self) -> str:
@@ -200,7 +202,7 @@ class Config(BaseSettings):
         env_prefix="CEMENTIC_",
     )
 
-    database: DatabaseConfig = Field(default_factory=DatabaseConfig)
+    database: DatabaseConfig = Field(default_factory=DatabaseConfig)  # type: ignore[arg-type]
     llama_cpp: LlamaCppConfig = Field(default_factory=LlamaCppConfig)
     ollama: OllamaConfig = Field(default_factory=OllamaConfig)
     pipeline: PipelineConfig = Field(default_factory=PipelineConfig)
