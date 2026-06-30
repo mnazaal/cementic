@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import json
 from hashlib import sha256
-from pathlib import Path
+from typing import cast
 
 from sqlalchemy.orm import Session
 
 from cementic.config import Config
 from cementic.db import ChunkProfile, EmbeddingProfile, ExtractorProfile
+from cementic.embedding_provider import EmbeddingFacts, EmbeddingProvider
+from cementic.embedding_runtime import runtime_spec_from_config
 
 EMBEDDING_TEXT_FORMAT_VERSION = "v1"
 CHUNKING_VERSION = "v1"
@@ -25,11 +27,19 @@ def _fingerprint(payload: dict[str, object]) -> str:
 
 
 def build_extractor_profile_payload(config: Config) -> dict[str, object]:
-    """Build extractor profile payload from config."""
+    """Build extractor profile payload from config.
+
+    Records the extractor registry identity so adding or revving a content-type
+    extractor re-versions the revision. Imported locally to keep this module's
+    import graph free of the (heavier) extraction backend.
+    """
+    from cementic.extract import extractor_registry_payload
+
     return {
-        "backend": config.extraction.backend,
+        "backends": dict(sorted(config.extraction.backends.items())),
         "use_ocr": config.extraction.use_ocr,
         "version": EXTRACTION_VERSION,
+        "extractors": extractor_registry_payload(),
     }
 
 
@@ -43,36 +53,44 @@ def build_chunk_profile_payload(config: Config) -> dict[str, object]:
     }
 
 
-def build_embedding_profile_payload(config: Config) -> dict[str, object]:
-    """Build embedding profile payload from config."""
-    if config.pipeline.embedding_provider == "ollama":
-        model_identifier = config.ollama.model
-        embedding_dim = config.ollama.embedding_dim
-        provider = "ollama"
-        payload = {
-            "provider": provider,
-            "host": config.ollama.host,
-            "model_identifier": model_identifier,
-            "embedding_dim": embedding_dim,
-            "distance_metric": "cosine",
-            "text_format_version": EMBEDDING_TEXT_FORMAT_VERSION,
-        }
-    else:
-        model_identifier = str(Path(config.llama_cpp.model_path))
-        embedding_dim = config.llama_cpp.embedding_dim
-        provider = "llama-cpp"
-        payload = {
-            "provider": provider,
-            "model_identifier": model_identifier,
-            "embedding_dim": embedding_dim,
-            "distance_metric": "cosine",
-            "n_ctx": config.llama_cpp.n_ctx,
-            "n_gpu_layers": config.llama_cpp.n_gpu_layers,
-            "verbose": config.llama_cpp.verbose,
-            "text_format_version": EMBEDDING_TEXT_FORMAT_VERSION,
-        }
+def build_embedding_profile_payload(
+    config: Config, provider: EmbeddingProvider | None = None
+) -> dict[str, object]:
+    """Build embedding profile payload from config and the resolved provider.
 
-    return payload
+    The provider self-describes its facts (backend name, embedding dimension,
+    distance metric); with a live provider the dimension is what the model
+    actually produces. Runtime-identity fields that change the vectors (model,
+    context window, GPU offload) come from the config-derived spec. The
+    payload is fully generic -- there is no per-provider branching.
+    """
+    spec = runtime_spec_from_config(config)
+    if provider is not None:
+        facts = provider.describe()
+    else:
+        facts = EmbeddingFacts(
+            name=spec.provider,
+            embedding_dim=spec.embedding_dim,
+            distance_metric=spec.distance_metric,
+        )
+    return {
+        "provider": facts.name,
+        "model_identifier": spec.model_identifier,
+        "embedding_dim": facts.embedding_dim,
+        "distance_metric": facts.distance_metric,
+        "n_ctx": spec.n_ctx,
+        "n_gpu_layers": spec.n_gpu_layers,
+        "verbose": spec.verbose,
+        "text_format_version": EMBEDDING_TEXT_FORMAT_VERSION,
+    }
+
+
+def _extractor_profile_name(payload: dict[str, object]) -> str:
+    """A short display name; the fingerprint carries the real identity."""
+    backends = payload.get("backends") or {}
+    if not isinstance(backends, dict) or not backends:
+        return "default"
+    return ",".join(f"{key}={value}" for key, value in sorted(backends.items()))
 
 
 def get_or_create_extractor_profile(session: Session, config: Config) -> ExtractorProfile:
@@ -83,7 +101,7 @@ def get_or_create_extractor_profile(session: Session, config: Config) -> Extract
     if profile is None:
         profile = ExtractorProfile(
             fingerprint=fingerprint,
-            name=str(payload["backend"]),
+            name=_extractor_profile_name(payload),
             config_json=_stable_json(payload),
         )
         session.add(profile)
@@ -103,21 +121,21 @@ def get_or_create_chunk_profile(session: Session, config: Config) -> ChunkProfil
     return profile
 
 
-def get_or_create_embedding_profile(session: Session, config: Config) -> EmbeddingProfile:
+def get_or_create_embedding_profile(
+    session: Session, config: Config, provider: EmbeddingProvider | None = None
+) -> EmbeddingProfile:
     """Resolve immutable embedding profile."""
-    payload = build_embedding_profile_payload(config)
+    payload = build_embedding_profile_payload(config, provider)
     fingerprint = _fingerprint(payload)
-    provider = str(payload["provider"])
+    provider_name = str(payload["provider"])
     model_identifier = str(payload["model_identifier"])
-    embedding_dim = (
-        config.ollama.embedding_dim if provider == "ollama" else config.llama_cpp.embedding_dim
-    )
+    embedding_dim = int(cast(int, payload["embedding_dim"]))
     distance_metric = str(payload["distance_metric"])
     profile = session.query(EmbeddingProfile).filter_by(fingerprint=fingerprint).first()
     if profile is None:
         profile = EmbeddingProfile(
             fingerprint=fingerprint,
-            provider=provider,
+            provider=provider_name,
             model_identifier=model_identifier,
             embedding_dim=embedding_dim,
             distance_metric=distance_metric,

@@ -1,29 +1,94 @@
-"""Tests for embedding text formatting helpers."""
+"""Tests for embedding text formatting policy and provider delegation.
 
-from cementic.config import get_config
-from cementic.embedding_text import format_document_text, format_query_text
+Formatting is a pure, model-keyed policy that providers delegate to; nothing
+here reads global config.
+"""
+
+from cementic.embedding_provider import EmbeddingProvider
+from cementic.embedding_text import (
+    format_document_text_for_model,
+    format_query_text_for_model,
+)
+
+NOMIC_V2 = "models/nomic-embed-text-v2-moe.Q8_0.gguf"
 
 
 def test_adds_nomic_v2_document_prefix() -> None:
-    config = get_config()
-    config.pipeline.embedding_provider = "llama-cpp"
-    config.llama_cpp.model_path = "models/nomic-embed-text-v2-moe.Q8_0.gguf"
-
-    assert format_document_text("hello", config) == "search_document: hello"
+    assert format_document_text_for_model("hello", NOMIC_V2) == "search_document: hello"
 
 
 def test_adds_nomic_v2_query_prefix() -> None:
-    config = get_config()
-    config.pipeline.embedding_provider = "llama-cpp"
-    config.llama_cpp.model_path = "models/nomic-embed-text-v2-moe.Q8_0.gguf"
-
-    assert format_query_text("hello", config) == "search_query: hello"
+    assert format_query_text_for_model("hello", NOMIC_V2) == "search_query: hello"
 
 
 def test_does_not_change_non_nomic_v2_text() -> None:
-    config = get_config()
-    config.pipeline.embedding_provider = "ollama"
-    config.ollama.model = "nomic-embed-text"
+    assert format_document_text_for_model("hello", "nomic-embed-text") == "hello"
+    assert format_query_text_for_model("hello", "nomic-embed-text") == "hello"
 
-    assert format_document_text("hello", config) == "hello"
-    assert format_query_text("hello", config) == "hello"
+
+def test_no_double_prefix_document_text() -> None:
+    """Already-prefixed text should not get a second prefix."""
+    assert (
+        format_document_text_for_model("search_document: hello", NOMIC_V2)
+        == "search_document: hello"
+    )
+
+
+def test_no_double_prefix_query_text() -> None:
+    """Already-prefixed query text should not get a second prefix."""
+    assert format_query_text_for_model("search_query: hello", NOMIC_V2) == "search_query: hello"
+
+
+def test_provider_default_format_is_identity() -> None:
+    """The base contract's formatting defaults to identity."""
+
+    class _Stub(EmbeddingProvider):
+        def embed(self, text: str) -> list[float]:
+            return []
+
+        def embed_batch(self, texts: list[str]) -> list[list[float] | None]:
+            return []
+
+        def health_check(self) -> bool:
+            return True
+
+        @property
+        def embedding_dim(self) -> int:
+            return 1
+
+    provider = _Stub()
+    assert provider.format_document("hello") == "hello"
+    assert provider.format_query("hello") == "hello"
+
+
+def test_provider_delegates_nomic_prefix_by_its_own_model() -> None:
+    """A provider applies its model's prefix without any config branching."""
+
+    class _NomicProvider(EmbeddingProvider):
+        name = "stub"
+
+        def __init__(self, model: str) -> None:
+            self._model = model
+
+        def format_document(self, text: str) -> str:
+            return format_document_text_for_model(text, self._model)
+
+        def format_query(self, text: str) -> str:
+            return format_query_text_for_model(text, self._model)
+
+        def embed(self, text: str) -> list[float]:
+            return []
+
+        def embed_batch(self, texts: list[str]) -> list[list[float] | None]:
+            return []
+
+        def health_check(self) -> bool:
+            return True
+
+        @property
+        def embedding_dim(self) -> int:
+            return 1
+
+    provider = _NomicProvider("nomic-embed-text-v2-moe")
+    assert provider.format_document("hello") == "search_document: hello"
+    assert provider.format_query("hello") == "search_query: hello"

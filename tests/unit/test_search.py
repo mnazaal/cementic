@@ -3,7 +3,13 @@
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-from cementic.search import Searcher, SearchResult
+from cementic.search import (
+    Searcher,
+    SearchResult,
+    _distance_operator,
+    _score_from_distance,
+    _searchable_revisions,
+)
 
 
 class TestSearcher:
@@ -24,28 +30,6 @@ class TestSearcher:
 
         def first(self):
             return self.rows[0] if self.rows else None
-
-        def all(self):
-            return self.rows
-
-    class ResultQuery:
-        def __init__(self, rows):
-            self.rows = rows
-
-        def join(self, *args, **kwargs):
-            return self
-
-        def filter(self, *args, **kwargs):
-            return self
-
-        def params(self, *args, **kwargs):
-            return self
-
-        def order_by(self, *args, **kwargs):
-            return self
-
-        def limit(self, *args, **kwargs):
-            return self
 
         def all(self):
             return self.rows
@@ -77,7 +61,7 @@ class TestSearcher:
             chunk_profile_id=2,
             embedding_profile=SimpleNamespace(
                 config_json=(
-                    '{"provider": "ollama", "host": "http://localhost:11434", '
+                    '{"provider": "llama-cpp", '
                     '"model_identifier": "nomic-embed-text", "embedding_dim": 768}'
                 ),
                 model_identifier="nomic-embed-text",
@@ -86,18 +70,23 @@ class TestSearcher:
         )
         revision_query = self.RevisionQuery([building_revision])
 
-        chunk = SimpleNamespace(
-            document=SimpleNamespace(collection="papers", source_path="/tmp/papers.pdf"),
+        row = SimpleNamespace(
+            collection="papers",
+            source_path="/tmp/papers.pdf",
             content="partial chunk text",
             page_start=1,
             page_end=1,
+            distance=0.1,
         )
-        result_query = self.ResultQuery([(chunk, 0.1)])
+        exec_result = MagicMock()
+        exec_result.scalar.return_value = 1  # vector table exists
+        exec_result.__iter__.return_value = iter([row])
 
         mock_session = MagicMock()
         mock_session.__enter__.return_value = mock_session
         mock_session.__exit__.return_value = False
-        mock_session.query.side_effect = [revision_query, result_query]
+        mock_session.query.side_effect = [revision_query]
+        mock_session.execute.return_value = exec_result
         mock_session_factory.return_value = lambda: mock_session
 
         embedding_provider = MagicMock()
@@ -110,6 +99,59 @@ class TestSearcher:
 
         assert results[0]["source_path"] == "/tmp/papers.pdf"
         embedding_provider.embed.assert_called_once()
+
+    @patch("cementic.search.get_engine")
+    @patch("cementic.search.get_session_factory")
+    @patch("cementic.search._create_embedding_provider")
+    def test_search_falls_back_to_building_when_active_query_empty(
+        self, mock_create_embedding_provider, mock_session_factory, mock_get_engine
+    ):
+        building_revision = SimpleNamespace(
+            collection="papers",
+            status="building",
+            embedding_profile_id=1,
+            chunk_profile_id=2,
+            embedding_profile=SimpleNamespace(
+                config_json=(
+                    '{"provider": "llama-cpp", '
+                    '"model_identifier": "nomic-embed-text", "embedding_dim": 768}'
+                ),
+                model_identifier="nomic-embed-text",
+                embedding_dim=768,
+            ),
+        )
+        row = SimpleNamespace(
+            collection="papers",
+            source_path="/tmp/papers.pdf",
+            content="partial chunk text",
+            page_start=1,
+            page_end=1,
+            distance=0.1,
+        )
+        exec_result = MagicMock()
+        exec_result.scalar.return_value = 1
+        exec_result.__iter__.return_value = iter([row])
+
+        # active query → empty, fallback query → building revision
+        active_query = self.RevisionQuery([])
+        fallback_query = self.RevisionQuery([building_revision])
+
+        mock_session = MagicMock()
+        mock_session.__enter__.return_value = mock_session
+        mock_session.__exit__.return_value = False
+        mock_session.query.side_effect = [active_query, fallback_query]
+        mock_session.execute.return_value = exec_result
+        mock_session_factory.return_value = lambda: mock_session
+
+        embedding_provider = MagicMock()
+        embedding_provider.health_check.return_value = True
+        embedding_provider.embed.return_value = [0.1] * 768
+        mock_create_embedding_provider.return_value = embedding_provider
+
+        searcher = Searcher()
+        results = searcher.search("hello", collections=["papers"])
+
+        assert results[0]["source_path"] == "/tmp/papers.pdf"
 
     @patch("cementic.search.get_engine")
     @patch("cementic.search.get_session_factory")
@@ -147,7 +189,7 @@ class TestSearcher:
             chunk_profile_id=2,
             embedding_profile=SimpleNamespace(
                 config_json=(
-                    '{"provider": "ollama", "host": "http://localhost:11434", '
+                    '{"provider": "llama-cpp", '
                     '"model_identifier": "nomic-embed-text", "embedding_dim": 768}'
                 ),
                 model_identifier="nomic-embed-text",
@@ -156,18 +198,23 @@ class TestSearcher:
         )
         revision_query = self.RevisionQuery([active_revision])
 
-        chunk = SimpleNamespace(
-            document=SimpleNamespace(collection="default", source_path="/tmp/test.pdf"),
+        row = SimpleNamespace(
+            collection="default",
+            source_path="/tmp/test.pdf",
             content="chunk text",
             page_start=1,
             page_end=2,
+            distance=0.05,
         )
-        result_query = self.ResultQuery([(chunk, 0.05)])
+        exec_result = MagicMock()
+        exec_result.scalar.return_value = 1
+        exec_result.__iter__.return_value = iter([row])
 
         mock_session = MagicMock()
         mock_session.__enter__.return_value = mock_session
         mock_session.__exit__.return_value = False
-        mock_session.query.side_effect = [revision_query, result_query]
+        mock_session.query.side_effect = [revision_query]
+        mock_session.execute.return_value = exec_result
         mock_session_factory.return_value = lambda: mock_session
 
         embedding_provider = MagicMock()
@@ -179,6 +226,9 @@ class TestSearcher:
         results = searcher.search("hello")
 
         assert results[0]["source_path"] == "/tmp/test.pdf"
+        assert results[0]["score"] == 0.95
+        assert results[0]["distance"] == 0.05
+        assert results[0]["score_kind"] == "cosine_similarity"
         embedding_provider.embed.assert_called_once()
 
     def test_search_result_type(self):
@@ -187,12 +237,88 @@ class TestSearcher:
             source_path="/test.pdf",
             content="test content",
             score=0.95,
+            distance=0.05,
+            score_kind="cosine_similarity",
             page_start=1,
             page_end=2,
         )
 
         assert result["collection"] == "default"
         assert result["source_path"] == "/test.pdf"
+
+    def test_score_from_distance_has_metric_specific_semantics(self):
+        assert _score_from_distance("cosine", 0.25) == (0.75, "cosine_similarity")
+        assert _score_from_distance("l2", 2.5) == (-2.5, "negative_l2_distance")
+        assert _score_from_distance("ip", -3.0) == (3.0, "inner_product")
+
+    def test_distance_operator_matches_metric(self):
+        assert _distance_operator("cosine") == "<=>"
+        assert _distance_operator("l2") == "<->"
+        assert _distance_operator("ip") == "<#>"
+
+    def test_searchable_revisions_prefers_active_per_collection(self):
+        building = SimpleNamespace(collection="papers", status="building", id=1)
+        active = SimpleNamespace(collection="papers", status="active", id=2)
+        ready = SimpleNamespace(collection="notes", status="ready", id=3)
+
+        revisions = _searchable_revisions([building, active, ready])
+
+        assert revisions == [active, ready]
+
+    def test_searchable_revisions_keeps_building_only_collection_with_active_other(self):
+        """Revision selection is per collection, not all-active globally."""
+        active = SimpleNamespace(collection="papers", status="active", id=2)
+        building_only = SimpleNamespace(collection="notes", status="building", id=3)
+
+        revisions = _searchable_revisions([active, building_only])
+
+        assert revisions == [active, building_only]
+
+    def test_searchable_revisions_prefers_ready_over_building(self):
+        building = SimpleNamespace(collection="papers", status="building", id=1)
+        ready = SimpleNamespace(collection="papers", status="ready", id=2)
+
+        revisions = _searchable_revisions([building, ready])
+
+        assert revisions == [ready]
+
+    @patch("cementic.search.get_engine")
+    @patch("cementic.search.get_session_factory")
+    @patch("cementic.search._create_embedding_provider")
+    def test_search_rejects_unhealthy_embedding_provider(
+        self, mock_create_embedding_provider, mock_session_factory, mock_get_engine
+    ):
+        active_revision = SimpleNamespace(
+            collection="default",
+            status="active",
+            embedding_profile_id=1,
+            chunk_profile_id=2,
+            embedding_profile=SimpleNamespace(
+                config_json=(
+                    '{"provider": "llama-cpp", '
+                    '"model_identifier": "nomic-embed-text", "embedding_dim": 768}'
+                ),
+                model_identifier="nomic-embed-text",
+                embedding_dim=768,
+            ),
+        )
+        mock_session = MagicMock()
+        mock_session.__enter__.return_value = mock_session
+        mock_session.__exit__.return_value = False
+        mock_session.query.return_value = self.RevisionQuery([active_revision])
+        mock_session_factory.return_value = lambda: mock_session
+
+        embedding_provider = MagicMock()
+        embedding_provider.health_check.return_value = False
+        mock_create_embedding_provider.return_value = embedding_provider
+
+        searcher = Searcher()
+        try:
+            searcher.search("hello")
+        except RuntimeError as error:
+            assert "not healthy" in str(error)
+        else:
+            raise AssertionError("Expected RuntimeError")
 
     @patch("cementic.search.get_engine")
     @patch("cementic.search.get_session_factory")
@@ -206,7 +332,7 @@ class TestSearcher:
             chunk_profile_id=2,
             embedding_profile=SimpleNamespace(
                 config_json=(
-                    '{"provider": "ollama", "host": "http://localhost:11434", '
+                    '{"provider": "llama-cpp", '
                     '"model_identifier": "nomic-embed-text", "embedding_dim": 768}'
                 ),
                 model_identifier="nomic-embed-text",
@@ -221,12 +347,16 @@ class TestSearcher:
             embedding_profile=active_default.embedding_profile,
         )
         active_query = self.RevisionQuery([active_default, active_test])
-        result_query = self.ResultQuery([])
+
+        exec_result = MagicMock()
+        exec_result.scalar.return_value = 1
+        exec_result.__iter__.return_value = iter([])
 
         mock_session = MagicMock()
         mock_session.__enter__.return_value = mock_session
         mock_session.__exit__.return_value = False
-        mock_session.query.side_effect = [active_query, result_query, result_query]
+        mock_session.query.side_effect = [active_query]
+        mock_session.execute.return_value = exec_result
         mock_session_factory.return_value = lambda: mock_session
 
         with patch("cementic.search._create_embedding_provider") as mock_create_provider:
@@ -238,21 +368,6 @@ class TestSearcher:
             searcher = Searcher()
             searcher.search("bayes")
 
-        assert mock_session.query.call_count == 3
-
-    @patch("cementic.search.get_llama_cpp_runtime_client")
-    def test_create_provider_uses_llama_runtime_client(self, mock_runtime_client):
-        from cementic.config import Config
-        from cementic.search import _create_embedding_provider
-
-        config = Config()
-        _create_embedding_provider(
-            (
-                '{"provider": "llama-cpp", "model_identifier": "model.gguf", '
-                '"n_ctx": 512, "n_gpu_layers": 0, "embedding_dim": 768, '
-                '"verbose": false}'
-            ),
-            config,
-        )
-
-        mock_runtime_client.assert_called_once_with(config)
+        # Only the active-revisions query runs; building revisions are not loaded,
+        # and the vector search now goes through session.execute (not .query).
+        assert mock_session.query.call_count == 1

@@ -1,7 +1,8 @@
 """Text chunking using tiktoken."""
 
+from __future__ import annotations
+
 from dataclasses import dataclass
-from typing import List, Optional
 
 import tiktoken
 
@@ -12,8 +13,8 @@ class TextChunk:
 
     content: str
     chunk_index: int
-    page_start: Optional[int] = None
-    page_end: Optional[int] = None
+    page_start: int | None = None
+    page_end: int | None = None
 
 
 def chunk_text(
@@ -21,7 +22,7 @@ def chunk_text(
     chunk_size: int = 512,
     chunk_overlap: int = 128,
     model: str = "cl100k_base",
-) -> List[TextChunk]:
+) -> list[TextChunk]:
     """Chunk text into overlapping segments using tiktoken.
 
     Args:
@@ -33,10 +34,21 @@ def chunk_text(
     Returns:
         List of TextChunk objects
     """
+    if chunk_size <= 0:
+        raise ValueError("chunk_size must be positive")
+    if chunk_overlap < 0:
+        raise ValueError("chunk_overlap must be non-negative")
+    if chunk_overlap >= chunk_size:
+        raise ValueError("chunk_overlap must be smaller than chunk_size")
+
     encoding = tiktoken.get_encoding(model)
     tokens = encoding.encode(text)
 
-    chunks = []
+    chunks: list[TextChunk] = []
+
+    # Early return for empty input
+    if len(tokens) == 0:
+        return chunks
     start = 0
     chunk_index = 0
 
@@ -58,9 +70,5 @@ def chunk_text(
         # Move to next chunk with overlap
         start += chunk_size - chunk_overlap
         chunk_index += 1
-
-        # Avoid infinite loop if chunk_size <= overlap
-        if chunk_size <= chunk_overlap:
-            break
 
     return chunks

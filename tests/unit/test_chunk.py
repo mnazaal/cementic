@@ -1,5 +1,5 @@
 """Tests for text chunking module."""
-
+import pytest
 
 from cementic.chunk import TextChunk, chunk_text
 
@@ -44,13 +44,13 @@ class TestChunkText:
 
     def test_chunk_empty_text(self):
         """Test chunking empty text."""
-        chunks = chunk_text("", chunk_size=100)
+        chunks = chunk_text("", chunk_size=100, chunk_overlap=0)
         assert len(chunks) == 0
 
     def test_chunk_with_model_parameter(self):
         """Test chunking with specific model encoding."""
         text = "Hello world this is a test"
-        chunks = chunk_text(text, chunk_size=10, model="cl100k_base")
+        chunks = chunk_text(text, chunk_size=10, chunk_overlap=2, model="cl100k_base")
 
         assert len(chunks) >= 1
         assert all(isinstance(chunk, TextChunk) for chunk in chunks)
@@ -70,13 +70,20 @@ class TestChunkText:
         assert chunks[0].chunk_index == 0
         assert chunks[1].chunk_index == 1
 
-    def test_chunk_overlap_larger_than_size(self):
-        """Test behavior when overlap >= chunk size."""
-        text = "a b c d e f g h i j"
-        chunks = chunk_text(text, chunk_size=5, chunk_overlap=5)
+    def test_chunk_overlap_must_be_smaller_than_size(self):
+        """Overlap equal to chunk size is invalid rather than silently degraded."""
+        with pytest.raises(ValueError, match="chunk_overlap must be smaller"):
+            chunk_text("a b c", chunk_size=5, chunk_overlap=5)
 
-        # Should not hang or error, should create at least one chunk
-        assert len(chunks) >= 1
+    def test_chunk_size_must_be_positive(self):
+        """Zero or negative chunk sizes are invalid."""
+        with pytest.raises(ValueError, match="chunk_size must be positive"):
+            chunk_text("a b c", chunk_size=0, chunk_overlap=0)
+
+    def test_chunk_overlap_must_be_non_negative(self):
+        """Negative overlap is invalid."""
+        with pytest.raises(ValueError, match="chunk_overlap must be non-negative"):
+            chunk_text("a b c", chunk_size=5, chunk_overlap=-1)
 
 
 class TestTextChunk:

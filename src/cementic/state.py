@@ -5,7 +5,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 UNSET = object()
 
@@ -26,9 +26,9 @@ class WorkerState:
     watched_directories: list[str] = field(default_factory=list)
     processed_count: int = 0
     failed_count: int = 0
-    current_file: Optional[str] = None
+    current_file: str | None = None
     last_updated: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
-    pid: Optional[int] = None
+    pid: int | None = None
 
     def to_dict(self) -> dict[str, object]:
         """Convert to dictionary."""
@@ -40,13 +40,13 @@ class WorkerState:
         normalized = dict(data)
         raw_daemon_state = normalized.get("daemon_state", DaemonState.STOPPED)
 
-        if isinstance(raw_daemon_state, str):
+        if isinstance(raw_daemon_state, DaemonState):
+            daemon_state_value = raw_daemon_state
+        elif isinstance(raw_daemon_state, str):
             try:
-                daemon_state_value: DaemonState = DaemonState(raw_daemon_state)
+                daemon_state_value = DaemonState(raw_daemon_state)
             except ValueError:
                 daemon_state_value = DaemonState.STOPPED
-        elif isinstance(raw_daemon_state, DaemonState):
-            daemon_state_value = raw_daemon_state
         else:
             daemon_state_value = DaemonState.STOPPED
 
@@ -84,7 +84,7 @@ class WorkerState:
 class StateManager:
     """Manages persistent state for pause/resume functionality."""
 
-    def __init__(self, state_path: Optional[Path]) -> None:
+    def __init__(self, state_path: Path | None) -> None:
         """Initialize state manager."""
         if state_path is None:
             raise ValueError("state_path cannot be None")

@@ -7,10 +7,25 @@ from typing import Generator
 
 import pytest
 
-from cementic.embedding_providers.base import EmbeddingProvider
+from cementic.embedding_provider import EmbeddingProvider
 
 # Ensure DB password env var is set for all tests
 os.environ.setdefault("CEMENTIC_DB_PASSWORD", "test-password")
+
+
+@pytest.fixture(autouse=True)
+def _isolate_user_config(
+    monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory
+) -> None:
+    """Keep tests hermetic: never pick up a developer's real config file.
+
+    Clears CEMENTIC_CONFIG and points the user-config dir at an empty temp dir,
+    so resolve_config_path() returns None unless a test opts in. Tests that
+    exercise the config file set CEMENTIC_CONFIG themselves.
+    """
+    monkeypatch.delenv("CEMENTIC_CONFIG", raising=False)
+    empty = tmp_path_factory.mktemp("cementic-no-user-config")
+    monkeypatch.setattr("cementic.config.user_config_dir", lambda *a, **k: str(empty))
 
 
 @pytest.fixture
@@ -88,24 +103,16 @@ def sample_config_dict(temp_dir: Path) -> dict:
             "embedding_dim": 768,
             "verbose": False,
         },
-        "ollama": {
-            "host": "http://localhost:11434",
-            "model": "nomic-embed-text",
-            "embedding_dim": 768,
-        },
         "pipeline": {
             "chunk_size": 512,
             "chunk_overlap": 128,
             "embedding_provider": "llama-cpp",
         },
         "source_watcher": {
-            "pid_file": str(temp_dir / "source_watcher.pid"),
             "log_file": str(temp_dir / "source_watcher.log"),
         },
         "pipeline_worker": {
-            "pid_file": str(temp_dir / "pipeline_worker.pid"),
             "log_file": str(temp_dir / "pipeline_worker.log"),
-            "max_workers": 2,
             "batch_size": 16,
             "poll_interval": 0.1,
         },

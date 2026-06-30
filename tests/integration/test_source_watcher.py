@@ -1,0 +1,208 @@
+"""Integration tests for source watcher thread lifecycle."""
+
+import os
+import signal
+import time
+from pathlib import Path
+from unittest.mock import patch
+
+import pytest
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+
+from cementic.config import Config
+from cementic.db import Base, SourceDocument
+from cementic.source_watcher import DocumentEventHandler, SourceWatcher
+
+
+@pytest.fixture
+def watcher_config(temp_dir: Path) -> Config:
+    """Create watcher config with temp files."""
+    config = Config()
+    config.source_watcher.log_file = temp_dir / "watcher.log"
+    config.source_watcher.state_path = temp_dir / "watcher_state.json"
+    return config
+
+
+@pytest.fixture
+def watcher_db(temp_dir: Path):
+    """Create SQLite engine + tables for watcher tests."""
+    db_path = temp_dir / "watcher_test.db"
+    engine = create_engine(f"sqlite:///{db_path}")
+    Base.metadata.create_all(engine)
+    session_factory = sessionmaker(bind=engine)
+    return engine, session_factory, db_path
+
+
+class TestSourceWatcherLifecycle:
+    """Tests for SourceWatcher thread lifecycle."""
+
+    def test_init(self, watcher_config: Config) -> None:
+        sw = SourceWatcher(watcher_config)
+        assert sw.config is watcher_config
+        assert sw.watcher is None
+        assert sw._event_handler is None
+        assert not sw._shutdown_event.is_set()
+
+    def test_setup_logging_requires_log_file(self, temp_dir: Path) -> None:
+        config = Config()
+        config.source_watcher.log_file = temp_dir / "watcher.log"
+        config.source_watcher.state_path = temp_dir / "state.json"
+        sw = SourceWatcher(config)
+        sw.config.source_watcher.log_file = None
+        with pytest.raises(RuntimeError, match="log file"):
+            sw._setup_logging()
+
+    def test_setup_logging_creates_handler(self, watcher_config: Config) -> None:
+        sw = SourceWatcher(watcher_config)
+        logger = sw._setup_logging()
+        assert logger.name == "cementic.source_watcher"
+
+    def test_register_document_sqlite(
+        self, watcher_config: Config, watcher_db, temp_dir: Path
+    ) -> None:
+        """_register_document writes SourceDocument to SQLite DB."""
+        engine, session_factory, db_path = watcher_db
+        sw = SourceWatcher(watcher_config)
+        sw.Session = session_factory
+
+        # Create a minimal PDF file
+        pdf_path = temp_dir / "test_watcher.pdf"
+        pdf_path.write_text("fake pdf content")
+
+        sw._register_document(str(pdf_path))
+
+        with sw.Session() as session:
+            doc = session.query(SourceDocument).first()
+            assert doc is not None
+            assert doc.source_path == str(pdf_path)
+            assert doc.collection == "default"
+            assert doc.status == "pending"
+
+    def test_register_document_duplicate_updates(
+        self, watcher_config: Config, watcher_db, temp_dir: Path
+    ) -> None:
+        """Re-registering same PDF updates existing document."""
+        engine, session_factory, db_path = watcher_db
+        sw = SourceWatcher(watcher_config)
+        sw.Session = session_factory
+
+        pdf_path = temp_dir / "dup.pdf"
+        pdf_path.write_text("content v1")
+
+        sw._register_document(str(pdf_path))
+
+        # Update content and re-register
+        pdf_path.write_text("content v2")
+        sw._register_document(str(pdf_path))
+
+        with sw.Session() as session:
+            docs = session.query(SourceDocument).all()
+            assert len(docs) == 1  # Still one document
+            assert docs[0].status == "pending"
+
+    def test_start_already_running_detected(
+        self, watcher_config: Config, watcher_db, temp_dir: Path
+    ) -> None:
+        """start() detects already-running watcher via state file."""
+        engine, session_factory, db_path = watcher_db
+
+        # Set up state file with running status and a real PID
+        from cementic.state import DaemonState
+        sw1 = SourceWatcher(watcher_config)
+        sw1.state_manager.update(
+            daemon_state=DaemonState.RUNNING,
+            pid=os.getpid(),  # our own PID is always running
+        )
+
+        sw = SourceWatcher(watcher_config)
+        # Patch _start_watcher so it doesn't actually start a watchdog observer
+        with patch.object(sw, "_start_watcher"):
+            sw.start([str(temp_dir)], collection="test")
+        # Should have detected running PID and returned early
+        assert sw.watcher is None
+
+    def test_stop_cleans_up(self, watcher_config: Config) -> None:
+        """stop() sets shutdown event and writes STOPPED state."""
+        sw = SourceWatcher(watcher_config)
+        sw.stop()
+        assert sw._shutdown_event.is_set()
+        state = sw.state_manager.load()
+        from cementic.state import DaemonState
+        assert state.daemon_state == DaemonState.STOPPED
+
+    def test_handle_shutdown(self, watcher_config: Config) -> None:
+        """_handle_shutdown calls stop()."""
+        sw = SourceWatcher(watcher_config)
+        called = []
+        sw.stop = lambda: called.append(True)  # type: ignore[method-assign]
+        sw._handle_shutdown(signal.SIGTERM, None)
+        assert len(called) == 1
+
+
+class TestDocumentEventHandler:
+    """Tests for DocumentEventHandler debounce and file detection."""
+
+    def test_should_process_pdf(self) -> None:
+        callback_called = []
+        handler = DocumentEventHandler(lambda p: callback_called.append(p))
+        assert handler._should_process("test.pdf") is True
+        assert handler._should_process("test.PDF") is True
+        assert handler._should_process("test.docx") is False
+        assert handler._should_process("noext") is False
+
+    def test_debounced_process_fires(self) -> None:
+        callback_called = []
+        handler = DocumentEventHandler(lambda p: callback_called.append(p))
+        handler._debounce_seconds = 0.01
+
+        handler._debounced_process("/tmp/test.pdf")
+
+        # Wait briefly for timer to fire
+        time.sleep(0.1)
+        assert len(callback_called) == 1
+        assert callback_called[0] == "/tmp/test.pdf"
+
+    def test_debounced_cancel_replaced(self) -> None:
+        """Second trigger on same path cancels first timer."""
+        callback_called = []
+        handler = DocumentEventHandler(lambda p: callback_called.append(p))
+        handler._debounce_seconds = 0.03
+
+        handler._debounced_process("/tmp/test.pdf")
+        handler._debounced_process("/tmp/test.pdf")  # Same path → cancels first
+
+        time.sleep(0.2)
+        # Only one callback should have fired (first was cancelled)
+        assert len(callback_called) == 1
+
+    def test_cancel_all_clears_timers(self) -> None:
+        callback_called = []
+        handler = DocumentEventHandler(lambda p: callback_called.append(p))
+        handler._debounce_seconds = 0.05
+
+        handler._debounced_process("/tmp/test.pdf")
+        handler.cancel_all()
+
+        time.sleep(0.1)
+        assert len(callback_called) == 0
+        assert len(handler._timers) == 0
+
+    def test_on_created_non_pdf_ignored(self) -> None:
+        callback_called = []
+        handler = DocumentEventHandler(lambda p: callback_called.append(p))
+        from watchdog.events import FileCreatedEvent
+        event = FileCreatedEvent("/tmp/test.docx")
+        handler.on_created(event)
+        # No callback should have fired for non-PDF
+        assert len(callback_called) == 0
+
+    def test_on_modified_debounces(self) -> None:
+        callback_called = []
+        handler = DocumentEventHandler(lambda p: callback_called.append(p))
+        handler._debounce_seconds = 0.01
+        from watchdog.events import FileModifiedEvent
+        event = FileModifiedEvent("/tmp/test.pdf")
+        handler.on_modified(event)
+        time.sleep(0.1)
+        assert len(callback_called) == 1

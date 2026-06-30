@@ -3,7 +3,96 @@
 import os
 from unittest.mock import patch
 
-from cementic.config import Config, DatabaseConfig, LlamaCppConfig, get_config
+import pytest
+
+from cementic.config import (
+    Config,
+    DatabaseConfig,
+    LlamaCppConfig,
+    get_config,
+    load_config_file,
+    resolve_config_path,
+)
+
+
+class TestConfigFile:
+    """TOML config file: precedence (defaults < file < env < init) and resolution."""
+
+    def test_file_values_applied(self, tmp_path, monkeypatch) -> None:
+        cfg = tmp_path / "cementic.toml"
+        cfg.write_text(
+            '[database]\nhost = "file-host"\nport = 6000\n[pipeline]\nchunk_size = 999\n'
+        )
+        monkeypatch.setenv("CEMENTIC_CONFIG", str(cfg))
+        monkeypatch.delenv("CEMENTIC_DB_HOST", raising=False)
+
+        config = Config()
+        assert config.database.host == "file-host"
+        assert config.database.port == 6000
+        assert config.pipeline.chunk_size == 999
+
+    def test_env_overrides_file(self, tmp_path, monkeypatch) -> None:
+        cfg = tmp_path / "cementic.toml"
+        cfg.write_text('[database]\nhost = "file-host"\nport = 6000\n')
+        monkeypatch.setenv("CEMENTIC_CONFIG", str(cfg))
+        monkeypatch.setenv("CEMENTIC_DB_HOST", "env-host")
+
+        config = Config()
+        assert config.database.host == "env-host"  # env wins over file
+        assert config.database.port == 6000  # file still fills the gap
+
+    def test_init_kwargs_override_file(self, tmp_path, monkeypatch) -> None:
+        cfg = tmp_path / "cementic.toml"
+        cfg.write_text("[pipeline]\nchunk_size = 999\n")
+        monkeypatch.setenv("CEMENTIC_CONFIG", str(cfg))
+
+        config = Config(pipeline={"chunk_size": 256})
+        assert config.pipeline.chunk_size == 256
+
+    def test_defaults_when_no_file(self, monkeypatch) -> None:
+        # The autouse fixture already ensures no config file is found.
+        monkeypatch.delenv("CEMENTIC_DB_HOST", raising=False)
+        config = Config()
+        assert config.database.host == "localhost"
+        assert config.pipeline.chunk_size == 512
+
+    def test_resolve_path_prefers_explicit_env(self, tmp_path, monkeypatch) -> None:
+        path = tmp_path / "explicit.toml"
+        path.write_text("")
+        monkeypatch.setenv("CEMENTIC_CONFIG", str(path))
+        assert resolve_config_path() == path
+
+    def test_resolve_path_project_local(self, tmp_path, monkeypatch) -> None:
+        monkeypatch.delenv("CEMENTIC_CONFIG", raising=False)
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "cementic.toml").write_text("")
+        assert resolve_config_path() == tmp_path / "cementic.toml"
+
+    def test_resolve_path_none_when_absent(self, tmp_path, monkeypatch) -> None:
+        monkeypatch.delenv("CEMENTIC_CONFIG", raising=False)
+        monkeypatch.chdir(tmp_path)
+        assert resolve_config_path() is None
+
+    def test_invalid_toml_is_ignored(self, tmp_path, monkeypatch) -> None:
+        bad = tmp_path / "bad.toml"
+        bad.write_text("this is := not valid toml")
+        monkeypatch.setenv("CEMENTIC_CONFIG", str(bad))
+        assert load_config_file() == {}
+        # Config falls back to defaults rather than crashing.
+        assert Config().database.host == "localhost"
+
+    def test_index_section_defaults(self) -> None:
+        config = Config()
+        assert config.index.method == "hnsw"
+        assert config.index.hnsw_m == 16
+
+    def test_index_section_from_file(self, tmp_path, monkeypatch) -> None:
+        cfg = tmp_path / "cementic.toml"
+        cfg.write_text('[index]\nmethod = "diskann"\ndiskann_num_neighbors = 64\n')
+        monkeypatch.setenv("CEMENTIC_CONFIG", str(cfg))
+        config = Config()
+        assert config.index.method == "diskann"
+        assert config.index.diskann_num_neighbors == 64
 
 
 class TestDatabaseConfig:
@@ -11,12 +100,13 @@ class TestDatabaseConfig:
 
     def test_default_values(self):
         """Test default database configuration."""
-        config = DatabaseConfig(password="cementic")
+        with patch.dict(os.environ, {}, clear=True):
+            config = DatabaseConfig()
         assert config.host == "localhost"
         assert config.port == 5432
         assert config.name == "cementic"
         assert config.user == "cementic"
-        assert config.password == "cementic"
+        assert config.password.get_secret_value() == "cementic"
 
     def test_database_url(self):
         """Test database URL generation."""
@@ -24,7 +114,7 @@ class TestDatabaseConfig:
             host="testhost", port=5433, name="testdb", user="testuser", password="testpass"
         )
         expected_url = "postgresql://testuser:testpass@testhost:5433/testdb"
-        assert config.url == expected_url
+        assert config.url.render_as_string(hide_password=False) == expected_url
 
     def test_environment_override(self):
         """Test environment variable override."""
@@ -39,6 +129,7 @@ class TestDatabaseConfig:
             config = DatabaseConfig()
             assert config.host == "envhost"
             assert config.port == 5434
+            assert config.password.get_secret_value() == "test-password"
 
 
 class TestLlamaCppConfig:
@@ -78,7 +169,6 @@ class TestConfig:
         config = Config()
         assert hasattr(config, "database")
         assert hasattr(config, "llama_cpp")
-        assert hasattr(config, "ollama")
         assert hasattr(config, "pipeline")
         assert hasattr(config, "source_watcher")
         assert hasattr(config, "pipeline_worker")
@@ -88,29 +178,19 @@ class TestConfig:
         config = Config()
         assert config.extraction.use_ocr is False
 
-    def test_bootstrap_defaults_include_vectorscale_image(self):
-        """Postgres bootstrap defaults should target the vectorscale image."""
+    def test_bootstrap_defaults_are_container_free(self):
+        """Bootstrap config carries only model-download settings, no containers."""
         config = Config()
-        assert config.bootstrap.auto_build_postgres_image is True
-        assert (
-            config.bootstrap.postgres_image
-            == "localhost/cementic-postgres-vectorscale:pg18.3-v0.9.0"
-        )
-        assert config.bootstrap.postgres_base_image == "docker.io/postgres:18.3-bookworm"
-        assert config.bootstrap.pgvectorscale_version == "0.9.0"
-
-    def test_bootstrap_defaults_pin_ollama_image(self):
-        """Ollama bootstrap defaults should use a pinned image tag."""
-        config = Config()
-        assert config.bootstrap.ollama_image == "docker.io/ollama/ollama:0.20.6"
-        assert not config.bootstrap.ollama_image.endswith(":latest")
+        assert config.bootstrap.auto_download_llama_model is True
+        assert not hasattr(config.bootstrap, "postgres_image")
+        assert not hasattr(config.bootstrap, "auto_start_infra")
 
     def test_default_paths_set(self, temp_dir):
         """Test that default paths are set."""
         with patch("cementic.config.user_data_dir", return_value=str(temp_dir)):
             config = Config()
-            assert config.source_watcher.pid_file is not None
-            assert config.pipeline_worker.pid_file is not None
+            assert config.source_watcher.log_file is not None
+            assert config.pipeline_worker.log_file is not None
             assert config.llama_cpp.daemon_pid_file is not None
             assert config.llama_cpp.daemon_log_file is not None
 
@@ -122,6 +202,26 @@ class TestConfig:
     def test_embedding_provider_selection(self):
         """Test embedding provider configuration."""
         config = Config()
-        assert config.pipeline.embedding_provider in ["llama-cpp", "ollama"]
+        assert config.pipeline.embedding_provider == "llama-cpp"
         assert config.pipeline.chunk_size == 512
         assert config.pipeline.chunk_overlap == 128
+
+    def test_chunk_overlap_must_be_smaller_than_size(self):
+        """Pipeline config rejects an overlap that cannot make progress."""
+        with pytest.raises(ValueError, match="chunk_overlap must be smaller"):
+            Config(pipeline={"chunk_size": 128, "chunk_overlap": 128})
+
+    def test_chunk_size_must_be_positive(self):
+        """Pipeline config rejects non-positive chunk sizes."""
+        with pytest.raises(ValueError, match="greater than or equal to 1"):
+            Config(pipeline={"chunk_size": 0})
+
+    def test_index_method_must_be_supported(self):
+        """Index config rejects unknown ANN methods."""
+        with pytest.raises(ValueError, match="hnsw or diskann"):
+            Config(index={"method": "flat"})
+
+    def test_index_params_must_be_positive(self):
+        """Index config rejects non-positive build/query parameters."""
+        with pytest.raises(ValueError, match="greater than or equal to 1"):
+            Config(index={"hnsw_m": 0})

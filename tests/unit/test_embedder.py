@@ -11,28 +11,26 @@ class TestPipelineWorker:
     """Test pipeline worker functionality."""
 
     def test_create_embedding_client_llama_cpp(self):
-        with patch(
-            "cementic.pipeline_worker.get_embedding_provider"
-        ) as mock_get_embedding_provider:
+        with patch("cementic.pipeline_worker.create_provider") as mock_create:
             daemon = PipelineWorker()
             daemon.config.pipeline.embedding_provider = "llama-cpp"
             daemon._create_embedding_client()
-            assert mock_get_embedding_provider.call_args[0][0] == "llama-cpp"
+            spec, config = mock_create.call_args[0]
+            assert config is daemon.config
+            assert spec.provider == "llama-cpp"
 
-    def test_create_embedding_client_ollama(self):
-        with patch(
-            "cementic.pipeline_worker.get_embedding_provider"
-        ) as mock_get_embedding_provider:
-            daemon = PipelineWorker()
-            daemon.config.pipeline.embedding_provider = "ollama"
-            daemon._create_embedding_client()
-            assert mock_get_embedding_provider.call_args[0][0] == "ollama"
-
+    @patch("cementic.pipeline_worker.requeue_interrupted_artifacts")
+    @patch("cementic.pipeline_worker.get_target_revision")
     @patch("cementic.pipeline_worker.create_tables")
     @patch("cementic.pipeline_worker.get_session_factory")
     @patch("cementic.pipeline_worker.get_engine")
     def test_start_sets_running_state(
-        self, mock_get_engine, mock_session_factory, mock_create_tables
+        self,
+        mock_get_engine,
+        mock_session_factory,
+        mock_create_tables,
+        mock_get_target,
+        mock_requeue,
     ):
         class StopLoopError(Exception):
             pass
@@ -89,9 +87,11 @@ class TestPipelineWorker:
         daemon.Session = MagicMock(return_value=mock_session)
 
         with patch.object(daemon, "_revision_complete", return_value=True):
-            with patch("cementic.pipeline_worker.mark_revision_ready") as mock_mark_ready:
-                daemon._mark_revision_ready_if_complete(3)
+            with patch("cementic.pipeline_worker.ensure_revision_ann_index") as mock_ensure_index:
+                with patch("cementic.pipeline_worker.mark_revision_ready") as mock_mark_ready:
+                    daemon._mark_revision_ready_if_complete(3)
 
+        mock_ensure_index.assert_called_once_with(mock_session, revision, daemon.config)
         mock_mark_ready.assert_called_once_with(mock_session, revision)
         mock_session.commit.assert_called_once()
 

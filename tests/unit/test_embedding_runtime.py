@@ -1,15 +1,273 @@
 """Tests for persistent llama.cpp runtime helpers."""
 
-from unittest.mock import patch
+import json
+from unittest.mock import MagicMock, patch
 
-from cementic.config import Config
-from cementic.embedding_runtime import get_llama_cpp_runtime_client, llama_cpp_runtime_fingerprint
+import pytest
+import requests
+
+from cementic.config import Config, resolve_llama_model_path
+from cementic.embedding_runtime import (
+    EmbeddingRuntimeSpec,
+    RemoteEmbeddingClient,
+    _read_daemon_pid_file,
+    _restart_llama_cpp_daemon_if_needed,
+    _start_llama_cpp_daemon,
+    _wait_for_daemon_ready,
+    create_provider,
+    get_llama_cpp_runtime_client,
+    llama_cpp_runtime_fingerprint,
+    llama_daemon_status,
+    runtime_spec_from_config,
+    runtime_spec_from_profile_json,
+    stop_llama_cpp_runtime,
+)
+
+
+class TestRemoteEmbeddingClient:
+    """Tests for RemoteEmbeddingClient."""
+
+    def test_embedding_dim_property(self) -> None:
+        client = RemoteEmbeddingClient(
+            host="localhost", port=8081, embedding_dim=384, expected_fingerprint="abc"
+        )
+        assert client.embedding_dim == 384
+
+    def test_base_url(self) -> None:
+        client = RemoteEmbeddingClient(
+            host="localhost", port=8081, embedding_dim=384, expected_fingerprint="abc"
+        )
+        assert client.base_url == "http://localhost:8081"
+
+    @patch("cementic.embedding_runtime.requests.get")
+    def test_health_check_matches_served_model(self, mock_get) -> None:
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {"data": [{"id": "abc"}]}
+        mock_get.return_value = mock_resp
+
+        client = RemoteEmbeddingClient(
+            host="localhost", port=8081, embedding_dim=384, expected_fingerprint="abc"
+        )
+        assert client.health_check() is True
+
+    @patch("cementic.embedding_runtime.requests.get")
+    def test_health_check_mismatch(self, mock_get) -> None:
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {"data": [{"id": "wrong"}]}
+        mock_get.return_value = mock_resp
+
+        client = RemoteEmbeddingClient(
+            host="localhost", port=8081, embedding_dim=384, expected_fingerprint="abc"
+        )
+        assert client.health_check() is False
+
+    @patch("cementic.embedding_runtime.requests.get", side_effect=requests.ConnectionError)
+    def test_health_check_connection_error(self, mock_get) -> None:
+        client = RemoteEmbeddingClient(
+            host="localhost", port=8081, embedding_dim=384, expected_fingerprint="abc"
+        )
+        assert client.health_check() is False
+
+    @patch("cementic.embedding_runtime.requests.post")
+    def test_embed_single(self, mock_post) -> None:
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {"data": [{"index": 0, "embedding": [0.1, 0.2, 0.3]}]}
+        mock_post.return_value = mock_resp
+
+        client = RemoteEmbeddingClient(
+            host="localhost", port=8081, embedding_dim=3, expected_fingerprint="abc"
+        )
+        result = client.embed("hello")
+        assert result == [0.1, 0.2, 0.3]
+
+    @patch("cementic.embedding_runtime.requests.post")
+    def test_embed_batch_preserves_input_order(self, mock_post) -> None:
+        # Server may return rows out of order; they must be sorted by index.
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {
+            "data": [
+                {"index": 1, "embedding": [3.0, 4.0]},
+                {"index": 0, "embedding": [1.0, 2.0]},
+            ]
+        }
+        mock_post.return_value = mock_resp
+
+        client = RemoteEmbeddingClient(
+            host="localhost", port=8081, embedding_dim=2, expected_fingerprint="abc"
+        )
+        result = client.embed_batch(["a", "b"])
+        assert result == [[1.0, 2.0], [3.0, 4.0]]
+
+    @patch("cementic.embedding_runtime.requests.post")
+    def test_embed_batch_count_mismatch_raises(self, mock_post) -> None:
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {"data": [{"index": 0, "embedding": [1.0, 2.0]}]}
+        mock_post.return_value = mock_resp
+
+        client = RemoteEmbeddingClient(
+            host="localhost", port=8081, embedding_dim=2, expected_fingerprint="abc"
+        )
+        with pytest.raises(ValueError, match="does not match input count"):
+            client.embed_batch(["a", "b"])
+
+    def test_embed_batch_empty(self) -> None:
+        client = RemoteEmbeddingClient(
+            host="localhost", port=8081, embedding_dim=2, expected_fingerprint="abc"
+        )
+        assert client.embed_batch([]) == []
+
+    @patch("cementic.embedding_runtime.requests.post")
+    def test_describe_probes_live_dim_once(self, mock_post) -> None:
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {"data": [{"index": 0, "embedding": [0.0, 0.0, 0.0]}]}
+        mock_post.return_value = mock_resp
+
+        client = RemoteEmbeddingClient(
+            host="localhost", port=8081, embedding_dim=768, expected_fingerprint="abc"
+        )
+        facts = client.describe()
+        assert facts.embedding_dim == 3  # probed, not the configured 768
+        assert facts.name == "llama-cpp"
+        # Cached: a second describe() does not probe again.
+        client.describe()
+        assert mock_post.call_count == 1
+
+    @patch("cementic.embedding_runtime.requests.post", side_effect=requests.ConnectionError)
+    def test_describe_falls_back_to_configured_dim(self, mock_post) -> None:
+        client = RemoteEmbeddingClient(
+            host="localhost", port=8081, embedding_dim=768, expected_fingerprint="abc"
+        )
+        assert client.describe().embedding_dim == 768
+
+
+class TestDaemonLifecycle:
+    """Tests for daemon lifecycle helpers."""
+
+    def test_restart_no_pid_file(self, temp_dir) -> None:
+        config = Config()
+        config.llama_cpp.daemon_pid_file = temp_dir / "nonexistent.pid"
+        # Should not raise
+        _restart_llama_cpp_daemon_if_needed(config)
+
+    def test_restart_invalid_pid_content(self, temp_dir) -> None:
+        pid_file = temp_dir / "daemon.pid"
+        pid_file.write_text("not-a-pid")
+        config = Config()
+        config.llama_cpp.daemon_pid_file = pid_file
+        _restart_llama_cpp_daemon_if_needed(config)
+        # Should unlink the invalid pid file
+        assert not pid_file.exists()
+
+    @patch("cementic.embedding_runtime.is_managed_process_alive", return_value=False)
+    def test_restart_stale_pid(self, mock_running, temp_dir) -> None:
+        pid_file = temp_dir / "daemon.pid"
+        pid_file.write_text("99999")
+        config = Config()
+        config.llama_cpp.daemon_pid_file = pid_file
+        _restart_llama_cpp_daemon_if_needed(config)
+        assert not pid_file.exists()
+
+    @patch("cementic.embedding_runtime.wait_for_exit", return_value=[])
+    @patch("cementic.embedding_runtime.os.kill")
+    @patch("cementic.embedding_runtime.is_managed_process_alive", return_value=True)
+    def test_restart_live_pid_sigterm_clean_exit(
+        self, mock_running, mock_kill, mock_wait, temp_dir
+    ) -> None:
+        """Live PID → SIGTERM → all exited → pid file unlinked."""
+        pid_file = temp_dir / "daemon.pid"
+        pid_file.write_text("12345")
+        config = Config()
+        config.llama_cpp.daemon_pid_file = pid_file
+        _restart_llama_cpp_daemon_if_needed(config)
+        mock_kill.assert_any_call(12345, 15)  # signal.SIGTERM
+        assert not pid_file.exists()
+
+    @patch("cementic.embedding_runtime.wait_for_exit", return_value=[12345])
+    @patch("cementic.embedding_runtime.os.kill")
+    @patch("cementic.embedding_runtime.is_managed_process_alive", return_value=True)
+    def test_restart_live_pid_sigterm_then_sigkill(
+        self, mock_running, mock_kill, mock_wait, temp_dir
+    ) -> None:
+        """Live PID → SIGTERM → processes remain → SIGKILL → pid file unlinked."""
+        pid_file = temp_dir / "daemon.pid"
+        pid_file.write_text("12345")
+        config = Config()
+        config.llama_cpp.daemon_pid_file = pid_file
+        _restart_llama_cpp_daemon_if_needed(config)
+        mock_kill.assert_any_call(12345, 15)  # signal.SIGTERM
+        mock_kill.assert_any_call(12345, 9)   # signal.SIGKILL
+        assert not pid_file.exists()
+
+    def test_start_daemon_missing_log_file_raises(self) -> None:
+        config = Config()
+        config.llama_cpp.daemon_log_file = None
+        with pytest.raises(RuntimeError, match="not configured"):
+            _start_llama_cpp_daemon(config)
+
+    def test_start_daemon_missing_pid_file_raises(self) -> None:
+        config = Config()
+        config.llama_cpp.daemon_log_file = "/tmp/test.log"
+        config.llama_cpp.daemon_pid_file = None
+        with pytest.raises(RuntimeError, match="not configured"):
+            _start_llama_cpp_daemon(config)
+
+    @patch("cementic.embedding_runtime.spawn_detached", return_value=4321)
+    def test_start_daemon_runs_llama_cpp_server(self, mock_spawn, temp_dir) -> None:
+        config = Config()
+        config.llama_cpp.daemon_log_file = temp_dir / "daemon.log"
+        config.llama_cpp.daemon_pid_file = temp_dir / "daemon.pid"
+        config.llama_cpp.verbose = False
+
+        _start_llama_cpp_daemon(config)
+
+        command = mock_spawn.call_args[0][0]
+        assert "llama_cpp.server" in command
+        assert command[command.index("--embedding") + 1] == "true"
+        assert command[command.index("--verbose") + 1] == "false"
+        # --model is resolved to the physical path the daemon will open, while
+        # the model_alias (fingerprint) still derives from the logical identifier.
+        assert command[command.index("--model") + 1] == str(
+            resolve_llama_model_path(config.llama_cpp.model_path)
+        )
+        # llama_cpp.server does not write its own PID file; we record it as a
+        # {pid, start_token} JSON record for recycled-PID-safe teardown.
+        record = json.loads((temp_dir / "daemon.pid").read_text())
+        assert record["pid"] == 4321
+        assert "start_token" in record
+
+    @patch("cementic.embedding_runtime.spawn_detached", return_value=4321)
+    def test_start_daemon_verbose_true(self, mock_spawn, temp_dir) -> None:
+        config = Config()
+        config.llama_cpp.daemon_log_file = temp_dir / "daemon.log"
+        config.llama_cpp.daemon_pid_file = temp_dir / "daemon.pid"
+        config.llama_cpp.verbose = True
+
+        _start_llama_cpp_daemon(config)
+
+        command = mock_spawn.call_args[0][0]
+        assert command[command.index("--verbose") + 1] == "true"
+
+
+class TestWaitForDaemon:
+    """Tests for _wait_for_daemon_ready."""
+
+    def test_daemon_immediately_ready(self) -> None:
+        client = MagicMock(spec=RemoteEmbeddingClient)
+        client.matches_expected_runtime.return_value = True
+        # Should not raise
+        _wait_for_daemon_ready(client, timeout_seconds=5)
+
+    def test_daemon_timeout_raises(self) -> None:
+        client = MagicMock(spec=RemoteEmbeddingClient)
+        client.matches_expected_runtime.return_value = False
+        with pytest.raises(RuntimeError, match="did not become ready"):
+            _wait_for_daemon_ready(client, timeout_seconds=0.01)
 
 
 class TestEmbeddingRuntime:
     """Test llama.cpp daemon client helpers."""
 
-    def test_runtime_fingerprint_is_stable(self):
+    def test_runtime_fingerprint_is_stable(self) -> None:
         first = llama_cpp_runtime_fingerprint(
             model_path="model.gguf",
             n_ctx=512,
@@ -35,12 +293,12 @@ class TestEmbeddingRuntime:
         assert first == second
         assert first != third
 
-    def test_get_runtime_client_reuses_matching_daemon(self):
+    def test_get_runtime_client_reuses_matching_daemon(self) -> None:
         config = Config()
 
         with (
             patch(
-                "cementic.embedding_runtime.LlamaCppDaemonClient.matches_expected_runtime",
+                "cementic.embedding_runtime.RemoteEmbeddingClient.matches_expected_runtime",
                 return_value=True,
             ),
             patch("cementic.embedding_runtime._restart_llama_cpp_daemon_if_needed") as restart,
@@ -54,12 +312,33 @@ class TestEmbeddingRuntime:
         start.assert_not_called()
         wait.assert_not_called()
 
-    def test_get_runtime_client_starts_daemon_when_missing(self):
+    def test_get_runtime_client_refuses_autostart_when_disabled(self) -> None:
         config = Config()
+        config.llama_cpp.daemon_autostart = False
 
         with (
             patch(
-                "cementic.embedding_runtime.LlamaCppDaemonClient.matches_expected_runtime",
+                "cementic.embedding_runtime.RemoteEmbeddingClient.matches_expected_runtime",
+                return_value=False,
+            ),
+            patch("cementic.embedding_runtime._restart_llama_cpp_daemon_if_needed") as restart,
+            patch("cementic.embedding_runtime._start_llama_cpp_daemon") as start,
+            patch("cementic.embedding_runtime._wait_for_daemon_ready") as wait,
+            pytest.raises(RuntimeError, match="cementic embedding start"),
+        ):
+            get_llama_cpp_runtime_client(config)
+
+        restart.assert_not_called()
+        start.assert_not_called()
+        wait.assert_not_called()
+
+    def test_get_runtime_client_starts_daemon_when_autostart_enabled(self) -> None:
+        config = Config()
+        config.llama_cpp.daemon_autostart = True
+
+        with (
+            patch(
+                "cementic.embedding_runtime.RemoteEmbeddingClient.matches_expected_runtime",
                 side_effect=[False, True],
             ),
             patch("cementic.embedding_runtime._restart_llama_cpp_daemon_if_needed") as restart,
@@ -70,5 +349,131 @@ class TestEmbeddingRuntime:
 
         assert client.embedding_dim == config.llama_cpp.embedding_dim
         restart.assert_called_once_with(config)
-        start.assert_called_once_with(config)
+        _, kwargs = start.call_args
+        assert kwargs["spec"].model_identifier == config.llama_cpp.model_path
         wait.assert_called_once()
+
+    def test_get_runtime_client_uses_profile_spec(self) -> None:
+        config = Config()
+        spec = EmbeddingRuntimeSpec(
+            provider="llama-cpp",
+            model_identifier="profile-model.gguf",
+            embedding_dim=384,
+            n_ctx=1024,
+            n_gpu_layers=2,
+            verbose=True,
+        )
+
+        with (
+            patch(
+                "cementic.embedding_runtime.RemoteEmbeddingClient.matches_expected_runtime",
+                return_value=True,
+            ),
+            patch("cementic.embedding_runtime.llama_cpp_runtime_fingerprint") as fingerprint,
+        ):
+            fingerprint.return_value = "profile-fingerprint"
+            client = get_llama_cpp_runtime_client(config, spec=spec)
+
+        assert client.embedding_dim == 384
+        fingerprint.assert_called_once_with(
+            model_path="profile-model.gguf",
+            n_ctx=1024,
+            n_gpu_layers=2,
+            embedding_dim=384,
+            verbose=True,
+        )
+
+    def test_runtime_spec_from_config_for_llama_cpp(self) -> None:
+        config = Config()
+        config.pipeline.embedding_provider = "llama-cpp"
+        config.llama_cpp.model_path = "model.gguf"
+        config.llama_cpp.embedding_dim = 384
+
+        spec = runtime_spec_from_config(config)
+
+        assert spec.provider == "llama-cpp"
+        assert spec.model_identifier == "model.gguf"
+        assert spec.embedding_dim == 384
+
+    def test_runtime_spec_from_profile_json_generic(self) -> None:
+        spec = runtime_spec_from_profile_json(
+            '{"provider":"llama-cpp","model_identifier":"model.gguf",'
+            '"embedding_dim":768,"n_ctx":512,"n_gpu_layers":0,"verbose":false}'
+        )
+
+        assert spec.provider == "llama-cpp"
+        assert spec.model_identifier == "model.gguf"
+        assert spec.embedding_dim == 768
+        assert spec.n_ctx == 512
+
+
+class TestCreateProvider:
+    """Tests for the single create_provider resolver."""
+
+    def test_llama_cpp_with_config_uses_runtime_client(self) -> None:
+        config = Config()
+        spec = runtime_spec_from_profile_json(
+            '{"provider": "llama-cpp", "model_identifier": "profile-model.gguf", '
+            '"n_ctx": 512, "n_gpu_layers": 0, "embedding_dim": 768, "verbose": false}'
+        )
+        with patch("cementic.embedding_runtime.get_llama_cpp_runtime_client") as mock_runtime:
+            create_provider(spec, config)
+
+        _, kwargs = mock_runtime.call_args
+        assert kwargs["config"] is config
+        assert kwargs["spec"].model_identifier == "profile-model.gguf"
+        assert kwargs["spec"].embedding_dim == 768
+
+    def test_unknown_provider_raises(self) -> None:
+        spec = EmbeddingRuntimeSpec(provider="nope", model_identifier="x", embedding_dim=1)
+        with pytest.raises(ValueError, match="Unknown embedding provider"):
+            create_provider(spec, Config())
+
+
+class TestDaemonPidFile:
+    """The daemon pid-file carries an identity token so a recycled PID is safe."""
+
+    def test_read_legacy_bare_int(self, temp_dir) -> None:
+        pid_file = temp_dir / "daemon.pid"
+        pid_file.write_text("4321")
+        assert _read_daemon_pid_file(pid_file) == (4321, None)
+
+    def test_read_json_record(self, temp_dir) -> None:
+        pid_file = temp_dir / "daemon.pid"
+        pid_file.write_text(json.dumps({"pid": 4321, "start_token": "tok"}))
+        assert _read_daemon_pid_file(pid_file) == (4321, "tok")
+
+    def test_read_invalid_returns_none(self, temp_dir) -> None:
+        pid_file = temp_dir / "daemon.pid"
+        pid_file.write_text("not-a-pid")
+        assert _read_daemon_pid_file(pid_file) is None
+
+    @patch("cementic.embedding_runtime.os.kill")
+    @patch("cementic.embedding_runtime.is_managed_process_alive", return_value=False)
+    def test_stop_does_not_kill_recycled_pid(
+        self, mock_alive, mock_kill, temp_dir
+    ) -> None:
+        """A token mismatch (recycled PID) must not be signalled."""
+        pid_file = temp_dir / "daemon.pid"
+        pid_file.write_text(json.dumps({"pid": 4321, "start_token": "stale"}))
+        config = Config()
+        config.llama_cpp.daemon_pid_file = pid_file
+
+        assert stop_llama_cpp_runtime(config) is False
+        mock_kill.assert_not_called()
+        assert not pid_file.exists()
+
+    def test_status_stopped_when_no_pid_file(self, temp_dir) -> None:
+        config = Config()
+        config.llama_cpp.daemon_pid_file = temp_dir / "missing.pid"
+        assert llama_daemon_status(config) == "stopped"
+
+    @patch("cementic.embedding_runtime.is_managed_process_alive", return_value=True)
+    def test_status_running_reports_pid(self, mock_alive, temp_dir) -> None:
+        pid_file = temp_dir / "daemon.pid"
+        pid_file.write_text(json.dumps({"pid": 4321, "start_token": "tok"}))
+        config = Config()
+        config.llama_cpp.daemon_pid_file = pid_file
+        status = llama_daemon_status(config)
+        assert "running" in status
+        assert "4321" in status

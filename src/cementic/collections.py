@@ -3,13 +3,21 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from pathlib import Path
+from typing import Any
 
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
+from cementic.config import Config
 from cementic.db import Chunk, ExtractedDocument, PipelineRevision, SourceDocument
+from cementic.pipeline_worker import (
+    PipelineCounts,
+    compute_revision_counts,
+    revision_failure_total,
+)
 from cementic.revisions import promote_revision
+from cementic.storage import safe_remove_artifact
+from cementic.vector_store import drop_vector_table
 
 
 @dataclass(frozen=True)
@@ -19,6 +27,7 @@ class DeleteCollectionResult:
     deleted_docs: int
     deleted_chunks: int
     artifact_paths: list[str]
+    vector_profile_ids: list[int]
 
 
 @dataclass(frozen=True)
@@ -59,7 +68,9 @@ def list_collections(session: Session) -> list[CollectionSummary]:
             .first()
         )
         documents = (
-            session.query(func.count(SourceDocument.id)).filter_by(collection=name).scalar()
+            session.query(func.count(SourceDocument.id))
+            .filter(SourceDocument.collection == name, SourceDocument.status != "deleted")
+            .scalar()
         ) or 0
         summaries.append(
             CollectionSummary(
@@ -87,6 +98,13 @@ def delete_collection_records(session: Session, collection: str) -> DeleteCollec
         .all()
         if path
     ]
+    candidate_profile_ids = [
+        int(profile_id)
+        for (profile_id,) in session.query(PipelineRevision.embedding_profile_id)
+        .filter_by(collection=collection)
+        .all()
+        if profile_id is not None
+    ]
     deleted_chunks = (
         session.query(Chunk)
         .filter(Chunk.document_id.in_(doc_ids))
@@ -100,37 +118,81 @@ def delete_collection_records(session: Session, collection: str) -> DeleteCollec
         .filter(SourceDocument.id.in_(doc_ids))
         .delete(synchronize_session=False)
     )
+    vector_profile_ids = []
+    for profile_id in sorted(set(candidate_profile_ids)):
+        remaining = (
+            session.query(func.count(PipelineRevision.id))
+            .filter_by(embedding_profile_id=profile_id)
+            .scalar()
+        ) or 0
+        if int(remaining) == 0:
+            vector_profile_ids.append(profile_id)
     session.commit()
     return DeleteCollectionResult(
         deleted_docs=deleted_docs,
         deleted_chunks=deleted_chunks,
         artifact_paths=artifact_paths,
+        vector_profile_ids=vector_profile_ids,
     )
 
 
-def remove_artifacts(paths: list[str]) -> None:
+def remove_artifacts(paths: list[str], *, config: Config) -> None:
     """Best-effort removal of extracted document artifacts."""
     for artifact_path in paths:
-        try:
-            Path(artifact_path).unlink(missing_ok=True)
-        except OSError:
-            pass
+        safe_remove_artifact(config, artifact_path)
 
 
-def promote_ready_revision(session: Session, collection: str) -> PipelineRevision | None:
-    """Promote the newest ready revision for one collection."""
-    revision = (
+def drop_orphan_vector_tables(engine: Any, profile_ids: list[int]) -> None:
+    """Best-effort drop of vector tables no longer referenced by revisions."""
+    for profile_id in profile_ids:
+        drop_vector_table(engine, profile_id)
+
+
+def find_ready_revision(session: Session, collection: str) -> PipelineRevision | None:
+    """Return the newest ready (promotable) revision for one collection."""
+    return (
         session.query(PipelineRevision)
         .filter_by(collection=collection, status="ready")
         .order_by(PipelineRevision.id.desc())
         .first()
     )
-    if revision is None:
-        return None
 
-    promote_revision(session, collection, revision)
+
+@dataclass(frozen=True)
+class PromotionOutcome:
+    """Result of attempting to promote a collection's ready revision.
+
+    ``status`` is one of ``"promoted"``, ``"no_ready"`` (nothing to promote), or
+    ``"blocked_by_failures"`` (a ready revision exists but built with failures and
+    ``force`` was not set, so it was left untouched).
+    """
+
+    status: str
+    revision: PipelineRevision | None = None
+    failures: PipelineCounts | None = None
+
+
+def promote_ready_revision(
+    session: Session, collection: str, *, config: Config, force: bool = False
+) -> PromotionOutcome:
+    """Promote the newest ready revision for one collection.
+
+    A revision can reach ``ready`` with failed documents/chunks (failures are
+    terminal so the build can finish). Promoting one silently would publish a
+    partial index, so unless ``force`` is set this refuses and reports the failure
+    counts instead.
+    """
+    revision = find_ready_revision(session, collection)
+    if revision is None:
+        return PromotionOutcome("no_ready")
+
+    counts = compute_revision_counts(session, collection, revision)
+    if not force and revision_failure_total(counts) > 0:
+        return PromotionOutcome("blocked_by_failures", revision=revision, failures=counts)
+
+    promote_revision(session, collection, revision, config=config)
     session.commit()
-    return revision
+    return PromotionOutcome("promoted", revision=revision)
 
 
 def list_collection_revisions(session: Session, collection: str) -> list[PipelineRevision]:

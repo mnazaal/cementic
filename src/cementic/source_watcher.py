@@ -1,4 +1,4 @@
-"""Document watcher that registers PDFs for downstream pipeline processing."""
+"""Document watcher that registers source files for downstream pipeline processing."""
 
 from __future__ import annotations
 
@@ -12,24 +12,30 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from watchdog.events import FileSystemEvent, FileSystemEventHandler
+from watchdog.events import DirMovedEvent, FileMovedEvent, FileSystemEvent, FileSystemEventHandler
 from watchdog.observers import Observer
 
 from cementic.config import Config, get_config
 from cementic.db import SourceDocument, create_tables, get_engine, get_session_factory
+from cementic.extract import supported_extensions
 from cementic.state import DaemonState, StateManager
 
 
-class PDFEventHandler(FileSystemEventHandler):
-    """Handles PDF file system events."""
+class DocumentEventHandler(FileSystemEventHandler):
+    """Handles file system events for any supported document type."""
 
-    def __init__(self, callback: Callable[[str], None]) -> None:
+    def __init__(
+        self,
+        callback: Callable[[str], None],
+        delete_callback: Callable[[str], None] | None = None,
+    ) -> None:
         self.callback = callback
+        self.delete_callback = delete_callback
         self._timers: dict[str, Any] = {}
         self._debounce_seconds = 2.0
 
     def _should_process(self, file_path: str) -> bool:
-        return Path(file_path).suffix.lower() == ".pdf"
+        return Path(file_path).suffix.lower() in supported_extensions()
 
     def _debounced_process(self, file_path: str) -> None:
         existing_timer = self._timers.pop(file_path, None)
@@ -45,6 +51,12 @@ class PDFEventHandler(FileSystemEventHandler):
         self._timers.pop(file_path, None)
         self.callback(file_path)
 
+    def cancel_all(self) -> None:
+        """Cancel all pending debounce timers, preventing fire after shutdown."""
+        for file_path, timer in list(self._timers.items()):
+            timer.cancel()
+        self._timers.clear()
+
     def on_created(self, event: FileSystemEvent) -> None:
         if event.is_directory:
             return
@@ -59,18 +71,42 @@ class PDFEventHandler(FileSystemEventHandler):
         if self._should_process(src_path):
             self._debounced_process(src_path)
 
+    def on_deleted(self, event: FileSystemEvent) -> None:
+        if event.is_directory:
+            return
+        src_path = event.src_path.decode() if isinstance(event.src_path, bytes) else event.src_path
+        timer = self._timers.pop(src_path, None)
+        if timer:
+            timer.cancel()
+        if self.delete_callback and self._should_process(src_path):
+            self.delete_callback(src_path)
+
+    def on_moved(self, event: DirMovedEvent | FileMovedEvent) -> None:
+        if event.is_directory:
+            return
+        src_path = event.src_path.decode() if isinstance(event.src_path, bytes) else event.src_path
+        dest_path = (
+            event.dest_path.decode() if isinstance(event.dest_path, bytes) else event.dest_path
+        )
+        if self.delete_callback and self._should_process(src_path):
+            self.delete_callback(src_path)
+        if self._should_process(dest_path):
+            self._debounced_process(dest_path)
+
 
 class SourceWatcher:
-    """Background watcher that registers source PDFs for pipeline processing."""
+    """Background watcher that registers source documents for pipeline processing."""
 
     def __init__(self, config: Config | None = None) -> None:
         self.config = config or get_config()
         self.state_manager = StateManager(self.config.source_watcher.state_path)
         self._shutdown_event = threading.Event()
         self.watcher: Any = None
+        self._event_handler: DocumentEventHandler | None = None
         self._logger = self._setup_logging()
         self.Session: Any = None
         self.collection = "default"
+        self._watched_roots: list[Path] = []
 
     def _setup_logging(self) -> logging.Logger:
         logger = logging.getLogger("cementic.source_watcher")
@@ -78,11 +114,17 @@ class SourceWatcher:
         log_file = self.config.source_watcher.log_file
         if log_file is None:
             raise RuntimeError("Source watcher log file is not configured")
-        handler = logging.FileHandler(log_file)
-        handler.setLevel(logging.INFO)
         formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
-        handler.setFormatter(formatter)
-        logger.addHandler(handler)
+        if not any(
+            isinstance(handler, logging.FileHandler)
+            and handler.baseFilename == str(log_file)
+            for handler in logger.handlers
+        ):
+            handler = logging.FileHandler(log_file)
+            handler.setLevel(logging.INFO)
+            handler.setFormatter(formatter)
+            logger.addHandler(handler)
+        logger.propagate = False
         return logger
 
     def start(self, directories: list[str], collection: str = "default") -> None:
@@ -122,29 +164,78 @@ class SourceWatcher:
 
     def _start_watcher(self, directories: list[str]) -> None:
         observer = Observer()
-        event_handler = PDFEventHandler(self._on_pdf_detected)
+        event_handler = DocumentEventHandler(self._on_file_detected, self._on_file_deleted)
+        self._event_handler = event_handler
+        self._watched_roots = []
         for directory in directories:
             path = Path(directory).resolve()
             if path.exists():
+                self._watched_roots.append(path)
                 observer.schedule(event_handler, str(path), recursive=True)
                 self._scan_existing(path)
         observer.start()
         self.watcher = observer
 
     def _scan_existing(self, directory: Path) -> None:
-        for pdf_file in directory.rglob("*.pdf"):
-            if pdf_file.is_file():
-                self._on_pdf_detected(str(pdf_file))
+        extensions = supported_extensions()
+        for file_path in directory.rglob("*"):
+            if (
+                file_path.is_file()
+                and not file_path.is_symlink()
+                and file_path.suffix.lower() in extensions
+            ):
+                self._on_file_detected(str(file_path))
 
-    def _on_pdf_detected(self, pdf_path: str) -> None:
+    def _on_file_detected(self, file_path: str) -> None:
         try:
-            self._register_pdf(pdf_path)
+            self._register_document(file_path)
         except Exception as error:
-            self._logger.error("Failed to register %s: %s", pdf_path, error)
+            self._logger.error("Failed to register %s: %s", file_path, error)
 
-    def _register_pdf(self, pdf_path: str) -> None:
+    def _on_file_deleted(self, file_path: str) -> None:
+        try:
+            self._mark_document_deleted(file_path)
+        except Exception as error:
+            self._logger.error("Failed to mark deleted %s: %s", file_path, error)
+
+    def _normalize_watched_path(self, file_path: str, *, must_exist: bool) -> str | None:
+        path = Path(file_path)
+        try:
+            resolved_path = path.resolve(strict=must_exist)
+        except OSError:
+            self._logger.error("Cannot resolve file: %s", file_path)
+            return None
+        if self._watched_roots and not any(
+            resolved_path.is_relative_to(root) for root in self._watched_roots
+        ):
+            self._logger.error("File is outside watched roots: %s", file_path)
+            return None
+        return str(resolved_path)
+
+    def _register_document(self, file_path: str) -> None:
+        path = Path(file_path)
+        if path.is_symlink():
+            self._logger.error("Refusing symlinked file: %s", file_path)
+            return
+        normalized_path = self._normalize_watched_path(file_path, must_exist=True)
+        if normalized_path is None:
+            return
+        file_path = normalized_path
+        # Guard against exceedingly large files
+        max_size_bytes = 512 * 1024 * 1024  # 512 MiB
+        try:
+            file_size = path.stat().st_size
+        except OSError:
+            self._logger.error("Cannot stat file: %s", file_path)
+            return
+        if file_size > max_size_bytes:
+            self._logger.error(
+                "File too large (%d bytes, max %d): %s", file_size, max_size_bytes, file_path
+            )
+            return
+
         sha256 = hashlib.sha256()
-        with open(pdf_path, "rb") as handle:
+        with open(file_path, "rb") as handle:
             for chunk in iter(lambda: handle.read(8192), b""):
                 sha256.update(chunk)
         file_hash = sha256.hexdigest()
@@ -152,14 +243,14 @@ class SourceWatcher:
         with self.Session() as session:
             document = (
                 session.query(SourceDocument)
-                .filter_by(source_path=pdf_path, collection=self.collection)
+                .filter_by(source_path=file_path, collection=self.collection)
                 .first()
             )
             if document is None:
-                document = SourceDocument(source_path=pdf_path, collection=self.collection)
+                document = SourceDocument(source_path=file_path, collection=self.collection)
                 session.add(document)
 
-            self.state_manager.update(current_file=pdf_path)
+            self.state_manager.update(current_file=file_path)
             document.file_hash = file_hash
             document.status = "pending"
             document.error_message = None
@@ -167,7 +258,27 @@ class SourceWatcher:
 
         state = self.state_manager.load()
         self.state_manager.update(processed_count=state.processed_count + 1, current_file=None)
-        self._logger.info("Registered PDF: %s (collection=%s)", pdf_path, self.collection)
+        self._logger.info("Registered document: %s (collection=%s)", file_path, self.collection)
+
+    def _mark_document_deleted(self, file_path: str) -> None:
+        normalized_path = self._normalize_watched_path(file_path, must_exist=False)
+        if normalized_path is None:
+            return
+        with self.Session() as session:
+            document = (
+                session.query(SourceDocument)
+                .filter_by(source_path=normalized_path, collection=self.collection)
+                .first()
+            )
+            if document is None:
+                return
+            document.status = "deleted"
+            document.file_hash = None
+            document.error_message = None
+            session.commit()
+        self._logger.info(
+            "Marked document deleted: %s (collection=%s)", normalized_path, self.collection
+        )
 
     def _handle_shutdown(self, signum: int, frame: object) -> None:
         self._logger.info("Received signal %s, shutting down...", signum)
@@ -175,6 +286,8 @@ class SourceWatcher:
 
     def stop(self) -> None:
         self._shutdown_event.set()
+        if self._event_handler:
+            self._event_handler.cancel_all()
         if self.watcher:
             self.watcher.stop()
             self.watcher.join()

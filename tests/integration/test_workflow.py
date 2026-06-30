@@ -38,7 +38,7 @@ def test_model_change_creates_new_revision_without_reusing_old_embedding_profile
         session.commit()
         first_embedding_profile_id = first.embedding_profile_id
 
-        config.pipeline.embedding_provider = "ollama"
+        config.llama_cpp.model_path = "other-model.gguf"
         second = get_target_revision(session, "research", config)
         session.commit()
 
@@ -62,13 +62,13 @@ def test_ready_revision_can_be_promoted_per_collection(temp_dir: Path) -> None:
     with session_factory() as session:
         first = get_target_revision(session, "research", config)
         first.status = "ready"
-        promote_revision(session, "research", first)
+        promote_revision(session, "research", first, config=config)
         session.commit()
 
-        config.pipeline.embedding_provider = "ollama"
+        config.llama_cpp.model_path = "other-model.gguf"
         second = get_target_revision(session, "research", config)
         second.status = "ready"
-        promote_revision(session, "research", second)
+        promote_revision(session, "research", second, config=config)
         session.commit()
 
     with session_factory() as session:
@@ -106,20 +106,20 @@ def test_promotion_prunes_older_retired_revisions(temp_dir: Path) -> None:
     with session_factory() as session:
         first = get_target_revision(session, "research", config)
         first.status = "ready"
-        promote_revision(session, "research", first)
+        promote_revision(session, "research", first, config=config)
         session.commit()
 
-        config.pipeline.embedding_provider = "ollama"
+        config.llama_cpp.model_path = "other-model.gguf"
         second = get_target_revision(session, "research", config)
         second.status = "ready"
-        promote_revision(session, "research", second)
+        promote_revision(session, "research", second, config=config)
         session.commit()
 
         config.pipeline.embedding_provider = "llama-cpp"
         config.llama_cpp.model_path = str(temp_dir / "model-v2.gguf")
         third = get_target_revision(session, "research", config)
         third.status = "ready"
-        promote_revision(session, "research", third)
+        promote_revision(session, "research", third, config=config)
         session.commit()
 
     with session_factory() as session:

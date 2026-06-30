@@ -4,24 +4,27 @@ from __future__ import annotations
 
 # mypy: disable-error-code=import-untyped
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
-from pgvector.sqlalchemy import Vector
 from sqlalchemy import ForeignKey, Index, Integer, String, Text, create_engine, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship, sessionmaker
 
+from cementic.index_strategies import IndexParams, build_index_ddl
+from cementic.vector_store import index_access_method, vector_index_name, vector_table_name
+
 if TYPE_CHECKING:
-    from sqlalchemy.engine import Engine
+    from sqlalchemy.engine import URL, Engine
     from sqlalchemy.orm import Session
 
 
-DISTANCE_TO_OPCLASS = {
-    "cosine": "vector_cosine_ops",
-    "l2": "vector_l2_ops",
-    "ip": "vector_ip_ops",
-}
-
 _ENGINE_CACHE: dict[str, Engine] = {}
+
+
+def _url_cache_key(database_url: str | URL) -> str:
+    """Return a stable cache key for the database URL."""
+    if hasattr(database_url, "render_as_string"):
+        return database_url.render_as_string(hide_password=False)
+    return database_url
 
 
 class Base(DeclarativeBase):
@@ -34,7 +37,7 @@ def utc_now() -> datetime:
 
 
 class SourceDocument(Base):
-    """Stable source-of-truth for discovered PDF files."""
+    """Stable source-of-truth for discovered source documents."""
 
     __tablename__ = "source_documents"
 
@@ -181,7 +184,6 @@ class Chunk(Base):
     )
     chunk_index: Mapped[int] = mapped_column(Integer, nullable=False)
     content: Mapped[str] = mapped_column(Text, nullable=False)
-    content_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     page_start: Mapped[int | None] = mapped_column(Integer, nullable=True)
     page_end: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(default=utc_now)
@@ -223,7 +225,11 @@ class EmbeddingProfile(Base):
 
 
 class ChunkEmbedding(Base):
-    """Embedding artifact for one chunk/profile pair."""
+    """Embedding work-tracking for one chunk/profile pair.
+
+    Tracks status/error and supports the per-chunk row-claim; the vector itself
+    lives in the per-profile ``embedding_vectors_p{id}`` table (see vector_store).
+    """
 
     __tablename__ = "chunk_embeddings"
 
@@ -234,7 +240,6 @@ class ChunkEmbedding(Base):
     embedding_profile_id: Mapped[int] = mapped_column(
         ForeignKey("embedding_profiles.id", ondelete="CASCADE"), nullable=False
     )
-    embedding: Mapped[list[float] | None] = mapped_column(Vector(), nullable=True)
     status: Mapped[str] = mapped_column(String(20), default="pending", nullable=False)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(default=utc_now)
@@ -292,12 +297,17 @@ class PipelineRevision(Base):
     )
 
 
-def get_engine(database_url: str) -> Engine:
+def get_engine(database_url: str | URL) -> Engine:
     """Create database engine."""
-    engine = _ENGINE_CACHE.get(database_url)
+    cache_key = _url_cache_key(database_url)
+    engine = _ENGINE_CACHE.get(cache_key)
     if engine is None:
+        url_str = (
+            database_url if isinstance(database_url, str)
+            else database_url.render_as_string(hide_password=False)
+        )
         connect_args: dict[str, object] = {"connect_timeout": 5}
-        if database_url.startswith("postgresql://"):
+        if url_str.startswith("postgresql://"):
             connect_args["gssencmode"] = "disable"
         engine = create_engine(
             database_url,
@@ -305,7 +315,7 @@ def get_engine(database_url: str) -> Engine:
             pool_pre_ping=True,
             connect_args=connect_args,
         )
-        _ENGINE_CACHE[database_url] = engine
+        _ENGINE_CACHE[cache_key] = engine
     return engine
 
 
@@ -351,29 +361,52 @@ def get_session_factory(engine: Engine) -> sessionmaker[Session]:
     return sessionmaker(bind=engine, expire_on_commit=False)
 
 
-def embedding_index_name(profile_id: int) -> str:
-    """Return the ANN index name for one embedding profile."""
-    return f"ix_chunk_embeddings_ann_profile_{profile_id}"
+def _ensure_ann_access_method(conn: Any, method: str) -> None:
+    """Fail early if PostgreSQL cannot build the requested ANN index method."""
+    if method != "diskann":
+        return
+    exists = bool(
+        conn.execute(
+            text("SELECT EXISTS (SELECT 1 FROM pg_am WHERE amname = :method)"),
+            {"method": method},
+        ).scalar()
+    )
+    if not exists:
+        raise RuntimeError(
+            "DiskANN indexing requires the vectorscale PostgreSQL extension with the "
+            "diskann access method available"
+        )
 
 
 def ensure_embedding_ann_index(
     engine: Engine,
+    *,
     profile_id: int,
-    embedding_dim: int,
+    method: str,
+    params: IndexParams,
     distance_metric: str = "cosine",
 ) -> None:
-    """Ensure one partial ANN index exists for the embedding profile."""
-    opclass = DISTANCE_TO_OPCLASS.get(distance_metric)
-    if opclass is None:
-        raise ValueError(f"Unsupported distance metric: {distance_metric}")
+    """Ensure the chosen ANN index exists on the profile's vector table.
 
-    index_name = embedding_index_name(profile_id)
-    statement = text(
-        f"CREATE INDEX IF NOT EXISTS {index_name} "
-        "ON chunk_embeddings "
-        f"USING hnsw ((embedding::vector({embedding_dim})) {opclass}) "
-        f"WHERE embedding_profile_id = {profile_id} AND embedding IS NOT NULL AND status = 'done'"
+    The method (`hnsw`/`diskann`) is resolved through the index-strategy
+    registry; this is the thin imperative shell that executes its pure DDL.
+    """
+    index_name = vector_index_name(profile_id)
+    ddl = build_index_ddl(
+        method=method,
+        index_name=index_name,
+        table=vector_table_name(profile_id),
+        column="embedding",
+        metric=distance_metric,
+        params=params,
     )
     with engine.connect() as conn:
-        conn.execute(statement)
+        _ensure_ann_access_method(conn, method)
+        # If an index already exists under a different method, drop it first so a
+        # method switch actually takes effect (CREATE INDEX IF NOT EXISTS alone
+        # would silently keep the old one).
+        existing_method = index_access_method(conn, index_name)
+        if existing_method is not None and existing_method != method:
+            conn.execute(text(f"DROP INDEX IF EXISTS {index_name}"))
+        conn.execute(text(ddl))
         conn.commit()

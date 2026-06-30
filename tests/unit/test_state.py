@@ -2,6 +2,8 @@
 
 import json
 
+import pytest
+
 from cementic.state import DaemonState, StateManager, WorkerState
 
 
@@ -64,6 +66,34 @@ class TestWorkerState:
             "pid": None,
         }
 
+        state = WorkerState.from_dict(data)
+        assert state.daemon_state == DaemonState.STOPPED
+
+    def test_from_dict_already_enum_type(self) -> None:
+        """daemon_state already DaemonState enum passes through (line 48)."""
+        data = {
+            "daemon_state": DaemonState.PAUSED,
+            "watched_directories": [],
+            "processed_count": 0,
+            "failed_count": 0,
+            "current_file": None,
+            "last_updated": "2024-01-01T00:00:00",
+            "pid": None,
+        }
+        state = WorkerState.from_dict(data)
+        assert state.daemon_state == DaemonState.PAUSED
+
+    def test_from_dict_non_string_non_enum_falls_back(self) -> None:
+        """Non-string, non-DaemonState daemon_state → STÖPPED fallback (line 50)."""
+        data = {
+            "daemon_state": 42,
+            "watched_directories": [],
+            "processed_count": 0,
+            "failed_count": 0,
+            "current_file": None,
+            "last_updated": "2024-01-01T00:00:00",
+            "pid": None,
+        }
         state = WorkerState.from_dict(data)
         assert state.daemon_state == DaemonState.STOPPED
 
@@ -209,3 +239,16 @@ class TestStateManager:
 
         assert state.daemon_state == DaemonState.RUNNING
         assert isinstance(state.daemon_state, DaemonState)
+
+    def test_init_raises_on_none_state_path(self) -> None:
+        """StateManager(None) → ValueError (line 90)."""
+        with pytest.raises(ValueError, match="state_path cannot be None"):
+            StateManager(None)
+
+    def test_update_sets_failed_count(self, temp_dir) -> None:
+        """Update should set failed_count on the state (line 131)."""
+        state_path = temp_dir / "state.json"
+        manager = StateManager(state_path)
+        manager.update(failed_count=7)
+        loaded = manager.load()
+        assert loaded.failed_count == 7

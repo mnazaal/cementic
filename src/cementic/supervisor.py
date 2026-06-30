@@ -15,11 +15,19 @@ SupervisorState = dict[str, object]
 
 @dataclass
 class ManagedProcess:
-    """Metadata for one managed background process."""
+    """Metadata for one managed background process.
+
+    ``start_token`` is the process's kernel start time captured at spawn. It lets
+    liveness checks distinguish *this* process from an unrelated one that later
+    reuses the same PID (after a reboot or PID wraparound). ``None`` means the
+    token is unknown (e.g. state written by an older version), in which case
+    callers fall back to a PID-only check.
+    """
 
     name: str
     pid: int
     log_file: str
+    start_token: str | None = None
 
 
 def is_pid_running(pid: int) -> bool:
@@ -29,6 +37,43 @@ def is_pid_running(pid: int) -> bool:
         return True
     except (ProcessLookupError, OSError):
         return False
+
+
+def process_start_token(pid: int) -> str | None:
+    """Return a stable per-process start-time token, or None if unavailable.
+
+    Reads field 22 (``starttime``) of ``/proc/<pid>/stat`` on Linux. The comm
+    field (2) may contain spaces and parentheses, so we split after the final
+    ``)`` before counting fields. Returns None on any platform without ``/proc``
+    or if the process is gone, so callers degrade to a PID-only check.
+    """
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text()
+    except (OSError, ValueError):
+        return None
+    try:
+        after_comm = stat[stat.rindex(")") + 2 :]
+        # After the comm field, index 0 is field 3 (state); starttime is field 22.
+        return after_comm.split()[19]
+    except (ValueError, IndexError):
+        return None
+
+
+def is_managed_process_alive(pid: int, start_token: str | None) -> bool:
+    """Check that PID is running *and* is the same process we recorded.
+
+    When ``start_token`` is known it must match the live process's current start
+    token; a mismatch means the PID was recycled by an unrelated process, so this
+    returns False. When ``start_token`` is None (unknown), it falls back to a
+    bare PID check for backward compatibility.
+    """
+    if pid <= 0:
+        return False
+    if not is_pid_running(pid):
+        return False
+    if start_token is None:
+        return True
+    return process_start_token(pid) == start_token
 
 
 def load_supervisor_state(state_path: Path) -> SupervisorState:

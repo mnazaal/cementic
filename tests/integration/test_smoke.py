@@ -18,7 +18,7 @@ from cementic.db import (
     get_engine,
     get_session_factory,
 )
-from cementic.embedding_providers.base import EmbeddingProvider
+from cementic.embedding_provider import EmbeddingProvider
 from cementic.embedding_text import format_document_text_for_model, format_query_text_for_model
 from cementic.pipeline_worker import PipelineWorker
 from cementic.revisions import promote_revision
@@ -110,7 +110,7 @@ def test_postgres_smoke_build_search_and_promote(
     )
 
     try:
-        source_watcher._register_pdf(str(PDF_FIXTURE))
+        source_watcher._register_document(str(PDF_FIXTURE))
         revision_id = pipeline._ensure_target_revision()
 
         for _ in range(500):
@@ -123,7 +123,7 @@ def test_postgres_smoke_build_search_and_promote(
             revision = session.get(PipelineRevision, revision_id)
             assert revision is not None
             assert revision.status == "ready"
-            promote_revision(session, collection, revision)
+            promote_revision(session, collection, revision, config=config)
             session.commit()
 
         with session_factory() as session:

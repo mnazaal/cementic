@@ -18,7 +18,7 @@ from cementic.db import (
     get_session_factory,
 )
 from cementic.state import StateManager, WorkerState
-from cementic.supervisor import is_pid_running
+from cementic.supervisor import is_managed_process_alive, is_pid_running
 
 
 @dataclass(frozen=True)
@@ -92,6 +92,14 @@ def _safe_pct(done: int, total: int) -> float:
     return round((done / total) * 100, 1) if total > 0 else 0.0
 
 
+def _select_target_revision(
+    building_revision: PipelineRevision | None,
+    active_revision: PipelineRevision | None,
+) -> PipelineRevision | None:
+    """Prefer in-flight revision for status; fall back to active revision."""
+    return building_revision or active_revision
+
+
 def daemon_state_text(value: object) -> str:
     """Normalize worker state for display."""
     if hasattr(value, "value"):
@@ -129,6 +137,11 @@ def _process_pid(process: dict[str, object]) -> int:
     return pid if isinstance(pid, int) else 0
 
 
+def _process_start_token(process: dict[str, object]) -> str | None:
+    token = process.get("start_token")
+    return token if isinstance(token, str) else None
+
+
 def build_supervisor_status(supervisor_state: dict[str, object]) -> SupervisorStatus:
     """Build supervisor status from stored process metadata."""
     processes = supervisor_state.get("processes", [])
@@ -139,7 +152,11 @@ def build_supervisor_status(supervisor_state: dict[str, object]) -> SupervisorSt
     if not process_rows:
         return SupervisorStatus(state="not started", collection="N/A", directories=[])
 
-    running_count = sum(1 for proc in process_rows if is_pid_running(_process_pid(proc)))
+    running_count = sum(
+        1
+        for proc in process_rows
+        if is_managed_process_alive(_process_pid(proc), _process_start_token(proc))
+    )
     directories = supervisor_state.get("directories", [])
     directory_list = directories if isinstance(directories, list) else []
     return SupervisorStatus(
@@ -154,7 +171,11 @@ def load_pipeline_status(config: Config, collection: str) -> PipelineStatus:
     engine = get_engine(config.database.url)
     session_factory = get_session_factory(engine)
     with session_factory() as session:
-        documents = session.query(SourceDocument).filter_by(collection=collection).count()
+        documents = (
+            session.query(SourceDocument)
+            .filter(SourceDocument.collection == collection, SourceDocument.status != "deleted")
+            .count()
+        )
         active_revision = (
             session.query(PipelineRevision)
             .filter_by(collection=collection, status="active")
@@ -170,7 +191,7 @@ def load_pipeline_status(config: Config, collection: str) -> PipelineStatus:
             .order_by(PipelineRevision.id.desc())
             .first()
         )
-        target_revision = building_revision or active_revision
+        target_revision = _select_target_revision(building_revision, active_revision)
 
         extracted_done = 0
         extracted_failed = 0
@@ -188,6 +209,7 @@ def load_pipeline_status(config: Config, collection: str) -> PipelineStatus:
                 .join(SourceDocument, ExtractedDocument.document_id == SourceDocument.id)
                 .filter(
                     SourceDocument.collection == collection,
+                    SourceDocument.status != "deleted",
                     ExtractedDocument.extractor_profile_id == target_revision.extractor_profile_id,
                     ExtractedDocument.status == "done",
                 )
@@ -198,6 +220,7 @@ def load_pipeline_status(config: Config, collection: str) -> PipelineStatus:
                 .join(SourceDocument, ExtractedDocument.document_id == SourceDocument.id)
                 .filter(
                     SourceDocument.collection == collection,
+                    SourceDocument.status != "deleted",
                     ExtractedDocument.extractor_profile_id == target_revision.extractor_profile_id,
                     ExtractedDocument.status == "failed",
                 )
@@ -211,6 +234,7 @@ def load_pipeline_status(config: Config, collection: str) -> PipelineStatus:
                 .join(SourceDocument, ExtractedDocument.document_id == SourceDocument.id)
                 .filter(
                     SourceDocument.collection == collection,
+                    SourceDocument.status != "deleted",
                     ExtractedDocument.extractor_profile_id == target_revision.extractor_profile_id,
                     ChunkedDocument.chunk_profile_id == target_revision.chunk_profile_id,
                     ChunkedDocument.status == "done",
@@ -225,6 +249,7 @@ def load_pipeline_status(config: Config, collection: str) -> PipelineStatus:
                 .join(SourceDocument, ExtractedDocument.document_id == SourceDocument.id)
                 .filter(
                     SourceDocument.collection == collection,
+                    SourceDocument.status != "deleted",
                     ExtractedDocument.extractor_profile_id == target_revision.extractor_profile_id,
                     ChunkedDocument.chunk_profile_id == target_revision.chunk_profile_id,
                     ChunkedDocument.status == "failed",
@@ -241,6 +266,7 @@ def load_pipeline_status(config: Config, collection: str) -> PipelineStatus:
                 .join(SourceDocument, Chunk.document_id == SourceDocument.id)
                 .filter(
                     SourceDocument.collection == collection,
+                    SourceDocument.status != "deleted",
                     ExtractedDocument.extractor_profile_id == target_revision.extractor_profile_id,
                     ChunkedDocument.chunk_profile_id == target_revision.chunk_profile_id,
                 )
@@ -252,6 +278,7 @@ def load_pipeline_status(config: Config, collection: str) -> PipelineStatus:
                 .join(SourceDocument, Chunk.document_id == SourceDocument.id)
                 .filter(
                     SourceDocument.collection == collection,
+                    SourceDocument.status != "deleted",
                     ChunkEmbedding.embedding_profile_id == target_revision.embedding_profile_id,
                     ChunkEmbedding.status == "pending",
                 )
@@ -263,6 +290,7 @@ def load_pipeline_status(config: Config, collection: str) -> PipelineStatus:
                 .join(SourceDocument, Chunk.document_id == SourceDocument.id)
                 .filter(
                     SourceDocument.collection == collection,
+                    SourceDocument.status != "deleted",
                     ChunkEmbedding.embedding_profile_id == target_revision.embedding_profile_id,
                     ChunkEmbedding.status == "processing",
                 )
@@ -274,6 +302,7 @@ def load_pipeline_status(config: Config, collection: str) -> PipelineStatus:
                 .join(SourceDocument, Chunk.document_id == SourceDocument.id)
                 .filter(
                     SourceDocument.collection == collection,
+                    SourceDocument.status != "deleted",
                     ChunkEmbedding.embedding_profile_id == target_revision.embedding_profile_id,
                     ChunkEmbedding.status == "done",
                 )
@@ -285,6 +314,7 @@ def load_pipeline_status(config: Config, collection: str) -> PipelineStatus:
                 .join(SourceDocument, Chunk.document_id == SourceDocument.id)
                 .filter(
                     SourceDocument.collection == collection,
+                    SourceDocument.status != "deleted",
                     ChunkEmbedding.embedding_profile_id == target_revision.embedding_profile_id,
                     ChunkEmbedding.status == "failed",
                 )
@@ -324,36 +354,18 @@ def check_health(config: Config) -> HealthStatus:
     embedding_provider = config.pipeline.embedding_provider
     embedding_healthy = False
     try:
-        client: object  # EmbeddingProvider-like
-        if embedding_provider == "llama-cpp":
-            from cementic.embedding_runtime import get_llama_cpp_runtime_client
+        from cementic.embedding_runtime import create_provider, runtime_spec_from_config
 
-            client = get_llama_cpp_runtime_client(config)
-            embedding_healthy = client.health_check()
-        elif embedding_provider == "ollama":
-            from cementic.embedding_providers import get_embedding_provider
-
-            client = get_embedding_provider(
-                "ollama",
-                host=config.ollama.host,
-                model=config.ollama.model,
-                embedding_dim=config.ollama.embedding_dim,
-            )
-            embedding_healthy = client.health_check()
+        client = create_provider(runtime_spec_from_config(config), config, autostart=False)
+        embedding_healthy = client.health_check()
     except Exception:
         embedding_healthy = False
 
     llama_daemon = "N/A"
     if embedding_provider == "llama-cpp":
-        pid_file = config.llama_cpp.daemon_pid_file
-        if pid_file is not None and pid_file.exists():
-            try:
-                pid = int(pid_file.read_text(encoding="utf-8").strip())
-                llama_daemon = f"running, pid={pid}" if is_pid_running(pid) else "stopped"
-            except (ValueError, OSError):
-                llama_daemon = "stopped"
-        else:
-            llama_daemon = "stopped"
+        from cementic.embedding_runtime import llama_daemon_status
+
+        llama_daemon = llama_daemon_status(config)
 
     return HealthStatus(
         db_reachable=db_reachable,
@@ -368,7 +380,7 @@ def load_file_progress(config: Config, collection: str) -> list[FileProgress]:
     engine = get_engine(config.database.url)
     session_factory = get_session_factory(engine)
     with session_factory() as session:
-        target_revision = (
+        building_revision = (
             session.query(PipelineRevision)
             .filter(
                 PipelineRevision.collection == collection,
@@ -376,19 +388,21 @@ def load_file_progress(config: Config, collection: str) -> list[FileProgress]:
             )
             .order_by(PipelineRevision.id.desc())
             .first()
-        ) or (
+        )
+        active_revision = (
             session.query(PipelineRevision)
             .filter_by(collection=collection, status="active")
             .order_by(PipelineRevision.id.desc())
             .first()
         )
+        target_revision = _select_target_revision(building_revision, active_revision)
 
         if target_revision is None:
             return []
 
         documents = (
             session.query(SourceDocument)
-            .filter_by(collection=collection)
+            .filter(SourceDocument.collection == collection, SourceDocument.status != "deleted")
             .order_by(SourceDocument.source_path)
             .all()
         )

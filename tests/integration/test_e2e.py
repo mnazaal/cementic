@@ -1,7 +1,7 @@
-"""End-to-end integration tests for full CLI workflow.
+"""End-to-end integration tests for the full pipeline, on PostgreSQL.
 
-Pipeline build and status tests run on SQLite.
-Search tests require PostgreSQL (pgvector dependency).
+Vector storage requires pgvector, so these run against the compose-managed
+Postgres (the ANN index build itself is covered by test_db_pg / test_revisions_pg).
 """
 
 from __future__ import annotations
@@ -9,21 +9,20 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from cementic.config import Config
 from cementic.db import (
-    Base,
     Chunk,
     ChunkEmbedding,
     PipelineRevision,
     SourceDocument,
 )
-from cementic.embedding_providers.base import EmbeddingProvider
+from cementic.embedding_provider import EmbeddingProvider
 from cementic.pipeline_worker import PipelineWorker
 from cementic.revisions import promote_revision
 from cementic.source_watcher import SourceWatcher
+from tests.integration.test_pg_helpers import cleanup_pg_tables
 
 
 class FakeEmbeddingClient(EmbeddingProvider):
@@ -89,21 +88,22 @@ class TestE2EPipeline:
     """Full pipeline build and status tests (SQLite-compatible)."""
 
     @pytest.fixture(autouse=True)
-    def _skip_ann_index(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Skip ANN index creation — SQLite doesn't support pgvector HNSW."""
+    def _e2e_env(self, pg_engine, monkeypatch: pytest.MonkeyPatch):
+        """Skip the index build (covered elsewhere) and clean up PG between tests."""
         monkeypatch.setattr(
             "cementic.pipeline_worker.ensure_revision_ann_index",
-            lambda session, revision: None,
+            lambda *args, **kwargs: None,
         )
+        yield
+        with sessionmaker(bind=pg_engine)() as session:
+            cleanup_pg_tables(session)
 
     def test_full_pipeline_build_and_promote(
-        self, temp_dir: Path, pdf_fixtures_dir: Path, monkeypatch: pytest.MonkeyPatch
+        self, pg_engine, temp_dir: Path, pdf_fixtures_dir: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Register a real PDF, build full pipeline, promote revision, verify state."""
         config = _config_for(temp_dir)
-        engine = create_engine("sqlite:///:memory:")
-        Base.metadata.create_all(engine)
-        session_factory = sessionmaker(bind=engine, expire_on_commit=False)
+        session_factory = sessionmaker(bind=pg_engine, expire_on_commit=False)
 
         collection = "e2e-docs"
         pdf_path = pdf_fixtures_dir / "test_doc_a.pdf"
@@ -121,7 +121,7 @@ class TestE2EPipeline:
         monkeypatch.setattr(pipeline.state_manager, "update", lambda **kwargs: None)
 
         # Register PDF
-        source_watcher._register_pdf(str(pdf_path))
+        source_watcher._register_document(str(pdf_path))
         with session_factory() as session:
             docs = session.query(SourceDocument).filter_by(collection=collection).all()
             assert len(docs) == 1
@@ -145,7 +145,7 @@ class TestE2EPipeline:
         with session_factory() as session:
             revision = session.get(PipelineRevision, revision_id)
             assert revision is not None
-            promote_revision(session, collection, revision)
+            promote_revision(session, collection, revision, config=config)
             session.commit()
 
         # Verify active revision
@@ -159,13 +159,11 @@ class TestE2EPipeline:
             assert active.id == revision_id
 
     def test_two_collections_independent(
-        self, temp_dir: Path, pdf_fixtures_dir: Path, monkeypatch: pytest.MonkeyPatch
+        self, pg_engine, temp_dir: Path, pdf_fixtures_dir: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Two collections build independently with separate revisions."""
         config = _config_for(temp_dir)
-        engine = create_engine("sqlite:///:memory:")
-        Base.metadata.create_all(engine)
-        session_factory = sessionmaker(bind=engine, expire_on_commit=False)
+        session_factory = sessionmaker(bind=pg_engine, expire_on_commit=False)
 
         def _build_collection(name: str, pdf_file: str) -> int:
             source_watcher = SourceWatcher(config)
@@ -180,14 +178,14 @@ class TestE2EPipeline:
             monkeypatch.setattr(pipeline.state_manager, "update", lambda **kwargs: None)
 
             pdf_path = pdf_fixtures_dir / pdf_file
-            source_watcher._register_pdf(str(pdf_path))
+            source_watcher._register_document(str(pdf_path))
             revision_id = pipeline._ensure_target_revision()
             _run_pipeline_until_idle(pipeline, revision_id)
 
             with session_factory() as session:
                 revision = session.get(PipelineRevision, revision_id)
                 assert revision is not None
-                promote_revision(session, name, revision)
+                promote_revision(session, name, revision, config=config)
                 session.commit()
             return revision_id
 
@@ -213,13 +211,11 @@ class TestE2EPipeline:
             assert active_b.collection == "docs-b"
 
     def test_model_change_creates_new_revision(
-        self, temp_dir: Path, pdf_fixtures_dir: Path, monkeypatch: pytest.MonkeyPatch
+        self, pg_engine, temp_dir: Path, pdf_fixtures_dir: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Changing embedding model creates new revision; old one superseded/retired."""
         config = _config_for(temp_dir)
-        engine = create_engine("sqlite:///:memory:")
-        Base.metadata.create_all(engine)
-        session_factory = sessionmaker(bind=engine, expire_on_commit=False)
+        session_factory = sessionmaker(bind=pg_engine, expire_on_commit=False)
 
         collection = "model-test"
         pdf_path = pdf_fixtures_dir / "test_doc_a.pdf"
@@ -235,7 +231,7 @@ class TestE2EPipeline:
         pipeline.embedding_client = FakeEmbeddingClient()
         monkeypatch.setattr(pipeline.state_manager, "update", lambda **kwargs: None)
 
-        source_watcher._register_pdf(str(pdf_path))
+        source_watcher._register_document(str(pdf_path))
         rev1_id = pipeline._ensure_target_revision()
         _run_pipeline_until_idle(pipeline, rev1_id)
 
@@ -243,12 +239,11 @@ class TestE2EPipeline:
         with session_factory() as session:
             rev1 = session.get(PipelineRevision, rev1_id)
             assert rev1 is not None
-            promote_revision(session, collection, rev1)
+            promote_revision(session, collection, rev1, config=config)
             session.commit()
 
-        # Change model config
-        config.pipeline.embedding_provider = "ollama"
-        config.ollama.embedding_dim = 768
+        # Change model config (new model identity -> new revision)
+        config.llama_cpp.model_path = "other-model.gguf"
         rev2_id = pipeline._ensure_target_revision()
 
         with session_factory() as session:
@@ -261,17 +256,15 @@ class TestE2EPipeline:
             assert rev2.status == "building"
 
     def test_status_output_contains_new_fields(
-        self, temp_dir: Path, pdf_fixtures_dir: Path, monkeypatch: pytest.MonkeyPatch
+        self, pg_engine, temp_dir: Path, pdf_fixtures_dir: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Verify that load_pipeline_status includes all enhanced fields."""
         config = _config_for(temp_dir)
-        engine = create_engine("sqlite:///:memory:")
-        Base.metadata.create_all(engine)
-        session_factory = sessionmaker(bind=engine, expire_on_commit=False)
+        session_factory = sessionmaker(bind=pg_engine, expire_on_commit=False)
 
-        # Patch status_service.get_engine to use our SQLite engine
+        # Patch status_service.get_engine to use the test Postgres engine
         monkeypatch.setattr(
-            "cementic.status_service.get_engine", lambda url: engine,
+            "cementic.status_service.get_engine", lambda url: pg_engine,
         )
 
         collection = "status-test"
@@ -288,7 +281,7 @@ class TestE2EPipeline:
         pipeline.embedding_client = FakeEmbeddingClient()
         monkeypatch.setattr(pipeline.state_manager, "update", lambda **kwargs: None)
 
-        source_watcher._register_pdf(str(pdf_path))
+        source_watcher._register_document(str(pdf_path))
         rev_id = pipeline._ensure_target_revision()
         _run_pipeline_until_idle(pipeline, rev_id)
 
@@ -311,17 +304,15 @@ class TestE2EPipeline:
         assert status.building_revision_label != ""
 
     def test_file_progress_for_verbose(
-        self, temp_dir: Path, pdf_fixtures_dir: Path, monkeypatch: pytest.MonkeyPatch
+        self, pg_engine, temp_dir: Path, pdf_fixtures_dir: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Verify that load_file_progress returns per-file breakdown."""
         config = _config_for(temp_dir)
-        engine = create_engine("sqlite:///:memory:")
-        Base.metadata.create_all(engine)
-        session_factory = sessionmaker(bind=engine, expire_on_commit=False)
+        session_factory = sessionmaker(bind=pg_engine, expire_on_commit=False)
 
-        # Patch status_service.get_engine to use our SQLite engine
+        # Patch status_service.get_engine to use the test Postgres engine
         monkeypatch.setattr(
-            "cementic.status_service.get_engine", lambda url: engine,
+            "cementic.status_service.get_engine", lambda url: pg_engine,
         )
 
         collection = "verbose-test"
@@ -340,8 +331,8 @@ class TestE2EPipeline:
         monkeypatch.setattr(pipeline.state_manager, "update", lambda **kwargs: None)
 
         # Register both PDFs
-        source_watcher._register_pdf(str(pdf_a))
-        source_watcher._register_pdf(str(pdf_b))
+        source_watcher._register_document(str(pdf_a))
+        source_watcher._register_document(str(pdf_b))
 
         rev_id = pipeline._ensure_target_revision()
         _run_pipeline_until_idle(pipeline, rev_id)

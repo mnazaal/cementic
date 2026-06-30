@@ -1,8 +1,8 @@
 # cementic
 
-Concrete semantic search for PDFs.
+Concrete semantic search for your documents.
 
-`cementic` watches one or more directories, registers PDFs, extracts text, chunks that text, embeds the chunks, and serves semantic search over the active revision for each collection.
+`cementic` watches one or more directories, registers documents (PDF, Markdown, and plain text), extracts text, chunks that text, embeds the chunks, and serves semantic search over the active revision for each collection.
 
 ## How It Works
 
@@ -17,7 +17,8 @@ This keeps old search available while a new extractor, chunking policy, or embed
 
 ## Features
 
-- Watches directories for PDFs and records them as source documents
+- Watches directories for documents (PDF, Markdown, plain text) and records them as source documents
+- Adds new document types through a small extractor registry — one entry per type
 - Stores extracted text as compressed artifacts for cheap rechunking
 - Separates extraction, chunking, and embedding so each stage can evolve independently
 - Keeps one active searchable revision per collection while a replacement revision builds
@@ -37,21 +38,30 @@ uv pip install -e ".[dev]"
 
 ## Prerequisites
 
-- **Podman** or **Docker** — used to run PostgreSQL with pgvector + vectorscale
+- **PostgreSQL with pgvector + vectorscale** — provision it however you like. The
+  easiest path is the included `compose.yml`, run with **Docker** or **Podman**
+  (see Setup). cementic itself does not manage containers.
 - **Python 3.10+**
-- **8-16 GB RAM** recommended when using the default llama.cpp embedding backend (the model loads into memory)
+- **8-16 GB RAM** recommended for the llama.cpp embedding backend (the model loads into memory)
 - **Disk space**: ~2 GB for the llama.cpp model, plus PostgreSQL data and artifact storage
 
 ## Setup
 
-When you run `cementic start`, cementic can automatically:
+Bring up PostgreSQL with the bundled image (pgvector + vectorscale) using whichever
+container engine you have — `docker` or `podman`:
 
-- start the PostgreSQL vectorscale container when using a local database host
-- build a local PostgreSQL image with packaged `pgvector` + `vectorscale` when needed
-- keep container build files under `containers/`, while runtime uses Podman commands
-- wait for services to become healthy
-- pull missing Ollama models only when the Ollama backend is selected
-- validate or auto-download the configured `llama.cpp` model when using the default backend
+```bash
+docker compose up -d      # or: podman compose up -d
+```
+
+This binds PostgreSQL to `127.0.0.1:5432` with the default `CEMENTIC_DB_*` values.
+To use a Postgres you manage yourself, just point `CEMENTIC_DB_URL` (or the
+`CEMENTIC_DB_*` variables) at it — it must have the `pgvector` and `vectorscale`
+extensions available.
+
+cementic connects to that database and, on first run, validates or auto-downloads
+the configured `llama.cpp` model. It does **not** start, build, or stop any
+containers; if Postgres isn't reachable it tells you how to bring it up.
 
 ## Usage
 
@@ -65,8 +75,17 @@ cementic status
 # Show known collections
 cementic collection list
 
-# Search the active revision only
+# Search the active revision only (1-50 results; default 10)
 cementic search "vector database design" -c research
+
+# Run one document through the pipeline with no database — stdin/stdout filters,
+# handy for debugging a single file end-to-end
+cementic extract paper.pdf | cementic chunk | cementic embed
+
+# Manage the embedding runtime explicitly when needed
+cementic embedding status
+cementic embedding start
+cementic embedding stop
 
 # Promote the newest ready revision to active
 cementic collection promote research
@@ -74,7 +93,8 @@ cementic collection promote research
 # Inspect revision history for one collection
 cementic collection revisions research
 
-# Stop background workers and local infra
+# Stop cementic's background workers (Postgres is left running; stop it
+# with your container engine, e.g. `docker compose down`)
 cementic stop
 
 # Delete one collection and its stored artifacts
@@ -93,26 +113,95 @@ cementic collection remove research --force
   - rebuilds extraction, chunks, and embeddings
 
 Search keeps using the active revision until you explicitly run `cementic collection promote`.
-By default, embeddings use `llama.cpp`, so Ollama is optional and only needed when you set
-`CEMENTIC_PIPELINE_EMBEDDING_PROVIDER=ollama`.
+Embeddings are produced by a local `llama.cpp` server.
+
+If a revision finished building with failed documents or chunks, `cementic collection promote`
+refuses it and prints the failure counts, so you never silently publish a partial index. Re-run
+with `--force` to promote it anyway.
+
+A document that fails to extract, chunk, or embed is recorded as failed and does not block the
+rest of the build from finishing; failed documents are retried automatically the next time you
+run `cementic start`. Deleting a file from a watched directory drops it from search.
 
 For a brand-new collection with no active revision yet, search can use the in-progress build and return
 partial results from chunks whose embeddings are already available.
 
 ## Configuration
 
-Configuration is driven by environment variables.
+cementic can be configured by a TOML config file, by environment variables, or both.
+Precedence, lowest to highest:
+
+```
+built-in defaults  <  config file  <  CEMENTIC_* env vars  <  command-line flags
+```
+
+The defaults target local development; override `CEMENTIC_DB_PASSWORD` on shared
+machines or any non-local deployment. The included `compose.yml` uses the same
+`CEMENTIC_DB_*` values and binds PostgreSQL to `127.0.0.1` by default.
+
+### Config file
 
 ```bash
-# Database (required: set CEMENTIC_DB_PASSWORD before starting)
+cementic config init      # write an annotated config.toml to ~/.config/cementic/
+cementic config path      # print the active config file (or where it would live)
+cementic config show      # print the effective merged config as JSON (pipe to jq)
+```
+
+cementic looks for a config file at `CEMENTIC_CONFIG` (if set), then `./cementic.toml`,
+then `~/.config/cementic/config.toml`. Everything is optional — set only what you
+want to change:
+
+```toml
+# ~/.config/cementic/config.toml
+[database]
+host = "localhost"
+port = 5432
+
+[pipeline]
+embedding_provider = "llama-cpp"
+chunk_size = 512
+
+[index]
+method = "hnsw"   # or "diskann"
+
+[llama_cpp]
+model_path = "./models/nomic-embed-text-v2-moe.Q8_0.gguf"
+```
+
+### Choosing an ANN index (HNSW vs DiskANN)
+
+`index.method` selects how vectors are indexed for similarity search:
+
+- **`hnsw`** (default, pgvector) — graph index that lives in memory. Lowest query
+  latency; wants enough RAM to hold the index. Best when the index fits in RAM.
+- **`diskann`** (pgvectorscale) — disk-resident, compressed index. Much lower RAM
+  use at scale; trades some latency. Best when the index is large relative to RAM.
+
+Both ship in the bundled Postgres image. The method is a *serving* choice: it is
+applied when a collection's vector index is built, and it never re-embeds — so set
+it before you first index a collection. Changing it afterwards takes effect the next
+time that collection's index is rebuilt, which swaps the index in place (HNSW ↔
+DiskANN) without touching the embeddings; a one-command reindex of an existing
+collection is on the roadmap. At a few-million-vector scale HNSW usually wins latency
+and DiskANN wins memory.
+
+### Environment variables
+
+Every setting also has a `CEMENTIC_*` environment variable, which overrides the
+config file (handy for one-off overrides and CI):
+
+```bash
+# Database (defaults shown)
 export CEMENTIC_DB_HOST=localhost
 export CEMENTIC_DB_PORT=5432
 export CEMENTIC_DB_NAME=cementic
 export CEMENTIC_DB_USER=cementic
-export CEMENTIC_DB_PASSWORD=your-secure-password
+export CEMENTIC_DB_PASSWORD=cementic
+# Or point at an existing Postgres with a full URL (wins over the parts above):
+# export CEMENTIC_DB_URL=postgresql://user:pass@host:5432/dbname
 
-# Extraction
-export CEMENTIC_EXTRACT_BACKEND=pymupdf4llm
+# Extraction (per-file-type extractor choice lives in the
+# [extraction.backends] config table; this toggles OCR)
 export CEMENTIC_EXTRACT_USE_OCR=false
 
 # Artifact storage
@@ -125,37 +214,22 @@ export CEMENTIC_PIPELINE_CHUNK_OVERLAP=128
 # Embedding provider selection (default)
 export CEMENTIC_PIPELINE_EMBEDDING_PROVIDER=llama-cpp
 
-# llama.cpp default path
+# llama.cpp defaults
 export CEMENTIC_LLAMA_MODEL_PATH=./models/nomic-embed-text-v2-moe.Q8_0.gguf
-
-# Optional Ollama backend
-# export CEMENTIC_PIPELINE_EMBEDDING_PROVIDER=ollama
-# export CEMENTIC_OLLAMA_HOST=http://localhost:11434
-# export CEMENTIC_OLLAMA_MODEL=nomic-embed-text
-# export CEMENTIC_OLLAMA_EMBEDDING_DIM=768
+export CEMENTIC_LLAMA_DAEMON_AUTOSTART=true
 
 # Background worker
-export CEMENTIC_PIPELINE_WORKER_MAX_WORKERS=1
 export CEMENTIC_PIPELINE_WORKER_BATCH_SIZE=8
 export CEMENTIC_PIPELINE_WORKER_POLL_INTERVAL=1.0
 
-# Bootstrap
-export CEMENTIC_BOOTSTRAP_AUTO_START_INFRA=true
-export CEMENTIC_BOOTSTRAP_AUTO_PULL_OLLAMA_MODEL=true
+# Bootstrap (model download only; cementic does not manage containers)
 export CEMENTIC_BOOTSTRAP_AUTO_DOWNLOAD_LLAMA_MODEL=true
-export CEMENTIC_BOOTSTRAP_POSTGRES_BASE_IMAGE=docker.io/postgres:18.3-bookworm
-export CEMENTIC_BOOTSTRAP_POSTGRES_IMAGE=localhost/cementic-postgres-vectorscale:pg18.3-v0.9.0
-export CEMENTIC_BOOTSTRAP_PGVECTORSCALE_VERSION=0.9.0
-export CEMENTIC_BOOTSTRAP_OLLAMA_IMAGE=docker.io/ollama/ollama:0.20.6
 ```
 
 The default local setup is:
 
-- Postgres with `pgvector` + `vectorscale`
-- `llama.cpp` embeddings inside the cementic worker process for indexing
-- a persistent local `llama.cpp` daemon for interactive search, so the model stays loaded
-
-Switch to Ollama only when you specifically want the Ollama backend.
+- Postgres with `pgvector` + `vectorscale`, run via the included `compose.yml`
+- a shared persistent local `llama.cpp` server for indexing and interactive search, so the model stays loaded once
 
 When using Nomic v2 models, cementic automatically applies task prefixes:
 
@@ -165,9 +239,9 @@ When using Nomic v2 models, cementic automatically applies task prefixes:
 ## Architecture
 
 - `src/cementic/source_watcher.py`
-  - watches directories and registers source PDFs
+  - watches directories and registers source documents of any supported type
 - `src/cementic/extract.py`
-  - extracts markdown from PDFs for the extraction stage
+  - a content-type extractor registry that turns each document into Markdown/text
 - `src/cementic/pipeline_worker.py`
   - builds extraction, chunking, and embedding artifacts for the target revision
 - `src/cementic/collections.py`

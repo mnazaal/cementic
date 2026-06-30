@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import cast
 
 from sqlalchemy import select
@@ -20,13 +21,47 @@ from cementic.db import (
     SourceDocument,
     ensure_embedding_ann_index,
 )
+from cementic.embedding_provider import EmbeddingProvider
+from cementic.index_strategies import IndexParams
 from cementic.profiles import (
     get_or_create_chunk_profile,
     get_or_create_embedding_profile,
     get_or_create_extractor_profile,
 )
+from cementic.storage import safe_remove_artifact
 
 BUILDING_STATUSES = {"building", "ready"}
+
+
+@dataclass(frozen=True)
+class RevisionPrunePlan:
+    """Pure pruning decision for old pipeline revisions."""
+
+    removable_revision_ids: set[int]
+    keep_extractor_profile_ids: set[int]
+    keep_chunk_profile_ids: set[int]
+    keep_embedding_profile_ids: set[int]
+
+
+def _revision_prune_plan(revisions: Sequence[PipelineRevision]) -> RevisionPrunePlan:
+    """Plan which revision history can be removed without DB or file I/O."""
+    retired = [revision for revision in revisions if revision.status == "retired"]
+    keep_retired_id = retired[0].id if retired else None
+
+    removable_revision_ids = {
+        revision.id
+        for revision in revisions
+        if revision.status == "superseded"
+        or (revision.status == "retired" and revision.id != keep_retired_id)
+    }
+    kept = [revision for revision in revisions if revision.id not in removable_revision_ids]
+
+    return RevisionPrunePlan(
+        removable_revision_ids=removable_revision_ids,
+        keep_extractor_profile_ids={revision.extractor_profile_id for revision in kept},
+        keep_chunk_profile_ids={revision.chunk_profile_id for revision in kept},
+        keep_embedding_profile_ids={revision.embedding_profile_id for revision in kept},
+    )
 
 
 def _default_revision_label(revision: PipelineRevision) -> str:
@@ -47,11 +82,16 @@ def get_active_revision(session: Session, collection: str) -> PipelineRevision |
     )
 
 
-def get_target_revision(session: Session, collection: str, config: Config) -> PipelineRevision:
+def get_target_revision(
+    session: Session,
+    collection: str,
+    config: Config,
+    provider: EmbeddingProvider | None = None,
+) -> PipelineRevision:
     """Return the revision matching current config, creating it if needed."""
     extractor_profile = get_or_create_extractor_profile(session, config)
     chunk_profile = get_or_create_chunk_profile(session, config)
-    embedding_profile = get_or_create_embedding_profile(session, config)
+    embedding_profile = get_or_create_embedding_profile(session, config, provider)
 
     current = (
         session.query(PipelineRevision)
@@ -97,8 +137,50 @@ def mark_revision_ready(session: Session, revision: PipelineRevision) -> None:
         session.flush()
 
 
-def promote_revision(
+def requeue_interrupted_artifacts(
     session: Session, collection: str, revision: PipelineRevision
+) -> None:
+    """Reset failed/interrupted artifacts of a revision to ``pending``.
+
+    Failures are terminal *within* a single worker run (so a build can still
+    finish), but a fresh ``cementic start`` re-queues them — along with any rows a
+    crashed worker left in ``processing`` — for another attempt. Deleted source
+    documents are skipped so they leave no dangling ``pending`` rows.
+    """
+    interrupted = ("failed", "processing")
+    doc_ids = select(SourceDocument.id).where(
+        SourceDocument.collection == collection,
+        SourceDocument.status != "deleted",
+    )
+
+    session.query(ExtractedDocument).filter(
+        ExtractedDocument.document_id.in_(doc_ids),
+        ExtractedDocument.extractor_profile_id == revision.extractor_profile_id,
+        ExtractedDocument.status.in_(interrupted),
+    ).update({"status": "pending"}, synchronize_session=False)
+
+    extracted_ids = select(ExtractedDocument.id).where(
+        ExtractedDocument.document_id.in_(doc_ids),
+        ExtractedDocument.extractor_profile_id == revision.extractor_profile_id,
+    )
+    session.query(ChunkedDocument).filter(
+        ChunkedDocument.extracted_document_id.in_(extracted_ids),
+        ChunkedDocument.chunk_profile_id == revision.chunk_profile_id,
+        ChunkedDocument.status.in_(interrupted),
+    ).update({"status": "pending"}, synchronize_session=False)
+
+    chunk_ids = select(Chunk.id).where(Chunk.document_id.in_(doc_ids))
+    session.query(ChunkEmbedding).filter(
+        ChunkEmbedding.chunk_id.in_(chunk_ids),
+        ChunkEmbedding.embedding_profile_id == revision.embedding_profile_id,
+        ChunkEmbedding.status.in_(interrupted),
+    ).update({"status": "pending"}, synchronize_session=False)
+
+    session.flush()
+
+
+def promote_revision(
+    session: Session, collection: str, revision: PipelineRevision, *, config: Config
 ) -> PipelineRevision:
     """Promote a ready revision to active for one collection."""
     if revision.collection != collection:
@@ -114,24 +196,33 @@ def promote_revision(
     revision.status = "active"
     revision.promoted_at = datetime.now(timezone.utc)
     session.flush()
-    prune_collection_history(session, collection)
+    prune_collection_history(session, collection, config=config)
     return revision
 
 
-def ensure_revision_ann_index(session: Session, revision: PipelineRevision) -> None:
-    """Ensure the ANN index exists for the revision's embedding profile."""
+def ensure_revision_ann_index(
+    session: Session, revision: PipelineRevision, config: Config
+) -> None:
+    """Ensure the configured ANN index exists for the revision's vector table."""
     bind = session.get_bind()
     if bind is None:
         raise RuntimeError("Session is not bound to an engine")
+    params = IndexParams(
+        hnsw_m=config.index.hnsw_m,
+        hnsw_ef_construction=config.index.hnsw_ef_construction,
+        diskann_num_neighbors=config.index.diskann_num_neighbors,
+        diskann_search_list_size=config.index.diskann_search_list_size,
+    )
     ensure_embedding_ann_index(
         cast(Engine, bind),
         profile_id=revision.embedding_profile_id,
-        embedding_dim=revision.embedding_profile.embedding_dim,
+        method=config.index.method,
+        params=params,
         distance_metric=revision.embedding_profile.distance_metric,
     )
 
 
-def prune_collection_history(session: Session, collection: str) -> None:
+def prune_collection_history(session: Session, collection: str, *, config: Config) -> None:
     """Keep only active and most recent retired history for one collection."""
     session.flush()
     session.expire_all()
@@ -141,30 +232,16 @@ def prune_collection_history(session: Session, collection: str) -> None:
         .order_by(PipelineRevision.id.desc())
         .all()
     )
-    retired = [revision for revision in revisions if revision.status == "retired"]
-    keep_retired_id = retired[0].id if retired else None
-
-    removable = [
-        revision
-        for revision in revisions
-        if revision.status == "superseded"
-        or (revision.status == "retired" and revision.id != keep_retired_id)
-    ]
-    if not removable:
+    plan = _revision_prune_plan(revisions)
+    if not plan.removable_revision_ids:
         return
-
-    removable_revision_ids = {revision.id for revision in removable}
-    kept = [revision for revision in revisions if revision.id not in removable_revision_ids]
-    keep_extractor_profile_ids = {revision.extractor_profile_id for revision in kept}
-    keep_chunk_profile_ids = {revision.chunk_profile_id for revision in kept}
-    keep_embedding_profile_ids = {revision.embedding_profile_id for revision in kept}
 
     extracted_to_remove = (
         session.query(ExtractedDocument.id, ExtractedDocument.artifact_path)
         .join(SourceDocument, ExtractedDocument.document_id == SourceDocument.id)
         .filter(
             SourceDocument.collection == collection,
-            ExtractedDocument.extractor_profile_id.not_in(keep_extractor_profile_ids),
+            ExtractedDocument.extractor_profile_id.not_in(plan.keep_extractor_profile_ids),
         )
         .all()
     )
@@ -177,14 +254,14 @@ def prune_collection_history(session: Session, collection: str) -> None:
         .join(SourceDocument, ExtractedDocument.document_id == SourceDocument.id)
         .filter(
             SourceDocument.collection == collection,
-            ChunkedDocument.chunk_profile_id.not_in(keep_chunk_profile_ids),
+            ChunkedDocument.chunk_profile_id.not_in(plan.keep_chunk_profile_ids),
         )
     )
     chunk_ids = select(Chunk.id).where(Chunk.chunked_document_id.in_(chunked_ids))
 
     session.query(ChunkEmbedding).filter(
         ChunkEmbedding.chunk_id.in_(chunk_ids),
-        ChunkEmbedding.embedding_profile_id.not_in(keep_embedding_profile_ids),
+        ChunkEmbedding.embedding_profile_id.not_in(plan.keep_embedding_profile_ids),
     ).delete(synchronize_session=False)
     session.query(Chunk).filter(Chunk.chunked_document_id.in_(chunked_ids)).delete(
         synchronize_session=False
@@ -198,13 +275,10 @@ def prune_collection_history(session: Session, collection: str) -> None:
             synchronize_session=False
         )
 
-    session.query(PipelineRevision).filter(PipelineRevision.id.in_(removable_revision_ids)).delete(
+    session.query(PipelineRevision).filter(PipelineRevision.id.in_(plan.removable_revision_ids)).delete(
         synchronize_session=False
     )
     session.flush()
 
     for artifact_path in artifact_paths:
-        try:
-            Path(artifact_path).unlink(missing_ok=True)
-        except OSError:
-            pass
+        safe_remove_artifact(config, artifact_path)
