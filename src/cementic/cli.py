@@ -3,9 +3,11 @@
 import inspect
 import json
 import os
+import shutil
 import sys
 import time
 from collections.abc import Callable
+from importlib import resources
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Any, TypeVar, cast
@@ -34,6 +36,7 @@ from cementic.config import (
     resolve_config_path,
 )
 from cementic.db import get_engine, get_session_factory
+from cementic.doctor import collect_doctor_report
 from cementic.embedding_runtime import (
     create_provider,
     get_llama_cpp_runtime_client,
@@ -127,9 +130,11 @@ app = CementicTyper(help="Index and semantically search document collections")
 collection_app = CementicTyper(help="Inspect and manage collections")
 embedding_app = CementicTyper(help="Manage embedding runtime service")
 config_app = CementicTyper(help="View and manage the config file")
+init_app = CementicTyper(help="Initialize local setup files")
 app.add_typer(collection_app, name="collection")
 app.add_typer(embedding_app, name="embedding")
 app.add_typer(config_app, name="config")
+app.add_typer(init_app, name="init")
 console = Console()
 # Diagnostics for the stdin/stdout filter commands go here so a failure never
 # pollutes the data on stdout (which would otherwise be piped on as content).
@@ -266,6 +271,36 @@ def config_show() -> None:
     typer.echo(json.dumps(_get_config().model_dump(mode="json"), indent=2, sort_keys=True))
 
 
+@init_app.command("postgres", short_help="Write a local Postgres setup directory")
+def init_postgres(
+    directory: Path = typer.Argument(..., help="Directory to write setup files into"),
+    force: bool = typer.Option(False, "--force", help="Replace an existing non-empty directory"),
+) -> None:
+    """Copy static Docker/Podman Postgres setup files for cementic."""
+    if directory.exists() and any(directory.iterdir()) and not force:
+        console.print(f"{directory} already exists and is not empty (use --force to replace it)")
+        raise typer.Exit(1)
+    if directory.exists() and force:
+        shutil.rmtree(directory)
+
+    template_root = resources.files("cementic") / "templates" / "postgres"
+    with resources.as_file(template_root) as source:
+        if not source.is_dir():
+            console.print("Postgres setup templates are missing from this installation")
+            raise typer.Exit(1)
+        shutil.copytree(source, directory, dirs_exist_ok=True)
+
+    console.print(f"Wrote Postgres setup to {directory}")
+    console.print("")
+    console.print("Start the persistent local database once:")
+    console.print(f"  cd {directory}")
+    console.print("  docker compose up -d")
+    console.print("  # or: podman compose up -d")
+    console.print("")
+    console.print("Then check readiness:")
+    console.print("  cementic status --doctor")
+
+
 def _load_supervisor_state() -> dict[str, object]:
     return load_supervisor_state(_get_supervisor_state_path())
 
@@ -363,7 +398,10 @@ def _is_database_unavailable(error: Exception) -> bool:
     return isinstance(error, (OperationalError, InterfaceError))
 
 
-_DB_HINT = "hint: start Postgres with `docker compose up -d` (or `podman compose up -d`)"
+_DB_HINT = (
+    "hint: run `cementic init postgres ./cementic-postgres` once and follow its README, "
+    "or set CEMENTIC_DB_URL to an existing Postgres with pgvector and pgvectorscale"
+)
 
 
 def _state(ok: bool, ok_word: str, bad_word: str) -> str:
@@ -380,6 +418,25 @@ def _print_database_unavailable(action: str) -> None:
 def _llama_daemon_runtime_status() -> str:
     """Return llama.cpp daemon runtime status."""
     return llama_daemon_status(_get_config())
+
+
+def _print_doctor_report(report: dict[str, Any]) -> None:
+    """Print read-only doctor diagnostics in a compact human format."""
+    doctor_status = "[green]ok[/green]" if report["ok"] else "[red]failed[/red]"
+    console.print(f"cementic doctor: {doctor_status}")
+    checks = report["checks"]
+    for name, payload in checks.items():
+        if name == "extensions":
+            console.print("extensions:")
+            for extension, extension_payload in payload.items():
+                console.print(
+                    f"  - {extension}: {extension_payload['status']} "
+                    f"({extension_payload['message']})"
+                )
+            continue
+        status_text = payload.get("status", "unknown")
+        message = payload.get("message")
+        console.print(f"{name}: {status_text}" + (f" — {message}" if message else ""))
 
 
 def _print_status_summary(
@@ -716,8 +773,23 @@ def status(
         "--json",
         help="Output status as JSON",
     ),
+    doctor: bool = typer.Option(
+        False,
+        "--doctor",
+        help="Run read-only runtime readiness diagnostics",
+    ),
 ) -> None:
     """Show background worker status and collection progress."""
+    if doctor:
+        report = collect_doctor_report(_get_config())
+        if json_output:
+            typer.echo(json.dumps(report, indent=2, sort_keys=True))
+        else:
+            _print_doctor_report(report)
+        if not report["ok"]:
+            raise typer.Exit(1)
+        return
+
     if collection is not None:
         try:
             collection = validate_collection_name(collection)

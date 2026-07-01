@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.1.0b1] — 2026-07-01
+
+### Beta Release Prep
+
+- Add GitHub-tag install target for `pipx` / `uv tool` beta users
+- Add `cementic init postgres DIR` to generate packaged Docker/Podman Postgres setup files
+- Add `cementic status --doctor` read-only runtime diagnostics with JSON support
+- Enable required Postgres extensions during normal schema initialization with actionable failures
+- Document Linux-first beta setup, persistent Postgres service setup, and model auto-download behavior
+
 ## [0.1.0] — 2026-04-30
 
 ### Initial Release
@@ -18,5 +28,3 @@
 - **Automatic Nomic v2 task prefixes**: `search_document:` / `search_query:` applied when using Nomic models
 - **Configuration**: TOML config file and/or `CEMENTIC_*` environment variables via pydantic-settings, with sensible local defaults
 - **Quality gates**: unit + PostgreSQL integration test suites; ruff linting and mypy strict type checking
-</content>
-</invoke>

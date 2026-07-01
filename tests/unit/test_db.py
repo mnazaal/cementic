@@ -5,6 +5,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from cementic.db import (
+    REQUIRED_DB_EXTENSIONS,
     _ensure_ann_access_method,
     create_tables,
     ensure_embedding_ann_index,
@@ -60,70 +61,39 @@ def _make_engine_conn_mock(execute_side_effect: list) -> MagicMock:
 class TestEnsureVectorExtensions:
     """Behavior tests for ensure_vector_extensions branch coverage."""
 
-    def test_both_extensions_already_exist_skips_creation(self) -> None:
-        """If vectorscale and vector already exist, no CREATE is issued."""
-        engine = _make_engine_conn_mock(
-            [
-                _make_exec_result(True),   # extension_exists("vectorscale") → True
-                _make_exec_result(True),   # extension_exists("vector") → True
-            ]
-        )
+    def test_required_extensions_are_centralized(self) -> None:
+        assert REQUIRED_DB_EXTENSIONS == ("vector", "vectorscale")
+
+    def test_postgres_creates_required_extensions(self) -> None:
+        """Postgres setup should create both required extensions before tables."""
+        engine = _make_engine_conn_mock([None, None])
+        engine.dialect.name = "postgresql"
+
         ensure_vector_extensions(engine)
-        # Only two SELECT EXISTS queries; no CREATE was sent.
+
         assert engine.connect.return_value.__enter__.return_value.execute.call_count == 2
+        execute_calls = engine.connect.return_value.__enter__.return_value.execute.call_args_list
+        first = str(execute_calls[0][0][0])
+        second = str(execute_calls[1][0][0])
+        assert "CREATE EXTENSION IF NOT EXISTS vector" in first
+        assert "CREATE EXTENSION IF NOT EXISTS vectorscale" in second
+        engine.connect.return_value.__enter__.return_value.commit.assert_called_once()
 
-    def test_vectorscale_missing_creates_and_existing_vector_returns(self) -> None:
-        """Create vectorscale when missing, skip vector when already present."""
-        engine = _make_engine_conn_mock(
-            [
-                _make_exec_result(False),  # vectorscale check → False
-                None,                       # CREATE EXTENSION vectorscale
-                _make_exec_result(True),   # vector check → True
-            ]
-        )
+    def test_non_postgres_skips_extension_setup(self) -> None:
+        engine = _make_engine_conn_mock([])
+        engine.dialect.name = "sqlite"
+
         ensure_vector_extensions(engine)
-        # Three calls: two SELECT + one CREATE
-        assert engine.connect.return_value.__enter__.return_value.execute.call_count == 3
 
-    def test_vectorscale_fails_continues_to_vector_success(self) -> None:
-        """Rollback vectorscale, try vector when missing, success."""
-        engine = _make_engine_conn_mock(
-            [
-                _make_exec_result(False),   # vectorscale check → False
-                RuntimeError("no vectorscale"),  # CREATE vectorscale → fail
-                _make_exec_result(False),   # vector check → False
-                None,                        # CREATE vector → success
-            ]
-        )
-        ensure_vector_extensions(engine)
-        calls = engine.connect.return_value.__enter__.return_value.execute.call_count
-        assert calls == 4
+        engine.connect.assert_not_called()
 
-    def test_vectorscale_ok_vector_create_fails_still_missing_raises(self) -> None:
-        """When vector create fails and extension still missing, re-raise."""
-        engine = _make_engine_conn_mock(
-            [
-                _make_exec_result(False),   # vectorscale check → False
-                None,                        # CREATE vectorscale → success
-                _make_exec_result(False),   # vector check → False
-                RuntimeError("no vector"),   # CREATE vector → fail
-                _make_exec_result(False),   # post-rollback re-check → still False
-            ]
-        )
+    def test_extension_create_failure_is_actionable(self) -> None:
+        engine = _make_engine_conn_mock([RuntimeError("permission denied")])
+        engine.dialect.name = "postgresql"
+
         with pytest.raises(Exception):
             ensure_vector_extensions(engine)
-
-    def test_vectorscale_exists_vector_missing_creates(self) -> None:
-        """Skip vectorscale, create missing vector."""
-        engine = _make_engine_conn_mock(
-            [
-                _make_exec_result(True),    # vectorscale check → True
-                _make_exec_result(False),   # vector check → False
-                None,                        # CREATE vector → success
-            ]
-        )
-        ensure_vector_extensions(engine)
-        assert engine.connect.return_value.__enter__.return_value.execute.call_count == 3
+        engine.connect.return_value.__enter__.return_value.rollback.assert_called_once()
 
 
 def test_ensure_embedding_ann_index_builds_hnsw_on_profile_table() -> None:

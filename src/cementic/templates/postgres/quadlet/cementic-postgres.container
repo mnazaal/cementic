@@ -1,0 +1,20 @@
+# Optional Podman Quadlet service for cementic Postgres.
+# Install from the generated setup directory with:
+#   mkdir -p ~/.config/containers/systemd
+#   cp quadlet/cementic-postgres.container ~/.config/containers/systemd/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now cementic-postgres.service
+
+[Container]
+ContainerName=cementic-postgres
+Image=cementic-postgres-vectorscale:latest
+PublishPort=127.0.0.1:5432:5432
+Environment=POSTGRES_USER=cementic
+Environment=POSTGRES_PASSWORD=cementic
+Environment=POSTGRES_DB=cementic
+
+[Service]
+Restart=unless-stopped
+
+[Install]
+WantedBy=default.target

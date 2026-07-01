@@ -23,9 +23,9 @@ from cementic.db import get_engine
 _logger = logging.getLogger("cementic.bootstrap")
 
 _COMPOSE_HINT = (
-    "Start it with the shipped compose file (`docker compose up -d` or "
-    "`podman compose up -d`), or set CEMENTIC_DB_URL to an existing Postgres "
-    "with the pgvector and vectorscale extensions."
+    "Run `cementic init postgres ./cementic-postgres` once and follow its README, "
+    "or set CEMENTIC_DB_URL to an existing Postgres with the pgvector and "
+    "vectorscale extensions."
 )
 
 

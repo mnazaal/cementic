@@ -27,14 +27,19 @@ This keeps old search available while a new extractor, chunking policy, or embed
 ## Installation
 
 ```bash
-# From PyPI (once published):
-uv tool install cementic
-# or
-pipx install cementic
+# Beta from GitHub tag (Linux-first):
+pipx install "git+https://github.com/mnazaal/cementic.git@v0.1.0b1"
+# or:
+uv tool install "git+https://github.com/mnazaal/cementic.git@v0.1.0b1"
 
 # From source (development):
 uv pip install -e ".[dev]"
 ```
+
+The beta is verified for Linux with Python 3.10-3.12. macOS and Windows are
+best-effort until tested. Installing `llama-cpp-python[server]` can take a while
+on some machines; the embedding model itself is downloaded separately on first
+use when auto-download is enabled.
 
 ## Prerequisites
 
@@ -47,21 +52,46 @@ uv pip install -e ".[dev]"
 
 ## Setup
 
-Bring up PostgreSQL with the bundled image (pgvector + vectorscale) using whichever
-container engine you have — `docker` or `podman`:
+Generate a local Postgres setup directory, then start it once as a persistent
+local service. This does not make cementic manage containers; it only writes
+copy-pasteable setup files.
 
 ```bash
+cementic init postgres ./cementic-postgres
+cd ./cementic-postgres
 docker compose up -d      # or: podman compose up -d
+cementic status --doctor
 ```
 
-This binds PostgreSQL to `127.0.0.1:5432` with the default `CEMENTIC_DB_*` values.
+You do **not** run Compose every time you use cementic. The generated Compose
+file uses `restart: unless-stopped`; optional Podman Quadlet/user-systemd files
+are generated for users who prefer a user service.
+
+The generated setup binds PostgreSQL to `127.0.0.1:5432` with the default
+`CEMENTIC_DB_*` values.
 To use a Postgres you manage yourself, just point `CEMENTIC_DB_URL` (or the
 `CEMENTIC_DB_*` variables) at it — it must have the `pgvector` and `vectorscale`
 extensions available.
 
-cementic connects to that database and, on first run, validates or auto-downloads
-the configured `llama.cpp` model. It does **not** start, build, or stop any
-containers; if Postgres isn't reachable it tells you how to bring it up.
+cementic connects to that database and, on first indexing/search run, validates
+or auto-downloads the configured `llama.cpp` model into the cementic user data
+directory when it is missing. Auto-download is the recommended beta path; use
+`cementic status --doctor` to check the resolved model path without downloading.
+If Postgres is not reachable, doctor suggests generating the local setup or
+pointing cementic at your own Postgres.
+
+### Running Postgres as a persistent service (optional, Podman + systemd)
+
+If you'd rather not start/stop the container by hand, or you're running cementic
+from an environment (CI runner, sandboxed agent, etc.) that can't reach your
+host's container engine, you can run the bundled Postgres as a persistent
+user-level `systemd` service via [Podman Quadlet](https://docs.podman.io/en/latest/markdown/podman-systemd.unit.5.html),
+using the unit in `containers/quadlet/cementic-postgres.container`. See the
+comments at the top of that file for the one-time build/install/enable steps.
+Once enabled, Postgres starts with your login session (or survives
+logout/reboot if you also run `loginctl enable-linger $USER`) and any
+`cementic` command — or any agent running one — just needs network access to
+it; nothing needs to start the container itself anymore.
 
 ## Usage
 

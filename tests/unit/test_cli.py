@@ -84,6 +84,45 @@ class TestConfigCommands:
         assert data["database"]["password"] == "**********"
 
 
+class TestInitPostgresCommand:
+    """Tests for generated Postgres setup files."""
+
+    def test_init_postgres_writes_setup_tree(self, tmp_path) -> None:
+        target = tmp_path / "cementic-postgres"
+
+        result = runner.invoke(app, ["init", "postgres", str(target)])
+
+        assert result.exit_code == 0
+        assert (target / ".env").is_file()
+        assert (target / "compose.yml").is_file()
+        assert (target / "Containerfile").is_file()
+        assert (target / "README.md").is_file()
+        assert (target / "quadlet" / "cementic-postgres.container").is_file()
+        assert "cementic status --doctor" in result.output
+
+    def test_init_postgres_refuses_non_empty_directory(self, tmp_path) -> None:
+        target = tmp_path / "cementic-postgres"
+        target.mkdir()
+        (target / "keep.txt").write_text("do not clobber")
+
+        result = runner.invoke(app, ["init", "postgres", str(target)])
+
+        assert result.exit_code == 1
+        assert "already exists and is not empty" in result.output
+        assert (target / "keep.txt").read_text() == "do not clobber"
+
+    def test_init_postgres_force_replaces_non_empty_directory(self, tmp_path) -> None:
+        target = tmp_path / "cementic-postgres"
+        target.mkdir()
+        (target / "old.txt").write_text("old")
+
+        result = runner.invoke(app, ["init", "postgres", str(target), "--force"])
+
+        assert result.exit_code == 0
+        assert not (target / "old.txt").exists()
+        assert (target / "compose.yml").is_file()
+
+
 class TestRootHelp:
     """Test top-level help behavior."""
 
@@ -275,11 +314,52 @@ class TestSearchCommand:
 
         assert result.exit_code == 1
         assert "search: database not reachable" in result.output
-        assert "docker compose up -d" in result.output
+        assert "cementic init postgres" in result.output
 
 
 class TestBackgroundCommands:
     """Test top-level background process commands."""
+
+    @patch("cementic.cli.collect_doctor_report")
+    def test_status_doctor_outputs_json_and_fails_when_not_ok(self, mock_collect):
+        mock_collect.return_value = {
+            "ok": False,
+            "checks": {
+                "database": {"status": "fail", "reachable": False, "message": "down"},
+                "extensions": {},
+                "model": {"status": "ok", "exists": True},
+                "daemon": {"status": "warning", "reachable": False, "autostart": True},
+            },
+        }
+
+        result = runner.invoke(app, ["status", "--doctor", "--json"])
+
+        assert result.exit_code == 1
+        data = json.loads(result.stdout)
+        assert data["ok"] is False
+        assert data["checks"]["database"]["message"] == "down"
+
+    @patch("cementic.cli.collect_doctor_report")
+    def test_status_doctor_outputs_human_summary_when_ok(self, mock_collect):
+        mock_collect.return_value = {
+            "ok": True,
+            "checks": {
+                "database": {"status": "ok", "reachable": True},
+                "extensions": {
+                    "vector": {"status": "ok", "message": "installed"},
+                    "vectorscale": {"status": "warning", "message": "available"},
+                },
+                "model": {"status": "ok", "exists": True},
+                "daemon": {"status": "warning", "reachable": False, "autostart": True},
+            },
+        }
+
+        result = runner.invoke(app, ["status", "--doctor"])
+
+        assert result.exit_code == 0
+        assert "cementic doctor: ok" in result.output
+        assert "vector: ok" in result.output
+        assert "vectorscale: warning" in result.output
 
     @patch("cementic.cli._llama_daemon_runtime_status", return_value="running, pid=333")
     @patch("cementic.cli.check_health")
@@ -720,7 +800,7 @@ class TestBackgroundCommands:
 
         assert result.exit_code == 1
         assert "collection list: database not reachable" in result.output
-        assert "docker compose up -d" in result.output
+        assert "cementic init postgres" in result.output
 
     @patch("cementic.cli.get_engine")
     def test_collection_promote_shows_database_hint_when_database_unavailable(
@@ -732,7 +812,7 @@ class TestBackgroundCommands:
 
         assert result.exit_code == 1
         assert "collection promote: database not reachable" in result.output
-        assert "docker compose up -d" in result.output
+        assert "cementic init postgres" in result.output
 
 
 class TestCollectionCommands:

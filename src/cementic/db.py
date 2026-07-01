@@ -18,6 +18,7 @@ if TYPE_CHECKING:
 
 
 _ENGINE_CACHE: dict[str, Engine] = {}
+REQUIRED_DB_EXTENSIONS = ("vector", "vectorscale")
 
 
 def _url_cache_key(database_url: str | URL) -> str:
@@ -321,33 +322,24 @@ def get_engine(database_url: str | URL) -> Engine:
 
 def ensure_vector_extensions(engine: Engine) -> None:
     """Ensure vector-related PostgreSQL extensions are enabled."""
+    if engine.dialect.name != "postgresql":
+        return
     with engine.connect() as conn:
-
-        def extension_exists(name: str) -> bool:
-            return bool(
-                conn.execute(
-                    text("SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = :name)"),
-                    {"name": name},
-                ).scalar()
-            )
-
-        if not extension_exists("vectorscale"):
-            try:
-                conn.execute(text("CREATE EXTENSION vectorscale CASCADE"))
-                conn.commit()
-            except Exception:
-                conn.rollback()
-
-        if extension_exists("vector"):
-            return
-
         try:
-            conn.execute(text("CREATE EXTENSION vector"))
+            for extension in REQUIRED_DB_EXTENSIONS:
+                conn.execute(text(f"CREATE EXTENSION IF NOT EXISTS {extension}"))
             conn.commit()
-        except Exception:
+        except Exception as error:
             conn.rollback()
-            if not extension_exists("vector"):
-                raise
+            details = (
+                "Postgres must provide the pgvector (`vector`) and pgvectorscale "
+                "(`vectorscale`) extensions. Use `cementic init postgres ./cementic-postgres` "
+                "for a local setup, install the extensions on your Postgres server, or connect "
+                "as a user with CREATE EXTENSION privileges."
+            )
+            raise RuntimeError(
+                f"Failed to enable required Postgres extensions: {error}. {details}"
+            ) from error
 
 
 def create_tables(engine: Engine) -> None:

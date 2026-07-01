@@ -73,7 +73,7 @@ class TestPostgresReady:
         bootstrapper = Bootstrapper(config)
         with (
             patch.object(bootstrapper, "_database_ready", return_value=False),
-            pytest.raises(RuntimeError, match="compose"),
+            pytest.raises(RuntimeError, match="cementic init postgres"),
         ):
             bootstrapper._ensure_postgres_ready()
 
