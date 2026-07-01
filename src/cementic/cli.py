@@ -211,8 +211,9 @@ _DEFAULT_CONFIG_TOML = """\
 # < command-line flags. Every value below is optional; delete what you don't need.
 
 [database]
-# Postgres with the pgvector extension. Bring one up with the bundled compose
-# file: `docker compose up -d`  (or `podman compose up -d`).
+# Postgres with the pgvector and pgvectorscale extensions. Generate a local
+# setup with `cementic init postgres ./cementic-postgres`, then start it with
+# `docker compose up -d` (or `podman compose up -d`).
 host = "localhost"
 port = 5432
 name = "cementic"

@@ -1,7 +1,10 @@
 # Postgres (with pgvector + vectorscale) for cementic.
 #
-# cementic does not manage containers; this compose file is the recommended way
-# to provision the database. Use whichever engine you have -- docker or podman:
+# Dev/local compose file for cementic development. Installed users should run
+# `cementic init postgres ./cementic-postgres` instead, which generates a
+# self-contained setup directory with its own compose, Containerfile, and docs.
+#
+# Use whichever engine you have — docker or podman:
 #
 #   docker compose up -d     (or: podman compose up -d)    # start
 #   docker compose down      (or: podman compose down)     # stop and remove

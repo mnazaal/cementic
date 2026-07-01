@@ -1,10 +1,10 @@
 """Runtime bootstrap helpers: verify external services and fetch the model.
 
 cementic does not manage containers. Postgres (with pgvector + vectorscale) is
-provisioned externally -- e.g. via the shipped ``compose.yml`` run with
-``docker compose up -d`` or ``podman compose up -d``, or any Postgres pointed at
-by ``CEMENTIC_DB_URL``. Here we only verify Postgres is reachable and fetch the
-llama.cpp model file when needed.
+provisioned externally -- e.g. via ``cementic init postgres ./cementic-postgres``
+and its generated setup, or any Postgres pointed at by ``CEMENTIC_DB_URL``. Here
+we only verify Postgres is reachable and fetch the llama.cpp model file when
+needed.
 """
 
 from __future__ import annotations

@@ -1,9 +1,10 @@
 # Roadmap
 
 Baseline: unit tests, ruff, and mypy pass locally. PostgreSQL integration tests
-require a running Postgres with pgvector + vectorscale (e.g. `docker compose up
--d` or `podman compose up -d`); the integration suite brings the bundled compose
-stack up/down itself when a container engine is available.
+require a running Postgres with pgvector + vectorscale (generate one with
+`cementic init postgres ./cementic-postgres`, then `docker compose up -d` or
+`podman compose up -d`); the integration suite can bring the compose stack
+up/down itself when a container engine is available.
 
 Design rationale and the pluggable seams (embedding provider, extractor, ANN
 index, versioned revisions) are documented in [PLAN.md](PLAN.md).

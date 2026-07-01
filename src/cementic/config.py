@@ -321,9 +321,9 @@ class BootstrapConfig(_SectionSettings):
     """Runtime bootstrap configuration for the embedding model.
 
     cementic does not manage containers. Postgres (with pgvector + vectorscale)
-    is provisioned externally -- e.g. via the shipped ``compose.yml`` run with
-    ``docker compose up -d`` or ``podman compose up -d``, or any Postgres pointed
-    at by ``CEMENTIC_DB_URL``.
+    is provisioned externally -- e.g. via ``cementic init postgres
+    ./cementic-postgres`` and its generated setup, or any Postgres pointed at by
+    ``CEMENTIC_DB_URL``.
     """
 
     model_config = SettingsConfigDict(env_prefix="CEMENTIC_BOOTSTRAP_")

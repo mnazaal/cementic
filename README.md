@@ -44,8 +44,9 @@ use when auto-download is enabled.
 ## Prerequisites
 
 - **PostgreSQL with pgvector + vectorscale** — provision it however you like. The
-  easiest path is the included `compose.yml`, run with **Docker** or **Podman**
-  (see Setup). cementic itself does not manage containers.
+  easiest path is generating a local setup via `cementic init postgres`, then
+  starting it with **Docker** or **Podman** (see Setup). cementic itself does
+  not manage containers.
 - **Python 3.10+**
 - **8-16 GB RAM** recommended for the llama.cpp embedding backend (the model loads into memory)
 - **Disk space**: ~2 GB for the llama.cpp model, plus PostgreSQL data and artifact storage
@@ -84,7 +85,7 @@ pointing cementic at your own Postgres.
 
 If you'd rather not start/stop the container by hand, or you're running cementic
 from an environment (CI runner, sandboxed agent, etc.) that can't reach your
-host's container engine, you can run the bundled Postgres as a persistent
+host's container engine, you can run Postgres as a persistent
 user-level `systemd` service via [Podman Quadlet](https://docs.podman.io/en/latest/markdown/podman-systemd.unit.5.html),
 using the unit in `containers/quadlet/cementic-postgres.container`. See the
 comments at the top of that file for the one-time build/install/enable steps.
