@@ -87,7 +87,8 @@ If you'd rather not start/stop the container by hand, or you're running cementic
 from an environment (CI runner, sandboxed agent, etc.) that can't reach your
 host's container engine, you can run Postgres as a persistent
 user-level `systemd` service via [Podman Quadlet](https://docs.podman.io/en/latest/markdown/podman-systemd.unit.5.html),
-using the unit in `containers/quadlet/cementic-postgres.container`. See the
+using the unit in `containers/quadlet/cementic-postgres.container` (the generated
+setup from `cementic init postgres` also includes an optional Quadlet file). See the
 comments at the top of that file for the one-time build/install/enable steps.
 Once enabled, Postgres starts with your login session (or survives
 logout/reboot if you also run `loginctl enable-linger $USER`) and any
@@ -124,8 +125,7 @@ cementic collection promote research
 # Inspect revision history for one collection
 cementic collection revisions research
 
-# Stop cementic's background workers (Postgres is left running; stop it
-# with your container engine, e.g. `docker compose down`)
+# Stop cementic's background workers (Postgres is left running)
 cementic stop
 
 # Delete one collection and its stored artifacts
@@ -167,7 +167,7 @@ built-in defaults  <  config file  <  CEMENTIC_* env vars  <  command-line flags
 ```
 
 The defaults target local development; override `CEMENTIC_DB_PASSWORD` on shared
-machines or any non-local deployment. The included `compose.yml` uses the same
+machines or any non-local deployment. The generated Postgres setup uses the same
 `CEMENTIC_DB_*` values and binds PostgreSQL to `127.0.0.1` by default.
 
 ### Config file
@@ -208,7 +208,7 @@ model_path = "./models/nomic-embed-text-v2-moe.Q8_0.gguf"
 - **`diskann`** (pgvectorscale) — disk-resident, compressed index. Much lower RAM
   use at scale; trades some latency. Best when the index is large relative to RAM.
 
-Both ship in the bundled Postgres image. The method is a *serving* choice: it is
+Both ship in the generated or provisioned Postgres image. The method is a *serving* choice: it is
 applied when a collection's vector index is built, and it never re-embeds — so set
 it before you first index a collection. Changing it afterwards takes effect the next
 time that collection's index is rebuilt, which swaps the index in place (HNSW ↔
@@ -259,7 +259,7 @@ export CEMENTIC_BOOTSTRAP_AUTO_DOWNLOAD_LLAMA_MODEL=true
 
 The default local setup is:
 
-- Postgres with `pgvector` + `vectorscale`, run via the included `compose.yml`
+- Postgres with `pgvector` + `vectorscale`, provisioned via the generated setup or your own Postgres
 - a shared persistent local `llama.cpp` server for indexing and interactive search, so the model stays loaded once
 
 When using Nomic v2 models, cementic automatically applies task prefixes:
