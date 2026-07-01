@@ -15,7 +15,6 @@ class DaemonState(str, Enum):
 
     STOPPED = "stopped"
     RUNNING = "running"
-    PAUSED = "paused"
 
 
 @dataclass
@@ -82,7 +81,7 @@ class WorkerState:
 
 
 class StateManager:
-    """Manages persistent state for pause/resume functionality."""
+    """Manages persistent on-disk worker state."""
 
     def __init__(self, state_path: Path | None) -> None:
         """Initialize state manager."""
@@ -136,18 +135,3 @@ class StateManager:
 
         self.save(state)
         return state
-
-    def reset(self) -> None:
-        """Reset all state."""
-        if self.state_path.exists():
-            self.state_path.unlink()
-
-    def is_running(self) -> bool:
-        """Check if daemon is marked as running."""
-        state = self.load()
-        return state.daemon_state == DaemonState.RUNNING
-
-    def is_paused(self) -> bool:
-        """Check if daemon is paused."""
-        state = self.load()
-        return state.daemon_state == DaemonState.PAUSED

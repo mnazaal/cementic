@@ -38,7 +38,7 @@ class TestWorkerState:
     def test_from_dict(self):
         """Test creation from dictionary."""
         data = {
-            "daemon_state": "paused",
+            "daemon_state": "running",
             "watched_directories": ["/test"],
             "processed_count": 5,
             "failed_count": 1,
@@ -48,7 +48,7 @@ class TestWorkerState:
         }
         state = WorkerState.from_dict(data)
 
-        assert state.daemon_state == DaemonState.PAUSED
+        assert state.daemon_state == DaemonState.RUNNING
         assert state.watched_directories == ["/test"]
         assert state.processed_count == 5
         assert state.current_file == "/test/file.pdf"
@@ -72,7 +72,7 @@ class TestWorkerState:
     def test_from_dict_already_enum_type(self) -> None:
         """daemon_state already DaemonState enum passes through (line 48)."""
         data = {
-            "daemon_state": DaemonState.PAUSED,
+            "daemon_state": DaemonState.RUNNING,
             "watched_directories": [],
             "processed_count": 0,
             "failed_count": 0,
@@ -81,7 +81,7 @@ class TestWorkerState:
             "pid": None,
         }
         state = WorkerState.from_dict(data)
-        assert state.daemon_state == DaemonState.PAUSED
+        assert state.daemon_state == DaemonState.RUNNING
 
     def test_from_dict_non_string_non_enum_falls_back(self) -> None:
         """Non-string, non-DaemonState daemon_state → STÖPPED fallback (line 50)."""
@@ -170,40 +170,6 @@ class TestStateManager:
         loaded = manager.load()
         assert loaded.current_file is None
         assert loaded.pid is None
-
-    def test_reset(self, temp_dir):
-        """Test resetting state."""
-        state_path = temp_dir / "state.json"
-        manager = StateManager(state_path)
-
-        # Create some state
-        state = WorkerState(daemon_state=DaemonState.RUNNING, processed_count=50)
-        manager.save(state)
-        assert state_path.exists()
-
-        # Reset it
-        manager.reset()
-        assert not state_path.exists()
-
-    def test_is_running(self, temp_dir):
-        """Test is_running helper."""
-        state_path = temp_dir / "state.json"
-        manager = StateManager(state_path)
-
-        assert not manager.is_running()
-
-        manager.update(daemon_state=DaemonState.RUNNING)
-        assert manager.is_running()
-
-    def test_is_paused(self, temp_dir):
-        """Test is_paused helper."""
-        state_path = temp_dir / "state.json"
-        manager = StateManager(state_path)
-
-        assert not manager.is_paused()
-
-        manager.update(daemon_state=DaemonState.PAUSED)
-        assert manager.is_paused()
 
     def test_load_corrupted_file(self, temp_dir):
         """Test loading corrupted state file."""

@@ -30,6 +30,19 @@ class ManagedProcess:
     start_token: str | None = None
 
 
+def managed_process_pid(record: dict[str, object]) -> int:
+    """Read back the ``pid`` field of a persisted process record (dict form of
+    ``ManagedProcess``), defensively re-checking its type after a JSON round-trip."""
+    pid = record.get("pid", 0)
+    return pid if isinstance(pid, int) else 0
+
+
+def managed_process_start_token(record: dict[str, object]) -> str | None:
+    """Read back the ``start_token`` field of a persisted process record."""
+    token = record.get("start_token")
+    return token if isinstance(token, str) else None
+
+
 def is_pid_running(pid: int) -> bool:
     """Check whether a PID is currently running."""
     try:

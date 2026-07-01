@@ -59,6 +59,8 @@ from cementic.supervisor import (
     is_managed_process_alive,
     is_pid_running,
     load_supervisor_state,
+    managed_process_pid,
+    managed_process_start_token,
     process_start_token,
     save_supervisor_state,
     spawn_detached,
@@ -317,18 +319,10 @@ def _supervisor_processes(state: dict[str, object]) -> list[dict[str, object]]:
     return [proc for proc in processes if isinstance(proc, dict)]
 
 
-def _process_pid(process: dict[str, object]) -> int:
-    pid = process.get("pid", 0)
-    return pid if isinstance(pid, int) else 0
-
-
-def _process_start_token(process: dict[str, object]) -> str | None:
-    token = process.get("start_token")
-    return token if isinstance(token, str) else None
-
-
 def _is_managed_proc_alive(process: dict[str, object]) -> bool:
-    return is_managed_process_alive(_process_pid(process), _process_start_token(process))
+    return is_managed_process_alive(
+        managed_process_pid(process), managed_process_start_token(process)
+    )
 
 
 def _spawn_detached(command: list[str], log_file: Path) -> int:
@@ -893,7 +887,7 @@ def stop_background(
 
     signaled_pids: list[int] = []
     for proc in processes:
-        pid = _process_pid(proc)
+        pid = managed_process_pid(proc)
         # Only signal a process we can confirm is still ours; a recycled PID
         # (token mismatch) belongs to someone else and must not be killed.
         if not _is_managed_proc_alive(proc):
@@ -928,7 +922,7 @@ def stop_background(
             console.print(f"force stopped {len(remaining)} process(es)")
         return
 
-    still_running = [proc for proc in processes if _process_pid(proc) in remaining]
+    still_running = [proc for proc in processes if managed_process_pid(proc) in remaining]
     _save_supervisor_state(
         {
             "collection": state.get("collection"),

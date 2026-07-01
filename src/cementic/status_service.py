@@ -18,7 +18,12 @@ from cementic.db import (
     get_session_factory,
 )
 from cementic.state import StateManager, WorkerState
-from cementic.supervisor import is_managed_process_alive, is_pid_running
+from cementic.supervisor import (
+    is_managed_process_alive,
+    is_pid_running,
+    managed_process_pid,
+    managed_process_start_token,
+)
 
 
 @dataclass(frozen=True)
@@ -132,16 +137,6 @@ def load_worker_statuses(config: Config) -> tuple[WorkerStatus, WorkerStatus]:
     return build_worker_status(source_watcher_state), build_worker_status(pipeline_state)
 
 
-def _process_pid(process: dict[str, object]) -> int:
-    pid = process.get("pid", 0)
-    return pid if isinstance(pid, int) else 0
-
-
-def _process_start_token(process: dict[str, object]) -> str | None:
-    token = process.get("start_token")
-    return token if isinstance(token, str) else None
-
-
 def build_supervisor_status(supervisor_state: dict[str, object]) -> SupervisorStatus:
     """Build supervisor status from stored process metadata."""
     processes = supervisor_state.get("processes", [])
@@ -155,7 +150,7 @@ def build_supervisor_status(supervisor_state: dict[str, object]) -> SupervisorSt
     running_count = sum(
         1
         for proc in process_rows
-        if is_managed_process_alive(_process_pid(proc), _process_start_token(proc))
+        if is_managed_process_alive(managed_process_pid(proc), managed_process_start_token(proc))
     )
     directories = supervisor_state.get("directories", [])
     directory_list = directories if isinstance(directories, list) else []
@@ -352,6 +347,13 @@ def check_health(config: Config) -> HealthStatus:
         db_reachable = False
 
     embedding_provider = config.pipeline.embedding_provider
+
+    llama_daemon = "N/A"
+    if embedding_provider == "llama-cpp":
+        from cementic.embedding_runtime import llama_daemon_status
+
+        llama_daemon = llama_daemon_status(config)
+
     embedding_healthy = False
     try:
         from cementic.embedding_runtime import create_provider, runtime_spec_from_config
@@ -361,11 +363,16 @@ def check_health(config: Config) -> HealthStatus:
     except Exception:
         embedding_healthy = False
 
-    llama_daemon = "N/A"
-    if embedding_provider == "llama-cpp":
-        from cementic.embedding_runtime import llama_daemon_status
-
-        llama_daemon = llama_daemon_status(config)
+    # llama_cpp.server serializes all requests behind a single model lock, so
+    # /v1/models can legitimately block for the full duration of an in-flight
+    # embedding batch (seconds to tens of seconds) -- no HTTP timeout/retry
+    # budget can distinguish "busy" from "down" without either being too slow
+    # or too eager to false-flag. The PID+start-token liveness check is
+    # instant and process-level, so if the daemon process is confirmed alive,
+    # a blocked HTTP probe means busy, not unhealthy.
+    if embedding_provider == "llama-cpp" and not embedding_healthy:
+        if llama_daemon.startswith("running"):
+            embedding_healthy = True
 
     return HealthStatus(
         db_reachable=db_reachable,

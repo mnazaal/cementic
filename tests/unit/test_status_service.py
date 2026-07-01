@@ -8,7 +8,6 @@ from cementic.status_service import (
     HealthStatus,
     PipelineStatus,
     WorkerStatus,
-    _process_pid,
     _safe_pct,
     _select_target_revision,
     build_supervisor_status,
@@ -206,19 +205,6 @@ class TestDataClasses:
         assert hs.embedding_provider == "llama-cpp"
 
 
-class TestProcessPid:
-    """Tests for _process_pid helper."""
-
-    def test_valid_pid_dict(self) -> None:
-        assert _process_pid({"pid": 42}) == 42
-
-    def test_missing_pid_key(self) -> None:
-        assert _process_pid({}) == 0
-
-    def test_non_int_pid(self) -> None:
-        assert _process_pid({"pid": "not-int"}) == 0
-
-
 class TestCheckHealth:
     """Tests for check_health runtime health checks."""
 
@@ -262,6 +248,28 @@ class TestCheckHealth:
 
         result = check_health(config)
         assert result.embedding_healthy is False
+
+    def test_health_llama_cpp_busy_not_unhealthy(self, temp_dir) -> None:
+        """HTTP health probe can fail while a large embedding batch holds
+        llama_cpp.server's request lock; if the daemon process is confirmed
+        alive via the PID file, that's busy, not unhealthy."""
+        config = Config()
+        config.pipeline.embedding_provider = "llama-cpp"
+        pid_file = temp_dir / "daemon.pid"
+        pid_file.write_text("42")
+        config.llama_cpp.daemon_pid_file = pid_file
+
+        with patch("cementic.status_service.get_engine"):
+            with patch(
+                "cementic.embedding_runtime.is_managed_process_alive", return_value=True
+            ):
+                with patch(
+                    "cementic.embedding_runtime.get_llama_cpp_runtime_client"
+                ) as mock_client:
+                    mock_client.return_value.health_check.return_value = False
+                    result = check_health(config)
+                    assert "running" in result.llama_daemon
+                    assert result.embedding_healthy is True
 
     def test_health_llama_daemon_running(self, temp_dir) -> None:
         config = Config()

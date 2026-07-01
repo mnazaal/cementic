@@ -28,7 +28,10 @@ keywords = [
 ]
 
 dependencies = [
-    "typer>=0.12.0",
+    # Upper bound is intentional: typer 0.26 reworks the Context/HelpFormatter
+    # internals cli.py's _UpperContext/_UpperFormatter subclass, which crashes
+    # --help/--version. Bump only after verifying against 0.26+.
+    "typer>=0.12.0,<0.26",
     "pydantic>=2.0",
     "pydantic-settings>=2.0",
     "sqlalchemy>=2.0",
@@ -42,14 +45,18 @@ dependencies = [
     "rich>=13.0",
     "platformdirs>=4.0",
     "tiktoken>=0.5.0",
-    "llama-cpp-python[server]>=0.2.0",
+    # Lower bound is load-bearing, not aspirational: 0.3.9-0.3.22 silently break
+    # any /v1/embeddings call with more than one input in the same request
+    # (llama_decode returned -1). embed_batch() always sends multiple chunks per
+    # request, so every affected version fails every multi-chunk embedding batch.
+    # Bisected: 0.3.8 last-good, 0.3.9 first-bad, 0.3.22 last-bad, 0.3.23 fixed.
+    "llama-cpp-python[server]>=0.3.23",
     "tomli>=2.0; python_version < '3.11'",
 ]
 
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0",
-    "pytest-asyncio>=0.23.0",
     "pytest-cov>=6.0",
     "coverage>=7.0",
     "ruff>=0.3.0",

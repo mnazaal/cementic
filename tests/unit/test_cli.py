@@ -15,7 +15,6 @@ from cementic import cli as cementic_cli
 from cementic.cli import (
     _build_collection_filters,
     _get_data_dir,
-    _process_pid,
     _supervisor_processes,
     app,
     collection_callback,
@@ -884,15 +883,6 @@ class TestCliHelpers:
         result = _supervisor_processes(state)
         assert len(result) == 1
         assert result[0]["name"] == "ok"
-
-    def test_process_pid_with_non_int(self):
-        """_process_pid returns 0 for non-int pid."""
-        assert _process_pid({"pid": "string"}) == 0
-        assert _process_pid({"pid": None}) == 0
-
-    def test_process_pid_default_zero(self):
-        """_process_pid returns 0 when key missing."""
-        assert _process_pid({}) == 0
 
     @patch("cementic.cli.version", side_effect=cementic_cli.PackageNotFoundError)
     def test_get_cli_version_returns_unknown(self, mock_version):

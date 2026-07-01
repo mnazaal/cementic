@@ -56,15 +56,44 @@ config file.
 ## Optional Podman Quadlet service
 
 The `quadlet/cementic-postgres.container` file is an optional user-systemd setup
-for Podman. Copy it to your user Quadlet directory, then reload and enable it:
+for Podman, so you don't have to start/stop the container by hand.
+
+This unit requires an environment file to exist (even empty) before its first
+start -- Podman's Quadlet `EnvironmentFile=` directive does not support an
+optional/missing path the way systemd's own directive does:
+
+```bash
+mkdir -p ~/.config/cementic
+touch ~/.config/cementic/postgres.env
+```
+
+To override credentials/db name, put them in that file instead:
+
+```bash
+cat > ~/.config/cementic/postgres.env <<'EOF'
+POSTGRES_USER=cementic
+POSTGRES_PASSWORD=change-me
+POSTGRES_DB=cementic
+EOF
+chmod 600 ~/.config/cementic/postgres.env
+```
+
+Then install and start it (build the image first with `podman compose build`
+if you haven't already run `podman compose up -d` in this directory):
 
 ```bash
 mkdir -p ~/.config/containers/systemd
 cp quadlet/cementic-postgres.container ~/.config/containers/systemd/
 systemctl --user daemon-reload
-systemctl --user enable --now cementic-postgres.service
+systemctl --user start cementic-postgres.service
 systemctl --user status cementic-postgres.service
 ```
+
+Do not run `systemctl --user enable` on this unit -- Quadlet-generated units
+are transient/generated, and `enable` fails with "Unit ... is transient or
+generated". The `[Install]` section in the unit file is processed by Quadlet
+itself at `daemon-reload` time, so it's already wired to start at the next
+login; no separate enable step is needed.
 
 For services that should survive logout/reboot, also run:
 

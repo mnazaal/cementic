@@ -9,6 +9,8 @@ from cementic.supervisor import (
     is_managed_process_alive,
     is_pid_running,
     load_supervisor_state,
+    managed_process_pid,
+    managed_process_start_token,
     process_start_token,
     save_supervisor_state,
     spawn_detached,
@@ -193,6 +195,32 @@ class TestProcessStartToken:
         stat = "1234 (weird )name) " + " ".join(after_comm)
         with patch("cementic.supervisor.Path.read_text", return_value=stat):
             assert process_start_token(1234) == "4242"
+
+
+class TestManagedProcessPid:
+    """Tests for managed_process_pid."""
+
+    def test_returns_int_pid(self) -> None:
+        assert managed_process_pid({"pid": 42}) == 42
+
+    def test_missing_key_defaults_zero(self) -> None:
+        assert managed_process_pid({}) == 0
+
+    def test_non_int_defaults_zero(self) -> None:
+        assert managed_process_pid({"pid": "not-int"}) == 0
+
+
+class TestManagedProcessStartToken:
+    """Tests for managed_process_start_token."""
+
+    def test_returns_str_token(self) -> None:
+        assert managed_process_start_token({"start_token": "999"}) == "999"
+
+    def test_missing_key_returns_none(self) -> None:
+        assert managed_process_start_token({}) is None
+
+    def test_non_str_returns_none(self) -> None:
+        assert managed_process_start_token({"start_token": 999}) is None
 
 
 class TestIsManagedProcessAlive:

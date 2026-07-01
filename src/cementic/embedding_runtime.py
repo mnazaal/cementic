@@ -157,13 +157,24 @@ class RemoteEmbeddingClient(EmbeddingProvider):
         )
 
     def _list_models(self) -> list[dict[str, Any]] | None:
-        try:
-            response = requests.get(f"{self.base_url}/v1/models", timeout=2)
-            response.raise_for_status()
-            payload = response.json()
-            return list(payload.get("data", []))
-        except (requests.RequestException, ValueError):
-            return None
+        # One retry for transient blips only. llama_cpp.server serializes all
+        # requests behind a single model lock (see app.py's llama_outer_lock),
+        # so /v1/models can legitimately block for the *entire* duration of an
+        # in-flight embedding batch -- seconds to tens of seconds, not
+        # something a short retry budget can wait out. Callers that need to
+        # tell "busy" apart from "down" should fall back to a process-level
+        # liveness check (see status_service.check_health) instead of
+        # widening the timeout/retry count here.
+        for attempt in range(2):
+            try:
+                response = requests.get(f"{self.base_url}/v1/models", timeout=2)
+                response.raise_for_status()
+                payload = response.json()
+                return list(payload.get("data", []))
+            except (requests.RequestException, ValueError):
+                if attempt == 0:
+                    time.sleep(0.3)
+        return None
 
     def matches_expected_runtime(self) -> bool:
         models = self._list_models()
