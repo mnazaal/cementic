@@ -10,9 +10,11 @@
 - Enable required Postgres extensions during normal schema initialization with actionable failures
 - Document Linux-first beta setup, persistent Postgres service setup, and model auto-download behavior
 
-## [0.1.0] — 2026-04-30
+## [Unreleased pre-beta] — 2026-04-30
 
-### Initial Release
+### Initial Development
+
+Never published as a release; superseded by 0.1.0b1 above.
 
 - **Versioned pipeline architecture**: separate extractor, chunk, and embedding profiles so each stage can evolve independently
 - **Background workers**: source watcher (registers documents of any supported type) and pipeline worker (extract → chunk → embed) managed by a process supervisor

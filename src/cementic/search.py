@@ -27,7 +27,12 @@ MAX_QUERY_CHARS = 8_000
 
 
 class SearchResult(TypedDict):
-    """Type for search results."""
+    """Type for search results.
+
+    TODO: add page_start/page_end once chunk.py populates them (they are
+    persisted as columns on Chunk today but never set, so they'd always
+    read as 0 here).
+    """
 
     collection: str
     source_path: str
@@ -35,8 +40,6 @@ class SearchResult(TypedDict):
     score: float
     distance: float
     score_kind: str
-    page_start: int
-    page_end: int
 
 
 _DISTANCE_OPERATORS = {
@@ -146,7 +149,7 @@ class Searcher:
                     session.execute(text(tuning))
                 statement = text(
                     "SELECT sd.collection AS collection, sd.source_path AS source_path, "
-                    "c.content AS content, c.page_start AS page_start, c.page_end AS page_end, "
+                    "c.content AS content, "
                     f"ev.embedding {distance_operator} (:query)::vector AS distance "
                     f"FROM {table} ev "
                     "JOIN chunks_v2 c ON c.id = ev.chunk_id "
@@ -178,8 +181,6 @@ class Searcher:
                             score=score,
                             distance=distance,
                             score_kind=score_kind,
-                            page_start=row.page_start or 0,
-                            page_end=row.page_end or 0,
                         )
                     )
 

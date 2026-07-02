@@ -74,8 +74,6 @@ class TestSearcher:
             collection="papers",
             source_path="/tmp/papers.pdf",
             content="partial chunk text",
-            page_start=1,
-            page_end=1,
             distance=0.1,
         )
         exec_result = MagicMock()
@@ -124,8 +122,6 @@ class TestSearcher:
             collection="papers",
             source_path="/tmp/papers.pdf",
             content="partial chunk text",
-            page_start=1,
-            page_end=1,
             distance=0.1,
         )
         exec_result = MagicMock()
@@ -202,8 +198,6 @@ class TestSearcher:
             collection="default",
             source_path="/tmp/test.pdf",
             content="chunk text",
-            page_start=1,
-            page_end=2,
             distance=0.05,
         )
         exec_result = MagicMock()
@@ -239,8 +233,6 @@ class TestSearcher:
             score=0.95,
             distance=0.05,
             score_kind="cosine_similarity",
-            page_start=1,
-            page_end=2,
         )
 
         assert result["collection"] == "default"

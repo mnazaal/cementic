@@ -289,8 +289,6 @@ class TestSearchCommand:
                 "source_path": "/test.pdf",
                 "content": "test result",
                 "score": 0.95,
-                "page_start": 1,
-                "page_end": 2,
             }
         ]
         mock_searcher_class.return_value = mock_searcher

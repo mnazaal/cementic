@@ -13,6 +13,7 @@ __pycache__/
 htmlcov/
 build/
 dist/
+libpod/
 .DS_Store
 *.so
 AGENTS.md

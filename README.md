@@ -251,7 +251,7 @@ export CEMENTIC_LLAMA_MODEL_PATH=./models/nomic-embed-text-v2-moe.Q8_0.gguf
 export CEMENTIC_LLAMA_DAEMON_AUTOSTART=true
 
 # Background worker
-export CEMENTIC_PIPELINE_WORKER_BATCH_SIZE=8
+export CEMENTIC_PIPELINE_WORKER_BATCH_SIZE=32
 export CEMENTIC_PIPELINE_WORKER_POLL_INTERVAL=1.0
 
 # Bootstrap (model download only; cementic does not manage containers)
