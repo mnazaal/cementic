@@ -29,7 +29,7 @@ class TestEnsureRuntime:
         bootstrapper = Bootstrapper(config)
         with (
             patch.object(bootstrapper, "_ensure_postgres_ready") as ensure_pg,
-            patch.object(bootstrapper, "_ensure_embedding_runtime") as ensure_embed,
+            patch.object(bootstrapper, "ensure_embedding_runtime") as ensure_embed,
         ):
             bootstrapper.ensure_for_convert()
         ensure_pg.assert_called_once_with()

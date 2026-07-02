@@ -175,6 +175,7 @@ _SEARCH_EPILOG = """\
 EXAMPLES:
   cementic search "transformer inference"
   cementic search "graph theory" -n 5 -c math papers
+  cementic search "graph theory" --json | jq .source_path
 """
 
 
@@ -958,6 +959,11 @@ def start_embedding_runtime() -> None:
         )
         raise typer.Exit(1)
     try:
+        Bootstrapper(config).ensure_embedding_runtime()
+    except RuntimeError as error:
+        console.print(f"embedding start failed: {error}")
+        raise typer.Exit(1)
+    try:
         client = get_llama_cpp_runtime_client(config=config, autostart=True)
     except Exception as error:
         console.print(f"embedding start failed: {error}")
@@ -1174,7 +1180,9 @@ def list_collection_revision_command(
 )
 def search(
     query: str = typer.Argument(..., help="Search query"),
-    top_k: int = typer.Option(10, "-n", min=1, max=50, help="Number of results"),
+    top_k: int = typer.Option(
+        10, "-n", "--top-k", "--limit", min=1, max=50, help="Number of results"
+    ),
     collections: list[str] | None = typer.Option(
         None,
         "-c",
@@ -1184,6 +1192,11 @@ def search(
     trailing_collections: list[str] | None = typer.Argument(
         None,
         help="Additional collections after --collection/-c",
+    ),
+    json_output: bool = typer.Option(
+        False,
+        "--json",
+        help="Output results as JSONL (one JSON object per line)",
     ),
 ) -> None:
     """Search indexed documents."""
@@ -1200,6 +1213,11 @@ def search(
     try:
         results = searcher.search(query, top_k=top_k, collections=filters)
 
+        if json_output:
+            for result in results:
+                typer.echo(json.dumps(result))
+            return
+
         if not results:
             console.print("no results")
             return
@@ -1215,7 +1233,12 @@ def search(
 
     except Exception as e:
         if _is_database_unavailable(e):
-            _print_database_unavailable("search")
+            if json_output:
+                err_console.print(f"search failed: database unavailable: {e}")
+            else:
+                _print_database_unavailable("search")
+        elif json_output:
+            err_console.print(f"search failed: {e}")
         else:
             console.print(f"search failed: {e}")
         raise typer.Exit(1)
@@ -1248,6 +1271,15 @@ def extract(path: str = typer.Argument(..., help="Path to a document file")) -> 
 @app.command(short_help="Chunk text from a file or stdin to JSONL on stdout")
 def chunk(
     path: str | None = typer.Argument(None, help="Text file to chunk (default: stdin)"),
+    chunk_size: int | None = typer.Option(
+        None, "--chunk-size", min=1, help="Tokens per chunk (default: config value)"
+    ),
+    chunk_overlap: int | None = typer.Option(
+        None,
+        "--chunk-overlap",
+        min=0,
+        help="Overlap tokens between chunks (default: config value)",
+    ),
 ) -> None:
     """Chunk text into JSONL on stdout (one object per line) — no database.
 
@@ -1261,8 +1293,8 @@ def chunk(
         raise typer.Exit(1)
     for piece in chunk_text(
         text,
-        chunk_size=cfg.pipeline.chunk_size,
-        chunk_overlap=cfg.pipeline.chunk_overlap,
+        chunk_size=chunk_size if chunk_size is not None else cfg.pipeline.chunk_size,
+        chunk_overlap=chunk_overlap if chunk_overlap is not None else cfg.pipeline.chunk_overlap,
     ):
         typer.echo(json.dumps({"index": piece.chunk_index, "content": piece.content}))
 

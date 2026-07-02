@@ -235,6 +235,7 @@ class PipelineWorker:
             and handler.baseFilename == str(log_file)
             for handler in logger.handlers
         ):
+            log_file.parent.mkdir(parents=True, exist_ok=True)
             handler = logging.FileHandler(log_file)
             handler.setLevel(logging.INFO)
             handler.setFormatter(formatter)

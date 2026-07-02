@@ -377,8 +377,10 @@ class Config(BaseSettings):
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
 
-        # Set default paths based on data directory
-        data_dir = Path(user_data_dir("cementic", ensure_exists=True))
+        # Set default paths based on data directory. Computing these paths must
+        # not create the directory — read-only commands (e.g. `config show`)
+        # should not write to disk; writers create it lazily when they need it.
+        data_dir = Path(user_data_dir("cementic", ensure_exists=False))
 
         if self.source_watcher.log_file is None:
             self.source_watcher.log_file = data_dir / "source_watcher.log"

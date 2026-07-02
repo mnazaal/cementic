@@ -64,9 +64,10 @@ class Bootstrapper:
     def ensure_for_index(self) -> None:
         """Ensure runtime dependencies for indexing."""
         self._ensure_postgres_ready()
-        self._ensure_embedding_runtime()
+        self.ensure_embedding_runtime()
 
-    def _ensure_embedding_runtime(self) -> None:
+    def ensure_embedding_runtime(self) -> None:
+        """Ensure the embedding runtime's model is present (no database needed)."""
         provider = self.config.pipeline.embedding_provider
         if provider == "llama-cpp":
             self._ensure_llama_model()

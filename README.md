@@ -133,6 +133,13 @@ cementic stop
 cementic collection remove research --force
 ```
 
+`cementic start` runs a single background session (one source watcher + one pipeline worker)
+at a time, tracked in one supervisor state file. Running `cementic start` again for a different
+collection while one is already active refuses with "Background cementic processes already
+running" — run `cementic stop` first to switch collections. To index multiple directories into
+one collection concurrently, pass them all to a single `cementic start` call (it accepts more
+than one directory); indexing two different collections at the same time is not supported.
+
 ## Revision behavior
 
 - Model change:

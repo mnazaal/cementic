@@ -249,7 +249,9 @@ class TestEmbeddingCommands:
     """Test embedding runtime lifecycle commands."""
 
     @patch("cementic.cli.get_llama_cpp_runtime_client")
-    def test_embedding_start_starts_llama_runtime(self, mock_runtime_client):
+    @patch("cementic.cli.Bootstrapper")
+    def test_embedding_start_starts_llama_runtime(self, mock_bootstrapper, mock_runtime_client):
+        mock_bootstrapper.return_value.ensure_embedding_runtime.return_value = None
         client = MagicMock()
         client.embedding_dim = 768
         mock_runtime_client.return_value = client
@@ -258,8 +260,25 @@ class TestEmbeddingCommands:
 
         assert result.exit_code == 0
         assert "embedding: running" in result.output
+        mock_bootstrapper.return_value.ensure_embedding_runtime.assert_called_once()
         _, kwargs = mock_runtime_client.call_args
         assert kwargs["autostart"] is True
+
+    @patch("cementic.cli.get_llama_cpp_runtime_client")
+    @patch("cementic.cli.Bootstrapper")
+    def test_embedding_start_fails_fast_when_model_missing(
+        self, mock_bootstrapper, mock_runtime_client
+    ):
+        """A missing model must fail with a clear message, not a bare daemon timeout."""
+        mock_bootstrapper.return_value.ensure_embedding_runtime.side_effect = RuntimeError(
+            "llama.cpp model not found at /models/x.gguf"
+        )
+
+        result = runner.invoke(app, ["embedding", "start"])
+
+        assert result.exit_code == 1
+        assert "model not found" in result.output
+        mock_runtime_client.assert_not_called()
 
     @patch("cementic.cli.stop_llama_cpp_runtime", return_value=True)
     def test_embedding_stop_stops_llama_runtime(self, mock_stop):
@@ -312,6 +331,72 @@ class TestSearchCommand:
         assert result.exit_code == 1
         assert "search: database not reachable" in result.output
         assert "cementic init postgres" in result.output
+
+    @patch("cementic.cli.Searcher")
+    def test_search_json_emits_one_json_object_per_line(self, mock_searcher_class):
+        mock_searcher = MagicMock()
+        mock_searcher.search.return_value = [
+            {
+                "collection": "research",
+                "source_path": "/a.pdf",
+                "content": "a",
+                "score": 0.9,
+                "distance": 0.1,
+                "score_kind": "cosine_similarity",
+            },
+            {
+                "collection": "math",
+                "source_path": "/b.pdf",
+                "content": "b",
+                "score": 0.8,
+                "distance": 0.2,
+                "score_kind": "cosine_similarity",
+            },
+        ]
+        mock_searcher_class.return_value = mock_searcher
+
+        result = runner.invoke(app, ["search", "test query", "--json"])
+
+        assert result.exit_code == 0
+        lines = [json.loads(line) for line in result.output.splitlines() if line.strip()]
+        assert len(lines) == 2
+        assert lines[0]["collection"] == "research"
+        assert lines[1]["collection"] == "math"
+
+    @patch("cementic.cli.Searcher")
+    def test_search_json_no_results_prints_nothing(self, mock_searcher_class):
+        mock_searcher = MagicMock()
+        mock_searcher.search.return_value = []
+        mock_searcher_class.return_value = mock_searcher
+
+        result = runner.invoke(app, ["search", "test query", "--json"])
+
+        assert result.exit_code == 0
+        assert result.output.strip() == ""
+
+    @patch("cementic.cli.Searcher")
+    def test_search_json_error_goes_to_stderr_not_stdout(self, mock_searcher_class):
+        mock_searcher = MagicMock()
+        mock_searcher.search.side_effect = RuntimeError("boom")
+        mock_searcher_class.return_value = mock_searcher
+
+        result = runner.invoke(app, ["search", "test query", "--json"])
+
+        assert result.exit_code == 1
+        assert result.stdout.strip() == ""
+        assert "search failed" in result.stderr
+
+    @patch("cementic.cli.Searcher")
+    def test_search_top_k_long_form_aliases(self, mock_searcher_class):
+        mock_searcher = MagicMock()
+        mock_searcher.search.return_value = []
+        mock_searcher_class.return_value = mock_searcher
+
+        runner.invoke(app, ["search", "test query", "--top-k", "5"])
+        mock_searcher.search.assert_called_with("test query", top_k=5, collections=None)
+
+        runner.invoke(app, ["search", "test query", "--limit", "7"])
+        mock_searcher.search.assert_called_with("test query", top_k=7, collections=None)
 
 
 class TestBackgroundCommands:
@@ -1470,6 +1555,18 @@ class TestFilterCommands:
         result = runner.invoke(app, ["chunk", str(f)])
         assert result.exit_code == 0
         assert json.loads(result.output.splitlines()[0])["content"]
+
+    def test_chunk_size_and_overlap_flags_override_config(self):
+        text = " ".join(f"word{i}" for i in range(50))
+        default_result = runner.invoke(app, ["chunk"], input=text)
+        flagged_result = runner.invoke(
+            app, ["chunk", "--chunk-size", "5", "--chunk-overlap", "0"], input=text
+        )
+        assert default_result.exit_code == 0
+        assert flagged_result.exit_code == 0
+        default_lines = [line for line in default_result.output.splitlines() if line.strip()]
+        flagged_lines = [line for line in flagged_result.output.splitlines() if line.strip()]
+        assert len(flagged_lines) > len(default_lines)
 
     @patch("cementic.cli.runtime_spec_from_config", return_value=object())
     @patch("cementic.cli.create_provider", return_value=_FakeEmbedProvider())

@@ -198,6 +198,17 @@ class TestConfig:
             assert config.llama_cpp.daemon_pid_file is not None
             assert config.llama_cpp.daemon_log_file is not None
 
+    def test_constructing_config_does_not_create_data_dir(self, temp_dir):
+        """Read-only commands must not write to disk just from building a Config."""
+        data_dir = temp_dir / "not-yet-created"
+        with patch(
+            "cementic.config.user_data_dir", return_value=str(data_dir)
+        ) as mock_user_data_dir:
+            config = Config()
+        assert config.source_watcher.log_file == data_dir / "source_watcher.log"
+        _, kwargs = mock_user_data_dir.call_args
+        assert kwargs["ensure_exists"] is False
+
     def test_get_config_singleton(self):
         """Test that get_config returns a Config instance."""
         config = get_config()
