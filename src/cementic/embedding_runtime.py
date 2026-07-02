@@ -246,10 +246,31 @@ def get_llama_cpp_runtime_client(
         embedding_dim=runtime_spec.embedding_dim,
         expected_fingerprint=fingerprint,
         model_identifier=runtime_spec.model_identifier,
-        timeout=float(config.llama_cpp.daemon_start_timeout_seconds),
+        timeout=float(config.llama_cpp.llama_embed_timeout_seconds),
     )
-    if client.matches_expected_runtime():
-        return client
+
+    models = client._list_models()
+    if models is not None:
+        if any(str(model.get("id")) == fingerprint for model in models):
+            return client
+        # Reachable and reporting a real model list, but not ours -- a genuine
+        # config change, not busyness. Fall through to restart below.
+    elif _daemon_pid_alive(config):
+        # /v1/models didn't respond, but the daemon process is confirmed alive
+        # (PID + start-token). llama_cpp.server serializes every request behind
+        # one lock, so a daemon mid-embedding-batch looks identical to a dead
+        # one over that probe alone. Wait the batch out instead of killing a
+        # healthy process.
+        extended_timeout = max(
+            config.llama_cpp.daemon_start_timeout_seconds,
+            config.llama_cpp.llama_embed_timeout_seconds,
+        )
+        if _poll_until_ready(client, extended_timeout):
+            return client
+        raise RuntimeError(
+            "llama.cpp embedding daemon appears busy (in-flight request) and did "
+            "not become available in time; try again shortly"
+        )
 
     should_autostart = config.llama_cpp.daemon_autostart if autostart is None else autostart
     if not should_autostart:
@@ -258,10 +279,35 @@ def get_llama_cpp_runtime_client(
             "run `cementic embedding start` or set CEMENTIC_LLAMA_DAEMON_AUTOSTART=true"
         )
 
+    print(
+        "starting embedding daemon (first search after a restart can take 30s+)...",
+        file=sys.stderr,
+    )
     _restart_llama_cpp_daemon_if_needed(config)
     _start_llama_cpp_daemon(config, spec=runtime_spec)
     _wait_for_daemon_ready(client, timeout_seconds=config.llama_cpp.daemon_start_timeout_seconds)
     return client
+
+
+def client_is_healthy_or_busy(client: EmbeddingProvider, config: Config) -> bool:
+    """Health check that tells a busy llama.cpp daemon apart from a dead one.
+
+    A single ``health_check()`` probe can't distinguish "mid-batch, lock
+    held" from "down" (see ``RemoteEmbeddingClient._list_models``). For a
+    ``RemoteEmbeddingClient``, fall back to PID+start-token liveness and a
+    longer poll before reporting unhealthy.
+    """
+    if client.health_check():
+        return True
+    if not isinstance(client, RemoteEmbeddingClient):
+        return False
+    if not _daemon_pid_alive(config):
+        return False
+    extended_timeout = max(
+        config.llama_cpp.daemon_start_timeout_seconds,
+        config.llama_cpp.llama_embed_timeout_seconds,
+    )
+    return _poll_until_ready(client, extended_timeout)
 
 
 def _create_llama_cpp_provider(
@@ -334,18 +380,26 @@ def _read_daemon_pid_file(pid_file: Path) -> tuple[int, str | None] | None:
     return None
 
 
-def llama_daemon_status(config: Config) -> str:
-    """Human-readable status of the llama.cpp daemon from its pid-file."""
+def _live_daemon_pid(config: Config) -> int | None:
+    """Return the daemon's PID if its pid-file names a still-alive process."""
     pid_file = config.llama_cpp.daemon_pid_file
     if pid_file is None or not pid_file.exists():
-        return "stopped"
+        return None
     record = _read_daemon_pid_file(pid_file)
     if record is None:
-        return "stopped"
+        return None
     pid, token = record
-    if not is_managed_process_alive(pid, token):
-        return "stopped"
-    return f"running, pid={pid}"
+    return pid if is_managed_process_alive(pid, token) else None
+
+
+def _daemon_pid_alive(config: Config) -> bool:
+    return _live_daemon_pid(config) is not None
+
+
+def llama_daemon_status(config: Config) -> str:
+    """Human-readable status of the llama.cpp daemon from its pid-file."""
+    pid = _live_daemon_pid(config)
+    return f"running, pid={pid}" if pid is not None else "stopped"
 
 
 def _restart_llama_cpp_daemon_if_needed(config: Config) -> None:
@@ -435,10 +489,15 @@ def _start_llama_cpp_daemon(
     _write_daemon_pid_file(pid_file, pid)
 
 
-def _wait_for_daemon_ready(client: RemoteEmbeddingClient, timeout_seconds: int) -> None:
+def _poll_until_ready(client: RemoteEmbeddingClient, timeout_seconds: float) -> bool:
     deadline = time.time() + timeout_seconds
     while time.time() < deadline:
         if client.matches_expected_runtime():
-            return
+            return True
         time.sleep(0.2)
-    raise RuntimeError("llama.cpp embedding daemon did not become ready in time")
+    return False
+
+
+def _wait_for_daemon_ready(client: RemoteEmbeddingClient, timeout_seconds: int) -> None:
+    if not _poll_until_ready(client, timeout_seconds):
+        raise RuntimeError("llama.cpp embedding daemon did not become ready in time")

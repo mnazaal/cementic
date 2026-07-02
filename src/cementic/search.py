@@ -9,7 +9,11 @@ from sqlalchemy import text
 
 from cementic.config import Config, get_config
 from cementic.db import PipelineRevision, get_engine, get_session_factory
-from cementic.embedding_runtime import create_provider, runtime_spec_from_profile_json
+from cementic.embedding_runtime import (
+    client_is_healthy_or_busy,
+    create_provider,
+    runtime_spec_from_profile_json,
+)
 from cementic.vector_store import (
     index_access_method,
     query_tuning_sql,
@@ -112,7 +116,7 @@ class Searcher:
             embedding_client = _create_embedding_provider(
                 embedding_profile.config_json, self.config
             )
-            if not embedding_client.health_check():
+            if not client_is_healthy_or_busy(embedding_client, self.config):
                 raise RuntimeError("Active embedding provider is not healthy")
             query_embedding = embedding_client.embed(embedding_client.format_query(query))
             query_literal = to_vector_literal(query_embedding)

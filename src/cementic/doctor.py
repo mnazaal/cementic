@@ -97,13 +97,22 @@ def collect_doctor_report(config: Config) -> dict[str, Any]:
         checks["extensions"] = {}
 
     model_exists = model_path.is_file()
+    model_auto_download = config.bootstrap.auto_download_llama_model
+    model_ok = model_exists or model_auto_download
     checks["model"] = {
-        "status": "ok" if model_exists else "fail",
+        "status": "ok" if model_exists else "warning" if model_auto_download else "fail",
         "path": str(Path(model_path)),
         "exists": model_exists,
-        "auto_download": config.bootstrap.auto_download_llama_model,
+        "auto_download": model_auto_download,
         "url": config.bootstrap.llama_model_url,
         "sha256_configured": bool(config.bootstrap.llama_model_sha256),
+        "message": (
+            "present"
+            if model_exists
+            else "missing; cementic will download it automatically when needed"
+            if model_auto_download
+            else "missing and auto_download_llama_model is disabled"
+        ),
     }
 
     daemon_reachable = _daemon_reachable(config)
@@ -122,5 +131,5 @@ def collect_doctor_report(config: Config) -> dict[str, Any]:
         ),
     }
 
-    ok = database_ok and extension_ok and model_exists and daemon_ok
+    ok = database_ok and extension_ok and model_ok and daemon_ok
     return {"ok": ok, "checks": checks}

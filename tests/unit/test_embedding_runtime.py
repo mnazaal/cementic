@@ -7,6 +7,7 @@ import pytest
 import requests
 
 from cementic.config import Config, resolve_llama_model_path
+from cementic.embedding_provider import EmbeddingProvider
 from cementic.embedding_runtime import (
     EmbeddingRuntimeSpec,
     RemoteEmbeddingClient,
@@ -14,6 +15,7 @@ from cementic.embedding_runtime import (
     _restart_llama_cpp_daemon_if_needed,
     _start_llama_cpp_daemon,
     _wait_for_daemon_ready,
+    client_is_healthy_or_busy,
     create_provider,
     get_llama_cpp_runtime_client,
     llama_cpp_runtime_fingerprint,
@@ -296,10 +298,13 @@ class TestEmbeddingRuntime:
     def test_get_runtime_client_reuses_matching_daemon(self) -> None:
         config = Config()
 
+        def fake_list_models(self: RemoteEmbeddingClient) -> list[dict]:
+            return [{"id": self.expected_fingerprint}]
+
         with (
             patch(
-                "cementic.embedding_runtime.RemoteEmbeddingClient.matches_expected_runtime",
-                return_value=True,
+                "cementic.embedding_runtime.RemoteEmbeddingClient._list_models",
+                fake_list_models,
             ),
             patch("cementic.embedding_runtime._restart_llama_cpp_daemon_if_needed") as restart,
             patch("cementic.embedding_runtime._start_llama_cpp_daemon") as start,
@@ -318,9 +323,10 @@ class TestEmbeddingRuntime:
 
         with (
             patch(
-                "cementic.embedding_runtime.RemoteEmbeddingClient.matches_expected_runtime",
-                return_value=False,
+                "cementic.embedding_runtime.RemoteEmbeddingClient._list_models",
+                return_value=None,
             ),
+            patch("cementic.embedding_runtime._daemon_pid_alive", return_value=False),
             patch("cementic.embedding_runtime._restart_llama_cpp_daemon_if_needed") as restart,
             patch("cementic.embedding_runtime._start_llama_cpp_daemon") as start,
             patch("cementic.embedding_runtime._wait_for_daemon_ready") as wait,
@@ -338,9 +344,10 @@ class TestEmbeddingRuntime:
 
         with (
             patch(
-                "cementic.embedding_runtime.RemoteEmbeddingClient.matches_expected_runtime",
-                side_effect=[False, True],
+                "cementic.embedding_runtime.RemoteEmbeddingClient._list_models",
+                return_value=None,
             ),
+            patch("cementic.embedding_runtime._daemon_pid_alive", return_value=False),
             patch("cementic.embedding_runtime._restart_llama_cpp_daemon_if_needed") as restart,
             patch("cementic.embedding_runtime._start_llama_cpp_daemon") as start,
             patch("cementic.embedding_runtime._wait_for_daemon_ready") as wait,
@@ -352,6 +359,92 @@ class TestEmbeddingRuntime:
         _, kwargs = start.call_args
         assert kwargs["spec"].model_identifier == config.llama_cpp.model_path
         wait.assert_called_once()
+
+    def test_get_runtime_client_prints_latency_notice_to_stderr_on_autostart(
+        self, capsys
+    ) -> None:
+        """A cold daemon start (30s+ model load) must not read as a silent hang."""
+        config = Config()
+        config.llama_cpp.daemon_autostart = True
+
+        with (
+            patch(
+                "cementic.embedding_runtime.RemoteEmbeddingClient._list_models",
+                return_value=None,
+            ),
+            patch("cementic.embedding_runtime._daemon_pid_alive", return_value=False),
+            patch("cementic.embedding_runtime._restart_llama_cpp_daemon_if_needed"),
+            patch("cementic.embedding_runtime._start_llama_cpp_daemon"),
+            patch("cementic.embedding_runtime._wait_for_daemon_ready"),
+        ):
+            get_llama_cpp_runtime_client(config)
+
+        captured = capsys.readouterr()
+        assert "starting embedding daemon" in captured.err
+        assert captured.out == ""
+
+    def test_get_runtime_client_restarts_on_real_mismatch_even_if_daemon_alive(self) -> None:
+        """A reachable daemon serving the wrong model is a real config change,
+        not busyness -- it must restart even though the PID is alive."""
+        config = Config()
+        config.llama_cpp.daemon_autostart = True
+
+        with (
+            patch(
+                "cementic.embedding_runtime.RemoteEmbeddingClient._list_models",
+                return_value=[{"id": "some-other-model"}],
+            ),
+            patch("cementic.embedding_runtime._daemon_pid_alive", return_value=True),
+            patch("cementic.embedding_runtime._restart_llama_cpp_daemon_if_needed") as restart,
+            patch("cementic.embedding_runtime._start_llama_cpp_daemon") as start,
+            patch("cementic.embedding_runtime._wait_for_daemon_ready") as wait,
+        ):
+            get_llama_cpp_runtime_client(config)
+
+        restart.assert_called_once_with(config)
+        start.assert_called_once()
+        wait.assert_called_once()
+
+    def test_get_runtime_client_treats_unreachable_alive_daemon_as_busy(self) -> None:
+        """/v1/models failing to respond while the PID is confirmed alive means
+        busy, not down -- must wait it out rather than kill the process."""
+        config = Config()
+
+        with (
+            patch(
+                "cementic.embedding_runtime.RemoteEmbeddingClient._list_models",
+                return_value=None,
+            ),
+            patch("cementic.embedding_runtime._daemon_pid_alive", return_value=True),
+            patch("cementic.embedding_runtime._poll_until_ready", return_value=True) as poll,
+            patch("cementic.embedding_runtime._restart_llama_cpp_daemon_if_needed") as restart,
+            patch("cementic.embedding_runtime._start_llama_cpp_daemon") as start,
+        ):
+            client = get_llama_cpp_runtime_client(config)
+
+        assert client.embedding_dim == config.llama_cpp.embedding_dim
+        poll.assert_called_once()
+        restart.assert_not_called()
+        start.assert_not_called()
+
+    def test_get_runtime_client_raises_when_busy_daemon_never_frees(self) -> None:
+        config = Config()
+
+        with (
+            patch(
+                "cementic.embedding_runtime.RemoteEmbeddingClient._list_models",
+                return_value=None,
+            ),
+            patch("cementic.embedding_runtime._daemon_pid_alive", return_value=True),
+            patch("cementic.embedding_runtime._poll_until_ready", return_value=False),
+            patch("cementic.embedding_runtime._restart_llama_cpp_daemon_if_needed") as restart,
+            patch("cementic.embedding_runtime._start_llama_cpp_daemon") as start,
+            pytest.raises(RuntimeError, match="busy"),
+        ):
+            get_llama_cpp_runtime_client(config)
+
+        restart.assert_not_called()
+        start.assert_not_called()
 
     def test_get_runtime_client_uses_profile_spec(self) -> None:
         config = Config()
@@ -366,8 +459,8 @@ class TestEmbeddingRuntime:
 
         with (
             patch(
-                "cementic.embedding_runtime.RemoteEmbeddingClient.matches_expected_runtime",
-                return_value=True,
+                "cementic.embedding_runtime.RemoteEmbeddingClient._list_models",
+                return_value=[{"id": "profile-fingerprint"}],
             ),
             patch("cementic.embedding_runtime.llama_cpp_runtime_fingerprint") as fingerprint,
         ):
@@ -382,6 +475,22 @@ class TestEmbeddingRuntime:
             embedding_dim=384,
             verbose=True,
         )
+
+    def test_get_runtime_client_uses_embed_timeout_not_start_timeout(self) -> None:
+        config = Config()
+        config.llama_cpp.daemon_start_timeout_seconds = 30
+        config.llama_cpp.llama_embed_timeout_seconds = 200
+
+        def fake_list_models(self: RemoteEmbeddingClient) -> list[dict]:
+            return [{"id": self.expected_fingerprint}]
+
+        with patch(
+            "cementic.embedding_runtime.RemoteEmbeddingClient._list_models",
+            fake_list_models,
+        ):
+            client = get_llama_cpp_runtime_client(config)
+
+        assert client.timeout == 200.0
 
     def test_runtime_spec_from_config_for_llama_cpp(self) -> None:
         config = Config()
@@ -428,6 +537,43 @@ class TestCreateProvider:
         spec = EmbeddingRuntimeSpec(provider="nope", model_identifier="x", embedding_dim=1)
         with pytest.raises(ValueError, match="Unknown embedding provider"):
             create_provider(spec, Config())
+
+
+class TestClientIsHealthyOrBusy:
+    """Searcher's health gate mirrors the busy-vs-down distinction."""
+
+    def test_healthy_client_short_circuits(self) -> None:
+        client = MagicMock(spec=RemoteEmbeddingClient)
+        client.health_check.return_value = True
+        assert client_is_healthy_or_busy(client, Config()) is True
+
+    def test_non_remote_client_unhealthy_is_unhealthy(self) -> None:
+        client = MagicMock(spec=EmbeddingProvider)
+        client.health_check.return_value = False
+        assert client_is_healthy_or_busy(client, Config()) is False
+
+    @patch("cementic.embedding_runtime._daemon_pid_alive", return_value=False)
+    def test_remote_client_unhealthy_and_daemon_dead_is_unhealthy(self, mock_alive) -> None:
+        client = MagicMock(spec=RemoteEmbeddingClient)
+        client.health_check.return_value = False
+        assert client_is_healthy_or_busy(client, Config()) is False
+
+    @patch("cementic.embedding_runtime._poll_until_ready", return_value=True)
+    @patch("cementic.embedding_runtime._daemon_pid_alive", return_value=True)
+    def test_remote_client_unhealthy_but_daemon_alive_waits_and_recovers(
+        self, mock_alive, mock_poll
+    ) -> None:
+        client = MagicMock(spec=RemoteEmbeddingClient)
+        client.health_check.return_value = False
+        assert client_is_healthy_or_busy(client, Config()) is True
+        mock_poll.assert_called_once()
+
+    @patch("cementic.embedding_runtime._poll_until_ready", return_value=False)
+    @patch("cementic.embedding_runtime._daemon_pid_alive", return_value=True)
+    def test_remote_client_stays_unhealthy_if_never_frees(self, mock_alive, mock_poll) -> None:
+        client = MagicMock(spec=RemoteEmbeddingClient)
+        client.health_check.return_value = False
+        assert client_is_healthy_or_busy(client, Config()) is False
 
 
 class TestDaemonPidFile:

@@ -194,6 +194,12 @@ class LlamaCppConfig(_SectionSettings):
         default=30,
         description="Seconds to wait for the llama.cpp daemon to become ready",
     )
+    llama_embed_timeout_seconds: int = Field(
+        default=120,
+        description="Seconds to wait for an embedding HTTP request to complete; "
+        "separate from daemon_start_timeout_seconds since a large batch can "
+        "legitimately run far longer than a startup probe should ever wait",
+    )
     daemon_autostart: bool = Field(
         default=True,
         description="Automatically start/restart the llama.cpp daemon when a client needs it",
