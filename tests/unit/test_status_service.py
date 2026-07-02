@@ -2,7 +2,22 @@
 
 from unittest.mock import MagicMock, patch
 
+from sqlalchemy import create_engine, event
+from sqlalchemy.orm import sessionmaker
+
 from cementic.config import Config
+from cementic.db import (
+    Base,
+    Chunk,
+    ChunkedDocument,
+    ChunkEmbedding,
+    ChunkProfile,
+    EmbeddingProfile,
+    ExtractedDocument,
+    ExtractorProfile,
+    PipelineRevision,
+    SourceDocument,
+)
 from cementic.state import DaemonState, WorkerState
 from cementic.status_service import (
     HealthStatus,
@@ -15,8 +30,164 @@ from cementic.status_service import (
     check_health,
     daemon_state_text,
     load_file_progress,
+    load_pipeline_status,
+    load_pipeline_status_bulk,
     load_worker_statuses,
 )
+
+
+def _count_select_queries(engine):
+    class _Counter:
+        value = 0
+
+    counter = _Counter()
+
+    def _on_execute(conn, cursor, statement, *args, **kwargs):
+        if statement.lstrip().upper().startswith("SELECT"):
+            counter.value += 1
+
+    event.listen(engine, "before_cursor_execute", _on_execute)
+    return counter
+
+
+def _seed_revision(session, collection: str) -> PipelineRevision:
+    extractor = ExtractorProfile(name="x", fingerprint=f"ext-{collection}", config_json="{}")
+    chunk_profile = ChunkProfile(fingerprint=f"chunk-{collection}", config_json="{}")
+    embedding_profile = EmbeddingProfile(
+        fingerprint=f"embed-{collection}",
+        provider="test",
+        model_identifier="test",
+        embedding_dim=2,
+        distance_metric="cosine",
+        config_json="{}",
+    )
+    session.add_all([extractor, chunk_profile, embedding_profile])
+    session.flush()
+    revision = PipelineRevision(
+        collection=collection,
+        extractor_profile_id=extractor.id,
+        chunk_profile_id=chunk_profile.id,
+        embedding_profile_id=embedding_profile.id,
+        status="building",
+    )
+    session.add(revision)
+    session.flush()
+    return revision
+
+
+def _seed_collection_with_documents(
+    session, collection: str, n_documents: int, n_failed_embeddings: int = 0
+) -> PipelineRevision:
+    """Seed a collection with n_documents fully done through embedding."""
+    revision = _seed_revision(session, collection)
+    revision.status = "active"
+    for i in range(n_documents):
+        doc = SourceDocument(
+            collection=collection, source_path=f"/{collection}/{i}.pdf", file_hash=f"h{i}"
+        )
+        session.add(doc)
+        session.flush()
+        extracted = ExtractedDocument(
+            document_id=doc.id, extractor_profile_id=revision.extractor_profile_id, status="done"
+        )
+        session.add(extracted)
+        session.flush()
+        chunked = ChunkedDocument(
+            extracted_document_id=extracted.id,
+            chunk_profile_id=revision.chunk_profile_id,
+            status="done",
+        )
+        session.add(chunked)
+        session.flush()
+        chunk = Chunk(
+            document_id=doc.id, chunked_document_id=chunked.id, chunk_index=0, content="c"
+        )
+        session.add(chunk)
+        session.flush()
+        status = "failed" if i < n_failed_embeddings else "done"
+        session.add(
+            ChunkEmbedding(
+                chunk_id=chunk.id, embedding_profile_id=revision.embedding_profile_id, status=status
+            )
+        )
+    return revision
+
+
+class TestLoadPipelineStatusBulk:
+    """Tests for load_pipeline_status_bulk."""
+
+    def _session_factory(self):
+        engine = create_engine("sqlite:///:memory:")
+        Base.metadata.create_all(engine)
+        return engine, sessionmaker(bind=engine, expire_on_commit=False)
+
+    def test_empty_collections_returns_empty_dict(self) -> None:
+        assert load_pipeline_status_bulk(Config(), []) == {}
+
+    def test_computes_correct_per_collection_counts(self) -> None:
+        engine, session_factory = self._session_factory()
+        with session_factory() as session:
+            _seed_collection_with_documents(session, "research", n_documents=3)
+            _seed_collection_with_documents(
+                session, "math", n_documents=2, n_failed_embeddings=1
+            )
+            session.commit()
+
+        with (
+            patch("cementic.status_service.get_engine", return_value=engine),
+            patch("cementic.status_service.get_session_factory", return_value=session_factory),
+        ):
+            result = load_pipeline_status_bulk(Config(), ["research", "math", "missing"])
+
+        assert result["research"].documents == 3
+        assert result["research"].extracted_done == 3
+        assert result["research"].done_embeddings == 3
+        assert result["research"].failed_embeddings == 0
+
+        assert result["math"].documents == 2
+        assert result["math"].done_embeddings == 1
+        assert result["math"].failed_embeddings == 1
+
+        assert result["missing"].documents == 0
+        assert result["missing"].done_embeddings == 0
+        assert result["missing"].active_revision_label is None
+
+    def test_matches_single_collection_loader(self) -> None:
+        engine, session_factory = self._session_factory()
+        with session_factory() as session:
+            _seed_collection_with_documents(session, "research", n_documents=3)
+            session.commit()
+
+        with (
+            patch("cementic.status_service.get_engine", return_value=engine),
+            patch("cementic.status_service.get_session_factory", return_value=session_factory),
+        ):
+            single = load_pipeline_status(Config(), "research")
+            bulk = load_pipeline_status_bulk(Config(), ["research"])["research"]
+
+        assert single == bulk
+
+    def test_query_count_does_not_scale_with_collection_count(self) -> None:
+        def run(n_collections: int) -> int:
+            engine, session_factory = self._session_factory()
+            names = [f"col-{i}" for i in range(n_collections)]
+            with session_factory() as session:
+                for name in names:
+                    _seed_collection_with_documents(session, name, n_documents=2)
+                session.commit()
+
+            counter = _count_select_queries(engine)
+            with (
+                patch("cementic.status_service.get_engine", return_value=engine),
+                patch("cementic.status_service.get_session_factory", return_value=session_factory),
+            ):
+                result = load_pipeline_status_bulk(Config(), names)
+            assert len(result) == n_collections
+            return counter.value
+
+        small = run(3)
+        large = run(30)
+        assert small == large
 
 
 class TestSafePct:
@@ -328,103 +499,215 @@ class TestCheckHealth:
 
 
 class TestLoadFileProgress:
-    """Tests for load_file_progress."""
+    """Tests for load_file_progress, against a real (in-memory) database."""
 
-    @patch("cementic.status_service.get_engine")
-    @patch("cementic.status_service.get_session_factory")
-    def test_no_target_revision_returns_empty(self, mock_factory, mock_engine) -> None:
-        session = MagicMock()
-        mock_factory.return_value.return_value.__enter__.return_value = session
+    def _session_factory(self):
+        engine = create_engine("sqlite:///:memory:")
+        Base.metadata.create_all(engine)
+        return engine, sessionmaker(bind=engine, expire_on_commit=False)
 
-        # Both building/ready and active queries return None
-        session.query().filter().order_by().first.return_value = None
-        session.query().filter_by().order_by().first.return_value = None
-
-        config = Config()
-        result = load_file_progress(config, "col")
+    def test_no_target_revision_returns_empty(self) -> None:
+        engine, session_factory = self._session_factory()
+        with (
+            patch("cementic.status_service.get_engine", return_value=engine),
+            patch("cementic.status_service.get_session_factory", return_value=session_factory),
+        ):
+            result = load_file_progress(Config(), "col")
         assert result == []
 
-    @patch("cementic.status_service.get_engine")
-    @patch("cementic.status_service.get_session_factory")
-    def test_no_documents_returns_empty(self, mock_factory, mock_engine) -> None:
-        session = MagicMock()
-        mock_factory.return_value.return_value.__enter__.return_value = session
+    def test_no_documents_returns_empty(self) -> None:
+        engine, session_factory = self._session_factory()
+        with session_factory() as session:
+            _seed_revision(session, "col")
+            session.commit()
 
-        # A revision exists but no documents
-        mock_revision = MagicMock()
-        mock_revision.id = 1
-        mock_revision.extractor_profile_id = 1
-        mock_revision.chunk_profile_id = 1
-        mock_revision.embedding_profile_id = 1
-        session.query().filter().order_by().first.return_value = mock_revision
-        session.query().filter_by().order_by().all.return_value = []
-
-        config = Config()
-        result = load_file_progress(config, "col")
+        with (
+            patch("cementic.status_service.get_engine", return_value=engine),
+            patch("cementic.status_service.get_session_factory", return_value=session_factory),
+        ):
+            result = load_file_progress(Config(), "col")
         assert result == []
 
-    @patch("cementic.status_service.get_engine")
-    @patch("cementic.status_service.get_session_factory")
-    def test_failed_extraction_sets_error_message(self, mock_factory, mock_engine) -> None:
-        """Line 455: extraction_status == 'failed' → error_message set."""
-        session = MagicMock()
-        mock_factory.return_value.return_value.__enter__.return_value = session
+    def test_failed_extraction_sets_error_message(self) -> None:
+        engine, session_factory = self._session_factory()
+        with session_factory() as session:
+            revision = _seed_revision(session, "col")
+            doc = SourceDocument(collection="col", source_path="/test/a.pdf", file_hash="h1")
+            session.add(doc)
+            session.flush()
+            session.add(
+                ExtractedDocument(
+                    document_id=doc.id,
+                    extractor_profile_id=revision.extractor_profile_id,
+                    status="failed",
+                    error_message="extraction broke",
+                )
+            )
+            session.commit()
 
-        mock_revision = MagicMock()
-        mock_revision.id = 1
-        mock_revision.extractor_profile_id = 1
-        mock_revision.chunk_profile_id = 1
-        mock_revision.embedding_profile_id = 1
-        session.query().filter().order_by().first.return_value = mock_revision
-
-        mock_doc = MagicMock()
-        mock_doc.id = 1
-        mock_doc.source_path = "/test/a.pdf"
-        session.query().filter().order_by().all.return_value = [mock_doc]
-
-        mock_extraction = MagicMock()
-        mock_extraction.status = "failed"
-        mock_extraction.error_message = "extraction broke"
-        mock_extraction.id = 10
-        session.query().filter_by().first.return_value = mock_extraction
-
-        config = Config()
-        result = load_file_progress(config, "col")
+        with (
+            patch("cementic.status_service.get_engine", return_value=engine),
+            patch("cementic.status_service.get_session_factory", return_value=session_factory),
+        ):
+            result = load_file_progress(Config(), "col")
         assert len(result) == 1
         assert result[0].extraction_status == "failed"
         assert result[0].error_message == "extraction broke"
 
-    @patch("cementic.status_service.get_engine")
-    @patch("cementic.status_service.get_session_factory")
-    def test_failed_chunking_sets_error_message(self, mock_factory, mock_engine) -> None:
-        """Line 457: chunking_status == 'failed' → error_message set."""
-        session = MagicMock()
-        mock_factory.return_value.return_value.__enter__.return_value = session
+    def test_failed_chunking_sets_error_message(self) -> None:
+        engine, session_factory = self._session_factory()
+        with session_factory() as session:
+            revision = _seed_revision(session, "col")
+            doc = SourceDocument(collection="col", source_path="/test/a.pdf", file_hash="h1")
+            session.add(doc)
+            session.flush()
+            extracted = ExtractedDocument(
+                document_id=doc.id,
+                extractor_profile_id=revision.extractor_profile_id,
+                status="done",
+            )
+            session.add(extracted)
+            session.flush()
+            session.add(
+                ChunkedDocument(
+                    extracted_document_id=extracted.id,
+                    chunk_profile_id=revision.chunk_profile_id,
+                    status="failed",
+                    error_message="chunker crashed",
+                )
+            )
+            session.commit()
 
-        mock_revision = MagicMock()
-        mock_revision.id = 1
-        mock_revision.extractor_profile_id = 1
-        mock_revision.chunk_profile_id = 1
-        mock_revision.embedding_profile_id = 1
-        session.query().filter().order_by().first.return_value = mock_revision
-
-        mock_doc = MagicMock()
-        mock_doc.id = 1
-        mock_doc.source_path = "/test/a.pdf"
-        session.query().filter().order_by().all.return_value = [mock_doc]
-
-        mock_extraction = MagicMock()
-        mock_extraction.status = "done"
-        mock_extraction.id = 10
-        mock_chunking = MagicMock()
-        mock_chunking.status = "failed"
-        mock_chunking.error_message = "chunker crashed"
-        mock_chunking.id = 20
-        session.query().filter_by().first.side_effect = [mock_extraction, mock_chunking]
-
-        config = Config()
-        result = load_file_progress(config, "col")
+        with (
+            patch("cementic.status_service.get_engine", return_value=engine),
+            patch("cementic.status_service.get_session_factory", return_value=session_factory),
+        ):
+            result = load_file_progress(Config(), "col")
         assert len(result) == 1
         assert result[0].extraction_status == "done"
         assert result[0].chunking_status == "failed"
         assert result[0].error_message == "chunker crashed"
+
+    def test_reports_embedding_counts_per_document(self) -> None:
+        engine, session_factory = self._session_factory()
+        with session_factory() as session:
+            revision = _seed_revision(session, "col")
+            doc = SourceDocument(collection="col", source_path="/test/a.pdf", file_hash="h1")
+            session.add(doc)
+            session.flush()
+            extracted = ExtractedDocument(
+                document_id=doc.id,
+                extractor_profile_id=revision.extractor_profile_id,
+                status="done",
+            )
+            session.add(extracted)
+            session.flush()
+            chunked = ChunkedDocument(
+                extracted_document_id=extracted.id,
+                chunk_profile_id=revision.chunk_profile_id,
+                status="done",
+            )
+            session.add(chunked)
+            session.flush()
+            for index in range(3):
+                chunk = Chunk(
+                    document_id=doc.id,
+                    chunked_document_id=chunked.id,
+                    chunk_index=index,
+                    content=f"chunk {index}",
+                )
+                session.add(chunk)
+                session.flush()
+                status = "done" if index < 2 else "failed"
+                session.add(
+                    ChunkEmbedding(
+                        chunk_id=chunk.id,
+                        embedding_profile_id=revision.embedding_profile_id,
+                        status=status,
+                    )
+                )
+            session.commit()
+
+        with (
+            patch("cementic.status_service.get_engine", return_value=engine),
+            patch("cementic.status_service.get_session_factory", return_value=session_factory),
+        ):
+            result = load_file_progress(Config(), "col")
+        assert len(result) == 1
+        assert result[0].embeddings_total == 3
+        assert result[0].embeddings_done == 2
+        assert result[0].embeddings_failed == 1
+
+    def test_query_count_does_not_scale_with_document_count(self) -> None:
+        def run(n_documents: int) -> int:
+            engine, session_factory = self._session_factory()
+            with session_factory() as session:
+                revision = _seed_revision(session, "col")
+                for i in range(n_documents):
+                    doc = SourceDocument(
+                        collection="col", source_path=f"/test/{i}.pdf", file_hash=f"h{i}"
+                    )
+                    session.add(doc)
+                    session.flush()
+                    extracted = ExtractedDocument(
+                        document_id=doc.id,
+                        extractor_profile_id=revision.extractor_profile_id,
+                        status="done",
+                    )
+                    session.add(extracted)
+                    session.flush()
+                    chunked = ChunkedDocument(
+                        extracted_document_id=extracted.id,
+                        chunk_profile_id=revision.chunk_profile_id,
+                        status="done",
+                    )
+                    session.add(chunked)
+                    session.flush()
+                    chunk = Chunk(
+                        document_id=doc.id,
+                        chunked_document_id=chunked.id,
+                        chunk_index=0,
+                        content="content",
+                    )
+                    session.add(chunk)
+                    session.flush()
+                    session.add(
+                        ChunkEmbedding(
+                            chunk_id=chunk.id,
+                            embedding_profile_id=revision.embedding_profile_id,
+                            status="done",
+                        )
+                    )
+                session.commit()
+
+            counter = _count_select_queries(engine)
+            with (
+                patch("cementic.status_service.get_engine", return_value=engine),
+                patch("cementic.status_service.get_session_factory", return_value=session_factory),
+            ):
+                result = load_file_progress(Config(), "col")
+            assert len(result) == n_documents
+            return counter.value
+
+        small = run(2)
+        large = run(50)
+        assert small == large
+
+
+class TestLoadPipelineStatusLabels:
+    """Tests for load_pipeline_status revision-label defaults."""
+
+    @patch("cementic.status_service.get_engine")
+    @patch("cementic.status_service.get_session_factory")
+    def test_no_revisions_yields_none_not_string_none(self, mock_factory, mock_engine) -> None:
+        session = MagicMock()
+        mock_factory.return_value.return_value.__enter__.return_value = session
+        session.query().filter().count.return_value = 0
+        session.query().filter_by().order_by().first.return_value = None
+        session.query().filter().order_by().first.return_value = None
+
+        config = Config()
+        result = load_pipeline_status(config, "col")
+
+        assert result.active_revision_label is None
+        assert result.building_revision_label is None

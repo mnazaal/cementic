@@ -4,6 +4,8 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+from sqlalchemy import create_engine, event
+from sqlalchemy.orm import sessionmaker
 
 from cementic.collections import (
     DeleteCollectionResult,
@@ -15,7 +17,17 @@ from cementic.collections import (
     remove_artifacts,
 )
 from cementic.config import Config
-from cementic.db import PipelineRevision, SourceDocument
+from cementic.db import (
+    Base,
+    Chunk,
+    ChunkedDocument,
+    ChunkProfile,
+    EmbeddingProfile,
+    ExtractedDocument,
+    ExtractorProfile,
+    PipelineRevision,
+    SourceDocument,
+)
 from cementic.pipeline_worker import PipelineCounts
 
 
@@ -32,22 +44,56 @@ def _counts(*, extracted_failed: int = 0, chunked_failed: int = 0, failed_embedd
     )
 
 
+def _new_session():
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    return engine, sessionmaker(bind=engine, expire_on_commit=False)()
+
+
+def _count_select_queries(engine):
+    class _Counter:
+        value = 0
+
+    counter = _Counter()
+
+    def _on_execute(conn, cursor, statement, *args, **kwargs):
+        if statement.lstrip().upper().startswith("SELECT"):
+            counter.value += 1
+
+    event.listen(engine, "before_cursor_execute", _on_execute)
+    return counter
+
+
+def _seed_profiles(session, suffix: str = "1"):
+    extractor = ExtractorProfile(name="x", fingerprint=f"ext-{suffix}", config_json="{}")
+    chunk_profile = ChunkProfile(fingerprint=f"chunk-{suffix}", config_json="{}")
+    embedding_profile = EmbeddingProfile(
+        fingerprint=f"embed-{suffix}",
+        provider="test",
+        model_identifier="test",
+        embedding_dim=2,
+        distance_metric="cosine",
+        config_json="{}",
+    )
+    session.add_all([extractor, chunk_profile, embedding_profile])
+    session.flush()
+    return extractor, chunk_profile, embedding_profile
+
+
 class TestListCollections:
     """Tests for list_collections."""
 
     def test_empty(self) -> None:
-        session = MagicMock()
-        session.query().group_by().order_by().all.return_value = []
-
-        result = list_collections(session)
-        assert result == []
+        _, session = _new_session()
+        assert list_collections(session) == []
 
     def test_single_collection(self) -> None:
-        session = MagicMock()
-        session.query().group_by().order_by().all.return_value = [("default",)]
-        session.query().filter_by().order_by().first.return_value = None
-        session.query().filter().order_by().first.return_value = None
-        session.query().filter.return_value.scalar.return_value = 3
+        _, session = _new_session()
+        for i in range(3):
+            session.add(
+                SourceDocument(collection="default", source_path=f"/{i}.pdf", file_hash=f"h{i}")
+            )
+        session.commit()
 
         result = list_collections(session)
         assert len(result) == 1
@@ -57,20 +103,32 @@ class TestListCollections:
         assert result[0].building_revision_label is None
 
     def test_with_active_and_building_revisions(self) -> None:
-        session = MagicMock()
-        session.query().group_by().order_by().all.return_value = [("c1",)]
-
-        active_rev = MagicMock(spec=PipelineRevision)
-        active_rev.label = "v1"
-        building_rev = MagicMock(spec=PipelineRevision)
-        building_rev.label = "v2"
-
-        # First call: active revision query
-        # Second call: building revision query
-        # Third call: count query
-        session.query().filter_by().order_by().first.side_effect = [active_rev, building_rev]
-        session.query().filter().order_by().first.return_value = building_rev
-        session.query().filter.return_value.scalar.return_value = 5
+        _, session = _new_session()
+        for i in range(5):
+            session.add(SourceDocument(collection="c1", source_path=f"/{i}.pdf", file_hash=f"h{i}"))
+        extractor1, chunk_profile1, embedding_profile1 = _seed_profiles(session, suffix="a")
+        extractor2, chunk_profile2, embedding_profile2 = _seed_profiles(session, suffix="b")
+        session.add(
+            PipelineRevision(
+                collection="c1",
+                label="v1",
+                status="active",
+                extractor_profile_id=extractor1.id,
+                chunk_profile_id=chunk_profile1.id,
+                embedding_profile_id=embedding_profile1.id,
+            )
+        )
+        session.add(
+            PipelineRevision(
+                collection="c1",
+                label="v2",
+                status="building",
+                extractor_profile_id=extractor2.id,
+                chunk_profile_id=chunk_profile2.id,
+                embedding_profile_id=embedding_profile2.id,
+            )
+        )
+        session.commit()
 
         result = list_collections(session)
         assert len(result) == 1
@@ -79,35 +137,160 @@ class TestListCollections:
         assert result[0].active_revision_label == "v1"
         assert result[0].building_revision_label == "v2"
 
+    def test_query_count_does_not_scale_with_collection_count(self) -> None:
+        def run(n_collections: int) -> int:
+            engine, session = _new_session()
+            for i in range(n_collections):
+                collection = f"col-{i}"
+                session.add(
+                    SourceDocument(
+                        collection=collection, source_path=f"/{i}.pdf", file_hash=f"h{i}"
+                    )
+                )
+                extractor, chunk_profile, embedding_profile = _seed_profiles(session, suffix=str(i))
+                session.add(
+                    PipelineRevision(
+                        collection=collection,
+                        label=f"v{i}",
+                        status="active",
+                        extractor_profile_id=extractor.id,
+                        chunk_profile_id=chunk_profile.id,
+                        embedding_profile_id=embedding_profile.id,
+                    )
+                )
+            session.commit()
+
+            counter = _count_select_queries(engine)
+            result = list_collections(session)
+            assert len(result) == n_collections
+            return counter.value
+
+        small = run(3)
+        large = run(30)
+        assert small == large
+
 
 class TestDeleteCollectionRecords:
     """Tests for delete_collection_records."""
 
     def test_nonexistent_collection_returns_none(self) -> None:
-        session = MagicMock()
-        session.query().filter_by().all.return_value = []
-
+        _, session = _new_session()
         result = delete_collection_records(session, "missing")
         assert result is None
 
     def test_deletes_existing_collection(self) -> None:
-        session = MagicMock()
-        doc = MagicMock(spec=SourceDocument)
-        doc.id = 1
-        session.query().filter_by().all.side_effect = [[doc], [(7,)]]
-
-        session.query().filter().all.return_value = [("/path/to/artifact.md.gz",)]
-        session.query().filter().delete.return_value = 5  # chunks
-        session.query().filter_by().delete.return_value = 1  # revisions
-        session.query().filter().delete.side_effect = [5, 1]  # chunks, then source docs
-        session.query().filter_by().scalar.return_value = 0
+        _, session = _new_session()
+        extractor, chunk_profile, embedding_profile = _seed_profiles(session)
+        session.add(
+            PipelineRevision(
+                collection="c1",
+                label="v1",
+                status="active",
+                extractor_profile_id=extractor.id,
+                chunk_profile_id=chunk_profile.id,
+                embedding_profile_id=embedding_profile.id,
+            )
+        )
+        doc = SourceDocument(collection="c1", source_path="/a.pdf", file_hash="h1")
+        session.add(doc)
+        session.flush()
+        extracted = ExtractedDocument(
+            document_id=doc.id,
+            extractor_profile_id=extractor.id,
+            status="done",
+            artifact_path="/path/to/artifact.md.gz",
+        )
+        session.add(extracted)
+        session.flush()
+        chunked = ChunkedDocument(
+            extracted_document_id=extracted.id, chunk_profile_id=chunk_profile.id, status="done"
+        )
+        session.add(chunked)
+        session.flush()
+        session.add(
+            Chunk(document_id=doc.id, chunked_document_id=chunked.id, chunk_index=0, content="c")
+        )
+        session.commit()
 
         result = delete_collection_records(session, "c1")
         assert isinstance(result, DeleteCollectionResult)
         assert result.deleted_docs == 1
+        assert result.deleted_chunks == 1
         assert result.artifact_paths == ["/path/to/artifact.md.gz"]
-        assert result.vector_profile_ids == [7]
-        assert session.commit.called
+        assert result.vector_profile_ids == [embedding_profile.id]
+        assert session.query(SourceDocument).count() == 0
+        assert session.query(PipelineRevision).count() == 0
+
+    def test_vector_profile_still_referenced_elsewhere_is_kept(self) -> None:
+        """A profile still used by another collection's revision must not be dropped."""
+        _, session = _new_session()
+        extractor, chunk_profile, embedding_profile = _seed_profiles(session)
+        session.add(
+            PipelineRevision(
+                collection="c1",
+                label="v1",
+                status="active",
+                extractor_profile_id=extractor.id,
+                chunk_profile_id=chunk_profile.id,
+                embedding_profile_id=embedding_profile.id,
+            )
+        )
+        session.add(
+            PipelineRevision(
+                collection="c2",
+                label="v1",
+                status="active",
+                extractor_profile_id=extractor.id,
+                chunk_profile_id=chunk_profile.id,
+                embedding_profile_id=embedding_profile.id,
+            )
+        )
+        doc = SourceDocument(collection="c1", source_path="/a.pdf", file_hash="h1")
+        session.add(doc)
+        session.commit()
+
+        result = delete_collection_records(session, "c1")
+        assert result is not None
+        assert result.vector_profile_ids == []
+
+    def test_query_count_bounded_by_profile_count(self) -> None:
+        """Regression: remaining-reference check groups by profile, not one query each."""
+
+        def run(n_old_profiles: int) -> int:
+            engine, session = _new_session()
+            extractor, chunk_profile, _ = _seed_profiles(session, suffix=str(n_old_profiles))
+            doc = SourceDocument(collection="c1", source_path="/a.pdf", file_hash="h1")
+            session.add(doc)
+            for i in range(n_old_profiles):
+                embedding_profile = EmbeddingProfile(
+                    fingerprint=f"embed-{n_old_profiles}-{i}",
+                    provider="test",
+                    model_identifier="test",
+                    embedding_dim=2,
+                    distance_metric="cosine",
+                    config_json="{}",
+                )
+                session.add(embedding_profile)
+                session.flush()
+                session.add(
+                    PipelineRevision(
+                        collection="c1",
+                        label=f"v{i}",
+                        status="retired",
+                        extractor_profile_id=extractor.id,
+                        chunk_profile_id=chunk_profile.id,
+                        embedding_profile_id=embedding_profile.id,
+                    )
+                )
+            session.commit()
+
+            counter = _count_select_queries(engine)
+            delete_collection_records(session, "c1")
+            return counter.value
+
+        small = run(2)
+        large = run(30)
+        assert small == large
 
 
 class TestDropOrphanVectorTables:

@@ -51,6 +51,7 @@ from cementic.status_service import (
     check_health,
     load_file_progress,
     load_pipeline_status,
+    load_pipeline_status_bulk,
     load_worker_statuses,
 )
 from cementic.supervisor import (
@@ -587,9 +588,12 @@ def _print_status_json(
         with session_factory() as session:
             if collection is None:
                 rows = list_collections(session)
+                status_by_collection = load_pipeline_status_bulk(
+                    _get_config(), [row.name for row in rows]
+                )
                 collections_data: dict[str, dict[str, Any]] = {}
                 for row in rows:
-                    ps = load_pipeline_status(_get_config(), row.name)
+                    ps = status_by_collection[row.name]
                     collections_data[row.name] = {
                         "documents": ps.documents,
                         "extracted_done": ps.extracted_done,
@@ -836,7 +840,10 @@ def status(
                 if not rows:
                     console.print("  (none)")
                     return
-                items = [(row, load_pipeline_status(_get_config(), row.name)) for row in rows]
+                status_by_collection = load_pipeline_status_bulk(
+                    _get_config(), [row.name for row in rows]
+                )
+                items = [(row, status_by_collection[row.name]) for row in rows]
                 name_w = max(len(row.name) for row, _ in items)
                 doc_w = max(len(f"{ps.documents:,}") for _, ps in items)
                 frac_w = max(
@@ -1275,15 +1282,18 @@ def embed() -> None:
         raise typer.Exit(1)
     if not records:
         return
+    batch_size = cfg.pipeline_worker.batch_size
     try:
         provider = create_provider(runtime_spec_from_config(cfg), cfg)
-        texts = [provider.format_document(str(rec.get("content", ""))) for rec in records]
-        vectors = provider.embed_batch(texts)
+        for start in range(0, len(records), batch_size):
+            batch = records[start : start + batch_size]
+            texts = [provider.format_document(str(rec.get("content", ""))) for rec in batch]
+            vectors = provider.embed_batch(texts)
+            for rec, vector in zip(batch, vectors):
+                typer.echo(json.dumps({**rec, "embedding": vector}))
     except Exception as error:
         err_console.print(f"embed failed: {error}")
         raise typer.Exit(1)
-    for rec, vector in zip(records, vectors):
-        typer.echo(json.dumps({**rec, "embedding": vector}))
 
 
 def main() -> None:

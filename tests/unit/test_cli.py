@@ -362,7 +362,7 @@ class TestBackgroundCommands:
 
     @patch("cementic.cli._llama_daemon_runtime_status", return_value="running, pid=333")
     @patch("cementic.cli.check_health")
-    @patch("cementic.cli.load_pipeline_status")
+    @patch("cementic.cli.load_pipeline_status_bulk")
     @patch("cementic.cli.list_collections")
     @patch("cementic.cli.get_session_factory")
     @patch("cementic.cli.get_engine")
@@ -377,7 +377,7 @@ class TestBackgroundCommands:
         mock_get_engine,
         mock_get_session_factory,
         mock_list_collections,
-        mock_load_pipeline_status,
+        mock_load_pipeline_status_bulk,
         mock_check_health,
         mock_daemon_status,
     ):
@@ -429,8 +429,8 @@ class TestBackgroundCommands:
                 building_revision_label="rev-2",
             )
         ]
-        mock_load_pipeline_status.side_effect = [
-            SimpleNamespace(
+        mock_load_pipeline_status_bulk.return_value = {
+            "research": SimpleNamespace(
                 documents=10,
                 extracted_done=8,
                 extracted_failed=1,
@@ -447,7 +447,7 @@ class TestBackgroundCommands:
                 active_revision_label="rev-1",
                 building_revision_label="rev-2",
             )
-        ]
+        }
 
         result = runner.invoke(app, ["status"])
 
@@ -461,7 +461,9 @@ class TestBackgroundCommands:
         assert "10 docs" in result.output
         assert "20/30 embedded (66.7%)" in result.output
         mock_list_collections.assert_called_once_with(mock_session)
-        mock_load_pipeline_status.assert_called_once_with(cementic_cli._get_config(), "research")
+        mock_load_pipeline_status_bulk.assert_called_once_with(
+            cementic_cli._get_config(), ["research"]
+        )
 
     @patch("cementic.cli._llama_daemon_runtime_status", return_value="stopped")
     @patch("cementic.cli.check_health")
@@ -1398,6 +1400,17 @@ class _FakeEmbedProvider:
         return [[0.1, 0.2, 0.3] for _ in texts]
 
 
+class _BatchTrackingEmbedProvider(_FakeEmbedProvider):
+    """Fake provider that records each embed_batch call's batch size."""
+
+    def __init__(self) -> None:
+        self.batch_sizes: list[int] = []
+
+    def embed_batch(self, texts: list[str]) -> list[list[float]]:
+        self.batch_sizes.append(len(texts))
+        return super().embed_batch(texts)
+
+
 class TestFilterCommands:
     """extract / chunk / embed stdin-stdout filters (Move 3)."""
 
@@ -1475,3 +1488,26 @@ class TestFilterCommands:
         result = runner.invoke(app, ["embed"], input="")
         assert result.exit_code == 0
         assert result.output.strip() == ""
+
+    @patch("cementic.cli.runtime_spec_from_config", return_value=object())
+    def test_embed_batches_requests_by_config_batch_size(self, mock_spec):
+        """Regression: embed must not send every stdin record in one request.
+
+        A single unbounded batch risks timing out the embedding backend on
+        large inputs; requests must be chunked by pipeline_worker.batch_size.
+        """
+        provider = _BatchTrackingEmbedProvider()
+        stdin = "".join(
+            json.dumps({"index": i, "content": f"chunk {i}"}) + "\n" for i in range(5)
+        )
+        with patch("cementic.cli.create_provider", return_value=provider):
+            with patch("cementic.cli._get_config") as mock_get_config:
+                config = mock_get_config.return_value
+                config.pipeline_worker.batch_size = 2
+                result = runner.invoke(app, ["embed"], input=stdin)
+
+        assert result.exit_code == 0
+        assert provider.batch_sizes == [2, 2, 1]
+        lines = [json.loads(line) for line in result.output.splitlines() if line.strip()]
+        assert len(lines) == 5
+        assert [line["index"] for line in lines] == [0, 1, 2, 3, 4]

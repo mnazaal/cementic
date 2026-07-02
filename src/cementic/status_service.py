@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from sqlalchemy import text
+from sqlalchemy import and_, func, or_, text
 
 from cementic.config import Config
 from cementic.db import (
@@ -65,8 +65,8 @@ class PipelineStatus:
     extraction_pct: float
     chunking_pct: float
     embedding_pct: float
-    active_revision_label: str
-    building_revision_label: str
+    active_revision_label: str | None
+    building_revision_label: str | None
 
 
 @dataclass(frozen=True)
@@ -163,176 +163,190 @@ def build_supervisor_status(supervisor_state: dict[str, object]) -> SupervisorSt
 
 def load_pipeline_status(config: Config, collection: str) -> PipelineStatus:
     """Load DB-backed pipeline status for one collection."""
+    return load_pipeline_status_bulk(config, [collection])[collection]
+
+
+def load_pipeline_status_bulk(config: Config, collections: list[str]) -> dict[str, PipelineStatus]:
+    """Load DB-backed pipeline status for many collections in a bounded number of queries.
+
+    A naive per-collection call to a single-collection status loader costs
+    ~11 queries per collection, which stops scaling once a deployment has many
+    collections. This groups every count by collection instead, so the total
+    query count stays constant regardless of how many collections are asked for.
+    """
+    if not collections:
+        return {}
+
     engine = get_engine(config.database.url)
     session_factory = get_session_factory(engine)
     with session_factory() as session:
-        documents = (
-            session.query(SourceDocument)
-            .filter(SourceDocument.collection == collection, SourceDocument.status != "deleted")
-            .count()
-        )
-        active_revision = (
-            session.query(PipelineRevision)
-            .filter_by(collection=collection, status="active")
-            .order_by(PipelineRevision.id.desc())
-            .first()
-        )
-        building_revision = (
+        revision_rows = (
             session.query(PipelineRevision)
             .filter(
-                PipelineRevision.collection == collection,
-                PipelineRevision.status.in_(["building", "ready"]),
+                PipelineRevision.collection.in_(collections),
+                PipelineRevision.status.in_(["active", "ready", "building"]),
             )
-            .order_by(PipelineRevision.id.desc())
-            .first()
+            .order_by(PipelineRevision.collection, PipelineRevision.id.desc())
+            .all()
         )
-        target_revision = _select_target_revision(building_revision, active_revision)
 
-        extracted_done = 0
-        extracted_failed = 0
-        chunked_done = 0
-        chunked_failed = 0
-        total_chunks = 0
-        pending_embeddings = 0
-        processing_embeddings = 0
-        done_embeddings = 0
-        failed_embeddings = 0
+        active_by_collection: dict[str, PipelineRevision] = {}
+        building_by_collection: dict[str, PipelineRevision] = {}
+        for revision in revision_rows:
+            if revision.status == "active":
+                active_by_collection.setdefault(revision.collection, revision)
+            else:
+                building_by_collection.setdefault(revision.collection, revision)
 
-        if target_revision is not None:
-            extracted_done = (
-                session.query(ExtractedDocument)
+        target_by_collection = {
+            collection: _select_target_revision(
+                building_by_collection.get(collection), active_by_collection.get(collection)
+            )
+            for collection in collections
+        }
+
+        documents_by_collection: dict[str, int] = {
+            collection: count
+            for collection, count in session.query(
+                SourceDocument.collection, func.count(SourceDocument.id)
+            )
+            .filter(SourceDocument.collection.in_(collections), SourceDocument.status != "deleted")
+            .group_by(SourceDocument.collection)
+            .all()
+        }
+
+        targets = [
+            (collection, revision)
+            for collection, revision in target_by_collection.items()
+            if revision is not None
+        ]
+
+        extracted_done: dict[str, int] = {}
+        extracted_failed: dict[str, int] = {}
+        chunked_done: dict[str, int] = {}
+        chunked_failed: dict[str, int] = {}
+        total_chunks: dict[str, int] = {}
+        pending_embeddings: dict[str, int] = {}
+        processing_embeddings: dict[str, int] = {}
+        done_embeddings: dict[str, int] = {}
+        failed_embeddings: dict[str, int] = {}
+
+        if targets:
+            extractor_conditions = [
+                and_(
+                    SourceDocument.collection == collection,
+                    ExtractedDocument.extractor_profile_id == revision.extractor_profile_id,
+                )
+                for collection, revision in targets
+            ]
+            for collection, status, count in (
+                session.query(
+                    SourceDocument.collection,
+                    ExtractedDocument.status,
+                    func.count(ExtractedDocument.id),
+                )
                 .join(SourceDocument, ExtractedDocument.document_id == SourceDocument.id)
                 .filter(
-                    SourceDocument.collection == collection,
                     SourceDocument.status != "deleted",
-                    ExtractedDocument.extractor_profile_id == target_revision.extractor_profile_id,
-                    ExtractedDocument.status == "done",
+                    ExtractedDocument.status.in_(["done", "failed"]),
+                    or_(*extractor_conditions),
                 )
-                .count()
-            )
-            extracted_failed = (
-                session.query(ExtractedDocument)
-                .join(SourceDocument, ExtractedDocument.document_id == SourceDocument.id)
-                .filter(
+                .group_by(SourceDocument.collection, ExtractedDocument.status)
+                .all()
+            ):
+                (extracted_done if status == "done" else extracted_failed)[collection] = count
+
+            chunk_conditions = [
+                and_(
                     SourceDocument.collection == collection,
-                    SourceDocument.status != "deleted",
-                    ExtractedDocument.extractor_profile_id == target_revision.extractor_profile_id,
-                    ExtractedDocument.status == "failed",
+                    ExtractedDocument.extractor_profile_id == revision.extractor_profile_id,
+                    ChunkedDocument.chunk_profile_id == revision.chunk_profile_id,
                 )
-                .count()
-            )
-            chunked_done = (
-                session.query(ChunkedDocument)
+                for collection, revision in targets
+            ]
+            for collection, status, count in (
+                session.query(
+                    SourceDocument.collection,
+                    ChunkedDocument.status,
+                    func.count(ChunkedDocument.id),
+                )
                 .join(
                     ExtractedDocument, ChunkedDocument.extracted_document_id == ExtractedDocument.id
                 )
                 .join(SourceDocument, ExtractedDocument.document_id == SourceDocument.id)
-                .filter(
-                    SourceDocument.collection == collection,
-                    SourceDocument.status != "deleted",
-                    ExtractedDocument.extractor_profile_id == target_revision.extractor_profile_id,
-                    ChunkedDocument.chunk_profile_id == target_revision.chunk_profile_id,
-                    ChunkedDocument.status == "done",
+                .filter(SourceDocument.status != "deleted", or_(*chunk_conditions))
+                .group_by(SourceDocument.collection, ChunkedDocument.status)
+                .all()
+            ):
+                (chunked_done if status == "done" else chunked_failed)[collection] = count
+
+            total_chunks = {
+                collection: count
+                for collection, count in session.query(
+                    SourceDocument.collection, func.count(Chunk.id)
                 )
-                .count()
-            )
-            chunked_failed = (
-                session.query(ChunkedDocument)
-                .join(
-                    ExtractedDocument, ChunkedDocument.extracted_document_id == ExtractedDocument.id
-                )
-                .join(SourceDocument, ExtractedDocument.document_id == SourceDocument.id)
-                .filter(
-                    SourceDocument.collection == collection,
-                    SourceDocument.status != "deleted",
-                    ExtractedDocument.extractor_profile_id == target_revision.extractor_profile_id,
-                    ChunkedDocument.chunk_profile_id == target_revision.chunk_profile_id,
-                    ChunkedDocument.status == "failed",
-                )
-                .count()
-            )
-            total_chunks = (
-                session.query(Chunk)
+                .select_from(Chunk)
                 .join(ChunkedDocument, Chunk.chunked_document_id == ChunkedDocument.id)
                 .join(
-                    ExtractedDocument,
-                    ChunkedDocument.extracted_document_id == ExtractedDocument.id,
+                    ExtractedDocument, ChunkedDocument.extracted_document_id == ExtractedDocument.id
                 )
                 .join(SourceDocument, Chunk.document_id == SourceDocument.id)
-                .filter(
-                    SourceDocument.collection == collection,
-                    SourceDocument.status != "deleted",
-                    ExtractedDocument.extractor_profile_id == target_revision.extractor_profile_id,
-                    ChunkedDocument.chunk_profile_id == target_revision.chunk_profile_id,
-                )
-                .count()
-            )
-            pending_embeddings = (
-                session.query(ChunkEmbedding)
-                .join(Chunk, ChunkEmbedding.chunk_id == Chunk.id)
-                .join(SourceDocument, Chunk.document_id == SourceDocument.id)
-                .filter(
-                    SourceDocument.collection == collection,
-                    SourceDocument.status != "deleted",
-                    ChunkEmbedding.embedding_profile_id == target_revision.embedding_profile_id,
-                    ChunkEmbedding.status == "pending",
-                )
-                .count()
-            )
-            processing_embeddings = (
-                session.query(ChunkEmbedding)
-                .join(Chunk, ChunkEmbedding.chunk_id == Chunk.id)
-                .join(SourceDocument, Chunk.document_id == SourceDocument.id)
-                .filter(
-                    SourceDocument.collection == collection,
-                    SourceDocument.status != "deleted",
-                    ChunkEmbedding.embedding_profile_id == target_revision.embedding_profile_id,
-                    ChunkEmbedding.status == "processing",
-                )
-                .count()
-            )
-            done_embeddings = (
-                session.query(ChunkEmbedding)
-                .join(Chunk, ChunkEmbedding.chunk_id == Chunk.id)
-                .join(SourceDocument, Chunk.document_id == SourceDocument.id)
-                .filter(
-                    SourceDocument.collection == collection,
-                    SourceDocument.status != "deleted",
-                    ChunkEmbedding.embedding_profile_id == target_revision.embedding_profile_id,
-                    ChunkEmbedding.status == "done",
-                )
-                .count()
-            )
-            failed_embeddings = (
-                session.query(ChunkEmbedding)
-                .join(Chunk, ChunkEmbedding.chunk_id == Chunk.id)
-                .join(SourceDocument, Chunk.document_id == SourceDocument.id)
-                .filter(
-                    SourceDocument.collection == collection,
-                    SourceDocument.status != "deleted",
-                    ChunkEmbedding.embedding_profile_id == target_revision.embedding_profile_id,
-                    ChunkEmbedding.status == "failed",
-                )
-                .count()
-            )
+                .filter(SourceDocument.status != "deleted", or_(*chunk_conditions))
+                .group_by(SourceDocument.collection)
+                .all()
+            }
 
-    return PipelineStatus(
-        documents=documents,
-        extracted_done=extracted_done,
-        extracted_failed=extracted_failed,
-        chunked_done=chunked_done,
-        chunked_failed=chunked_failed,
-        total_chunks=total_chunks,
-        pending_embeddings=pending_embeddings,
-        processing_embeddings=processing_embeddings,
-        done_embeddings=done_embeddings,
-        failed_embeddings=failed_embeddings,
-        extraction_pct=_safe_pct(extracted_done, documents),
-        chunking_pct=_safe_pct(chunked_done, extracted_done),
-        embedding_pct=_safe_pct(done_embeddings, total_chunks),
-        active_revision_label=getattr(active_revision, "label", "None"),
-        building_revision_label=getattr(building_revision, "label", "None"),
-    )
+            embedding_conditions = [
+                and_(
+                    SourceDocument.collection == collection,
+                    ChunkEmbedding.embedding_profile_id == revision.embedding_profile_id,
+                )
+                for collection, revision in targets
+            ]
+            embedding_status_map = {
+                "pending": pending_embeddings,
+                "processing": processing_embeddings,
+                "done": done_embeddings,
+                "failed": failed_embeddings,
+            }
+            for collection, status, count in (
+                session.query(
+                    SourceDocument.collection, ChunkEmbedding.status, func.count(ChunkEmbedding.id)
+                )
+                .select_from(ChunkEmbedding)
+                .join(Chunk, ChunkEmbedding.chunk_id == Chunk.id)
+                .join(SourceDocument, Chunk.document_id == SourceDocument.id)
+                .filter(SourceDocument.status != "deleted", or_(*embedding_conditions))
+                .group_by(SourceDocument.collection, ChunkEmbedding.status)
+                .all()
+            ):
+                embedding_status_map[status][collection] = count
+
+    result: dict[str, PipelineStatus] = {}
+    for collection in collections:
+        documents = documents_by_collection.get(collection, 0)
+        e_done = extracted_done.get(collection, 0)
+        c_done = chunked_done.get(collection, 0)
+        t_chunks = total_chunks.get(collection, 0)
+        d_embeddings = done_embeddings.get(collection, 0)
+        result[collection] = PipelineStatus(
+            documents=documents,
+            extracted_done=e_done,
+            extracted_failed=extracted_failed.get(collection, 0),
+            chunked_done=c_done,
+            chunked_failed=chunked_failed.get(collection, 0),
+            total_chunks=t_chunks,
+            pending_embeddings=pending_embeddings.get(collection, 0),
+            processing_embeddings=processing_embeddings.get(collection, 0),
+            done_embeddings=d_embeddings,
+            failed_embeddings=failed_embeddings.get(collection, 0),
+            extraction_pct=_safe_pct(e_done, documents),
+            chunking_pct=_safe_pct(c_done, e_done),
+            embedding_pct=_safe_pct(d_embeddings, t_chunks),
+            active_revision_label=getattr(active_by_collection.get(collection), "label", None),
+            building_revision_label=getattr(building_by_collection.get(collection), "label", None),
+        )
+    return result
 
 
 def check_health(config: Config) -> HealthStatus:
@@ -407,71 +421,73 @@ def load_file_progress(config: Config, collection: str) -> list[FileProgress]:
         if target_revision is None:
             return []
 
-        documents = (
-            session.query(SourceDocument)
+        rows = (
+            session.query(SourceDocument, ExtractedDocument, ChunkedDocument)
+            .outerjoin(
+                ExtractedDocument,
+                and_(
+                    ExtractedDocument.document_id == SourceDocument.id,
+                    ExtractedDocument.extractor_profile_id == target_revision.extractor_profile_id,
+                ),
+            )
+            .outerjoin(
+                ChunkedDocument,
+                and_(
+                    ChunkedDocument.extracted_document_id == ExtractedDocument.id,
+                    ChunkedDocument.chunk_profile_id == target_revision.chunk_profile_id,
+                ),
+            )
             .filter(SourceDocument.collection == collection, SourceDocument.status != "deleted")
             .order_by(SourceDocument.source_path)
             .all()
         )
 
-        result: list[FileProgress] = []
-        for doc in documents:
-            extraction = (
-                session.query(ExtractedDocument)
-                .filter_by(
-                    document_id=doc.id,
-                    extractor_profile_id=target_revision.extractor_profile_id,
-                )
-                .first()
-            )
-            extraction_status = extraction.status if extraction is not None else "pending"
+        chunked_ids = [chunked.id for _, _, chunked in rows if chunked is not None]
 
-            chunking = (
-                session.query(ChunkedDocument)
-                .filter_by(
-                    extracted_document_id=extraction.id,
-                    chunk_profile_id=target_revision.chunk_profile_id,
+        total_by_chunked: dict[int, int] = {}
+        done_by_chunked: dict[int, int] = {}
+        failed_by_chunked: dict[int, int] = {}
+        if chunked_ids:
+            total_by_chunked = {
+                chunked_document_id: count
+                for chunked_document_id, count in session.query(
+                    Chunk.chunked_document_id, func.count(Chunk.id)
                 )
-                .first()
-                if extraction is not None
-                else None
+                .filter(Chunk.chunked_document_id.in_(chunked_ids))
+                .group_by(Chunk.chunked_document_id)
+                .all()
+            }
+            status_counts = (
+                session.query(
+                    Chunk.chunked_document_id, ChunkEmbedding.status, func.count(ChunkEmbedding.id)
+                )
+                .join(Chunk, ChunkEmbedding.chunk_id == Chunk.id)
+                .filter(
+                    Chunk.chunked_document_id.in_(chunked_ids),
+                    ChunkEmbedding.embedding_profile_id == target_revision.embedding_profile_id,
+                    ChunkEmbedding.status.in_(["done", "failed"]),
+                )
+                .group_by(Chunk.chunked_document_id, ChunkEmbedding.status)
+                .all()
             )
+            for chunked_document_id, status, count in status_counts:
+                if status == "done":
+                    done_by_chunked[chunked_document_id] = count
+                elif status == "failed":
+                    failed_by_chunked[chunked_document_id] = count
+
+        result: list[FileProgress] = []
+        for doc, extraction, chunking in rows:
+            extraction_status = extraction.status if extraction is not None else "pending"
             chunking_status = chunking.status if chunking is not None else "pending"
 
-            embeddings_done = 0
-            embeddings_failed = 0
-            embeddings_total = 0
+            embeddings_total = total_by_chunked.get(chunking.id, 0) if chunking is not None else 0
+            embeddings_done = done_by_chunked.get(chunking.id, 0) if chunking is not None else 0
+            embeddings_failed = (
+                failed_by_chunked.get(chunking.id, 0) if chunking is not None else 0
+            )
+
             error_message = None
-
-            if chunking is not None:
-                embeddings_total = (
-                    session.query(Chunk)
-                    .filter_by(chunked_document_id=chunking.id)
-                    .count()
-                )
-                embeddings_done = (
-                    session.query(ChunkEmbedding)
-                    .join(Chunk, ChunkEmbedding.chunk_id == Chunk.id)
-                    .filter(
-                        Chunk.chunked_document_id == chunking.id,
-                        ChunkEmbedding.embedding_profile_id
-                        == target_revision.embedding_profile_id,
-                        ChunkEmbedding.status == "done",
-                    )
-                    .count()
-                )
-                embeddings_failed = (
-                    session.query(ChunkEmbedding)
-                    .join(Chunk, ChunkEmbedding.chunk_id == Chunk.id)
-                    .filter(
-                        Chunk.chunked_document_id == chunking.id,
-                        ChunkEmbedding.embedding_profile_id
-                        == target_revision.embedding_profile_id,
-                        ChunkEmbedding.status == "failed",
-                    )
-                    .count()
-                )
-
             if extraction_status == "failed" and extraction is not None:
                 error_message = extraction.error_message
             elif chunking_status == "failed" and chunking is not None:

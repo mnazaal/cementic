@@ -41,7 +41,11 @@ class CollectionSummary:
 
 
 def list_collections(session: Session) -> list[CollectionSummary]:
-    """Return collection summaries ordered by collection name."""
+    """Return collection summaries ordered by collection name.
+
+    Uses a fixed number of grouped queries regardless of collection count,
+    instead of 3 queries per collection.
+    """
     collection_names = [
         str(name)
         for (name,) in session.query(SourceDocument.collection)
@@ -50,38 +54,36 @@ def list_collections(session: Session) -> list[CollectionSummary]:
         .all()
     ]
 
-    summaries: list[CollectionSummary] = []
-    for name in collection_names:
-        active_revision = (
-            session.query(PipelineRevision)
-            .filter_by(collection=name, status="active")
-            .order_by(PipelineRevision.id.desc())
-            .first()
-        )
-        building_revision = (
-            session.query(PipelineRevision)
-            .filter(
-                PipelineRevision.collection == name,
-                PipelineRevision.status.in_(["building", "ready"]),
-            )
-            .order_by(PipelineRevision.id.desc())
-            .first()
-        )
-        documents = (
-            session.query(func.count(SourceDocument.id))
-            .filter(SourceDocument.collection == name, SourceDocument.status != "deleted")
-            .scalar()
-        ) or 0
-        summaries.append(
-            CollectionSummary(
-                name=name,
-                documents=int(documents),
-                active_revision_label=getattr(active_revision, "label", None),
-                building_revision_label=getattr(building_revision, "label", None),
-            )
-        )
+    documents_by_collection: dict[str, int] = {
+        str(name): int(count)
+        for name, count in session.query(SourceDocument.collection, func.count(SourceDocument.id))
+        .filter(SourceDocument.status != "deleted")
+        .group_by(SourceDocument.collection)
+        .all()
+    }
 
-    return summaries
+    active_by_collection: dict[str, PipelineRevision] = {}
+    building_by_collection: dict[str, PipelineRevision] = {}
+    for revision in (
+        session.query(PipelineRevision)
+        .filter(PipelineRevision.status.in_(["active", "building", "ready"]))
+        .order_by(PipelineRevision.collection, PipelineRevision.id.desc())
+        .all()
+    ):
+        if revision.status == "active":
+            active_by_collection.setdefault(revision.collection, revision)
+        else:
+            building_by_collection.setdefault(revision.collection, revision)
+
+    return [
+        CollectionSummary(
+            name=name,
+            documents=documents_by_collection.get(name, 0),
+            active_revision_label=getattr(active_by_collection.get(name), "label", None),
+            building_revision_label=getattr(building_by_collection.get(name), "label", None),
+        )
+        for name in collection_names
+    ]
 
 
 def delete_collection_records(session: Session, collection: str) -> DeleteCollectionResult | None:
@@ -119,14 +121,22 @@ def delete_collection_records(session: Session, collection: str) -> DeleteCollec
         .delete(synchronize_session=False)
     )
     vector_profile_ids = []
-    for profile_id in sorted(set(candidate_profile_ids)):
-        remaining = (
-            session.query(func.count(PipelineRevision.id))
-            .filter_by(embedding_profile_id=profile_id)
-            .scalar()
-        ) or 0
-        if int(remaining) == 0:
-            vector_profile_ids.append(profile_id)
+    unique_profile_ids = sorted(set(candidate_profile_ids))
+    if unique_profile_ids:
+        remaining_by_profile: dict[int, int] = {
+            int(profile_id): int(count)
+            for profile_id, count in session.query(
+                PipelineRevision.embedding_profile_id, func.count(PipelineRevision.id)
+            )
+            .filter(PipelineRevision.embedding_profile_id.in_(unique_profile_ids))
+            .group_by(PipelineRevision.embedding_profile_id)
+            .all()
+        }
+        vector_profile_ids = [
+            profile_id
+            for profile_id in unique_profile_ids
+            if remaining_by_profile.get(profile_id, 0) == 0
+        ]
     session.commit()
     return DeleteCollectionResult(
         deleted_docs=deleted_docs,

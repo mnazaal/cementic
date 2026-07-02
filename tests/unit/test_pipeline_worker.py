@@ -4,7 +4,7 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 import pytest
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
 from sqlalchemy.orm import sessionmaker
 
 from cementic.config import Config
@@ -27,6 +27,22 @@ from cementic.pipeline_worker import (
     _revision_is_complete,
     _try_acquire_pipeline_worker_lock,
 )
+
+
+def _count_queries(engine):
+    """Context manager yielding a mutable counter of SELECT statements issued."""
+
+    class _Counter:
+        value = 0
+
+    counter = _Counter()
+
+    def _on_execute(conn, cursor, statement, *args, **kwargs):
+        if statement.lstrip().upper().startswith("SELECT"):
+            counter.value += 1
+
+    event.listen(engine, "before_cursor_execute", _on_execute)
+    return counter
 
 
 class _ShortBatchClient:
@@ -420,3 +436,199 @@ class TestPipelineWorkerEmbedStep:
             rows = session.query(ChunkEmbedding).order_by(ChunkEmbedding.chunk_id).all()
             assert [row.status for row in rows] == ["failed", "failed"]
             assert all("returned 1 embeddings for 2 chunks" in row.error_message for row in rows)
+
+
+def _seed_extract_selection_data(session, collection: str, n_already_done: int) -> tuple[int, int]:
+    """Seed N already-extracted documents plus one pending; return (revision_id, pending_id)."""
+    extractor = ExtractorProfile(name="x", fingerprint=f"ext-{collection}", config_json="{}")
+    chunk_profile = ChunkProfile(fingerprint=f"chunk-{collection}", config_json="{}")
+    embedding_profile = EmbeddingProfile(
+        fingerprint=f"embed-{collection}",
+        provider="test",
+        model_identifier="test",
+        embedding_dim=2,
+        distance_metric="cosine",
+        config_json="{}",
+    )
+    session.add_all([extractor, chunk_profile, embedding_profile])
+    session.flush()
+
+    for index in range(n_already_done):
+        doc = SourceDocument(
+            collection=collection,
+            source_path=f"/tmp/done_{index}.txt",
+            file_hash=f"hash_{index}",
+            status="indexed",
+        )
+        session.add(doc)
+        session.flush()
+        session.add(
+            ExtractedDocument(
+                document_id=doc.id,
+                extractor_profile_id=extractor.id,
+                source_file_hash=f"hash_{index}",
+                status="done",
+            )
+        )
+
+    pending = SourceDocument(
+        collection=collection, source_path="/tmp/pending.txt", file_hash="pending-hash"
+    )
+    session.add(pending)
+    session.flush()
+
+    revision = PipelineRevision(
+        collection=collection,
+        extractor_profile_id=extractor.id,
+        chunk_profile_id=chunk_profile.id,
+        embedding_profile_id=embedding_profile.id,
+        status="building",
+    )
+    session.add(revision)
+    session.commit()
+    return revision.id, pending.id
+
+
+class TestStepExtractSelectionIsBounded:
+    """Regression guard: candidate selection is a single query, not O(n) in doc count."""
+
+    def _run_and_count_queries(self, temp_dir: Path, n_already_done: int) -> int:
+        engine = create_engine("sqlite:///:memory:")
+        Base.metadata.create_all(engine)
+        session_factory = sessionmaker(bind=engine, expire_on_commit=False)
+        collection = "bounded"
+        with session_factory() as session:
+            revision_id, pending_id = _seed_extract_selection_data(
+                session, collection, n_already_done
+            )
+
+        config = Config()
+        config.pipeline_worker.log_file = temp_dir / "worker.log"
+        worker = PipelineWorker(config)
+        worker.Session = session_factory
+        worker.collection = collection
+
+        counter = _count_queries(engine)
+        with (
+            patch("cementic.pipeline_worker.extract_document", return_value="content"),
+            patch("cementic.pipeline_worker.write_extracted_text", return_value="content-hash"),
+            patch.object(worker.state_manager, "update"),
+        ):
+            worked = worker._step_extract(revision_id)
+
+        assert worked is True
+        with session_factory() as session:
+            extracted = session.query(ExtractedDocument).filter_by(document_id=pending_id).first()
+            assert extracted is not None
+            assert extracted.status == "done"
+
+        return counter.value
+
+    def test_query_count_does_not_scale_with_document_count(self, temp_dir: Path) -> None:
+        small = self._run_and_count_queries(temp_dir, n_already_done=2)
+        large = self._run_and_count_queries(temp_dir, n_already_done=50)
+        assert small == large
+
+
+def _seed_chunk_selection_data(session, collection: str, n_already_done: int) -> tuple[int, int]:
+    """Seed N already-chunked documents plus one pending; return (revision_id, pending_id)."""
+    extractor = ExtractorProfile(name="x", fingerprint=f"ext-{collection}", config_json="{}")
+    chunk_profile = ChunkProfile(fingerprint=f"chunk-{collection}", config_json="{}")
+    embedding_profile = EmbeddingProfile(
+        fingerprint=f"embed-{collection}",
+        provider="test",
+        model_identifier="test",
+        embedding_dim=2,
+        distance_metric="cosine",
+        config_json="{}",
+    )
+    session.add_all([extractor, chunk_profile, embedding_profile])
+    session.flush()
+
+    def _add_extracted(index: int, status: str) -> ExtractedDocument:
+        doc = SourceDocument(
+            collection=collection, source_path=f"/tmp/doc_{index}.txt", file_hash=f"hash_{index}"
+        )
+        session.add(doc)
+        session.flush()
+        extracted = ExtractedDocument(
+            document_id=doc.id,
+            extractor_profile_id=extractor.id,
+            source_file_hash=f"hash_{index}",
+            content_hash=f"content_{index}",
+            artifact_path=f"/tmp/artifact_{index}.md.gz",
+            status=status,
+        )
+        session.add(extracted)
+        session.flush()
+        return extracted
+
+    for index in range(n_already_done):
+        extracted = _add_extracted(index, "done")
+        session.add(
+            ChunkedDocument(
+                extracted_document_id=extracted.id,
+                chunk_profile_id=chunk_profile.id,
+                source_content_hash=f"content_{index}",
+                status="done",
+            )
+        )
+
+    pending_extracted = _add_extracted(n_already_done, "done")
+
+    revision = PipelineRevision(
+        collection=collection,
+        extractor_profile_id=extractor.id,
+        chunk_profile_id=chunk_profile.id,
+        embedding_profile_id=embedding_profile.id,
+        status="building",
+    )
+    session.add(revision)
+    session.commit()
+    return revision.id, pending_extracted.id
+
+
+class TestStepChunkSelectionIsBounded:
+    """Regression guard: candidate selection is a single query, not O(n) in doc count."""
+
+    def _run_and_count_queries(self, temp_dir: Path, n_already_done: int) -> int:
+        engine = create_engine("sqlite:///:memory:")
+        Base.metadata.create_all(engine)
+        session_factory = sessionmaker(bind=engine, expire_on_commit=False)
+        collection = "bounded"
+        with session_factory() as session:
+            revision_id, pending_extracted_id = _seed_chunk_selection_data(
+                session, collection, n_already_done
+            )
+
+        config = Config()
+        config.pipeline_worker.log_file = temp_dir / "worker.log"
+        config.pipeline.chunk_size = 64
+        config.pipeline.chunk_overlap = 16
+        worker = PipelineWorker(config)
+        worker.Session = session_factory
+        worker.collection = collection
+
+        counter = _count_queries(engine)
+        with (
+            patch("cementic.pipeline_worker.read_extracted_text", return_value="some text"),
+            patch.object(worker.state_manager, "update"),
+        ):
+            worked = worker._step_chunk(revision_id)
+
+        assert worked is True
+        with session_factory() as session:
+            chunked = (
+                session.query(ChunkedDocument)
+                .filter_by(extracted_document_id=pending_extracted_id)
+                .first()
+            )
+            assert chunked is not None
+            assert chunked.status == "done"
+
+        return counter.value
+
+    def test_query_count_does_not_scale_with_document_count(self, temp_dir: Path) -> None:
+        small = self._run_and_count_queries(temp_dir, n_already_done=2)
+        large = self._run_and_count_queries(temp_dir, n_already_done=50)
+        assert small == large

@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import text
+from sqlalchemy import and_, or_, text
 from sqlalchemy.orm import Session
 
 from cementic.chunk import chunk_text
@@ -326,33 +326,32 @@ class PipelineWorker:
                 return False
 
             profile_id = revision.extractor_profile_id
-            document = None
-            extracted = None
-            for candidate in (
-                session.query(SourceDocument)
+            candidate_row = (
+                session.query(SourceDocument, ExtractedDocument)
+                .outerjoin(
+                    ExtractedDocument,
+                    and_(
+                        ExtractedDocument.document_id == SourceDocument.id,
+                        ExtractedDocument.extractor_profile_id == profile_id,
+                    ),
+                )
                 .filter(
                     SourceDocument.collection == self.collection,
                     SourceDocument.status != "deleted",
                 )
-                .order_by(SourceDocument.id)
-                .all()
-            ):
-                current = (
-                    session.query(ExtractedDocument)
-                    .filter_by(document_id=candidate.id, extractor_profile_id=profile_id)
-                    .first()
+                .filter(
+                    or_(
+                        ExtractedDocument.id.is_(None),
+                        ExtractedDocument.source_file_hash != SourceDocument.file_hash,
+                        ExtractedDocument.status.notin_(["done", "failed"]),
+                    )
                 )
-                if (
-                    current is None
-                    or current.source_file_hash != candidate.file_hash
-                    or current.status not in ("done", "failed")
-                ):
-                    document = candidate
-                    extracted = current
-                    break
-
-            if document is None:
+                .order_by(SourceDocument.id)
+                .first()
+            )
+            if candidate_row is None:
                 return False
+            document, extracted = candidate_row
 
             if extracted is None:
                 extracted = ExtractedDocument(
@@ -417,38 +416,35 @@ class PipelineWorker:
 
             extractor_profile_id = revision.extractor_profile_id
             chunk_profile_id = revision.chunk_profile_id
-            extracted = None
-            chunked = None
-            for candidate in (
-                session.query(ExtractedDocument)
+            candidate_row = (
+                session.query(ExtractedDocument, ChunkedDocument)
                 .join(SourceDocument, ExtractedDocument.document_id == SourceDocument.id)
+                .outerjoin(
+                    ChunkedDocument,
+                    and_(
+                        ChunkedDocument.extracted_document_id == ExtractedDocument.id,
+                        ChunkedDocument.chunk_profile_id == chunk_profile_id,
+                    ),
+                )
                 .filter(
                     SourceDocument.collection == self.collection,
                     SourceDocument.status != "deleted",
                     ExtractedDocument.extractor_profile_id == extractor_profile_id,
                     ExtractedDocument.status == "done",
                 )
-                .order_by(ExtractedDocument.id)
-                .all()
-            ):
-                current = (
-                    session.query(ChunkedDocument)
-                    .filter_by(
-                        extracted_document_id=candidate.id, chunk_profile_id=chunk_profile_id
+                .filter(
+                    or_(
+                        ChunkedDocument.id.is_(None),
+                        ChunkedDocument.source_content_hash != ExtractedDocument.content_hash,
+                        ChunkedDocument.status.notin_(["done", "failed"]),
                     )
-                    .first()
                 )
-                if (
-                    current is None
-                    or current.source_content_hash != candidate.content_hash
-                    or current.status not in ("done", "failed")
-                ):
-                    extracted = candidate
-                    chunked = current
-                    break
-
-            if extracted is None:
+                .order_by(ExtractedDocument.id)
+                .first()
+            )
+            if candidate_row is None:
                 return False
+            extracted, chunked = candidate_row
 
             if chunked is None:
                 chunked = ChunkedDocument(
