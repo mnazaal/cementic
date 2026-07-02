@@ -76,7 +76,10 @@ def load_config_file() -> dict[str, Any]:
     try:
         with open(path, "rb") as handle:
             return tomllib.load(handle)
-    except (OSError, tomllib.TOMLDecodeError):
+    except tomllib.TOMLDecodeError as error:
+        print(f"warning: ignoring malformed config file {path}: {error}", file=sys.stderr)
+        return {}
+    except OSError:
         return {}
 
 

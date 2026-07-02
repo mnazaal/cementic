@@ -553,8 +553,6 @@ def _print_status_json(
     verbose: bool,
 ) -> None:
     """Print full status as JSON."""
-    import json as _json
-
     output: dict[str, Any] = {
         "supervisor": {
             "state": supervisor_status.state,
@@ -647,7 +645,7 @@ def _print_status_json(
     except Exception as error:
         output["files_error"] = str(error)
 
-    console.print(_json.dumps(output, indent=2, default=str))
+    typer.echo(json.dumps(output, indent=2, default=str))
 
 
 @app.command(
@@ -873,7 +871,11 @@ def stop_background(
         help="Force kill processes that don't stop gracefully",
     ),
 ) -> None:
-    """Stop cementic's background processes (watcher, worker, embedding server).
+    """Stop cementic's background processes (source watcher, pipeline worker).
+
+    The shared embedding daemon is intentionally left running so other
+    collections and `search` stay warm; stop it separately with
+    `cementic embedding stop`.
 
     Postgres is not managed by cementic; stop it with your container engine
     (e.g. `docker compose down` or `podman compose down`).

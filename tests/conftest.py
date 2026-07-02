@@ -8,9 +8,19 @@ from typing import Generator
 import pytest
 
 from cementic.embedding_provider import EmbeddingProvider
+from tests.fixtures.generate_pdfs import ensure_fixture_pdfs
 
-# Ensure DB password env var is set for all tests
-os.environ.setdefault("CEMENTIC_DB_PASSWORD", "test-password")
+# Ensure DB password env var is set for all tests; matches compose.yml's default.
+os.environ.setdefault("CEMENTIC_DB_PASSWORD", "cementic")
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _ensure_pdf_fixtures() -> None:
+    """Regenerate any missing fixture PDF so a fresh clone can run the suite.
+
+    ``*.pdf`` is gitignored; see tests/fixtures/generate_pdfs.py.
+    """
+    ensure_fixture_pdfs()
 
 
 @pytest.fixture(autouse=True)

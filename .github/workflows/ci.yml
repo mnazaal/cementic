@@ -31,3 +31,46 @@ jobs:
 
       - name: Unit tests
         run: uv run pytest tests/unit
+
+  integration:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+
+      - name: Install dependencies
+        run: uv sync --locked --extra dev
+
+      - name: SQLite-backed integration tests
+        run: uv run pytest tests/integration -m "not pg"
+
+  integration-pg:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+
+      - name: Install dependencies
+        run: uv sync --locked --extra dev
+
+      - name: PostgreSQL-backed integration tests
+        # The pg_engine fixture builds and brings up compose.yml's
+        # pgvector+vectorscale image itself (first build compiles the
+        # extension from source, so this job is slower than the others).
+        run: uv run pytest tests/integration -m pg

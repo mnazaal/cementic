@@ -24,6 +24,8 @@ from cementic.revisions import promote_revision
 from cementic.source_watcher import SourceWatcher
 from tests.integration.test_pg_helpers import cleanup_pg_tables
 
+pytestmark = pytest.mark.pg
+
 
 class FakeEmbeddingClient(EmbeddingProvider):
     """Tiny deterministic embedding client for integration tests."""
@@ -85,7 +87,7 @@ def _run_pipeline_until_idle(
 
 
 class TestE2EPipeline:
-    """Full pipeline build and status tests (SQLite-compatible)."""
+    """Full pipeline build and status tests (requires PostgreSQL)."""
 
     @pytest.fixture(autouse=True)
     def _e2e_env(self, pg_engine, monkeypatch: pytest.MonkeyPatch):

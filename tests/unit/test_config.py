@@ -73,13 +73,17 @@ class TestConfigFile:
         monkeypatch.chdir(tmp_path)
         assert resolve_config_path() is None
 
-    def test_invalid_toml_is_ignored(self, tmp_path, monkeypatch) -> None:
+    def test_invalid_toml_is_ignored(self, tmp_path, monkeypatch, capsys) -> None:
         bad = tmp_path / "bad.toml"
         bad.write_text("this is := not valid toml")
         monkeypatch.setenv("CEMENTIC_CONFIG", str(bad))
         assert load_config_file() == {}
         # Config falls back to defaults rather than crashing.
         assert Config().database.host == "localhost"
+        # ...but the user is warned rather than the error being silently swallowed.
+        stderr = capsys.readouterr().err
+        assert str(bad) in stderr
+        assert "malformed" in stderr.lower()
 
     def test_index_section_defaults(self) -> None:
         config = Config()

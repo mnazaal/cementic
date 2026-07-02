@@ -550,6 +550,59 @@ class TestBackgroundCommands:
     @patch("cementic.cli.load_worker_statuses")
     @patch("cementic.cli._load_supervisor_state")
     @patch("cementic.cli.build_supervisor_status")
+    def test_status_command_shows_dash_when_no_active_revision(
+        self,
+        mock_build_supervisor_status,
+        mock_load_supervisor_state,
+        mock_load_worker_statuses,
+        mock_load_pipeline_status,
+        mock_check_health,
+        mock_daemon_status,
+    ):
+        """No active/building revision (None, not the string 'None') renders as '-'."""
+        mock_load_supervisor_state.return_value = {
+            "collection": "research",
+            "directories": ["/docs"],
+            "processes": [],
+        }
+        mock_load_worker_statuses.return_value = (
+            SimpleNamespace(
+                state="stopped", pid="N/A", process="stopped", current_file="None",
+                watched_directories=[], processed_count=0, failed_count=0,
+            ),
+            SimpleNamespace(
+                state="stopped", pid="N/A", process="stopped", current_file="None",
+                watched_directories=[], processed_count=0, failed_count=0,
+            ),
+        )
+        mock_build_supervisor_status.return_value = SimpleNamespace(
+            state="0/2 running", collection="research", directories=["/docs"],
+        )
+        mock_check_health.return_value = SimpleNamespace(
+            db_reachable=True, embedding_provider="llama-cpp",
+            embedding_healthy=True, llama_daemon="stopped",
+        )
+        mock_load_pipeline_status.return_value = SimpleNamespace(
+            documents=0, extracted_done=0, extracted_failed=0, chunked_done=0,
+            chunked_failed=0, total_chunks=0, pending_embeddings=0,
+            processing_embeddings=0, done_embeddings=0, failed_embeddings=0,
+            extraction_pct=0.0, chunking_pct=0.0, embedding_pct=0.0,
+            active_revision_label=None, building_revision_label=None,
+        )
+
+        result = runner.invoke(app, ["status", "--collection", "research"])
+
+        assert result.exit_code == 0
+        assert "active=-" in result.output
+        assert "building=-" in result.output
+        assert "active=None" not in result.output
+
+    @patch("cementic.cli._llama_daemon_runtime_status", return_value="stopped")
+    @patch("cementic.cli.check_health")
+    @patch("cementic.cli.load_pipeline_status")
+    @patch("cementic.cli.load_worker_statuses")
+    @patch("cementic.cli._load_supervisor_state")
+    @patch("cementic.cli.build_supervisor_status")
     def test_status_command_accepts_collection_short_flag(
         self,
         mock_build_supervisor_status,
@@ -1197,6 +1250,46 @@ class TestStatusEdgeCases:
                                 assert '"pipeline_worker"' in result.output
                                 assert '"health"' in result.output
                                 assert '"collections"' in result.output
+
+    @patch("cementic.cli.list_collections", return_value=[])
+    def test_status_json_output_survives_piping_with_long_paths(self, mock_list_collections):
+        """A long path must not be hard-wrapped by rich, which would break JSON parsing."""
+        long_path = "/a" + "/very-long-directory-segment" * 10
+        with patch("cementic.cli.load_worker_statuses") as mock_load:
+            mock_load.return_value = (
+                SimpleNamespace(state="running", pid=1111, process="running",
+                                current_file="None", watched_directories=[],
+                                processed_count=0, failed_count=0),
+                SimpleNamespace(state="running", pid=2222, process="running",
+                                current_file="None", watched_directories=[],
+                                processed_count=0, failed_count=0),
+            )
+            with patch("cementic.cli._load_supervisor_state") as mock_state:
+                mock_state.return_value = {
+                    "collection": "research", "directories": [long_path], "processes": [],
+                }
+                with patch("cementic.cli.build_supervisor_status") as mock_build:
+                    mock_build.return_value = SimpleNamespace(
+                        state="2/2 running", collection="research",
+                        directories=[long_path],
+                    )
+                    with patch("cementic.cli.check_health") as mock_health:
+                        mock_health.return_value = SimpleNamespace(
+                            db_reachable=True,
+                            embedding_provider="llama-cpp",
+                            embedding_healthy=True,
+                            llama_daemon="running, pid=333",
+                        )
+                        with patch("cementic.cli.get_session_factory") as mock_sf:
+                            with patch("cementic.cli.get_engine") as _mock_engine:
+                                mock_session = MagicMock()
+                                mock_session.__enter__.return_value = mock_session
+                                mock_sf.return_value = lambda: mock_session
+
+                                result = runner.invoke(app, ["status", "--json"])
+                                assert result.exit_code == 0
+                                parsed = json.loads(result.output)
+                                assert parsed["supervisor"]["directories"] == [long_path]
 
 
 class TestStartEdgeCases:
