@@ -471,6 +471,58 @@ class TestRevisionCompletionScoping:
     ``ready`` (so `collection promote` reports "no ready revision").
     """
 
+    @pytest.mark.pg
+    def test_failed_vector_writeback_does_not_strand_claimed_embeddings(
+        self, pg_setup, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A crash between claiming a batch and writing it back must not wedge.
+
+        Regression: rows were committed as `processing` in one transaction and
+        written back in another, and the embed step's candidate filter matched
+        only `pending` -- unlike the extract and chunk steps, which re-pick their
+        own `processing` rows. So one failed write-back stranded the batch for
+        the life of the process: `done + failed` never reached `total_chunks`,
+        the revision never completed, and the worker kept polling while looking
+        perfectly healthy to `cementic status`.
+        """
+        config, session_factory, pdf_fixtures_dir = pg_setup
+        collection = "test_writeback_failure"
+
+        pipeline, source_watcher = _setup_worker(config, session_factory, collection, monkeypatch)
+        pipeline.embedding_client = FakeEmbeddingClient()
+        source_watcher._register_document(str(pdf_fixtures_dir / "test_doc_a.pdf"))
+        revision_id = pipeline._ensure_target_revision()
+
+        pipeline._step_extract(revision_id)
+        pipeline._step_chunk(revision_id)
+
+        # Fail the vector write-back exactly once, after the batch is claimed.
+        calls = {"n": 0}
+        real_upsert = pipeline_worker_module.upsert_vectors
+
+        def flaky_upsert(*args, **kwargs):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("injected write-back failure")
+            return real_upsert(*args, **kwargs)
+
+        monkeypatch.setattr(pipeline_worker_module, "upsert_vectors", flaky_upsert)
+        with pytest.raises(RuntimeError, match="injected write-back failure"):
+            pipeline._step_embed(revision_id)
+
+        with session_factory() as session:
+            stranded = (
+                session.query(ChunkEmbedding).filter_by(status="processing").count()
+            )
+        assert stranded == 0, "claimed rows must be released, not left processing"
+
+        monkeypatch.setattr(pipeline_worker_module, "upsert_vectors", real_upsert)
+        _run_pipeline_until_idle(pipeline, revision_id)
+        with session_factory() as session:
+            revision = session.get(PipelineRevision, revision_id)
+            assert revision is not None
+            assert revision.status == "ready"
+
     def test_chunk_size_change_reaching_ready_with_shared_embedding_profile(
         self, pg_setup, monkeypatch: pytest.MonkeyPatch
     ) -> None:

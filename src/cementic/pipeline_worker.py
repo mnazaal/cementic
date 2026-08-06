@@ -578,8 +578,16 @@ class PipelineWorker:
                     ExtractedDocument.extractor_profile_id == revision.extractor_profile_id,
                     ChunkedDocument.chunk_profile_id == revision.chunk_profile_id,
                     ChunkedDocument.status == "done",
+                    # `processing` is re-picked deliberately, matching
+                    # _step_extract and _step_chunk. A row is claimed in one
+                    # transaction and written back in another, so a failure in
+                    # between would otherwise strand it as `processing` for the
+                    # life of the process -- `done + failed` could never reach
+                    # `total_chunks` and the revision would never complete.
+                    # One worker per collection holds the advisory lock and the
+                    # vector upsert is idempotent, so re-claiming is safe.
                     (ChunkEmbedding.id.is_(None))
-                    | (ChunkEmbedding.status == "pending"),
+                    | (ChunkEmbedding.status.in_(["pending", "processing"])),
                 )
                 .order_by(Chunk.id)
                 .limit(self.config.pipeline_worker.batch_size)
@@ -597,7 +605,7 @@ class PipelineWorker:
                     session.add(existing)
                     session.flush()
                     claimed.append((chunk.id, chunk.content))
-                elif existing.status == "pending":
+                elif existing.status in ("pending", "processing"):
                     existing.status = "processing"
                     existing.error_message = None
                     claimed.append((chunk.id, chunk.content))
@@ -651,26 +659,34 @@ class PipelineWorker:
             for (chunk_id, _), embedding in zip(claimed, embeddings)
             if embedding is not None
         ]
-        with self.Session() as session:
-            if successes:
-                conn = session.connection()
-                conn.execute(text(create_table_sql(profile_id, embedding_dim)))
-                upsert_vectors(conn, profile_id, successes)
-            for (chunk_id, _), embedding in zip(claimed, embeddings):
-                row = (
-                    session.query(ChunkEmbedding)
-                    .filter_by(chunk_id=chunk_id, embedding_profile_id=profile_id)
-                    .first()
-                )
-                if row is None:
-                    continue
-                if embedding is None:
-                    row.status = "failed"
-                    row.error_message = failure_message
-                else:
-                    row.status = "done"
-                    row.error_message = None
-            session.commit()
+        # A claim is a lease: every exit path from here must either write a
+        # terminal status or return the rows to `pending`. Leaving them
+        # `processing` would stall the revision short of completion with no
+        # error surfaced anywhere.
+        try:
+            with self.Session() as session:
+                if successes:
+                    conn = session.connection()
+                    conn.execute(text(create_table_sql(profile_id, embedding_dim)))
+                    upsert_vectors(conn, profile_id, successes)
+                for (chunk_id, _), embedding in zip(claimed, embeddings):
+                    row = (
+                        session.query(ChunkEmbedding)
+                        .filter_by(chunk_id=chunk_id, embedding_profile_id=profile_id)
+                        .first()
+                    )
+                    if row is None:
+                        continue
+                    if embedding is None:
+                        row.status = "failed"
+                        row.error_message = failure_message
+                    else:
+                        row.status = "done"
+                        row.error_message = None
+                session.commit()
+        except Exception:
+            self._release_claimed_embeddings([chunk_id for chunk_id, _ in claimed], profile_id)
+            raise
         return True
 
     def _release_claimed_embeddings(self, chunk_ids: list[int], profile_id: int) -> None:
