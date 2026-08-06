@@ -134,12 +134,35 @@ class TestRemoteEmbeddingClient:
         client.describe()
         assert mock_post.call_count == 1
 
+    @patch("cementic.embedding_runtime._PROBE_RETRY_DELAY_SECONDS", 0)
     @patch("cementic.embedding_runtime.requests.post", side_effect=requests.ConnectionError)
-    def test_describe_falls_back_to_configured_dim(self, mock_post) -> None:
+    def test_describe_raises_rather_than_guessing_the_dim(self, mock_post) -> None:
+        """A failed probe must not mint a profile from the configured fallback.
+
+        The dimension is written into an immutable embedding profile, so a
+        guess forks the profile and revision and silently re-embeds the whole
+        collection under a new vector table.
+        """
         client = RemoteEmbeddingClient(
             host="localhost", port=8081, embedding_dim=768, expected_fingerprint="abc"
         )
-        assert client.describe().embedding_dim == 768
+
+        with pytest.raises(RuntimeError, match="Could not determine the embedding dimension"):
+            client.describe()
+        assert mock_post.call_count == 3  # retried before giving up
+
+    @patch("cementic.embedding_runtime._PROBE_RETRY_DELAY_SECONDS", 0)
+    @patch("cementic.embedding_runtime.requests.post")
+    def test_describe_retries_a_transient_probe_failure(self, mock_post) -> None:
+        ok = MagicMock()
+        ok.json.return_value = {"data": [{"index": 0, "embedding": [0.0] * 5}]}
+        mock_post.side_effect = [requests.ConnectionError(), ok]
+
+        client = RemoteEmbeddingClient(
+            host="localhost", port=8081, embedding_dim=768, expected_fingerprint="abc"
+        )
+
+        assert client.describe().embedding_dim == 5
 
 
 class TestDaemonLifecycle:
@@ -274,21 +297,18 @@ class TestEmbeddingRuntime:
             model_path="model.gguf",
             n_ctx=512,
             n_gpu_layers=0,
-            embedding_dim=768,
             verbose=False,
         )
         second = llama_cpp_runtime_fingerprint(
             model_path="model.gguf",
             n_ctx=512,
             n_gpu_layers=0,
-            embedding_dim=768,
             verbose=False,
         )
         third = llama_cpp_runtime_fingerprint(
             model_path="other.gguf",
             n_ctx=512,
             n_gpu_layers=0,
-            embedding_dim=768,
             verbose=False,
         )
 
@@ -472,7 +492,6 @@ class TestEmbeddingRuntime:
             model_path="profile-model.gguf",
             n_ctx=1024,
             n_gpu_layers=2,
-            embedding_dim=384,
             verbose=True,
         )
 

@@ -158,16 +158,51 @@ class TestEnsureLlamaModel:
         assert not (temp_dir / "download.gguf").exists()
         assert not (temp_dir / ".download.gguf.tmp").exists()
 
-    def test_existing_model_checksum_mismatch_raises(self, temp_dir) -> None:
-        config = Config()
-        model_path = temp_dir / "test.gguf"
+    def test_default_model_path_checksum_mismatch_raises(self, temp_dir, monkeypatch) -> None:
+        """The pin protects the file cementic downloads for itself."""
+        config = Config()  # model_path left at its default
+        model_path = temp_dir / "default.gguf"
         model_path.write_bytes(b"fake")
-        config.llama_cpp.model_path = str(model_path)
+        monkeypatch.setattr(
+            "cementic.bootstrap.resolve_llama_model_path", lambda _path: model_path
+        )
         config.bootstrap.llama_model_sha256 = "0" * 64
         bootstrapper = Bootstrapper(config)
 
         with pytest.raises(RuntimeError, match="Checksum mismatch"):
             bootstrapper._ensure_llama_model()
+
+    def test_mismatch_error_names_the_override(self, temp_dir, monkeypatch) -> None:
+        """The message must lead to the fix; the env var was never mentioned."""
+        config = Config()
+        model_path = temp_dir / "default.gguf"
+        model_path.write_bytes(b"fake")
+        monkeypatch.setattr(
+            "cementic.bootstrap.resolve_llama_model_path", lambda _path: model_path
+        )
+        config.bootstrap.llama_model_sha256 = "0" * 64
+
+        with pytest.raises(RuntimeError, match="CEMENTIC_BOOTSTRAP_LLAMA_MODEL_SHA256"):
+            Bootstrapper(config)._ensure_llama_model()
+
+    def test_user_supplied_model_is_not_checked_against_the_pin(self, temp_dir) -> None:
+        """Pointing at your own model must not fail against the bundled digest.
+
+        Regression: llama_model_sha256 defaults to the bundled Nomic digest, so
+        `CEMENTIC_LLAMA_MODEL_PATH=/my/model.gguf` -- the documented way to use a
+        different model -- hard-failed with a mismatch.
+        """
+        config = Config()
+        model_path = temp_dir / "my-own-model.gguf"
+        model_path.write_bytes(b"fake")
+        config.llama_cpp.model_path = str(model_path)
+        config.bootstrap.llama_model_sha256 = "0" * 64  # digest of the bundled model
+        bootstrapper = Bootstrapper(config)
+
+        with patch("cementic.bootstrap.requests.get") as mock_get:
+            bootstrapper._ensure_llama_model()  # must not raise
+
+        mock_get.assert_not_called()
 
     def test_existing_model_checksum_match_skips_download(self, temp_dir) -> None:
         config = Config()

@@ -17,7 +17,12 @@ from pathlib import Path
 import requests
 from sqlalchemy import text
 
-from cementic.config import Config, cementic_data_dir, resolve_llama_model_path
+from cementic.config import (
+    Config,
+    LlamaCppConfig,
+    cementic_data_dir,
+    resolve_llama_model_path,
+)
 from cementic.db import get_engine
 
 _logger = logging.getLogger("cementic.bootstrap")
@@ -48,7 +53,11 @@ def _ensure_sha256(path: Path, expected: str | None) -> None:
         return
     actual = _sha256_file(path)
     if actual.lower() != expected.lower():
-        raise RuntimeError(f"Checksum mismatch for {path}: expected {expected}, got {actual}")
+        raise RuntimeError(
+            f"Checksum mismatch for {path}: expected {expected}, got {actual}. "
+            "Set CEMENTIC_BOOTSTRAP_LLAMA_MODEL_SHA256 to the digest of this file, "
+            "or to an empty value to disable verification."
+        )
 
 
 class Bootstrapper:
@@ -81,13 +90,24 @@ class Bootstrapper:
             f"Cannot reach Postgres at {self.config.database.url}. {_COMPOSE_HINT}"
         )
 
+    def _model_path_is_default(self) -> bool:
+        """Whether model_path still points at the file cementic would download."""
+        default = LlamaCppConfig.model_fields["model_path"].default
+        return bool(self.config.llama_cpp.model_path == default)
+
     def _ensure_llama_model(self) -> None:
         # Resolve to the same physical path the runtime will load from, so a
         # successful download is exactly what the daemon/provider opens later.
         model_path = resolve_llama_model_path(self.config.llama_cpp.model_path)
         expected_sha256 = self.config.bootstrap.llama_model_sha256
         if model_path.exists():
-            _ensure_sha256(model_path, expected_sha256)
+            # The pin is a supply-chain control on what cementic *downloads*, so
+            # it only applies to a file at the default model path. Enforcing the
+            # bundled Nomic digest against a model the user supplied themselves
+            # made `CEMENTIC_LLAMA_MODEL_PATH=/my/model.gguf` -- the documented
+            # way to use a different model -- fail with a mismatch.
+            if self._model_path_is_default():
+                _ensure_sha256(model_path, expected_sha256)
             return
 
         if not self.config.bootstrap.auto_download_llama_model:

@@ -27,6 +27,12 @@ from cementic.supervisor import (
     wait_for_exit,
 )
 
+#: Attempts (and the gap between them) when probing the model's true embedding
+#: dimension. Short: the daemon is already known reachable by this point, so
+#: this only rides out a blip, not a cold start.
+_PROBE_ATTEMPTS = 3
+_PROBE_RETRY_DELAY_SECONDS = 1.0
+
 
 @dataclass(frozen=True)
 class EmbeddingRuntimeSpec:
@@ -81,13 +87,24 @@ def llama_cpp_runtime_fingerprint(
     model_path: str,
     n_ctx: int,
     n_gpu_layers: int,
-    embedding_dim: int,
     verbose: bool,
 ) -> str:
-    """Return a stable fingerprint for one llama.cpp runtime config."""
+    """Return a stable fingerprint for one llama.cpp runtime config.
+
+    Only fields that change what the server loads belong here -- they become the
+    served model's alias, so a difference forces a daemon restart.
+
+    ``embedding_dim`` is deliberately excluded. It is not a llama.cpp launch
+    argument (the model file determines it), and it reaches callers from two
+    different sources: indexing derives it from config while search reads the
+    probed value stored on the profile. Including it meant that for any model
+    whose true dimension differed from the configured one, the two computed
+    different aliases and restarted the daemon from under each other on every
+    operation. The dimension still participates in the *profile* fingerprint,
+    where it does identify the vectors.
+    """
     payload = json.dumps(
         {
-            "embedding_dim": embedding_dim,
             "model_path": model_path,
             "n_ctx": n_ctx,
             "n_gpu_layers": n_gpu_layers,
@@ -141,20 +158,43 @@ class RemoteEmbeddingClient(EmbeddingProvider):
     def describe(self) -> EmbeddingFacts:
         """Report facts, probing the live server for the true embedding dim once.
 
-        Falls back to the configured dimension if the probe fails, so profile
-        resolution never depends on a transient network error.
+        Raises if the dimension cannot be established. It used to fall back to
+        the configured value so that profile resolution never depended on a
+        transient error -- but the result is not transient: the dimension is
+        written into an *immutable* embedding profile. One blip would mint a
+        second profile keyed on a guess, which forks the revision, silently
+        re-embeds the whole corpus into a new vector table, and makes
+        multi-collection search refuse with "different active embedding models".
+        If the guess is also wrong, every vector insert fails. Failing loudly is
+        the lesser harm.
         """
         if self._probed_dim is None:
-            try:
-                probed = len(self.embed("dimension probe"))
-                self._probed_dim = probed if probed > 0 else self._embedding_dim
-            except Exception:
-                self._probed_dim = self._embedding_dim
+            self._probed_dim = self._probe_embedding_dim()
         return EmbeddingFacts(
             name=self.name,
             embedding_dim=self._probed_dim,
             distance_metric=self.distance_metric,
         )
+
+    def _probe_embedding_dim(self) -> int:
+        """Ask the running model for its embedding dimension, retrying briefly."""
+        last_error: Exception | None = None
+        for attempt in range(_PROBE_ATTEMPTS):
+            try:
+                probed = len(self.embed("dimension probe"))
+                if probed > 0:
+                    return probed
+                last_error = ValueError("server returned an empty embedding")
+            except Exception as error:  # noqa: BLE001 - reported below
+                last_error = error
+            if attempt < _PROBE_ATTEMPTS - 1:
+                time.sleep(_PROBE_RETRY_DELAY_SECONDS)
+        raise RuntimeError(
+            "Could not determine the embedding dimension from the running model at "
+            f"{self.base_url} after {_PROBE_ATTEMPTS} attempts: {last_error}. "
+            "Refusing to record an embedding profile from the configured fallback, "
+            "which would re-embed the collection under a second profile."
+        ) from last_error
 
     def _list_models(self) -> list[dict[str, Any]] | None:
         # One retry for transient blips only. llama_cpp.server serializes all
@@ -237,7 +277,6 @@ def get_llama_cpp_runtime_client(
         model_path=runtime_spec.model_identifier,
         n_ctx=n_ctx,
         n_gpu_layers=n_gpu_layers,
-        embedding_dim=runtime_spec.embedding_dim,
         verbose=runtime_spec.verbose,
     )
     client = RemoteEmbeddingClient(
@@ -463,7 +502,6 @@ def _start_llama_cpp_daemon(
         model_path=runtime_spec.model_identifier,
         n_ctx=n_ctx,
         n_gpu_layers=n_gpu_layers,
-        embedding_dim=runtime_spec.embedding_dim,
         verbose=runtime_spec.verbose,
     )
     # Run llama.cpp's own OpenAI-compatible server rather than a hand-rolled
