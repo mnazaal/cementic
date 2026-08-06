@@ -34,6 +34,49 @@ def watcher_db(temp_dir: Path):
     return engine, session_factory, db_path
 
 
+class TestIgnoredDirectories:
+    """Dependency, build and VCS trees are not search corpora.
+
+    Pointing `cementic start` at a project directory otherwise indexed every
+    README and note under .git, .venv and node_modules -- thousands of files no
+    one meant to search, each costing a hash, an extraction and an embedding.
+    """
+
+    def test_scan_skips_ignored_directories(
+        self, watcher_config: Config, temp_dir: Path
+    ) -> None:
+        (temp_dir / "docs").mkdir()
+        (temp_dir / "docs" / "keep.md").write_text("keep", encoding="utf-8")
+        for ignored in (".git", ".venv", "node_modules"):
+            (temp_dir / ignored).mkdir()
+            (temp_dir / ignored / "README.md").write_text("skip", encoding="utf-8")
+        # Nested inside a kept directory: pruning must apply at any depth.
+        (temp_dir / "docs" / "node_modules").mkdir()
+        (temp_dir / "docs" / "node_modules" / "readme.md").write_text("skip", encoding="utf-8")
+
+        sw = SourceWatcher(watcher_config)
+        seen: list[str] = []
+        with patch.object(sw, "_on_file_detected", side_effect=seen.append):
+            sw._scan_existing(temp_dir)
+
+        assert [Path(p).name for p in seen] == ["keep.md"]
+
+    def test_live_events_in_ignored_directories_are_dropped(
+        self, watcher_config: Config
+    ) -> None:
+        """A file written into node_modules arrives by inotify, not the walk."""
+        handler = DocumentEventHandler(
+            lambda path: None, ignore_directories=["node_modules", ".git"]
+        )
+        assert handler._should_process("/repo/docs/paper.md") is True
+        assert handler._should_process("/repo/node_modules/pkg/readme.md") is False
+        assert handler._should_process("/repo/.git/notes.md") is False
+
+    def test_empty_ignore_list_indexes_everything(self, watcher_config: Config) -> None:
+        handler = DocumentEventHandler(lambda path: None, ignore_directories=[])
+        assert handler._should_process("/repo/node_modules/pkg/readme.md") is True
+
+
 class TestWatchDirectoryPreconditions:
     """A watcher with nothing to watch must fail, not idle.
 

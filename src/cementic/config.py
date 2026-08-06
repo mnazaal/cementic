@@ -20,6 +20,31 @@ else:  # Python 3.10
     import tomli as tomllib
 
 
+#: Directory names the watcher skips by default. Pointing `cementic start` at a
+#: project directory otherwise indexes every README and note inside dependency,
+#: build and VCS trees -- thousands of files no one meant to search, each costing
+#: a hash, an extraction and an embedding. Names, not globs: matching is by exact
+#: directory name at any depth.
+DEFAULT_IGNORED_DIRECTORIES: tuple[str, ...] = (
+    ".bzr",
+    ".git",
+    ".hg",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".svn",
+    ".tox",
+    ".venv",
+    "__pycache__",
+    "build",
+    "dist",
+    "node_modules",
+    "site-packages",
+    "target",
+    "venv",
+)
+
+
 def resolve_config_path() -> Path | None:
     """Resolve the active config file path, or None if there isn't one.
 
@@ -350,6 +375,12 @@ class SourceWatcherConfig(_SectionSettings):
 
     log_file: Path | None = Field(default=None, description="Log file path")
     state_path: Path | None = Field(default=None, description="Source watcher state file path")
+    ignore_directories: list[str] = Field(
+        default_factory=lambda: list(DEFAULT_IGNORED_DIRECTORIES),
+        description="Directory names never descended into. Matching is by exact "
+        "name at any depth, so 'node_modules' skips every such directory in the "
+        "tree. Set to an empty list to index everything.",
+    )
 
 
 class PipelineWorkerConfig(_SectionSettings):

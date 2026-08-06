@@ -8,7 +8,7 @@ import os
 import signal
 import sys
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import Any
 
@@ -30,13 +30,28 @@ class DocumentEventHandler(FileSystemEventHandler):
         self,
         callback: Callable[[str], None],
         delete_callback: Callable[[str], None] | None = None,
+        ignore_directories: Iterable[str] = (),
     ) -> None:
         self.callback = callback
         self.delete_callback = delete_callback
+        self._ignored_directories = set(ignore_directories)
         self._timers: dict[str, Any] = {}
         self._debounce_seconds = 2.0
 
+    def _is_ignored(self, file_path: str) -> bool:
+        """Whether any directory on the path is one the watcher skips.
+
+        Live events need this as well as the scan: a file written into
+        node_modules while cementic is running arrives by inotify, never
+        through the (pruned) directory walk.
+        """
+        if not self._ignored_directories:
+            return False
+        return any(part in self._ignored_directories for part in Path(file_path).parts[:-1])
+
     def _should_process(self, file_path: str) -> bool:
+        if self._is_ignored(file_path):
+            return False
         return Path(file_path).suffix.lower() in supported_extensions()
 
     def _debounced_process(self, file_path: str) -> None:
@@ -189,7 +204,11 @@ class SourceWatcher:
 
     def _start_watcher(self, directories: list[str]) -> None:
         observer = Observer()
-        event_handler = DocumentEventHandler(self._on_file_detected, self._on_file_deleted)
+        event_handler = DocumentEventHandler(
+            self._on_file_detected,
+            self._on_file_deleted,
+            ignore_directories=self.config.source_watcher.ignore_directories,
+        )
         self._event_handler = event_handler
         self._watched_roots = []
         missing: list[str] = []
@@ -267,26 +286,35 @@ class SourceWatcher:
 
     def _scan_existing(self, directory: Path) -> None:
         extensions = supported_extensions()
-        for file_path in directory.rglob("*"):
+        ignored = set(self.config.source_watcher.ignore_directories)
+        # os.walk rather than rglob so ignored directories can be pruned from
+        # the traversal itself: rglob would still descend into node_modules and
+        # .git to discover files it then discards.
+        for dirpath, dirnames, filenames in os.walk(directory):
             # The scan can walk a large tree for minutes; without this a
             # `cementic stop` during startup waits out its whole grace period
             # and then reports a timeout, while the watcher keeps indexing.
             if self._shutdown_event.is_set():
                 return
-            if (
-                file_path.is_file()
-                and not file_path.is_symlink()
-                and file_path.suffix.lower() in extensions
-            ):
-                self._on_file_detected(str(file_path))
+            dirnames[:] = [name for name in dirnames if name not in ignored]
+            root = Path(dirpath)
+            for filename in filenames:
+                if self._shutdown_event.is_set():
+                    return
+                file_path = root / filename
+                if (
+                    file_path.is_file()
+                    and not file_path.is_symlink()
+                    and file_path.suffix.lower() in extensions
+                ):
+                    self._on_file_detected(str(file_path))
 
     def _on_file_detected(self, file_path: str) -> None:
         try:
             self._register_document(file_path)
         except Exception as error:
             self._logger.error("Failed to register %s: %s", file_path, error)
-            state = self.state_manager.load()
-            self.state_manager.update(failed_count=state.failed_count + 1, current_file=None)
+            self.state_manager.increment(failed=1, current_file=None)
 
     def _on_file_deleted(self, file_path: str) -> None:
         try:
@@ -376,8 +404,7 @@ class SourceWatcher:
                 # The concurrent insert has committed; the retry now updates it.
                 self._logger.debug("Concurrent registration of %s; retrying", file_path)
 
-        state = self.state_manager.load()
-        self.state_manager.update(processed_count=state.processed_count + 1, current_file=None)
+        self.state_manager.increment(processed=1, current_file=None)
         self._logger.info("Registered document: %s (collection=%s)", file_path, self.collection)
 
     def _mark_document_deleted(self, file_path: str) -> None:

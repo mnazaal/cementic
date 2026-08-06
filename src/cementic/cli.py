@@ -44,6 +44,7 @@ from cementic.embedding_runtime import (
     runtime_spec_from_config,
     stop_llama_cpp_runtime,
 )
+from cementic.embedding_text import describe_text_policy
 from cementic.extract import extract_document
 from cementic.filelock import LockUnavailableError, file_lock
 from cementic.search import MAX_SEARCH_RESULTS, Searcher
@@ -627,8 +628,14 @@ def _print_collection_detail(
     console.print(
         f"{'chunked':<11} {ps.chunked_done:,}/{ps.extracted_done:,} ({ps.chunking_pct}%)"
     )
+    # The denominator is chunks that exist *so far*, so mid-build this can read
+    # 100% while most documents have not been chunked yet. Say so rather than
+    # implying the collection is finished.
+    chunking_complete = ps.chunked_done + ps.chunked_failed >= ps.documents
+    embedded_suffix = "" if chunking_complete else " of chunks created so far"
     console.print(
-        f"{'embedded':<11} {ps.done_embeddings:,}/{ps.total_chunks:,} ({ps.embedding_pct}%)"
+        f"{'embedded':<11} {ps.done_embeddings:,}/{ps.total_chunks:,} "
+        f"({ps.embedding_pct}%{embedded_suffix})"
     )
     console.print(
         f"{'revision':<11} active={ps.active_revision_label or '-'}  "
@@ -1165,7 +1172,17 @@ def start_embedding_runtime() -> None:
         console.print(f"embedding start failed: {error}")
         raise typer.Exit(1)
     console.print("embedding: running")
-    console.print(f"provider: llama-cpp, dim={client.embedding_dim}")
+    # Report the probed dimension, not the configured fallback: this command's
+    # whole job is to confirm what is actually loaded.
+    try:
+        dimension: object = client.describe().embedding_dim
+    except Exception as error:
+        dimension = f"unknown ({error})"
+    console.print(f"provider: llama-cpp, dim={dimension}")
+    # Asymmetric models need task prefixes and the policy is chosen from the
+    # model filename, so a renamed file silently disables it and quietly
+    # degrades retrieval. Showing the choice makes that visible.
+    console.print(f"text policy: {describe_text_policy(config.llama_cpp.model_path)}")
 
 
 @embedding_app.command("stop", short_help="Stop embedding runtime")

@@ -737,7 +737,9 @@ class TestBackgroundCommands:
         assert "documents" in result.output
         assert "8/10 (80.0%)" in result.output
         assert "7/8 (87.5%)" in result.output
-        assert "20/30 (66.7%)" in result.output
+        # Only 7 of 10 documents are chunked, so the embedding denominator is
+        # "chunks that exist so far" and the percentage is qualified.
+        assert "20/30 (66.7% of chunks created so far)" in result.output
         assert "active=rev-1" in result.output
         mock_load_pipeline_status.assert_called_once_with(cementic_cli._get_config(), "research")
 

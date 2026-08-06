@@ -100,9 +100,14 @@ def index_access_method(conn: Connection, index_name: str) -> str | None:
     """
     row = conn.execute(
         text(
+            # Restricted to the connection's own search_path: an index of the
+            # same name in another schema would otherwise be reported here,
+            # suppressing a genuine method-change rebuild and misdirecting the
+            # query-time tuning in search.
             "SELECT am.amname FROM pg_class c "
             "JOIN pg_am am ON am.oid = c.relam "
-            "WHERE c.relname = :name AND c.relkind = 'i'"
+            "WHERE c.relname = :name AND c.relkind = 'i' "
+            "AND pg_catalog.pg_table_is_visible(c.oid)"
         ),
         {"name": index_name},
     ).scalar()

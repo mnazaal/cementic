@@ -1,6 +1,8 @@
 """Tests for state management module."""
 
 import json
+import threading
+from pathlib import Path
 
 import pytest
 
@@ -96,6 +98,50 @@ class TestWorkerState:
         }
         state = WorkerState.from_dict(data)
         assert state.daemon_state == DaemonState.STOPPED
+
+
+class TestAtomicIncrement:
+    """Counters must not lose updates under concurrency.
+
+    Regression: callers read the state and then wrote count + 1 in a separate
+    update(). Only the write was inside the lock, so the watcher's scan thread
+    and its debounce timers could read the same value and lose an increment.
+    """
+
+    def test_concurrent_increments_are_all_counted(self, temp_dir: Path) -> None:
+        manager = StateManager(temp_dir / "state.json")
+        manager.update(processed_count=0, failed_count=0)
+        workers = 8
+        per_worker = 25
+
+        def bump() -> None:
+            for _ in range(per_worker):
+                manager.increment(processed=1)
+
+        threads = [threading.Thread(target=bump) for _ in range(workers)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        assert manager.load().processed_count == workers * per_worker
+
+    def test_increment_can_set_current_file_at_the_same_time(self, temp_dir: Path) -> None:
+        manager = StateManager(temp_dir / "state.json")
+        manager.update(processed_count=3, current_file="/a.pdf")
+
+        state = manager.increment(processed=1, current_file=None)
+
+        assert state.processed_count == 4
+        assert state.current_file is None
+
+    def test_failed_counter_increments_independently(self, temp_dir: Path) -> None:
+        manager = StateManager(temp_dir / "state.json")
+        manager.increment(failed=1)
+        manager.increment(failed=1)
+        state = manager.load()
+        assert state.failed_count == 2
+        assert state.processed_count == 0
 
 
 class TestStateManager:

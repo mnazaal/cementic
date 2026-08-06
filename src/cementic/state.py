@@ -183,3 +183,22 @@ class StateManager:
 
             self.save(state)
             return state
+
+    def increment(
+        self, *, processed: int = 0, failed: int = 0, current_file: Any = UNSET
+    ) -> WorkerState:
+        """Add to the counters atomically with respect to other threads.
+
+        Callers used to read the state and then write ``count + 1`` in a separate
+        ``update`` call. Only the write was inside the lock, so the watcher's
+        scan thread and its debounce timers could read the same value and lose an
+        increment -- under-reporting progress in ``cementic status --verbose``.
+        """
+        with self._lock:
+            state = self.load()
+            state.processed_count += processed
+            state.failed_count += failed
+            if current_file is not UNSET:
+                state.current_file = current_file
+            self.save(state)
+            return state
