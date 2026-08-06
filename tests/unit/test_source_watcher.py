@@ -200,3 +200,39 @@ class TestSourceWatcherStateManagement:
 
         daemon._shutdown_event.set.assert_called_once()
         mock_update.assert_called_with(daemon_state=DaemonState.STOPPED, pid=None)
+
+    def test_shutdown_handler_does_not_touch_the_state_lock(self, tmp_path):
+        """The SIGTERM handler must only set the flag.
+
+        Regression: it used to call stop(), which takes StateManager's lock. A
+        signal delivered while the main thread was already inside update() --
+        which happens on every registered document -- re-entered that lock and
+        hung the process. Because the deadlocked handler *was* the SIGTERM
+        handler, `cementic stop` could then never stop it; only SIGKILL worked.
+        """
+        daemon = SourceWatcher()
+        daemon.state_manager.state_path = tmp_path / "state.json"
+
+        with patch.object(daemon.state_manager, "update") as mock_update:
+            # Simulate the signal landing while the main thread holds the lock.
+            with daemon.state_manager._lock:
+                daemon._handle_shutdown(15, None)
+
+        assert daemon._shutdown_event.is_set()
+        mock_update.assert_not_called()
+
+    def test_scan_existing_stops_on_shutdown(self, tmp_path):
+        """A shutdown mid-scan abandons the walk instead of indexing the rest."""
+        for name in ("a.md", "b.md", "c.md"):
+            (tmp_path / name).write_text("content", encoding="utf-8")
+        daemon = SourceWatcher()
+        seen: list[str] = []
+
+        def record(path: str) -> None:
+            seen.append(path)
+            daemon._shutdown_event.set()
+
+        with patch.object(daemon, "_on_file_detected", side_effect=record):
+            daemon._scan_existing(tmp_path)
+
+        assert len(seen) == 1

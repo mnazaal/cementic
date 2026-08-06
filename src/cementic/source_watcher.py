@@ -101,6 +101,7 @@ class SourceWatcher:
         self.config = config or get_config()
         self.state_manager = StateManager(self.config.source_watcher.state_path)
         self._shutdown_event = threading.Event()
+        self._shutdown_signal: int | None = None
         self.watcher: Any = None
         self._event_handler: DocumentEventHandler | None = None
         self._logger = self._setup_logging()
@@ -193,11 +194,18 @@ class SourceWatcher:
         observer.start()
         self.watcher = observer
         for root in self._watched_roots:
+            if self._shutdown_event.is_set():
+                return
             self._scan_existing(root)
 
     def _scan_existing(self, directory: Path) -> None:
         extensions = supported_extensions()
         for file_path in directory.rglob("*"):
+            # The scan can walk a large tree for minutes; without this a
+            # `cementic stop` during startup waits out its whole grace period
+            # and then reports a timeout, while the watcher keeps indexing.
+            if self._shutdown_event.is_set():
+                return
             if (
                 file_path.is_file()
                 and not file_path.is_symlink()
@@ -300,11 +308,22 @@ class SourceWatcher:
         )
 
     def _handle_shutdown(self, signum: int, frame: object) -> None:
-        self._logger.info("Received signal %s, shutting down...", signum)
-        self.stop()
+        """Signal handler: set the shutdown flag and nothing else.
+
+        Python runs handlers on the main thread between bytecodes, so anything
+        that takes a lock the main thread may already hold deadlocks the process
+        -- and since this *is* the SIGTERM handler, a deadlocked process can then
+        only be killed with SIGKILL. `stop()` takes the state-file lock and joins
+        the observer thread, so it runs from `start()`'s `finally` instead.
+        """
+        self._shutdown_signal = signum
+        self._shutdown_event.set()
 
     def stop(self) -> None:
         self._shutdown_event.set()
+        if self._shutdown_signal is not None:
+            self._logger.info("Received signal %s, shutting down...", self._shutdown_signal)
+            self._shutdown_signal = None
         if self._event_handler:
             self._event_handler.cancel_all()
         if self.watcher:

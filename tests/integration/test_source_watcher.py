@@ -131,13 +131,19 @@ class TestSourceWatcherLifecycle:
         from cementic.state import DaemonState
         assert state.daemon_state == DaemonState.STOPPED
 
-    def test_handle_shutdown(self, watcher_config: Config) -> None:
-        """_handle_shutdown calls stop()."""
+    def test_handle_shutdown_only_sets_the_flag(self, watcher_config: Config) -> None:
+        """_handle_shutdown sets the shutdown event without calling stop().
+
+        stop() takes StateManager's lock and joins the observer thread; doing
+        either from a signal handler deadlocked the process against its own
+        SIGTERM. start()'s `finally` performs the cleanup instead.
+        """
         sw = SourceWatcher(watcher_config)
         called = []
         sw.stop = lambda: called.append(True)  # type: ignore[method-assign]
         sw._handle_shutdown(signal.SIGTERM, None)
-        assert len(called) == 1
+        assert called == []
+        assert sw._shutdown_event.is_set()
 
 
 class TestDocumentEventHandler:

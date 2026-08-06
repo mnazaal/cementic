@@ -745,14 +745,22 @@ class TestPipelineWorkerFullPipeline:
         assert state.daemon_state == DaemonState.STOPPED
         assert state.pid is None
 
-    def test_handle_shutdown_calls_stop(self, temp_dir: Path) -> None:
+    def test_handle_shutdown_only_sets_the_flag(self, temp_dir: Path) -> None:
+        """The signal handler must not call stop().
+
+        stop() takes StateManager's lock; a signal delivered while the main
+        thread already held it deadlocked the process, and since the handler was
+        the SIGTERM handler, only SIGKILL could recover. start()'s `finally`
+        performs the cleanup instead.
+        """
         config = _config_for(temp_dir)
         worker = PipelineWorker(config)
         worker.embedding_client = FakeEmbeddingClient()
 
         with patch.object(worker, "stop") as mock_stop:
             worker._handle_shutdown(15, None)
-            mock_stop.assert_called_once()
+            mock_stop.assert_not_called()
+        assert worker._shutdown_event.is_set()
 
     def test_step_extract_nonexistent_revision_returns_false(
         self, sqlite_setup, monkeypatch: pytest.MonkeyPatch

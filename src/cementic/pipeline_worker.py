@@ -231,6 +231,7 @@ class PipelineWorker:
         self.config = config or get_config()
         self.state_manager = StateManager(self.config.pipeline_worker.state_path)
         self._shutdown_event = threading.Event()
+        self._shutdown_signal: int | None = None
         self._logger = self._setup_logging()
         self.Session: Any = None
         self.embedding_client: EmbeddingProvider | None = None
@@ -698,11 +699,22 @@ class PipelineWorker:
         return _revision_is_complete(counts)
 
     def _handle_shutdown(self, signum: int, frame: object) -> None:
-        self._logger.info("Received signal %s, shutting down...", signum)
-        self.stop()
+        """Signal handler: set the shutdown flag and nothing else.
+
+        Python runs handlers on the main thread between bytecodes, so anything
+        that takes a lock the main thread may already hold deadlocks the process
+        -- and since this *is* the SIGTERM handler, a deadlocked process can then
+        only be killed with SIGKILL. `stop()` takes the state-file lock, so it
+        runs from `start()`'s `finally` instead.
+        """
+        self._shutdown_signal = signum
+        self._shutdown_event.set()
 
     def stop(self) -> None:
         self._shutdown_event.set()
+        if self._shutdown_signal is not None:
+            self._logger.info("Received signal %s, shutting down...", self._shutdown_signal)
+            self._shutdown_signal = None
         self.state_manager.update(daemon_state=DaemonState.STOPPED, pid=None)
         self._logger.info("Pipeline worker stopped")
 

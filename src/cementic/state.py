@@ -103,7 +103,11 @@ class StateManager:
         if state_path is None:
             raise ValueError("state_path cannot be None")
         self.state_path = state_path
-        self._lock = threading.Lock()
+        # Reentrant so a shutdown path that runs while this thread already holds
+        # the lock cannot deadlock the process. Handlers are kept off this path
+        # deliberately (see the workers' _handle_shutdown), but a plain Lock here
+        # turns any future re-entry into an unkillable-by-SIGTERM hang.
+        self._lock = threading.RLock()
 
     def load(self) -> WorkerState:
         """Load state from file."""
