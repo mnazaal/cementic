@@ -22,6 +22,7 @@ from cementic.cli import (
 from cementic.collections import PromotionOutcome
 from cementic.config import Config, default_config_path
 from cementic.pipeline_worker import PipelineCounts
+from cementic.state import StateManager
 from cementic.status_service import WorkerStatus
 from cementic.supervisor import ManagedProcess
 
@@ -297,6 +298,55 @@ class TestEmbeddingCommands:
         assert result.exit_code == 0
         assert "embedding: running, pid=123" in result.output
         mock_status.assert_called_once_with()
+
+
+class TestStopFallsBackToWorkerStateFiles:
+    """`cementic stop` must still work when supervisor.json is gone.
+
+    Regression: the supervisor record was the only source of PIDs, and it is
+    deleted by every stop and overwritten by every start. Losing it made
+    `cementic stop` report "no background cementic processes found" while both
+    workers kept running, leaving `ps` and `kill` as the only recourse.
+    """
+
+    def _config_with_state(self, tmp_path, pid):
+        config = Config()
+        config.source_watcher.state_path = tmp_path / "sw.json"
+        config.pipeline_worker.state_path = tmp_path / "pw.json"
+        StateManager(config.pipeline_worker.state_path).update(pid=pid, start_token=None)
+        return config
+
+    def test_recovers_live_workers_when_supervisor_record_is_missing(self, tmp_path):
+        config = self._config_with_state(tmp_path, pid=4242)
+
+        with (
+            patch("cementic.cli._get_config", return_value=config),
+            patch("cementic.cli._load_supervisor_state", return_value={}),
+            patch("cementic.cli._get_supervisor_state_path", return_value=tmp_path / "sup.json"),
+            patch("cementic.cli.is_managed_process_alive", return_value=True),
+            patch("cementic.cli.is_pid_running", return_value=False),
+            patch("cementic.cli.os.kill") as mock_kill,
+            patch("cementic.cli.wait_for_exit", return_value=[]),
+        ):
+            result = runner.invoke(app, ["stop"])
+
+        assert result.exit_code == 0
+        assert "supervisor record missing" in result.output
+        mock_kill.assert_called_once_with(4242, 15)
+
+    def test_reports_nothing_when_no_worker_is_alive(self, tmp_path):
+        config = self._config_with_state(tmp_path, pid=4242)
+
+        with (
+            patch("cementic.cli._get_config", return_value=config),
+            patch("cementic.cli._load_supervisor_state", return_value={}),
+            patch("cementic.cli._get_supervisor_state_path", return_value=tmp_path / "sup.json"),
+            patch("cementic.cli.is_managed_process_alive", return_value=False),
+        ):
+            result = runner.invoke(app, ["stop"])
+
+        assert result.exit_code == 0
+        assert "no background cementic processes found" in result.output
 
 
 class TestChunkCommand:

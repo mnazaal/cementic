@@ -1,7 +1,7 @@
 """Tests for pipeline worker constructor, client creation, and lifecycle."""
 
 from pathlib import Path
-from unittest.mock import Mock, patch
+from unittest.mock import MagicMock, Mock, patch
 
 import pytest
 from sqlalchemy import create_engine, event
@@ -432,6 +432,38 @@ class TestWorkerProcessingLoop:
         state = worker.state_manager.load()
         assert state.last_error == "RuntimeError: boom"
         assert state.last_error_at is not None
+
+    def test_start_clears_an_error_left_by_a_previous_run(self, temp_dir: Path) -> None:
+        """A fresh worker must not inherit the last run's error.
+
+        Regression: the in-loop clear only reset errors recorded by the same
+        process, so a failure from an earlier worker was reported by
+        `cementic status` forever and made a healthy worker look broken.
+        """
+        config = Config()
+        config.pipeline_worker.log_file = temp_dir / "worker.log"
+        config.pipeline_worker.state_path = temp_dir / "worker-state.json"
+        worker = PipelineWorker(config)
+        worker.state_manager.update(last_error="stale from a previous run", last_error_at="then")
+
+        with (
+            patch("cementic.pipeline_worker.get_engine") as mock_engine,
+            patch("cementic.pipeline_worker.create_tables"),
+            patch.object(worker, "_create_embedding_client") as mock_create,
+            patch.object(worker, "_ensure_target_revision", return_value=1),
+            patch.object(worker, "_run_processing_loop"),
+        ):
+            engine = create_engine("sqlite:///:memory:")
+            mock_engine.return_value = engine
+            Base.metadata.create_all(engine)
+            client = MagicMock()
+            client.health_check.return_value = True
+            mock_create.return_value = client
+            worker.start("clears_stale")
+
+        state = worker.state_manager.load()
+        assert state.last_error is None
+        assert state.last_error_at is None
 
     def test_loop_clears_a_recorded_failure_after_a_clean_pass(self, temp_dir: Path) -> None:
         config = Config()

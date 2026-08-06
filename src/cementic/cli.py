@@ -46,6 +46,7 @@ from cementic.embedding_runtime import (
 )
 from cementic.extract import extract_document
 from cementic.search import MAX_SEARCH_RESULTS, Searcher
+from cementic.state import StateManager
 from cementic.status_service import (
     build_supervisor_status,
     check_health,
@@ -326,6 +327,33 @@ def _is_managed_proc_alive(process: dict[str, object]) -> bool:
 
 
 _STARTUP_GRACE_SECONDS = 2.0
+
+
+def _worker_processes_from_state_files() -> list[dict[str, object]]:
+    """Recover live worker records when the supervisor file is missing.
+
+    ``supervisor.json`` is the normal source of PIDs, but it is a single file
+    that every stop deletes and every start overwrites. Losing it left
+    `cementic stop` unable to stop anything while reporting that nothing was
+    running -- the user's only recourse being `ps` and `kill`. Each worker
+    already persists its own pid and start-token, so the information was never
+    actually lost; this just looks where it still is.
+    """
+    config = _get_config()
+    records: list[dict[str, object]] = []
+    for name, state_path in (
+        ("source-watcher", config.source_watcher.state_path),
+        ("pipeline-worker", config.pipeline_worker.state_path),
+    ):
+        if state_path is None:
+            continue
+        worker_state = StateManager(state_path).load()
+        pid = worker_state.pid
+        if pid and is_managed_process_alive(pid, worker_state.start_token):
+            records.append(
+                {"name": name, "pid": pid, "start_token": worker_state.start_token}
+            )
+    return records
 
 
 def _terminate_managed(processes: list[ManagedProcess]) -> None:
@@ -997,9 +1025,19 @@ def stop_background(
     state = _load_supervisor_state()
     processes = _supervisor_processes(state)
 
+    recovered = False
+    if not processes:
+        processes = _worker_processes_from_state_files()
+        recovered = bool(processes)
+
     if not processes:
         console.print("no background cementic processes found")
         return
+
+    if recovered:
+        console.print(
+            "supervisor record missing; found running workers from their own state files"
+        )
 
     signaled_pids: list[int] = []
     for proc in processes:

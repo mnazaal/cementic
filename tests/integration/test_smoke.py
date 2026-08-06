@@ -6,6 +6,7 @@ from pathlib import Path
 from uuid import uuid4
 
 import pytest
+from pydantic import SecretStr
 from sqlalchemy import text
 
 from cementic.config import Config
@@ -24,6 +25,7 @@ from cementic.pipeline_worker import PipelineWorker
 from cementic.revisions import promote_revision
 from cementic.search import Searcher
 from cementic.source_watcher import SourceWatcher
+from tests.integration.conftest import _pg_url
 
 #: Generated on demand by tests/fixtures/generate_pdfs.py (see conftest's
 #: autouse fixture). Its text is built around FakeEmbeddingClient.TERMS below,
@@ -53,6 +55,12 @@ class FakeEmbeddingClient(EmbeddingProvider):
 
 def _config_for(temp_dir: Path) -> Config:
     config = Config()
+    # This test opens its own engine rather than using the pg_engine fixture, so
+    # it must be pointed at the dedicated test database explicitly -- otherwise
+    # it creates tables in whatever database the user's real config names.
+    config.database.url_override = SecretStr(
+        _pg_url().render_as_string(hide_password=False)
+    )
     config.storage.artifacts_path = temp_dir / "artifacts"
     config.source_watcher.log_file = temp_dir / "source_watcher.log"
     config.pipeline_worker.log_file = temp_dir / "pipeline_worker.log"

@@ -263,6 +263,12 @@ class PipelineWorker:
             pid=os.getpid(),
             start_token=process_start_token(os.getpid()),
             current_file=None,
+            # Clear any error left by a previous run. The in-loop clear only
+            # resets errors this process recorded, so without this a failure
+            # from an earlier worker would be reported by `cementic status`
+            # forever -- making a healthy worker look permanently broken.
+            last_error=None,
+            last_error_at=None,
         )
         signal.signal(signal.SIGTERM, self._handle_shutdown)
         signal.signal(signal.SIGINT, self._handle_shutdown)

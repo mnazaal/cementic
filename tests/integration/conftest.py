@@ -10,6 +10,7 @@ import time
 from pathlib import Path
 
 import pytest
+from pydantic import SecretStr
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
 
@@ -20,21 +21,48 @@ _COMPOSE_FILE = Path(__file__).resolve().parents[2] / "compose.yml"
 _STARTUP_TIMEOUT = 600  # first run builds the pgvector + vectorscale image
 
 
-def _pg_url() -> object:
-    """Target Postgres URL, honoring the real config (CEMENTIC_DB_* / CEMENTIC_DB_URL).
+#: These fixtures call Base.metadata.drop_all(), so they must never target a
+#: database anyone keeps real data in. The configured database name gets this
+#: suffix appended, and the suite refuses to run without it.
+_TEST_DB_SUFFIX = "_test"
 
-    Defaults to the local ``cementic`` credentials when nothing is set, which is
-    what the bundled ``compose.yml`` also defaults to — so the probe matches the
-    database the suite would otherwise bring up itself.
-    """
+
+def _configured_url():
+    """The URL the user's own cementic uses (CEMENTIC_DB_* / CEMENTIC_DB_URL)."""
     return Config().database.url
 
 
-def _pg_reachable() -> bool:
-    """Check if PostgreSQL is reachable."""
+def _pg_url():
+    """Target Postgres URL for tests: always a dedicated ``*_test`` database.
+
+    Host, port and credentials come from the real config so the suite runs
+    against whatever Postgres is available -- but the database *name* never
+    does. These fixtures drop every cementic table on setup and again on
+    teardown; pointing that at the configured database destroys the user's
+    index with no warning and no opt-in.
+    """
+    configured = _configured_url()
+    name = configured.database or "cementic"
+    if name.endswith(_TEST_DB_SUFFIX):
+        return configured
+    return configured.set(database=f"{name}{_TEST_DB_SUFFIX}")
+
+
+def _require_isolated_test_database() -> None:
+    """Refuse to run destructive fixtures against a non-test database."""
+    target = _pg_url().database or ""
+    if not target.endswith(_TEST_DB_SUFFIX):
+        pytest.exit(
+            f"refusing to run destructive integration tests against {target!r}: "
+            f"the target database name must end in {_TEST_DB_SUFFIX!r}",
+            returncode=1,
+        )
+
+
+def _url_reachable(url) -> bool:
     engine = None
     try:
-        engine = create_engine(_pg_url(), connect_args={"connect_timeout": 2})
+        engine = create_engine(url, connect_args={"connect_timeout": 2})
         with engine.connect() as conn:
             conn.execute(text("SELECT 1"))
         return True
@@ -43,6 +71,36 @@ def _pg_reachable() -> bool:
     finally:
         if engine is not None:
             engine.dispose()
+
+
+def _server_reachable() -> bool:
+    """Whether the Postgres server answers, independent of the test database."""
+    return _url_reachable(_pg_url().set(database="postgres"))
+
+
+def _ensure_test_database() -> None:
+    """Create the dedicated test database if it does not exist yet."""
+    target = _pg_url()
+    admin = create_engine(
+        target.set(database="postgres"),
+        isolation_level="AUTOCOMMIT",
+        connect_args={"connect_timeout": 2},
+    )
+    try:
+        with admin.connect() as conn:
+            exists = conn.execute(
+                text("SELECT 1 FROM pg_database WHERE datname = :name"),
+                {"name": target.database},
+            ).scalar()
+            if not exists:
+                conn.execute(text(f'CREATE DATABASE "{target.database}"'))
+    finally:
+        admin.dispose()
+
+
+def _pg_reachable() -> bool:
+    """Check whether the dedicated test database is reachable."""
+    return _url_reachable(_pg_url())
 
 
 def _detect_compose_engine() -> list[str] | None:
@@ -79,7 +137,8 @@ def _wait_pg_reachable(timeout: int) -> bool:
 @pytest.fixture(scope="session")
 def _compose_postgres():
     """Bring the compose Postgres up for the session (down after) if not already up."""
-    if _pg_reachable():
+    _require_isolated_test_database()
+    if _server_reachable():
         # Already running (CI service, or a dev started it) — leave it untouched.
         yield
         return
@@ -116,9 +175,11 @@ def _drop_vector_tables(engine) -> None:
 
 @pytest.fixture(scope="session")
 def pg_engine(_compose_postgres):
-    """Session-scoped PostgreSQL engine backed by the compose-managed service."""
-    if not _pg_reachable():
+    """Session-scoped engine bound to the dedicated ``*_test`` database."""
+    _require_isolated_test_database()
+    if not _server_reachable():
         pytest.skip("PostgreSQL not reachable")
+    _ensure_test_database()
     engine = create_engine(_pg_url(), connect_args={"connect_timeout": 2})
     _drop_vector_tables(engine)
     Base.metadata.drop_all(engine)
@@ -161,12 +222,19 @@ def pg_session(pg_engine):
 
 @pytest.fixture
 def pg_config(pg_engine) -> Config:
-    """Config pointing at the same PostgreSQL the engine fixture uses.
+    """Config pointing at the same database the engine fixture uses.
 
-    Honors the real environment (CEMENTIC_DB_* / CEMENTIC_DB_URL) rather than
-    forcing the default password, so the suite works against any reachable DB.
+    Server and credentials come from the real environment (CEMENTIC_DB_* /
+    CEMENTIC_DB_URL), but the URL is pinned to the dedicated test database.
+    Returning a bare Config() here made anything that opens its own connection
+    from this config -- Searcher, most obviously -- read the *user's* database
+    while the fixtures seeded the test one.
     """
-    return Config()
+    config = Config()
+    config.database.url_override = SecretStr(
+        _pg_url().render_as_string(hide_password=False)
+    )
+    return config
 
 
 @pytest.fixture(scope="session")
