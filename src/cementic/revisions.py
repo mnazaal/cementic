@@ -28,7 +28,6 @@ from cementic.profiles import (
     get_or_create_embedding_profile,
     get_or_create_extractor_profile,
 )
-from cementic.storage import safe_remove_artifact
 from cementic.vector_store import create_table_sql
 
 #: Revision statuses that represent an in-flight (not yet promoted) build.
@@ -339,7 +338,28 @@ def ensure_revision_ann_index(
     )
 
 
-def prune_collection_history(session: Session, collection: str, *, config: Config) -> None:
+#: Session key holding artifact files whose rows were deleted but whose bytes
+#: must not be removed until the deleting transaction has actually committed.
+_PENDING_ARTIFACT_REMOVALS = "cementic_pending_artifact_removals"
+
+
+def _defer_artifact_removal(session: Session, paths: list[str]) -> None:
+    """Record artifact files to unlink once the transaction commits."""
+    if not paths:
+        return
+    pending = session.info.setdefault(_PENDING_ARTIFACT_REMOVALS, [])
+    pending.extend(paths)
+
+
+def drain_pending_artifact_removals(session: Session) -> list[str]:
+    """Take and clear the artifact files awaiting removal for this session."""
+    pending = session.info.pop(_PENDING_ARTIFACT_REMOVALS, [])
+    return list(pending) if isinstance(pending, list) else []
+
+
+def prune_collection_history(
+    session: Session, collection: str, *, config: Config
+) -> list[str]:
     """Keep only active and most recent retired history for one collection."""
     session.flush()
     session.expire_all()
@@ -351,7 +371,7 @@ def prune_collection_history(session: Session, collection: str, *, config: Confi
     )
     plan = _revision_prune_plan(revisions)
     if not plan.removable_revision_ids:
-        return
+        return []
 
     extracted_to_remove = (
         session.query(ExtractedDocument.id, ExtractedDocument.artifact_path)
@@ -397,5 +417,10 @@ def prune_collection_history(session: Session, collection: str, *, config: Confi
     )
     session.flush()
 
-    for artifact_path in artifact_paths:
-        safe_remove_artifact(config, artifact_path)
+    # Deliberately not unlinked here: the caller has not committed yet. Deleting
+    # the files inline meant a failed or rolled-back commit left rows pointing at
+    # artifacts that no longer existed, and every later chunk step failed on
+    # them. Deferring makes the worst case an orphaned file -- recoverable --
+    # instead of a database referencing missing data.
+    _defer_artifact_removal(session, artifact_paths)
+    return artifact_paths

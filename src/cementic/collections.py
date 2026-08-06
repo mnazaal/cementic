@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Any
 
@@ -15,9 +16,11 @@ from cementic.pipeline_worker import (
     compute_revision_counts,
     revision_failure_total,
 )
-from cementic.revisions import promote_revision
+from cementic.revisions import drain_pending_artifact_removals, promote_revision
 from cementic.storage import safe_remove_artifact
 from cementic.vector_store import drop_vector_table
+
+logger = logging.getLogger("cementic.collections")
 
 
 @dataclass(frozen=True)
@@ -154,10 +157,23 @@ def delete_collection_records(session: Session, collection: str) -> DeleteCollec
     )
 
 
-def remove_artifacts(paths: list[str], *, config: Config) -> None:
-    """Best-effort removal of extracted document artifacts."""
+def remove_artifacts(paths: list[str], *, config: Config) -> list[str]:
+    """Best-effort removal of extracted document artifacts.
+
+    Returns the paths that could not be removed. ``safe_remove_artifact`` raises
+    for a path outside the artifacts root or a symlink -- a deliberate safety
+    stop, but one that previously aborted the whole loop, so a single rejected
+    path left every later artifact on disk and could propagate out of a
+    promotion. Each path now fails on its own.
+    """
+    failures: list[str] = []
     for artifact_path in paths:
-        safe_remove_artifact(config, artifact_path)
+        try:
+            safe_remove_artifact(config, artifact_path)
+        except Exception:
+            logger.warning("Could not remove artifact %s", artifact_path, exc_info=True)
+            failures.append(artifact_path)
+    return failures
 
 
 def drop_orphan_vector_tables(engine: Any, profile_ids: list[int]) -> None:
@@ -210,6 +226,9 @@ def promote_ready_revision(
 
     promote_revision(session, collection, revision, config=config)
     session.commit()
+    # Only now that the promotion is durable are the superseded revisions'
+    # artifact files safe to unlink.
+    remove_artifacts(drain_pending_artifact_removals(session), config=config)
     return PromotionOutcome("promoted", revision=revision)
 
 

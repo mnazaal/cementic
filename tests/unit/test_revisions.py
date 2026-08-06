@@ -338,13 +338,19 @@ class TestPruneCollectionHistory:
             qm.all.return_value = rows
         return qm
 
-    @patch("cementic.storage.Path.unlink", side_effect=OSError("permission denied"))
+    @patch("cementic.storage.Path.unlink")
     @patch("cementic.revisions.select")
     @patch("cementic.revisions._revision_prune_plan")
-    def test_oserror_during_artifact_unlink_is_suppressed(
+    def test_pruning_defers_artifact_removal_until_after_commit(
         self, mock_prune_plan, mock_select, mock_unlink, tmp_path: Path
     ) -> None:
-        """Artifact unlink OSError is caught and suppressed during pruning."""
+        """Pruning must not unlink while the caller's transaction is open.
+
+        Regression: files were removed inline, so a failed or rolled-back commit
+        left rows pointing at artifacts that no longer existed and every later
+        chunk step failed on them. The paths are returned instead, for the
+        caller to remove once the delete is durable.
+        """
         from cementic.revisions import RevisionPrunePlan
 
         plan = RevisionPrunePlan(
@@ -371,9 +377,30 @@ class TestPruneCollectionHistory:
             self._make_query_mock(),                            # 7) PipelineRevision delete
         ]
 
-        # Must not raise
         config = Config()
         config.storage.artifacts_path = tmp_path
-        prune_collection_history(session, "test-collection", config=config)
+        pending = prune_collection_history(session, "test-collection", config=config)
 
-        mock_unlink.assert_called_once_with(missing_ok=True)
+        assert pending == [str(tmp_path / "artifact.pdf")]
+        mock_unlink.assert_not_called()
+
+
+class TestRemoveArtifacts:
+    """Cleanup must not stop at the first rejected path."""
+
+    def test_one_rejected_path_does_not_abort_the_rest(self, tmp_path: Path) -> None:
+        """Regression: safe_remove_artifact raises for a path outside the
+        artifacts root, which aborted the whole loop -- leaving every later
+        artifact on disk and propagating out of a promotion."""
+        from cementic.collections import remove_artifacts
+
+        config = Config()
+        config.storage.artifacts_path = tmp_path
+        good = tmp_path / "keep.md.gz"
+        good.write_bytes(b"x")
+        outside = "/etc/passwd"  # rejected: outside the artifacts root
+
+        failures = remove_artifacts([outside, str(good)], config=config)
+
+        assert failures == [outside]
+        assert not good.exists(), "the valid artifact must still be removed"
