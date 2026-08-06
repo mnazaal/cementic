@@ -66,6 +66,7 @@ class TestSearcher:
                 ),
                 model_identifier="nomic-embed-text",
                 embedding_dim=768,
+                distance_metric="cosine",
             ),
         )
         revision_query = self.RevisionQuery([building_revision])
@@ -116,6 +117,7 @@ class TestSearcher:
                 ),
                 model_identifier="nomic-embed-text",
                 embedding_dim=768,
+                distance_metric="cosine",
             ),
         )
         row = SimpleNamespace(
@@ -190,6 +192,7 @@ class TestSearcher:
                 ),
                 model_identifier="nomic-embed-text",
                 embedding_dim=768,
+                distance_metric="cosine",
             ),
         )
         revision_query = self.RevisionQuery([active_revision])
@@ -292,6 +295,7 @@ class TestSearcher:
                 ),
                 model_identifier="nomic-embed-text",
                 embedding_dim=768,
+                distance_metric="cosine",
             ),
         )
         mock_session = MagicMock()
@@ -329,6 +333,7 @@ class TestSearcher:
                 ),
                 model_identifier="nomic-embed-text",
                 embedding_dim=768,
+                distance_metric="cosine",
             ),
         )
         active_test = SimpleNamespace(

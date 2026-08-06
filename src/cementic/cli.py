@@ -16,7 +16,7 @@ import click
 import typer
 from rich.console import Console
 from rich.markup import escape
-from sqlalchemy.exc import InterfaceError, OperationalError
+from sqlalchemy.exc import InterfaceError, OperationalError, ProgrammingError
 from typer.core import TyperCommand, TyperGroup
 
 from cementic.bootstrap import Bootstrapper
@@ -45,7 +45,7 @@ from cementic.embedding_runtime import (
     stop_llama_cpp_runtime,
 )
 from cementic.extract import extract_document
-from cementic.search import Searcher
+from cementic.search import MAX_SEARCH_RESULTS, Searcher
 from cementic.status_service import (
     build_supervisor_status,
     check_health,
@@ -271,8 +271,6 @@ def config_init(
 @config_app.command("show", short_help="Print the effective merged config as JSON")
 def config_show() -> None:
     """Print the effective configuration (defaults + file + env) as JSON to stdout."""
-    import json
-
     typer.echo(json.dumps(_get_config().model_dump(mode="json"), indent=2, sort_keys=True))
 
 
@@ -327,20 +325,29 @@ def _is_managed_proc_alive(process: dict[str, object]) -> bool:
     )
 
 
-def _spawn_detached(command: list[str], log_file: Path) -> int:
-    return spawn_detached(command, log_file)
+_STARTUP_GRACE_SECONDS = 2.0
 
 
-def _wait_for_exit(pids: list[int], timeout_seconds: float = 20.0) -> list[int]:
-    return wait_for_exit(pids, timeout_seconds=timeout_seconds)
+def _wait_for_worker_startup(
+    processes: list[ManagedProcess], grace_seconds: float = _STARTUP_GRACE_SECONDS
+) -> list[ManagedProcess]:
+    """Return the processes that died within the startup grace period.
 
-
-def _force_kill(pids: list[int]) -> list[int]:
-    return force_kill(pids)
-
-
-def _is_pid_running(pid: int) -> bool:
-    return is_pid_running(pid)
+    A worker that fails at startup (bad config, unreachable runtime, lock held)
+    exits within a fraction of a second, so a short watch catches it; a healthy
+    worker outlives the grace period and this returns empty.
+    """
+    deadline = time.monotonic() + grace_seconds
+    while time.monotonic() < deadline:
+        dead = [
+            proc
+            for proc in processes
+            if not is_managed_process_alive(proc.pid, proc.start_token)
+        ]
+        if dead:
+            return dead
+        time.sleep(0.1)
+    return []
 
 
 def _get_cli_version() -> str:
@@ -393,6 +400,28 @@ def _build_collection_filters(
 def _is_database_unavailable(error: Exception) -> bool:
     """Return whether the error indicates an unreachable database."""
     return isinstance(error, (OperationalError, InterfaceError))
+
+
+def _is_schema_missing(error: Exception) -> bool:
+    """Return whether the error means cementic's tables don't exist yet.
+
+    The schema is created by the pipeline worker on first `cementic start`, so a
+    reachable-but-empty database is the normal pre-first-run state, not a fault.
+    """
+    return isinstance(error, ProgrammingError) and "does not exist" in str(error.orig)
+
+
+_NO_SCHEMA_HINT = "nothing indexed yet — run `cementic start DIRECTORY -c COLLECTION` first"
+
+
+def _report_db_error(error: Exception, action: str) -> None:
+    """Print the right message for a failed database operation."""
+    if _is_database_unavailable(error):
+        _print_database_unavailable(action)
+    elif _is_schema_missing(error):
+        console.print(_NO_SCHEMA_HINT)
+    else:
+        console.print(f"{action} failed: {error}")
 
 
 _DB_HINT = (
@@ -457,9 +486,15 @@ def _print_status_summary(
     console.print(f"{'workers':<11} {workers}")
     if health is not None:
         console.print(f"{'database':<11} {_state(health.db_reachable, 'reachable', 'unreachable')}")
-        console.print(
-            f"{'embedding':<11} {_state(health.embedding_healthy, 'healthy', 'unhealthy')}"
-        )
+        if health.embedding_healthy:
+            embedding_text = "[green]healthy[/green]"
+        elif _get_config().llama_cpp.daemon_autostart:
+            # Same state `status --doctor` calls a warning: not running now, but
+            # cementic starts it on demand. Not an error.
+            embedding_text = "[yellow]stopped (autostarts when needed)[/yellow]"
+        else:
+            embedding_text = "[red]unhealthy[/red]"
+        console.print(f"{'embedding':<11} {embedding_text}")
 
     if not verbose:
         return
@@ -484,10 +519,8 @@ def _print_status_summary(
     )
     if pipeline_worker_status.current_file != "None":
         console.print(f"  current file: {pipeline_worker_status.current_file}")
-    if _get_config().pipeline.embedding_provider == "llama-cpp":
-        console.print(f"search daemon: {_llama_daemon_runtime_status()}")
     if health is not None and health.llama_daemon != "N/A":
-        console.print(f"llama daemon: {health.llama_daemon}")
+        console.print(f"embedding daemon: {health.llama_daemon}")
 
 
 def _print_collection_detail(
@@ -648,7 +681,7 @@ def _print_status_json(
                         for f in files
                     ]
     except Exception as error:
-        output["files_error"] = str(error)
+        output["error"] = _NO_SCHEMA_HINT if _is_schema_missing(error) else str(error)
 
     typer.echo(json.dumps(output, indent=2, default=str))
 
@@ -703,11 +736,11 @@ def start_background(
     source_watcher_log = data_dir / "source-watcher-background.log"
     pipeline_log = data_dir / "pipeline-background.log"
 
-    source_watcher_pid = _spawn_detached(
+    source_watcher_pid = spawn_detached(
         [*base_cmd, "source-watcher", *directories, "--collection", collection],
         source_watcher_log,
     )
-    pipeline_pid = _spawn_detached(
+    pipeline_pid = spawn_detached(
         [
             *base_cmd,
             "pipeline-worker",
@@ -717,26 +750,37 @@ def start_background(
         pipeline_log,
     )
 
+    spawned = [
+        ManagedProcess(
+            "source-watcher",
+            source_watcher_pid,
+            str(source_watcher_log),
+            process_start_token(source_watcher_pid),
+        ),
+        ManagedProcess(
+            "pipeline-worker",
+            pipeline_pid,
+            str(pipeline_log),
+            process_start_token(pipeline_pid),
+        ),
+    ]
     _save_supervisor_state(
         {
             "collection": collection,
             "directories": directories,
-            "processes": [
-                ManagedProcess(
-                    "source-watcher",
-                    source_watcher_pid,
-                    str(source_watcher_log),
-                    process_start_token(source_watcher_pid),
-                ).__dict__,
-                ManagedProcess(
-                    "pipeline-worker",
-                    pipeline_pid,
-                    str(pipeline_log),
-                    process_start_token(pipeline_pid),
-                ).__dict__,
-            ],
+            "processes": [proc.__dict__ for proc in spawned],
         }
     )
+
+    # A worker can exit immediately (bootstrap failure, embedding runtime down,
+    # lock held) writing only to its log file. Reporting success without looking
+    # would leave the user believing indexing started.
+    dead = _wait_for_worker_startup(spawned)
+    if dead:
+        console.print("[red]cementic failed to start:[/red]")
+        for managed in dead:
+            console.print(f"- {managed.name} exited immediately; see {managed.log_file}")
+        raise typer.Exit(1)
 
     console.print("[green]Started cementic in background[/green]")
     console.print(f"- source watcher PID: {source_watcher_pid}")
@@ -862,10 +906,8 @@ def status(
         pipeline_status = load_pipeline_status(_get_config(), collection)
         _print_collection_detail(collection, pipeline_status, verbose)
     except Exception as error:
-        if _is_database_unavailable(error):
-            _print_database_unavailable("status")
-        else:
-            console.print(f"status failed: {error}")
+        _report_db_error(error, "status")
+        raise typer.Exit(1)
 
 
 @app.command(
@@ -909,7 +951,7 @@ def stop_background(
             continue
 
     timeout_seconds = 10.0  # grace period before --force is required
-    remaining = _wait_for_exit(signaled_pids, timeout_seconds=timeout_seconds)
+    remaining = wait_for_exit(signaled_pids, timeout_seconds=timeout_seconds)
 
     if not remaining:
         if _get_supervisor_state_path().exists():
@@ -918,9 +960,9 @@ def stop_background(
         return
 
     if force:
-        killed = _force_kill(remaining)
+        killed = force_kill(remaining)
         time.sleep(0.5)
-        still_alive = [pid for pid in killed if _is_pid_running(pid)]
+        still_alive = [pid for pid in killed if is_pid_running(pid)]
         if _get_supervisor_state_path().exists():
             _get_supervisor_state_path().unlink()
         if still_alive:
@@ -1017,21 +1059,24 @@ def remove_collection(
                 console.print(f"collection: {collection}")
                 console.print("status: not found")
                 return
+    except Exception as e:
+        _report_db_error(e, f"collection remove '{collection}'")
+        raise typer.Exit(1)
 
+    # The rows are committed by here, so the collection *is* deleted. Leftover
+    # artifacts/vector tables are reported as a warning rather than turning a
+    # successful delete into a reported failure.
+    console.print(f"collection: {collection}")
+    console.print("status: deleted")
+    console.print(f"documents: {result.deleted_docs}")
+    console.print(f"chunks: {result.deleted_chunks}")
+    try:
         remove_artifacts(result.artifact_paths, config=_get_config())
         drop_orphan_vector_tables(engine, result.vector_profile_ids)
-
-        console.print(f"collection: {collection}")
-        console.print("status: deleted")
-        console.print(f"documents: {result.deleted_docs}")
-        console.print(f"chunks: {result.deleted_chunks}")
-        console.print(f"vector_tables_dropped: {len(result.vector_profile_ids)}")
     except Exception as e:
-        if _is_database_unavailable(e):
-            _print_database_unavailable("collection remove")
-        else:
-            console.print(f"failed to remove collection '{collection}': {e}")
+        console.print(f"warning: collection deleted but cleanup failed: {e}")
         raise typer.Exit(1)
+    console.print(f"vector_tables_dropped: {len(result.vector_profile_ids)}")
 
 
 @collection_app.command("list", short_help="List known collections")
@@ -1057,10 +1102,7 @@ def list_collection_command() -> None:
                 f"building={row.building_revision_label or '-'}"
             )
     except Exception as error:
-        if _is_database_unavailable(error):
-            _print_database_unavailable("collection list")
-        else:
-            console.print(f"failed to list collections: {error}")
+        _report_db_error(error, "collection list")
         raise typer.Exit(1)
 
 
@@ -1102,10 +1144,7 @@ def promote_collection(
                 else None
             )
     except Exception as error:
-        if _is_database_unavailable(error):
-            _print_database_unavailable("collection promote")
-        else:
-            console.print(f"promotion failed: {error}")
+        _report_db_error(error, "collection promote")
         raise typer.Exit(1)
 
     console.print(f"collection: {collection}")
@@ -1166,10 +1205,7 @@ def list_collection_revision_command(
                     f"embed={row.embedding_profile.provider}:{row.embedding_profile.fingerprint[:8]}"
                 )
     except Exception as error:
-        if _is_database_unavailable(error):
-            _print_database_unavailable("collection revisions")
-        else:
-            console.print(f"failed to load revisions: {error}")
+        _report_db_error(error, "collection revisions")
         raise typer.Exit(1)
 
 
@@ -1181,7 +1217,7 @@ def list_collection_revision_command(
 def search(
     query: str = typer.Argument(..., help="Search query"),
     top_k: int = typer.Option(
-        10, "-n", "--top-k", "--limit", min=1, max=50, help="Number of results"
+        10, "-n", "--top-k", "--limit", min=1, max=MAX_SEARCH_RESULTS, help="Number of results"
     ),
     collections: list[str] | None = typer.Option(
         None,
@@ -1220,6 +1256,14 @@ def search(
 
         if not results:
             console.print("no results")
+            # Distinguish "no matches" from "that collection isn't indexed".
+            if filters:
+                unknown = searcher.unsearchable_collections(filters)
+                if unknown:
+                    console.print(
+                        f"note: no indexed revision for {', '.join(unknown)} "
+                        "(check `cementic collection list`)"
+                    )
             return
 
         rank_w = len(str(len(results)))
@@ -1232,15 +1276,16 @@ def search(
             console.print(f"   {escape(preview)}", no_wrap=True, overflow="ellipsis")
 
     except Exception as e:
-        if _is_database_unavailable(e):
-            if json_output:
+        if json_output:
+            # Diagnostics must not land on stdout, which is the JSONL stream.
+            if _is_database_unavailable(e):
                 err_console.print(f"search failed: database unavailable: {e}")
+            elif _is_schema_missing(e):
+                err_console.print(f"search failed: {_NO_SCHEMA_HINT}")
             else:
-                _print_database_unavailable("search")
-        elif json_output:
-            err_console.print(f"search failed: {e}")
+                err_console.print(f"search failed: {e}")
         else:
-            console.print(f"search failed: {e}")
+            _report_db_error(e, "search")
         raise typer.Exit(1)
 
 
@@ -1288,7 +1333,9 @@ def chunk(
     cfg = _get_config()
     try:
         text = Path(path).read_text(encoding="utf-8") if path else sys.stdin.read()
-    except (FileNotFoundError, OSError) as error:
+    except (OSError, ValueError) as error:
+        # ValueError covers UnicodeDecodeError: `chunk` takes text, and a binary
+        # file should be a one-line error, not a traceback.
         err_console.print(f"chunk failed: {error}")
         raise typer.Exit(1)
     for piece in chunk_text(

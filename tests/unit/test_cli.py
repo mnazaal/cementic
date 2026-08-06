@@ -757,8 +757,9 @@ class TestBackgroundCommands:
         assert "research" in result.output
         mock_load_pipeline_status.assert_called_once_with(cementic_cli._get_config(), "research")
 
-    @patch("cementic.cli._spawn_detached")
-    def test_start_background(self, mock_spawn, temp_dir: Path):
+    @patch("cementic.cli._wait_for_worker_startup", return_value=[])
+    @patch("cementic.cli.spawn_detached")
+    def test_start_background(self, mock_spawn, mock_startup, temp_dir: Path):
         mock_spawn.side_effect = [1111, 2222]
         mock_path = temp_dir / "supervisor.json"
 
@@ -778,8 +779,11 @@ class TestBackgroundCommands:
         assert second_command[1:4] == ["-m", "cementic.runner", "pipeline-worker"]
         assert second_command[4:] == ["--collection", "test"]
 
-    @patch("cementic.cli._spawn_detached")
-    def test_start_background_mentions_default_collection(self, mock_spawn, temp_dir: Path):
+    @patch("cementic.cli._wait_for_worker_startup", return_value=[])
+    @patch("cementic.cli.spawn_detached")
+    def test_start_background_mentions_default_collection(
+        self, mock_spawn, mock_startup, temp_dir: Path
+    ):
         mock_spawn.side_effect = [1111, 2222]
         mock_path = temp_dir / "supervisor.json"
 
@@ -977,7 +981,7 @@ class TestStatusCommand:
 
     @patch("cementic.status_service.get_engine")
     @patch("cementic.cli.get_session_factory")
-    @patch("cementic.status_service.is_pid_running", return_value=False)
+    @patch("cementic.status_service.is_managed_process_alive", return_value=False)
     @patch("cementic.embedding_runtime.get_llama_cpp_runtime_client")
     def test_status_no_collection_shows_health(
         self, mock_llama, mock_pid, mock_sf, mock_engine, monkeypatch
@@ -1067,7 +1071,7 @@ class TestCliHelpers:
         with patch.object(cementic_cli, "_config", mock_cfg):
             assert cementic_cli._llama_daemon_runtime_status() == "stopped"
 
-    @patch("cementic.cli._is_pid_running", return_value=False)
+    @patch("cementic.cli.is_pid_running", return_value=False)
     def test_llama_daemon_runtime_status_pid_not_running(
         self, mock_is_running, tmp_path: Path
     ):
@@ -1153,7 +1157,7 @@ class TestCollectionCommandsEdgeCases:
         mock_get_session_factory.return_value = lambda: mock_session
         result = runner.invoke(app, ["collection", "list"])
         assert result.exit_code == 1
-        assert "failed to list collections" in result.output
+        assert "collection list failed" in result.output
 
     @patch("cementic.cli.get_session_factory")
     @patch("cementic.cli.get_engine")
@@ -1180,7 +1184,7 @@ class TestCollectionCommandsEdgeCases:
         mock_get_session_factory.return_value = lambda: mock_session
         result = runner.invoke(app, ["collection", "promote", "mycol"])
         assert result.exit_code == 1
-        assert "promotion failed" in result.output
+        assert "collection promote failed" in result.output
 
 
 class TestListCollectionRevisionsEdgeCases:
@@ -1215,7 +1219,7 @@ class TestListCollectionRevisionsEdgeCases:
         mock_get_session_factory.return_value = lambda: mock_session
         result = runner.invoke(app, ["collection", "revisions", "mycol"])
         assert result.exit_code == 1
-        assert "failed to load revisions" in result.output
+        assert "collection revisions failed" in result.output
 
 
 class TestSearchEdgeCases:
@@ -1403,7 +1407,7 @@ class TestStartEdgeCases:
         assert "Background cementic processes already running" in result.output
 
     @patch("cementic.cli.Bootstrapper")
-    @patch("cementic.cli._is_pid_running", return_value=False)
+    @patch("cementic.cli.is_pid_running", return_value=False)
     @patch("cementic.cli._load_supervisor_state")
     def test_start_bootstrap_fails(self, mock_load_state, mock_is_running, mock_boot):
         """start_background exits 1 when bootstrap raises RuntimeError."""

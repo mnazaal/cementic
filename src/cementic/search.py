@@ -14,6 +14,7 @@ from cementic.embedding_runtime import (
     create_provider,
     runtime_spec_from_profile_json,
 )
+from cementic.revisions import BUILDING_STATUSES, get_active_revision
 from cementic.vector_store import (
     index_access_method,
     query_tuning_sql,
@@ -27,12 +28,7 @@ MAX_QUERY_CHARS = 8_000
 
 
 class SearchResult(TypedDict):
-    """Type for search results.
-
-    TODO: add page_start/page_end once chunk.py populates them (they are
-    persisted as columns on Chunk today but never set, so they'd always
-    read as 0 here).
-    """
+    """Type for search results."""
 
     collection: str
     source_path: str
@@ -123,7 +119,7 @@ class Searcher:
                 raise RuntimeError("Active embedding provider is not healthy")
             query_embedding = embedding_client.embed(embedding_client.format_query(query))
             query_literal = to_vector_literal(query_embedding)
-            distance_metric = getattr(embedding_profile, "distance_metric", "cosine")
+            distance_metric = embedding_profile.distance_metric
             distance_operator = _distance_operator(distance_metric)
 
             combined: list[SearchResult] = []
@@ -187,6 +183,19 @@ class Searcher:
         combined.sort(key=lambda result: result["score"], reverse=True)
         return combined[:top_k]
 
+    def unsearchable_collections(self, collections: list[str]) -> list[str]:
+        """Return requested collections that have no searchable revision.
+
+        A typo'd or not-yet-indexed collection otherwise looks exactly like a
+        query with no matches, so callers can tell the two apart.
+        """
+        with self.Session() as session:
+            found = {
+                revision.collection
+                for revision in self._load_searchable_revisions(session, collections)
+            }
+        return [collection for collection in collections if collection not in found]
+
     def _load_searchable_revisions(
         self,
         session: Any,
@@ -196,12 +205,7 @@ class Searcher:
             wanted = list(dict.fromkeys(collections))
             revisions: list[PipelineRevision] = []
             for collection in wanted:
-                active_revision = (
-                    session.query(PipelineRevision)
-                    .filter_by(collection=collection, status="active")
-                    .order_by(PipelineRevision.id.desc())
-                    .first()
-                )
+                active_revision = get_active_revision(session, collection)
                 if active_revision is not None:
                     revisions.append(active_revision)
                     continue
@@ -210,7 +214,7 @@ class Searcher:
                     session.query(PipelineRevision)
                     .filter(
                         PipelineRevision.collection == collection,
-                        PipelineRevision.status.in_(["building", "ready"]),
+                        PipelineRevision.status.in_(BUILDING_STATUSES),
                     )
                     .order_by(PipelineRevision.id.desc())
                     .first()
