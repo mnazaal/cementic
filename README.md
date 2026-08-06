@@ -160,7 +160,13 @@ with `--force` to promote it anyway.
 
 A document that fails to extract, chunk, or embed is recorded as failed and does not block the
 rest of the build from finishing; failed documents are retried automatically the next time you
-run `cementic start`. Deleting a file from a watched directory drops it from search.
+run `cementic start`. Deleting a file from a watched directory drops it from search, including
+when it is deleted while it is being indexed. If the embedding runtime becomes unreachable
+mid-build, the affected chunks stay pending and are retried rather than recorded as failed.
+
+Reverting your configuration back to a revision you previously built (for example, rolling back
+a model or chunking change) resumes that revision from its existing artifacts and makes it
+promotable again.
 
 For a brand-new collection with no active revision yet, search can use the in-progress build and return
 partial results from chunks whose embeddings are already available.
