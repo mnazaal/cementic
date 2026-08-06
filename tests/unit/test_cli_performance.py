@@ -9,6 +9,7 @@ from unittest.mock import MagicMock, patch
 from typer.testing import CliRunner
 
 from cementic.cli import app
+from cementic.status_service import WorkerStatus
 
 runner = CliRunner()
 
@@ -87,13 +88,23 @@ def test_status_command_stays_fast_with_mocked_backend(
 ) -> None:
     """Status CLI dispatch stays fast when DB and health checks are mocked."""
     mock_workers.return_value = (
-        SimpleNamespace(
-            state="running", pid=1, process="running", current_file="None",
-            watched_directories=[], processed_count=0, failed_count=0,
+        WorkerStatus(
+            state="running",
+            pid=str(1),
+            process="running",
+            current_file="None",
+            watched_directories=[],
+            processed_count=0,
+            failed_count=0,
         ),
-        SimpleNamespace(
-            state="running", pid=2, process="running", current_file="None",
-            watched_directories=[], processed_count=0, failed_count=0,
+        WorkerStatus(
+            state="running",
+            pid=str(2),
+            process="running",
+            current_file="None",
+            watched_directories=[],
+            processed_count=0,
+            failed_count=0,
         ),
     )
     mock_build.return_value = SimpleNamespace(

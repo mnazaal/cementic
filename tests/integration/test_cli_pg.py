@@ -9,6 +9,7 @@ from typer.testing import CliRunner
 
 from cementic import cli as cementic_cli
 from cementic.cli import app
+from cementic.status_service import WorkerStatus
 from tests.integration.test_pg_helpers import cleanup_pg_tables, seed_active_vector_collection
 
 runner = CliRunner()
@@ -79,20 +80,20 @@ def test_pg_cli_status_verbose_reports_real_collection(
     pg_session.commit()
     monkeypatch.setattr(cementic_cli, "_config", pg_config)
     monkeypatch.setattr("cementic.cli.check_health", lambda config: None)
+    def _stopped_worker() -> WorkerStatus:
+        return WorkerStatus(
+            state="stopped",
+            pid="N/A",
+            process="stopped",
+            current_file="None",
+            watched_directories=[],
+            processed_count=0,
+            failed_count=0,
+        )
+
     monkeypatch.setattr(
         "cementic.cli.load_worker_statuses",
-        lambda config: (
-            type("Status", (), {
-                "state": "stopped", "pid": None, "process": "stopped",
-                "current_file": None, "watched_directories": [],
-                "processed_count": 0, "failed_count": 0,
-            })(),
-            type("Status", (), {
-                "state": "stopped", "pid": None, "process": "stopped",
-                "current_file": None, "watched_directories": [],
-                "processed_count": 0, "failed_count": 0,
-            })(),
-        ),
+        lambda config: (_stopped_worker(), _stopped_worker()),
     )
     monkeypatch.setattr("cementic.cli._load_supervisor_state", lambda: {"processes": []})
 

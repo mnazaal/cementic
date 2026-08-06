@@ -44,6 +44,8 @@ class WorkerStatus:
     watched_directories: list[str]
     processed_count: int
     failed_count: int
+    last_error: str | None = None
+    last_error_at: str | None = None
 
 
 @dataclass(frozen=True)
@@ -136,6 +138,8 @@ def build_worker_status(state: WorkerState) -> WorkerStatus:
         watched_directories=[str(path) for path in watched_directories],
         processed_count=state.processed_count,
         failed_count=state.failed_count,
+        last_error=state.last_error,
+        last_error_at=state.last_error_at,
     )
 
 

@@ -496,6 +496,18 @@ def _print_status_summary(
             embedding_text = "[red]unhealthy[/red]"
         console.print(f"{'embedding':<11} {embedding_text}")
 
+    # A worker looping on a permanent failure otherwise looks exactly like a
+    # healthy idle one, so this is headline information rather than --verbose
+    # detail: without it the only evidence is a log file the user must know about.
+    for label, worker in (
+        ("source watcher", source_watcher_status),
+        ("pipeline worker", pipeline_worker_status),
+    ):
+        if worker.last_error:
+            console.print(
+                f"{'last error':<11} [red]{escape(f'{label}: {worker.last_error}')}[/red]"
+            )
+
     if not verbose:
         return
 
@@ -600,11 +612,15 @@ def _print_status_json(
             "pid": source_watcher_status.pid,
             "processed": source_watcher_status.processed_count,
             "failed": source_watcher_status.failed_count,
+            "last_error": source_watcher_status.last_error,
+            "last_error_at": source_watcher_status.last_error_at,
         },
         "pipeline_worker": {
             "process": pipeline_worker_status.process,
             "state": pipeline_worker_status.state,
             "pid": pipeline_worker_status.pid,
+            "last_error": pipeline_worker_status.last_error,
+            "last_error_at": pipeline_worker_status.last_error_at,
         },
     }
 

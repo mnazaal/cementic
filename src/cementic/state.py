@@ -33,6 +33,11 @@ class WorkerState:
     #: Kernel start-time token of ``pid`` (see supervisor.process_start_token);
     #: lets liveness checks reject a recycled PID. None = unknown (older state).
     start_token: str | None = None
+    #: Last unhandled error from the worker's processing loop, cleared on the
+    #: next clean pass. Without this a worker stuck in a permanent retry loop is
+    #: indistinguishable from a healthy idle one in `cementic status`.
+    last_error: str | None = None
+    last_error_at: str | None = None
 
     def to_dict(self) -> dict[str, object]:
         """Convert to dictionary."""
@@ -77,6 +82,12 @@ class WorkerState:
         raw_start_token = normalized.get("start_token")
         start_token = raw_start_token if isinstance(raw_start_token, str) else None
 
+        raw_last_error = normalized.get("last_error")
+        last_error = str(raw_last_error) if raw_last_error is not None else None
+
+        raw_last_error_at = normalized.get("last_error_at")
+        last_error_at = str(raw_last_error_at) if raw_last_error_at is not None else None
+
         return cls(
             daemon_state=daemon_state_value,
             watched_directories=watched_directories,
@@ -86,6 +97,8 @@ class WorkerState:
             last_updated=last_updated,
             pid=pid,
             start_token=start_token,
+            last_error=last_error,
+            last_error_at=last_error_at,
         )
 
 
@@ -138,6 +151,8 @@ class StateManager:
         current_file: Any = UNSET,
         pid: Any = UNSET,
         start_token: Any = UNSET,
+        last_error: Any = UNSET,
+        last_error_at: Any = UNSET,
     ) -> WorkerState:
         """Update specific fields and save."""
         with self._lock:
@@ -157,6 +172,10 @@ class StateManager:
                 state.pid = pid
             if start_token is not UNSET:
                 state.start_token = start_token
+            if last_error is not UNSET:
+                state.last_error = last_error
+            if last_error_at is not UNSET:
+                state.last_error_at = last_error_at
 
             self.save(state)
             return state

@@ -8,6 +8,7 @@ import signal
 import threading
 import zlib
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -288,6 +289,7 @@ class PipelineWorker:
                 self.stop()
 
     def _run_processing_loop(self, revision_id: int) -> None:
+        reported_error = False
         while not self._shutdown_event.is_set():
             try:
                 if self._step_extract(revision_id):
@@ -297,14 +299,33 @@ class PipelineWorker:
                 if self._step_embed(revision_id):
                     continue
                 self._mark_revision_ready_if_complete(revision_id)
-            except Exception:
+            except Exception as error:
                 # A transient failure (Postgres restart, network blip) must not
                 # kill the worker: log, back off, retry. Interrupted rows are
                 # re-queued on the next pass or the next `cementic start`.
                 self._logger.exception("Pipeline step failed; retrying after backoff")
+                # Publish it too: a worker looping on a permanent failure is
+                # otherwise indistinguishable from a healthy idle one, and the
+                # only evidence lives in a log file the user has to know about.
+                self._record_loop_error(error)
+                reported_error = True
                 self._shutdown_event.wait(5 * self.config.pipeline_worker.poll_interval)
                 continue
+            if reported_error:
+                self.state_manager.update(last_error=None, last_error_at=None)
+                reported_error = False
             self._shutdown_event.wait(self.config.pipeline_worker.poll_interval)
+
+    def _record_loop_error(self, error: Exception) -> None:
+        """Publish a processing-loop failure to the worker state file."""
+        message = f"{type(error).__name__}: {error}"
+        try:
+            self.state_manager.update(
+                last_error=message[:500],
+                last_error_at=datetime.now(timezone.utc).isoformat(),
+            )
+        except Exception:  # pragma: no cover - state file must never mask the real error
+            self._logger.exception("Could not record pipeline error to the state file")
 
     def _ensure_target_revision(self) -> int:
         with self.Session() as session:

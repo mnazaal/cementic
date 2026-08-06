@@ -383,6 +383,65 @@ class TestWorkerProcessingLoop:
         mock_mark.assert_called_once_with(42)
         mock_wait.assert_called_once()
 
+    def test_loop_publishes_failures_to_the_state_file(self, temp_dir: Path) -> None:
+        """A step failure must reach `cementic status`, not just the log file.
+
+        Regression: the retry handler only logged, so a worker looping forever on
+        a permanent failure was indistinguishable from a healthy idle one.
+        """
+        config = Config()
+        config.pipeline_worker.log_file = temp_dir / "worker.log"
+        config.pipeline_worker.state_path = temp_dir / "worker-state.json"
+        worker = PipelineWorker(config)
+
+        with (
+            patch.object(worker, "_step_extract", side_effect=RuntimeError("boom")),
+            patch.object(worker._shutdown_event, "wait") as mock_wait,
+        ):
+            mock_wait.side_effect = lambda _: worker._shutdown_event.set()
+            worker._run_processing_loop(1)
+
+        state = worker.state_manager.load()
+        assert state.last_error == "RuntimeError: boom"
+        assert state.last_error_at is not None
+
+    def test_loop_clears_a_recorded_failure_after_a_clean_pass(self, temp_dir: Path) -> None:
+        config = Config()
+        config.pipeline_worker.log_file = temp_dir / "worker.log"
+        config.pipeline_worker.state_path = temp_dir / "worker-state.json"
+        worker = PipelineWorker(config)
+        worker.state_manager.update(last_error="stale", last_error_at="then")
+
+        calls = {"n": 0}
+
+        def fail_then_succeed(_revision_id: int) -> bool:
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("transient")
+            return False
+
+        with (
+            patch.object(worker, "_step_extract", side_effect=fail_then_succeed),
+            patch.object(worker, "_step_chunk", return_value=False),
+            patch.object(worker, "_step_embed", return_value=False),
+            patch.object(worker, "_mark_revision_ready_if_complete"),
+            patch.object(worker._shutdown_event, "wait") as mock_wait,
+        ):
+            # First wait is the error backoff; the second ends the run.
+            waits = {"n": 0}
+
+            def wait(_timeout):
+                waits["n"] += 1
+                if waits["n"] >= 2:
+                    worker._shutdown_event.set()
+
+            mock_wait.side_effect = wait
+            worker._run_processing_loop(1)
+
+        state = worker.state_manager.load()
+        assert state.last_error is None
+        assert state.last_error_at is None
+
     def test_loop_skips_when_extract_does_work(self, temp_dir: Path) -> None:
         """When _step_extract returns True the loop continues immediately."""
         config = Config()

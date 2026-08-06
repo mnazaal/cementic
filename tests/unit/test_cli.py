@@ -22,6 +22,7 @@ from cementic.cli import (
 from cementic.collections import PromotionOutcome
 from cementic.config import Config, default_config_path
 from cementic.pipeline_worker import PipelineCounts
+from cementic.status_service import WorkerStatus
 
 runner = CliRunner()
 
@@ -185,18 +186,18 @@ class TestRootHelp:
             "processes": [],
         }
         mock_load_worker_statuses.return_value = (
-            SimpleNamespace(
+            WorkerStatus(
                 state="running",
-                pid="111",
+                pid=("111"),
                 process="running",
                 current_file="None",
                 watched_directories=["/docs"],
                 processed_count=3,
                 failed_count=1,
             ),
-            SimpleNamespace(
+            WorkerStatus(
                 state="running",
-                pid="222",
+                pid=("222"),
                 process="running",
                 current_file="None",
                 watched_directories=[],
@@ -345,9 +346,7 @@ class TestSearchCommand:
         mock_searcher.unsearchable_collections.return_value = ["typo"]
         mock_searcher_class.return_value = mock_searcher
 
-        result = runner.invoke(
-            app, ["search", "q", "-c", "typo", "--json"], catch_exceptions=False
-        )
+        result = runner.invoke(app, ["search", "q", "-c", "typo", "--json"], catch_exceptions=False)
 
         assert result.exit_code == 1
         assert "no indexed revision for typo" in result.output
@@ -502,18 +501,18 @@ class TestBackgroundCommands:
             "processes": [],
         }
         mock_load_worker_statuses.return_value = (
-            SimpleNamespace(
+            WorkerStatus(
                 state="running",
-                pid="111",
+                pid=("111"),
                 process="running",
                 current_file="None",
                 watched_directories=["/docs"],
                 processed_count=3,
                 failed_count=1,
             ),
-            SimpleNamespace(
+            WorkerStatus(
                 state="running",
-                pid="222",
+                pid=("222"),
                 process="running",
                 current_file="/docs/a.pdf",
                 watched_directories=[],
@@ -601,18 +600,18 @@ class TestBackgroundCommands:
             "processes": [],
         }
         mock_load_worker_statuses.return_value = (
-            SimpleNamespace(
+            WorkerStatus(
                 state="running",
-                pid="111",
+                pid=("111"),
                 process="running",
                 current_file="None",
                 watched_directories=["/docs"],
                 processed_count=3,
                 failed_count=1,
             ),
-            SimpleNamespace(
+            WorkerStatus(
                 state="running",
-                pid="222",
+                pid=("222"),
                 process="running",
                 current_file="/docs/a.pdf",
                 watched_directories=[],
@@ -683,28 +682,52 @@ class TestBackgroundCommands:
             "processes": [],
         }
         mock_load_worker_statuses.return_value = (
-            SimpleNamespace(
-                state="stopped", pid="N/A", process="stopped", current_file="None",
-                watched_directories=[], processed_count=0, failed_count=0,
+            WorkerStatus(
+                state="stopped",
+                pid=("N/A"),
+                process="stopped",
+                current_file="None",
+                watched_directories=[],
+                processed_count=0,
+                failed_count=0,
             ),
-            SimpleNamespace(
-                state="stopped", pid="N/A", process="stopped", current_file="None",
-                watched_directories=[], processed_count=0, failed_count=0,
+            WorkerStatus(
+                state="stopped",
+                pid=("N/A"),
+                process="stopped",
+                current_file="None",
+                watched_directories=[],
+                processed_count=0,
+                failed_count=0,
             ),
         )
         mock_build_supervisor_status.return_value = SimpleNamespace(
-            state="0/2 running", collection="research", directories=["/docs"],
+            state="0/2 running",
+            collection="research",
+            directories=["/docs"],
         )
         mock_check_health.return_value = SimpleNamespace(
-            db_reachable=True, embedding_provider="llama-cpp",
-            embedding_healthy=True, llama_daemon="stopped",
+            db_reachable=True,
+            embedding_provider="llama-cpp",
+            embedding_healthy=True,
+            llama_daemon="stopped",
         )
         mock_load_pipeline_status.return_value = SimpleNamespace(
-            documents=0, extracted_done=0, extracted_failed=0, chunked_done=0,
-            chunked_failed=0, total_chunks=0, pending_embeddings=0,
-            processing_embeddings=0, done_embeddings=0, failed_embeddings=0,
-            extraction_pct=0.0, chunking_pct=0.0, embedding_pct=0.0,
-            active_revision_label=None, building_revision_label=None,
+            documents=0,
+            extracted_done=0,
+            extracted_failed=0,
+            chunked_done=0,
+            chunked_failed=0,
+            total_chunks=0,
+            pending_embeddings=0,
+            processing_embeddings=0,
+            done_embeddings=0,
+            failed_embeddings=0,
+            extraction_pct=0.0,
+            chunking_pct=0.0,
+            embedding_pct=0.0,
+            active_revision_label=None,
+            building_revision_label=None,
         )
 
         result = runner.invoke(app, ["status", "--collection", "research"])
@@ -735,18 +758,18 @@ class TestBackgroundCommands:
             "processes": [],
         }
         mock_load_worker_statuses.return_value = (
-            SimpleNamespace(
+            WorkerStatus(
                 state="running",
-                pid="111",
+                pid=("111"),
                 process="running",
                 current_file="None",
                 watched_directories=["/docs"],
                 processed_count=3,
                 failed_count=1,
             ),
-            SimpleNamespace(
+            WorkerStatus(
                 state="running",
-                pid="222",
+                pid=("222"),
                 process="running",
                 current_file="None",
                 watched_directories=[],
@@ -795,9 +818,7 @@ class TestBackgroundCommands:
         mock_spawn.side_effect = [1111, 2222]
         mock_path = temp_dir / "supervisor.json"
 
-        with patch(
-            "cementic.cli._get_supervisor_state_path", return_value=mock_path
-        ):
+        with patch("cementic.cli._get_supervisor_state_path", return_value=mock_path):
             with patch("cementic.cli.Bootstrapper") as mock_bootstrapper:
                 mock_bootstrapper.return_value.ensure_for_convert.return_value = None
                 mock_bootstrapper.return_value.ensure_for_index.return_value = None
@@ -819,9 +840,7 @@ class TestBackgroundCommands:
         mock_spawn.side_effect = [1111, 2222]
         mock_path = temp_dir / "supervisor.json"
 
-        with patch(
-            "cementic.cli._get_supervisor_state_path", return_value=mock_path
-        ):
+        with patch("cementic.cli._get_supervisor_state_path", return_value=mock_path):
             with patch("cementic.cli.Bootstrapper") as mock_bootstrapper:
                 mock_bootstrapper.return_value.ensure_for_convert.return_value = None
                 mock_bootstrapper.return_value.ensure_for_index.return_value = None
@@ -876,9 +895,7 @@ class TestBackgroundCommands:
         mock_session.__exit__.return_value = False
         mock_get_session_factory.return_value = lambda: mock_session
 
-        outcome = PromotionOutcome(
-            status="blocked_by_failures", revision=revision, failures=counts
-        )
+        outcome = PromotionOutcome(status="blocked_by_failures", revision=revision, failures=counts)
         with patch("cementic.cli.promote_ready_revision", return_value=outcome):
             result = runner.invoke(app, ["collection", "promote", "research"])
 
@@ -1104,9 +1121,7 @@ class TestCliHelpers:
             assert cementic_cli._llama_daemon_runtime_status() == "stopped"
 
     @patch("cementic.cli.is_pid_running", return_value=False)
-    def test_llama_daemon_runtime_status_pid_not_running(
-        self, mock_is_running, tmp_path: Path
-    ):
+    def test_llama_daemon_runtime_status_pid_not_running(self, mock_is_running, tmp_path: Path):
         """_llama_daemon_runtime_status returns 'stopped' when PID not alive."""
         pid_file = tmp_path / "dead.pid"
         pid_file.write_text("99999")
@@ -1156,9 +1171,7 @@ class TestRemovePrompt:
     @patch("cementic.cli.get_engine")
     def test_remove_without_force_aborts_on_no(self, mock_get_engine):
         """remove_collection aborts when user says no to confirm."""
-        result = runner.invoke(
-            app, ["collection", "remove", "mycol"], input="n\n"
-        )
+        result = runner.invoke(app, ["collection", "remove", "mycol"], input="n\n")
         assert result.exit_code != 0  # Abort
 
 
@@ -1180,9 +1193,7 @@ class TestCollectionCommandsEdgeCases:
     @patch("cementic.cli.list_collections", side_effect=ValueError("something broke"))
     @patch("cementic.cli.get_session_factory")
     @patch("cementic.cli.get_engine")
-    def test_list_generic_error(
-        self, mock_get_engine, mock_get_session_factory, mock_list
-    ):
+    def test_list_generic_error(self, mock_get_engine, mock_get_session_factory, mock_list):
         """list_collection_command prints generic error and exits 1."""
         mock_session = MagicMock()
         mock_session.__enter__.return_value = mock_session
@@ -1207,9 +1218,7 @@ class TestCollectionCommandsEdgeCases:
     @patch("cementic.cli.promote_ready_revision", side_effect=ValueError("boom"))
     @patch("cementic.cli.get_session_factory")
     @patch("cementic.cli.get_engine")
-    def test_promote_generic_error(
-        self, mock_get_engine, mock_get_session_factory, mock_promote
-    ):
+    def test_promote_generic_error(self, mock_get_engine, mock_get_session_factory, mock_promote):
         """promote_collection prints generic error and exits 1."""
         mock_session = MagicMock()
         mock_session.__enter__.return_value = mock_session
@@ -1229,9 +1238,7 @@ class TestListCollectionRevisionsEdgeCases:
         mock_session = MagicMock()
         mock_session.__enter__.return_value = mock_session
         mock_get_session_factory.return_value = lambda: mock_session
-        with patch(
-            "cementic.cli.list_collection_revisions", return_value=[]
-        ):
+        with patch("cementic.cli.list_collection_revisions", return_value=[]):
             result = runner.invoke(app, ["collection", "revisions", "mycol"])
         assert result.exit_code == 0
         assert "(none)" in result.output
@@ -1242,9 +1249,7 @@ class TestListCollectionRevisionsEdgeCases:
     )
     @patch("cementic.cli.get_session_factory")
     @patch("cementic.cli.get_engine")
-    def test_revisions_generic_error(
-        self, mock_get_engine, mock_get_session_factory, mock_list
-    ):
+    def test_revisions_generic_error(self, mock_get_engine, mock_get_session_factory, mock_list):
         """list_collection_revision_command prints generic error and exits 1."""
         mock_session = MagicMock()
         mock_session.__enter__.return_value = mock_session
@@ -1278,6 +1283,54 @@ class TestSearchEdgeCases:
         assert "search failed: bad query" in result.output
 
 
+class TestStatusSurfacesWorkerErrors:
+    """A worker looping on a permanent failure must be visible in status.
+
+    Regression: the pipeline worker's only failure channel was its log file, so
+    a worker retrying forever looked exactly like a healthy idle one.
+    """
+
+    def _invoke(self, worker_error, args):
+        with (
+            patch("cementic.cli._llama_daemon_runtime_status", return_value="stopped"),
+            patch("cementic.cli.check_health") as mock_health,
+            patch("cementic.cli.load_worker_statuses") as mock_workers,
+            patch("cementic.cli._load_supervisor_state") as mock_state,
+            patch("cementic.cli.get_engine"),
+            patch("cementic.cli.get_session_factory"),
+            patch("cementic.cli.list_collections", return_value=[]),
+            patch("cementic.cli.load_pipeline_status_bulk", return_value={}),
+        ):
+            mock_state.return_value = {"collection": "c", "directories": [], "processes": []}
+            healthy = WorkerStatus(
+                state="running", pid="1", process="running", current_file="None",
+                watched_directories=[], processed_count=0, failed_count=0,
+            )
+            failing = WorkerStatus(
+                state="running", pid="2", process="running", current_file="None",
+                watched_directories=[], processed_count=0, failed_count=0,
+                last_error=worker_error, last_error_at="2026-08-06T00:00:00+00:00",
+            )
+            mock_workers.return_value = (healthy, failing)
+            mock_health.return_value = SimpleNamespace(
+                db_reachable=True, embedding_provider="llama-cpp",
+                embedding_healthy=True, llama_daemon="running",
+            )
+            return runner.invoke(app, args)
+
+    def test_last_error_is_shown_without_verbose(self):
+        result = self._invoke("ProgrammingError: relation does not exist", ["status"])
+        assert "last error" in result.output
+        assert "pipeline worker" in result.output
+        assert "relation does not exist" in result.output
+
+    def test_last_error_appears_in_json(self):
+        result = self._invoke("ProgrammingError: boom", ["status", "--json"])
+        payload = json.loads(result.output)
+        assert payload["pipeline_worker"]["last_error"] == "ProgrammingError: boom"
+        assert payload["source_watcher"]["last_error"] is None
+
+
 class TestStatusExitCodes:
     """`cementic status` must exit non-zero when it could not report status."""
 
@@ -1291,14 +1344,21 @@ class TestStatusExitCodes:
         """Regression: this printed the hint and exited 0, so
         `cementic status && ...` succeeded against an unreachable database."""
         mock_state.return_value = {"collection": "c", "directories": [], "processes": []}
-        worker = SimpleNamespace(
-            state="stopped", pid="N/A", process="stopped",
-            current_file="None", watched_directories=[], processed_count=0, failed_count=0,
+        worker = WorkerStatus(
+            state="stopped",
+            pid=("N/A"),
+            process="stopped",
+            current_file="None",
+            watched_directories=[],
+            processed_count=0,
+            failed_count=0,
         )
         mock_workers.return_value = (worker, worker)
         mock_health.return_value = SimpleNamespace(
-            db_reachable=False, embedding_provider="llama-cpp",
-            embedding_healthy=False, llama_daemon="stopped",
+            db_reachable=False,
+            embedding_provider="llama-cpp",
+            embedding_healthy=False,
+            llama_daemon="stopped",
         )
 
         result = runner.invoke(app, ["status"])
@@ -1334,22 +1394,32 @@ class TestStatusEdgeCases:
             "processes": [],
         }
         mock_load_worker_statuses.return_value = (
-            SimpleNamespace(
-                state="running", pid=1111, process="running",
-                current_file="None", watched_directories=[], processed_count=0, failed_count=0,
+            WorkerStatus(
+                state="running",
+                pid=str(1111),
+                process="running",
+                current_file="None",
+                watched_directories=[],
+                processed_count=0,
+                failed_count=0,
             ),
-            SimpleNamespace(
-                state="running", pid=2222, process="running",
-                current_file="None", watched_directories=[], processed_count=0, failed_count=0,
+            WorkerStatus(
+                state="running",
+                pid=str(2222),
+                process="running",
+                current_file="None",
+                watched_directories=[],
+                processed_count=0,
+                failed_count=0,
             ),
         )
         mock_build_supervisor_status.return_value = SimpleNamespace(
-            state="2/2 running", collection="research", directories=[],
+            state="2/2 running",
+            collection="research",
+            directories=[],
         )
         # check_health raises an exception
-        with patch(
-            "cementic.cli.check_health", side_effect=RuntimeError("health check failed")
-        ):
+        with patch("cementic.cli.check_health", side_effect=RuntimeError("health check failed")):
             mock_session = MagicMock()
             mock_session.__enter__.return_value = mock_session
             mock_get_session_factory.return_value = lambda: mock_session
@@ -1364,20 +1434,35 @@ class TestStatusEdgeCases:
         """Status with --json prints JSON output."""
         with patch("cementic.cli.load_worker_statuses") as mock_load:
             mock_load.return_value = (
-                SimpleNamespace(state="running", pid=1111, process="running",
-                                current_file="None", watched_directories=[],
-                                processed_count=0, failed_count=0),
-                SimpleNamespace(state="running", pid=2222, process="running",
-                                current_file="None", watched_directories=[],
-                                processed_count=0, failed_count=0),
+                WorkerStatus(
+                    state="running",
+                    pid=str(1111),
+                    process="running",
+                    current_file="None",
+                    watched_directories=[],
+                    processed_count=0,
+                    failed_count=0,
+                ),
+                WorkerStatus(
+                    state="running",
+                    pid=str(2222),
+                    process="running",
+                    current_file="None",
+                    watched_directories=[],
+                    processed_count=0,
+                    failed_count=0,
+                ),
             )
             with patch("cementic.cli._load_supervisor_state") as mock_state:
                 mock_state.return_value = {
-                    "collection": "research", "directories": ["/docs"], "processes": [],
+                    "collection": "research",
+                    "directories": ["/docs"],
+                    "processes": [],
                 }
                 with patch("cementic.cli.build_supervisor_status") as mock_build:
                     mock_build.return_value = SimpleNamespace(
-                        state="2/2 running", collection="research",
+                        state="2/2 running",
+                        collection="research",
                         directories=["/docs"],
                     )
                     with patch("cementic.cli.check_health") as mock_health:
@@ -1407,20 +1492,35 @@ class TestStatusEdgeCases:
         long_path = "/a" + "/very-long-directory-segment" * 10
         with patch("cementic.cli.load_worker_statuses") as mock_load:
             mock_load.return_value = (
-                SimpleNamespace(state="running", pid=1111, process="running",
-                                current_file="None", watched_directories=[],
-                                processed_count=0, failed_count=0),
-                SimpleNamespace(state="running", pid=2222, process="running",
-                                current_file="None", watched_directories=[],
-                                processed_count=0, failed_count=0),
+                WorkerStatus(
+                    state="running",
+                    pid=str(1111),
+                    process="running",
+                    current_file="None",
+                    watched_directories=[],
+                    processed_count=0,
+                    failed_count=0,
+                ),
+                WorkerStatus(
+                    state="running",
+                    pid=str(2222),
+                    process="running",
+                    current_file="None",
+                    watched_directories=[],
+                    processed_count=0,
+                    failed_count=0,
+                ),
             )
             with patch("cementic.cli._load_supervisor_state") as mock_state:
                 mock_state.return_value = {
-                    "collection": "research", "directories": [long_path], "processes": [],
+                    "collection": "research",
+                    "directories": [long_path],
+                    "processes": [],
                 }
                 with patch("cementic.cli.build_supervisor_status") as mock_build:
                     mock_build.return_value = SimpleNamespace(
-                        state="2/2 running", collection="research",
+                        state="2/2 running",
+                        collection="research",
                         directories=[long_path],
                     )
                     with patch("cementic.cli.check_health") as mock_health:
@@ -1657,9 +1757,7 @@ class TestFilterCommands:
         large inputs; requests must be chunked by pipeline_worker.batch_size.
         """
         provider = _BatchTrackingEmbedProvider()
-        stdin = "".join(
-            json.dumps({"index": i, "content": f"chunk {i}"}) + "\n" for i in range(5)
-        )
+        stdin = "".join(json.dumps({"index": i, "content": f"chunk {i}"}) + "\n" for i in range(5))
         with patch("cementic.cli.create_provider", return_value=provider):
             with patch("cementic.cli._get_config") as mock_get_config:
                 config = mock_get_config.return_value
