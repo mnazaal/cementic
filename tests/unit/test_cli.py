@@ -333,6 +333,38 @@ class TestSearchCommand:
         assert "cementic init postgres" in result.output
 
     @patch("cementic.cli.Searcher")
+    def test_search_json_reports_unknown_collection_on_stderr(self, mock_searcher_class):
+        """An unindexed collection must not look like a clean no-match.
+
+        Regression: --json returned before the unknown-collection check, so a
+        typo'd collection produced empty stdout and exit 0 -- indistinguishable
+        from a query that genuinely matched nothing.
+        """
+        mock_searcher = MagicMock()
+        mock_searcher.search.return_value = []
+        mock_searcher.unsearchable_collections.return_value = ["typo"]
+        mock_searcher_class.return_value = mock_searcher
+
+        result = runner.invoke(
+            app, ["search", "q", "-c", "typo", "--json"], catch_exceptions=False
+        )
+
+        assert result.exit_code == 1
+        assert "no indexed revision for typo" in result.output
+
+    @patch("cementic.cli.Searcher")
+    def test_search_json_no_match_still_succeeds(self, mock_searcher_class):
+        """A real no-match against an indexed collection stays exit 0."""
+        mock_searcher = MagicMock()
+        mock_searcher.search.return_value = []
+        mock_searcher.unsearchable_collections.return_value = []
+        mock_searcher_class.return_value = mock_searcher
+
+        result = runner.invoke(app, ["search", "q", "-c", "indexed", "--json"])
+
+        assert result.exit_code == 0
+
+    @patch("cementic.cli.Searcher")
     def test_search_json_emits_one_json_object_per_line(self, mock_searcher_class):
         mock_searcher = MagicMock()
         mock_searcher.search.return_value = [
@@ -1244,6 +1276,35 @@ class TestSearchEdgeCases:
         result = runner.invoke(app, ["search", "bad"])
         assert result.exit_code == 1
         assert "search failed: bad query" in result.output
+
+
+class TestStatusExitCodes:
+    """`cementic status` must exit non-zero when it could not report status."""
+
+    @patch("cementic.cli._llama_daemon_runtime_status", return_value="stopped")
+    @patch("cementic.cli.check_health")
+    @patch("cementic.cli.load_worker_statuses")
+    @patch("cementic.cli._load_supervisor_state")
+    def test_status_exits_nonzero_when_database_unreachable(
+        self, mock_state, mock_workers, mock_health, mock_daemon
+    ):
+        """Regression: this printed the hint and exited 0, so
+        `cementic status && ...` succeeded against an unreachable database."""
+        mock_state.return_value = {"collection": "c", "directories": [], "processes": []}
+        worker = SimpleNamespace(
+            state="stopped", pid="N/A", process="stopped",
+            current_file="None", watched_directories=[], processed_count=0, failed_count=0,
+        )
+        mock_workers.return_value = (worker, worker)
+        mock_health.return_value = SimpleNamespace(
+            db_reachable=False, embedding_provider="llama-cpp",
+            embedding_healthy=False, llama_daemon="stopped",
+        )
+
+        result = runner.invoke(app, ["status"])
+
+        assert result.exit_code == 1
+        assert "cementic init postgres" in result.output
 
 
 class TestStatusEdgeCases:

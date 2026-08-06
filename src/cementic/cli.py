@@ -586,8 +586,8 @@ def _print_status_json(
     health: Any,
     collection: str | None,
     verbose: bool,
-) -> None:
-    """Print full status as JSON."""
+) -> bool:
+    """Print full status as JSON. Returns whether the pipeline section failed."""
     output: dict[str, Any] = {
         "supervisor": {
             "state": supervisor_status.state,
@@ -680,10 +680,13 @@ def _print_status_json(
                         }
                         for f in files
                     ]
+        failed = False
     except Exception as error:
         output["error"] = _NO_SCHEMA_HINT if _is_schema_missing(error) else str(error)
+        failed = True
 
     typer.echo(json.dumps(output, indent=2, default=str))
+    return failed
 
 
 @app.command(
@@ -850,7 +853,7 @@ def status(
         health = None
 
     if json_output:
-        _print_status_json(
+        failed = _print_status_json(
             supervisor_status,
             source_watcher_status,
             pipeline_worker_status,
@@ -859,6 +862,8 @@ def status(
             collection,
             verbose,
         )
+        if failed:
+            raise typer.Exit(1)
         return
 
     _print_status_summary(
@@ -872,7 +877,9 @@ def status(
 
     if health is not None and not health.db_reachable:
         console.print(_DB_HINT)
-        return
+        # Non-zero so `cementic status && ...` cannot succeed against a database
+        # cementic could not reach; every other database-backed command exits 1.
+        raise typer.Exit(1)
 
     try:
         engine = get_engine(_get_config().database.url)
@@ -1249,21 +1256,32 @@ def search(
     try:
         results = searcher.search(query, top_k=top_k, collections=filters)
 
+        # Distinguish "no matches" from "that collection isn't indexed" — the two
+        # are otherwise identical (empty output, exit 0), in both output modes.
+        unknown = (
+            searcher.unsearchable_collections(filters) if not results and filters else []
+        )
+
         if json_output:
             for result in results:
                 typer.echo(json.dumps(result))
+            if unknown:
+                # stdout is the JSONL stream; diagnostics go to stderr, and the
+                # exit code has to distinguish this from a genuine no-match.
+                err_console.print(
+                    f"search failed: no indexed revision for {', '.join(unknown)} "
+                    "(check `cementic collection list`)"
+                )
+                raise typer.Exit(1)
             return
 
         if not results:
             console.print("no results")
-            # Distinguish "no matches" from "that collection isn't indexed".
-            if filters:
-                unknown = searcher.unsearchable_collections(filters)
-                if unknown:
-                    console.print(
-                        f"note: no indexed revision for {', '.join(unknown)} "
-                        "(check `cementic collection list`)"
-                    )
+            if unknown:
+                console.print(
+                    f"note: no indexed revision for {', '.join(unknown)} "
+                    "(check `cementic collection list`)"
+                )
             return
 
         rank_w = len(str(len(results)))
@@ -1275,6 +1293,10 @@ def search(
             # Keep the preview to a single line (truncate to the terminal width).
             console.print(f"   {escape(preview)}", no_wrap=True, overflow="ellipsis")
 
+    except typer.Exit:
+        # typer.Exit subclasses RuntimeError, so the broad handler below would
+        # otherwise swallow a deliberate exit and report it as "search failed: 1".
+        raise
     except Exception as e:
         if json_output:
             # Diagnostics must not land on stdout, which is the JSONL stream.
