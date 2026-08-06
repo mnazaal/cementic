@@ -59,6 +59,7 @@ class TestSearcher:
             status="building",
             embedding_profile_id=1,
             chunk_profile_id=2,
+            extractor_profile_id=1,
             embedding_profile=SimpleNamespace(
                 config_json=(
                     '{"provider": "llama-cpp", '
@@ -110,6 +111,7 @@ class TestSearcher:
             status="building",
             embedding_profile_id=1,
             chunk_profile_id=2,
+            extractor_profile_id=1,
             embedding_profile=SimpleNamespace(
                 config_json=(
                     '{"provider": "llama-cpp", '
@@ -185,6 +187,7 @@ class TestSearcher:
             collection="default",
             embedding_profile_id=1,
             chunk_profile_id=2,
+            extractor_profile_id=1,
             embedding_profile=SimpleNamespace(
                 config_json=(
                     '{"provider": "llama-cpp", '
@@ -288,6 +291,7 @@ class TestSearcher:
             status="active",
             embedding_profile_id=1,
             chunk_profile_id=2,
+            extractor_profile_id=1,
             embedding_profile=SimpleNamespace(
                 config_json=(
                     '{"provider": "llama-cpp", '
@@ -326,6 +330,7 @@ class TestSearcher:
             status="active",
             embedding_profile_id=1,
             chunk_profile_id=2,
+            extractor_profile_id=1,
             embedding_profile=SimpleNamespace(
                 config_json=(
                     '{"provider": "llama-cpp", '
@@ -341,6 +346,7 @@ class TestSearcher:
             status="active",
             embedding_profile_id=1,
             chunk_profile_id=2,
+            extractor_profile_id=1,
             embedding_profile=active_default.embedding_profile,
         )
         active_query = self.RevisionQuery([active_default, active_test])

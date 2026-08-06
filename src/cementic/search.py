@@ -144,6 +144,14 @@ class Searcher:
                 )
                 if tuning is not None:
                     session.execute(text(tuning))
+                # The vector table is per *embedding* profile, so it also holds
+                # vectors from other revisions that share that model. Restricting
+                # to the revision's chunk profile is not enough: a revision whose
+                # extractor changed reuses the same chunk and embedding profiles,
+                # and pruning deliberately keeps the most recent retired revision.
+                # Without the extractor condition, search returned every document
+                # twice -- once from the retired extraction and once from the
+                # active one -- spending half of top_k on superseded text.
                 statement = text(
                     "SELECT sd.collection AS collection, sd.source_path AS source_path, "
                     "c.content AS content, "
@@ -151,10 +159,12 @@ class Searcher:
                     f"FROM {table} ev "
                     "JOIN chunks_v2 c ON c.id = ev.chunk_id "
                     "JOIN chunked_documents cd ON c.chunked_document_id = cd.id "
+                    "JOIN extracted_documents ed ON cd.extracted_document_id = ed.id "
                     "JOIN source_documents sd ON c.document_id = sd.id "
                     "WHERE sd.collection = :collection "
                     "AND sd.status <> 'deleted' "
                     "AND cd.chunk_profile_id = :chunk_profile_id "
+                    "AND ed.extractor_profile_id = :extractor_profile_id "
                     f"ORDER BY ev.embedding {distance_operator} (:query)::vector "
                     "LIMIT :k"
                 )
@@ -164,6 +174,7 @@ class Searcher:
                         "query": query_literal,
                         "collection": revision.collection,
                         "chunk_profile_id": revision.chunk_profile_id,
+                        "extractor_profile_id": revision.extractor_profile_id,
                         "k": top_k,
                     },
                 )

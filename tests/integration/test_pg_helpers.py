@@ -120,6 +120,106 @@ def seed_active_vector_collection(
     return revision
 
 
+
+def seed_two_extractor_profiles_sharing_a_vector_table(
+    session: Session,
+    *,
+    collection: str,
+    source_path: str,
+    old_content: str,
+    new_content: str,
+    vector: list[float],
+) -> PipelineRevision:
+    """Seed one document extracted under two extractor profiles.
+
+    Both extractions share the same chunk and embedding profiles, so their
+    vectors land in the same per-profile table -- the arrangement a revision
+    whose extractor changed produces, with the superseded revision retained by
+    pruning. Only the *new* extractor's revision is active.
+    """
+    chunk_profile = ChunkProfile(fingerprint=f"cp-{collection}", config_json="{}")
+    embedding_profile = EmbeddingProfile(
+        provider="llama-cpp",
+        model_identifier="test-model",
+        embedding_dim=VECTOR_DIM,
+        distance_metric="cosine",
+        config_json=json.dumps(
+            {
+                "provider": "llama-cpp",
+                "model_identifier": "test-model",
+                "embedding_dim": VECTOR_DIM,
+                "n_ctx": 512,
+                "n_gpu_layers": 0,
+                "verbose": False,
+            }
+        ),
+        fingerprint=f"ep-{collection}",
+    )
+    old_extractor = ExtractorProfile(
+        name="old", config_json="{}", fingerprint=f"ex-old-{collection}"
+    )
+    new_extractor = ExtractorProfile(
+        name="new", config_json="{}", fingerprint=f"ex-new-{collection}"
+    )
+    source = SourceDocument(
+        collection=collection, source_path=source_path, file_hash="h", status="done"
+    )
+    session.add_all(
+        [chunk_profile, embedding_profile, old_extractor, new_extractor, source]
+    )
+    session.flush()
+
+    for extractor, content in ((old_extractor, old_content), (new_extractor, new_content)):
+        extracted = ExtractedDocument(
+            document_id=source.id,
+            extractor_profile_id=extractor.id,
+            source_file_hash="h",
+            content_hash=f"c-{extractor.name}",
+            status="done",
+        )
+        session.add(extracted)
+        session.flush()
+        chunked = ChunkedDocument(
+            extracted_document_id=extracted.id,
+            chunk_profile_id=chunk_profile.id,
+            source_content_hash=f"c-{extractor.name}",
+            status="done",
+        )
+        session.add(chunked)
+        session.flush()
+        chunk = Chunk(
+            document_id=source.id,
+            chunked_document_id=chunked.id,
+            chunk_index=0,
+            content=content,
+        )
+        session.add(chunk)
+        session.flush()
+        session.add(
+            ChunkEmbedding(
+                chunk_id=chunk.id,
+                embedding_profile_id=embedding_profile.id,
+                status="done",
+            )
+        )
+        session.flush()
+        conn = session.connection()
+        conn.execute(text(create_table_sql(embedding_profile.id, VECTOR_DIM)))
+        upsert_vectors(conn, embedding_profile.id, [(chunk.id, vector)])
+
+    revision = PipelineRevision(
+        collection=collection,
+        extractor_profile_id=new_extractor.id,
+        chunk_profile_id=chunk_profile.id,
+        embedding_profile_id=embedding_profile.id,
+        status="active",
+        label=f"active-{collection}",
+    )
+    session.add(revision)
+    session.flush()
+    return revision
+
+
 def cleanup_pg_tables(session: Session) -> None:
     """Remove rows from all pipeline tables between PG integration tests."""
     session.execute(
