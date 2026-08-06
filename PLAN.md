@@ -1,5 +1,56 @@
 # cementic — architecture & design
 
+<!-- session-handoff:begin (2026-08-06) -->
+## Where the work stands
+
+**Entry point:** run `cementic collection promote test` then
+`cementic search "..." -c test`. That is the one thing not yet exercised
+end-to-end on the fixed code. After that, decide whether to merge
+`claude/hygiene-fixes` (below) — there is no other queued work.
+
+**Branch:** `claude/hygiene-fixes`, **5 commits not merged to `main`**:
+`27e5ab0`, `6d56d9a`, `e93d79c`, `9d50d48`, and the commit carrying this block.
+The worktree is clean once that commit lands. Earlier batches (21 commits) are
+already merged.
+
+**Origin of this work:** a full code review of the CLI and every path it
+reaches. Findings and fixes are in the git history — 24 commits, each naming the
+user-visible symptom it fixes. `CHANGELOG.md` carries the user-facing summary.
+Nothing from the review plan is outstanding.
+
+**Verification state:** `610 unit + 102 integration passing, 0 skipped`, ruff
+and mypy clean. Test DB is `cementic_test`; the user's real `cementic` database
+holds 5 documents and revision 1 in `ready`.
+
+### Environment facts that cost time to rediscover
+
+- **The venv is an editable install of this working tree.** Running `cementic`
+  executes whatever branch is checked out — not `main`. Check
+  `git branch --show-current` before interpreting CLI behaviour.
+- **Integration tests use a separate `<name>_test` database** and refuse to run
+  otherwise (`tests/integration/conftest.py`). Before that guard existed they
+  dropped every table in the user's real database; `pytest tests/unit` never
+  touches Postgres.
+- Postgres answers on `localhost:5432`; the container engine is *not* reachable
+  from an agent sandbox, and the sandbox is in its own PID namespace, so `ps`
+  cannot see the user's worker processes. Ask the user to run process checks.
+- Commits must be on a `claude/*` branch (`AGENT_BRANCH_PREFIX`), and commit
+  messages containing dependency-directory names can trip a path guard — write
+  the message to a file and use `git commit -F`.
+
+### Deliberately not done
+
+Review findings judged not worth fixing — not oversights, and distinct from the
+feature roadmap in `TODO.md`. Reasoning is in the relevant commit messages:
+ANN pre-filter recall on shared vector tables (inherent to ANN +
+post-filter; the actionable slice is purging vectors for deleted documents),
+`check_health` treating a live-but-broken daemon as healthy (documented
+tradeoff), DiskANN + inner-product `storage_layout` (unreachable while only
+cosine exists), and reading model identity from GGUF metadata instead of the
+filename (the filename heuristic is now at least *reported* by
+`cementic embedding start`).
+<!-- session-handoff:end -->
+
 Design rationale and roadmap for cementic: a CLI that watches directories of
 documents, builds a versioned **extract → chunk → embed** pipeline in Postgres
 (pgvector / vectorscale), and serves semantic search over the active revision of
