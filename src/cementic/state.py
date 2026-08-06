@@ -127,11 +127,15 @@ class StateManager:
         if not self.state_path.exists():
             return WorkerState()
 
+        # Read as UTF-8 to match save(): under a non-UTF-8 locale a non-ASCII
+        # current_file or watched directory would otherwise raise
+        # UnicodeDecodeError, which is a ValueError and was not caught here.
+        # OSError covers an unreadable file; every caller treats an unusable
+        # state file as "nothing recorded" rather than an error.
         try:
-            with open(self.state_path, "r") as f:
-                data = json.load(f)
+            data = json.loads(self.state_path.read_text(encoding="utf-8"))
             return WorkerState.from_dict(data)
-        except (json.JSONDecodeError, KeyError, TypeError):
+        except (ValueError, OSError, KeyError, TypeError):
             return WorkerState()
 
     def save(self, state: WorkerState) -> None:

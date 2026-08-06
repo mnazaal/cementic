@@ -160,9 +160,14 @@ with `--force` to promote it anyway.
 
 A document that fails to extract, chunk, or embed is recorded as failed and does not block the
 rest of the build from finishing; failed documents are retried automatically the next time you
-run `cementic start`. Deleting a file from a watched directory drops it from search, including
-when it is deleted while it is being indexed. If the embedding runtime becomes unreachable
-mid-build, the affected chunks stay pending and are retried rather than recorded as failed.
+run `cementic start`. Deleting a file from a watched directory drops it from search — while
+cementic is running, including mid-index, and on the next `cementic start` for files removed
+while it was stopped. If the embedding runtime becomes unreachable mid-build, the affected
+chunks stay pending and are retried rather than recorded as failed.
+
+If a background worker hits an error it cannot recover from immediately, it retries with a
+backoff and reports the reason as `last error` in `cementic status` (and in `status --json`),
+so a worker stuck on a persistent problem is visible without reading log files.
 
 Reverting your configuration back to a revision you previously built (for example, rolling back
 a model or chunking change) resumes that revision from its existing artifacts and makes it

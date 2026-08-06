@@ -262,8 +262,13 @@ class IndexConfig(_SectionSettings):
     @field_validator("method")
     @classmethod
     def _validate_method(cls, value: str) -> str:
-        if value not in {"hnsw", "diskann"}:
-            raise ValueError("index method must be hnsw or diskann")
+        # Ask the index-strategy registry rather than repeating its contents, so
+        # adding a method stays a single-entry change as its module claims.
+        from cementic.index_strategies import supported_index_methods
+
+        supported = supported_index_methods()
+        if value not in supported:
+            raise ValueError(f"index method must be one of: {', '.join(sorted(supported))}")
         return value
 
 

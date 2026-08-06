@@ -13,6 +13,7 @@ from cementic.config import (
     load_config_file,
     resolve_config_path,
 )
+from cementic.index_strategies import supported_index_methods
 
 
 class TestConfigFile:
@@ -232,9 +233,14 @@ class TestConfig:
             Config(pipeline={"chunk_size": 0})
 
     def test_index_method_must_be_supported(self):
-        """Index config rejects unknown ANN methods."""
-        with pytest.raises(ValueError, match="hnsw or diskann"):
+        """Index config rejects methods the strategy registry does not provide."""
+        with pytest.raises(ValueError, match="index method must be one of"):
             Config(index={"method": "flat"})
+
+    def test_index_method_accepts_every_registered_method(self):
+        """Validation is driven by the registry, so the two cannot drift."""
+        for method in supported_index_methods():
+            assert Config(index={"method": method}).index.method == method
 
     def test_index_params_must_be_positive(self):
         """Index config rejects non-positive build/query parameters."""

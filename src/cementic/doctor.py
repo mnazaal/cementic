@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Any
 
 import requests
@@ -101,7 +100,7 @@ def collect_doctor_report(config: Config) -> dict[str, Any]:
     model_ok = model_exists or model_auto_download
     checks["model"] = {
         "status": "ok" if model_exists else "warning" if model_auto_download else "fail",
-        "path": str(Path(model_path)),
+        "path": str(model_path),
         "exists": model_exists,
         "auto_download": model_auto_download,
         "url": config.bootstrap.llama_model_url,

@@ -4,6 +4,50 @@
 
 ### Fixed
 
+- **`cementic stop` no longer deadlocks a worker against its own SIGTERM.** The signal
+  handler wrote to the state file, whose lock the main thread was often already holding —
+  most likely during a bulk initial scan. The process hung, `cementic stop` timed out and
+  advised `--force`, and because the deadlocked handler *was* the SIGTERM handler, only
+  SIGKILL could recover it. Handlers now only set the shutdown flag; cleanup runs on the
+  main thread. `cementic stop` during a large directory scan is also responsive now
+  instead of waiting out the whole walk.
+- **A build that produces no vectors no longer wedges in `building` forever.** An empty
+  watch directory, or one where every document failed to extract, reached the ANN index
+  step with no vector table to index; the resulting error was swallowed by the worker's
+  retry loop, so the revision never became promotable and the only evidence was a
+  repeating traceback in a log file.
+- **A failed embedding write-back no longer strands its batch.** Rows claimed as
+  `processing` were never re-picked within a run — unlike the extract and chunk steps —
+  so one failure between claiming and writing back meant the revision could never reach
+  `ready`, with the worker still reporting itself healthy.
+- **Reverting configuration to the currently active revision no longer leaves a phantom
+  build.** The abandoned revision stayed `building` forever, was displayed as in-progress
+  by `cementic status`, and pinned its artifacts on disk permanently.
+- **`cementic status` no longer reports queued work as failures**, and no longer shows
+  100% extracted for files that changed on disk and still owe a re-extraction. Status and
+  the pipeline worker now share one definition of what counts, so they cannot drift.
+- **Worker failures are visible in `cementic status`.** A worker looping on a permanent
+  failure was previously indistinguishable from a healthy idle one; the reason now
+  appears as `last error` and in `--json`.
+- **`cementic status` and `cementic search --json` exit non-zero when they cannot
+  answer.** `status` printed "database not reachable" and exited 0; `search --json`
+  returned empty output and exited 0 for a collection that was never indexed.
+- **A partly-failed `cementic start` cleans up after itself.** It reported failure while
+  leaving the surviving worker running and the supervisor record written, so the next
+  `cementic start` refused with "already running".
+- **Worker startup failures appear in the log `cementic start` names**, rather than in a
+  different file the user was never told about.
+- **Files deleted while cementic was not running now drop out of search.** Deletion was
+  only noticed through a live filesystem event, so such files kept matching queries with
+  a path that no longer existed.
+- **`cementic collection remove` can remove a collection that has revisions but no
+  documents** — what `cementic start` on a directory with no supported files creates.
+  Such collections were invisible to `collection list` and reported as "not found".
+- Watched directories are resolved before being handed to the background workers, so a
+  relative path cannot mean something different in the worker's working directory.
+- A corrupt, unreadable, or non-object supervisor/worker state file no longer aborts
+  `start`/`status`/`stop` with a traceback.
+
 - **Revisions no longer stall after a chunking or extraction change.** The build-completeness
   check counted embeddings by embedding profile alone while counting chunks by chunk profile,
   so a revision that reused an existing embedding model (the common case when only chunking
@@ -42,9 +86,9 @@
 - `cementic start` verifies both workers survived startup and fails with the relevant log path
   instead of reporting success for a worker that exited immediately.
 - Commands run against a reachable database with no cementic schema now print
-  "nothing indexed yet" instead of a raw SQL error, and `cementic status` exits non-zero on
-  failure.
-- `cementic search` distinguishes "no matches" from an unknown or not-yet-indexed collection.
+  "nothing indexed yet" instead of a raw SQL error.
+- `cementic search` distinguishes "no matches" from an unknown or not-yet-indexed
+  collection, in both human-readable and `--json` output.
 - `cementic chunk` reports a one-line error for non-text input instead of a traceback.
 - `cementic status` reports a stopped-but-autostartable embedding runtime as a warning rather
   than "unhealthy", matching `--doctor`.
@@ -56,6 +100,8 @@
 - Unused `pgvector` Python dependency (the extension is used through SQL, never imported).
 - Never-populated `page_start` / `page_end` fields on chunks, and the write-only
   `SourceDocument.error_message` column.
+- A `python -m cementic.pipeline_worker` entry point that duplicated `cementic.runner`
+  while skipping bootstrap and collection-name validation.
 
 ## [0.1.0b1] — 2026-07-01
 

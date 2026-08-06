@@ -727,8 +727,3 @@ class PipelineWorker:
             self._shutdown_signal = None
         self.state_manager.update(daemon_state=DaemonState.STOPPED, pid=None)
         self._logger.info("Pipeline worker stopped")
-
-
-if __name__ == "__main__":
-    worker = PipelineWorker()
-    worker.start()

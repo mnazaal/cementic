@@ -17,7 +17,10 @@ def extracted_document_path(
     extractor_profile_id: int,
 ) -> Path:
     """Return the gzip path for one extracted document artifact."""
-    _ = validate_collection_name(collection)
+    # Use the normalized name, not the raw argument: "  foo  " validates but
+    # would otherwise create a directory whose name does not match the
+    # collection recorded in the database.
+    collection = validate_collection_name(collection)
     root = config.storage.artifacts_path
     if root is None:
         raise RuntimeError("Artifact storage path is not configured")

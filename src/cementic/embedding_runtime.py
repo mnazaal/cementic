@@ -207,10 +207,10 @@ class RemoteEmbeddingClient(EmbeddingProvider):
             raise ValueError(
                 f"embedding count {len(embeddings)} does not match input count {len(texts)}"
             )
-        results: list[list[float] | None] = []
-        for embedding in embeddings:
-            results.append(embedding)
-        return results
+        # The optional element type is part of the EmbeddingProvider contract
+        # (a provider may report per-item failure); this one either returns a
+        # full batch or raises.
+        return list(embeddings)
 
     @property
     def embedding_dim(self) -> int:
@@ -283,7 +283,7 @@ def get_llama_cpp_runtime_client(
         "starting embedding daemon (first search after a restart can take 30s+)...",
         file=sys.stderr,
     )
-    _restart_llama_cpp_daemon_if_needed(config)
+    _stop_mismatched_llama_cpp_daemon(config)
     _start_llama_cpp_daemon(config, spec=runtime_spec)
     _wait_for_daemon_ready(client, timeout_seconds=config.llama_cpp.daemon_start_timeout_seconds)
     return client
@@ -404,8 +404,12 @@ def llama_daemon_status(config: Config) -> str:
     return f"running, pid={pid}" if pid is not None else "stopped"
 
 
-def _restart_llama_cpp_daemon_if_needed(config: Config) -> None:
-    """Stop any existing llama.cpp daemon so a matching runtime can be started."""
+def _stop_mismatched_llama_cpp_daemon(config: Config) -> None:
+    """Stop any existing llama.cpp daemon so a matching runtime can be started.
+
+    Callers reach here only after establishing that no daemon serving the wanted
+    runtime is available, so the stop is unconditional.
+    """
     stop_llama_cpp_runtime(config)
 
 

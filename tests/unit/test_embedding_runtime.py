@@ -12,8 +12,8 @@ from cementic.embedding_runtime import (
     EmbeddingRuntimeSpec,
     RemoteEmbeddingClient,
     _read_daemon_pid_file,
-    _restart_llama_cpp_daemon_if_needed,
     _start_llama_cpp_daemon,
+    _stop_mismatched_llama_cpp_daemon,
     _wait_for_daemon_ready,
     client_is_healthy_or_busy,
     create_provider,
@@ -149,14 +149,14 @@ class TestDaemonLifecycle:
         config = Config()
         config.llama_cpp.daemon_pid_file = temp_dir / "nonexistent.pid"
         # Should not raise
-        _restart_llama_cpp_daemon_if_needed(config)
+        _stop_mismatched_llama_cpp_daemon(config)
 
     def test_restart_invalid_pid_content(self, temp_dir) -> None:
         pid_file = temp_dir / "daemon.pid"
         pid_file.write_text("not-a-pid")
         config = Config()
         config.llama_cpp.daemon_pid_file = pid_file
-        _restart_llama_cpp_daemon_if_needed(config)
+        _stop_mismatched_llama_cpp_daemon(config)
         # Should unlink the invalid pid file
         assert not pid_file.exists()
 
@@ -166,7 +166,7 @@ class TestDaemonLifecycle:
         pid_file.write_text("99999")
         config = Config()
         config.llama_cpp.daemon_pid_file = pid_file
-        _restart_llama_cpp_daemon_if_needed(config)
+        _stop_mismatched_llama_cpp_daemon(config)
         assert not pid_file.exists()
 
     @patch("cementic.embedding_runtime.wait_for_exit", return_value=[])
@@ -180,7 +180,7 @@ class TestDaemonLifecycle:
         pid_file.write_text("12345")
         config = Config()
         config.llama_cpp.daemon_pid_file = pid_file
-        _restart_llama_cpp_daemon_if_needed(config)
+        _stop_mismatched_llama_cpp_daemon(config)
         mock_kill.assert_any_call(12345, 15)  # signal.SIGTERM
         assert not pid_file.exists()
 
@@ -195,7 +195,7 @@ class TestDaemonLifecycle:
         pid_file.write_text("12345")
         config = Config()
         config.llama_cpp.daemon_pid_file = pid_file
-        _restart_llama_cpp_daemon_if_needed(config)
+        _stop_mismatched_llama_cpp_daemon(config)
         mock_kill.assert_any_call(12345, 15)  # signal.SIGTERM
         mock_kill.assert_any_call(12345, 9)   # signal.SIGKILL
         assert not pid_file.exists()
@@ -306,7 +306,7 @@ class TestEmbeddingRuntime:
                 "cementic.embedding_runtime.RemoteEmbeddingClient._list_models",
                 fake_list_models,
             ),
-            patch("cementic.embedding_runtime._restart_llama_cpp_daemon_if_needed") as restart,
+            patch("cementic.embedding_runtime._stop_mismatched_llama_cpp_daemon") as restart,
             patch("cementic.embedding_runtime._start_llama_cpp_daemon") as start,
             patch("cementic.embedding_runtime._wait_for_daemon_ready") as wait,
         ):
@@ -327,7 +327,7 @@ class TestEmbeddingRuntime:
                 return_value=None,
             ),
             patch("cementic.embedding_runtime._daemon_pid_alive", return_value=False),
-            patch("cementic.embedding_runtime._restart_llama_cpp_daemon_if_needed") as restart,
+            patch("cementic.embedding_runtime._stop_mismatched_llama_cpp_daemon") as restart,
             patch("cementic.embedding_runtime._start_llama_cpp_daemon") as start,
             patch("cementic.embedding_runtime._wait_for_daemon_ready") as wait,
             pytest.raises(RuntimeError, match="cementic embedding start"),
@@ -348,7 +348,7 @@ class TestEmbeddingRuntime:
                 return_value=None,
             ),
             patch("cementic.embedding_runtime._daemon_pid_alive", return_value=False),
-            patch("cementic.embedding_runtime._restart_llama_cpp_daemon_if_needed") as restart,
+            patch("cementic.embedding_runtime._stop_mismatched_llama_cpp_daemon") as restart,
             patch("cementic.embedding_runtime._start_llama_cpp_daemon") as start,
             patch("cementic.embedding_runtime._wait_for_daemon_ready") as wait,
         ):
@@ -373,7 +373,7 @@ class TestEmbeddingRuntime:
                 return_value=None,
             ),
             patch("cementic.embedding_runtime._daemon_pid_alive", return_value=False),
-            patch("cementic.embedding_runtime._restart_llama_cpp_daemon_if_needed"),
+            patch("cementic.embedding_runtime._stop_mismatched_llama_cpp_daemon"),
             patch("cementic.embedding_runtime._start_llama_cpp_daemon"),
             patch("cementic.embedding_runtime._wait_for_daemon_ready"),
         ):
@@ -395,7 +395,7 @@ class TestEmbeddingRuntime:
                 return_value=[{"id": "some-other-model"}],
             ),
             patch("cementic.embedding_runtime._daemon_pid_alive", return_value=True),
-            patch("cementic.embedding_runtime._restart_llama_cpp_daemon_if_needed") as restart,
+            patch("cementic.embedding_runtime._stop_mismatched_llama_cpp_daemon") as restart,
             patch("cementic.embedding_runtime._start_llama_cpp_daemon") as start,
             patch("cementic.embedding_runtime._wait_for_daemon_ready") as wait,
         ):
@@ -417,7 +417,7 @@ class TestEmbeddingRuntime:
             ),
             patch("cementic.embedding_runtime._daemon_pid_alive", return_value=True),
             patch("cementic.embedding_runtime._poll_until_ready", return_value=True) as poll,
-            patch("cementic.embedding_runtime._restart_llama_cpp_daemon_if_needed") as restart,
+            patch("cementic.embedding_runtime._stop_mismatched_llama_cpp_daemon") as restart,
             patch("cementic.embedding_runtime._start_llama_cpp_daemon") as start,
         ):
             client = get_llama_cpp_runtime_client(config)
@@ -437,7 +437,7 @@ class TestEmbeddingRuntime:
             ),
             patch("cementic.embedding_runtime._daemon_pid_alive", return_value=True),
             patch("cementic.embedding_runtime._poll_until_ready", return_value=False),
-            patch("cementic.embedding_runtime._restart_llama_cpp_daemon_if_needed") as restart,
+            patch("cementic.embedding_runtime._stop_mismatched_llama_cpp_daemon") as restart,
             patch("cementic.embedding_runtime._start_llama_cpp_daemon") as start,
             pytest.raises(RuntimeError, match="busy"),
         ):
