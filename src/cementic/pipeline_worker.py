@@ -82,6 +82,30 @@ def _try_acquire_pipeline_worker_lock(engine: Any, collection: str) -> Any | Non
     return connection
 
 
+def _release_pipeline_worker_lock(connection: Any | None, collection: str) -> None:
+    """Release the collection's advisory lock, then return the connection.
+
+    ``Connection.close()`` only returns the connection to the pool; a
+    ``pg_advisory_lock`` is bound to the backend session and survives that. The
+    lock did go away when the process exited, so this was harmless in practice
+    -- but the ``finally`` block read as if it released, and because the engine
+    is cached process-wide, a second in-process ``start()`` could get the same
+    pooled backend and see its own lock as someone else's.
+    """
+    if connection is None:
+        return
+    try:
+        connection.execute(
+            text("SELECT pg_advisory_unlock(:lock_key)"),
+            {"lock_key": _pipeline_worker_lock_key(collection)},
+        )
+        connection.commit()
+    except Exception:  # pragma: no cover - the connection may already be dead
+        pass
+    finally:
+        connection.close()
+
+
 @dataclass(frozen=True)
 class PipelineCounts:
     """Immutable counts for checking whether a pipeline revision is complete."""
@@ -318,8 +342,7 @@ class PipelineWorker:
             self._run_processing_loop(revision_id)
         finally:
             try:
-                if worker_lock is not None:
-                    worker_lock.close()
+                _release_pipeline_worker_lock(worker_lock, self.collection)
             finally:
                 self.stop()
 

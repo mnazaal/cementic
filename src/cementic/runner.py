@@ -48,6 +48,12 @@ def run_source_watcher(
         watcher.start(directories, collection=collection)
     except KeyboardInterrupt:
         watcher.stop()
+    except RuntimeError as e:
+        # e.g. every watch directory vanished between `cementic start`'s check
+        # and here. A one-line reason on stderr lands in the background log the
+        # CLI points at; a traceback would not explain anything.
+        console.print(f"[red]Source watcher failed: {e}[/red]")
+        raise typer.Exit(1)
 
 
 @app.command("pipeline-worker")

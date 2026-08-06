@@ -10,7 +10,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
 
 from cementic import pipeline_worker as pipeline_worker_module
@@ -25,7 +25,13 @@ from cementic.db import (
     SourceDocument,
 )
 from cementic.embedding_provider import EmbeddingProvider
-from cementic.pipeline_worker import PipelineWorker, compute_revision_counts
+from cementic.pipeline_worker import (
+    PipelineWorker,
+    _pipeline_worker_lock_key,
+    _release_pipeline_worker_lock,
+    _try_acquire_pipeline_worker_lock,
+    compute_revision_counts,
+)
 from cementic.revisions import promote_revision, requeue_interrupted_artifacts
 from cementic.source_watcher import SourceWatcher
 from tests.integration.test_pg_helpers import cleanup_pg_tables
@@ -889,3 +895,33 @@ class TestPipelineWorkerFullPipeline:
         pipeline.embedding_client = FakeEmbeddingClient()
         result = pipeline._step_embed(99999)
         assert result is False
+
+
+@pytest.mark.pg
+def test_advisory_lock_is_released_not_just_returned_to_the_pool(pg_engine) -> None:
+    """Closing the connection does not release a session advisory lock.
+
+    Connection.close() returns the connection to the pool; a pg_advisory_lock is
+    bound to the backend session and survives it. The lock did go away when the
+    worker process exited, so this was harmless in practice -- but the teardown
+    read as if it released, and the engine is cached process-wide, so a second
+    in-process start() could get the same pooled backend and see its own lock.
+    """
+    key = _pipeline_worker_lock_key("lockprobe")
+
+    def locks_held() -> int:
+        with pg_engine.connect() as conn:
+            return conn.execute(
+                text(
+                    "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' "
+                    "AND ((classid::bigint << 32) | objid::bigint) = :key"
+                ),
+                {"key": key},
+            ).scalar()
+
+    connection = _try_acquire_pipeline_worker_lock(pg_engine, "lockprobe")
+    assert connection is not None
+    assert locks_held() == 1
+
+    _release_pipeline_worker_lock(connection, "lockprobe")
+    assert locks_held() == 0

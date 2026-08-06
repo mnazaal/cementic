@@ -487,12 +487,30 @@ def stop_llama_cpp_runtime(config: Config) -> bool:
         pid_file.unlink(missing_ok=True)
         return False
 
-    os.kill(pid, signal.SIGTERM)
+    # Classic TOCTOU: the liveness check above can pass and the daemon exit
+    # before the signal lands (crash, OOM, a concurrent `embedding stop`).
+    # Unguarded, that turned a normal race into a traceback out of
+    # `cementic embedding stop` -- and out of any search or index that happened
+    # to be restarting the daemon. supervisor.force_kill already handles this.
+    if not _signal_daemon(pid, signal.SIGTERM):
+        pid_file.unlink(missing_ok=True)
+        return False
     remaining = wait_for_exit([pid], timeout_seconds=5.0)
     if remaining:
-        os.kill(pid, signal.SIGKILL)
+        _signal_daemon(pid, signal.SIGKILL)
         wait_for_exit([pid], timeout_seconds=2.0)
     pid_file.unlink(missing_ok=True)
+    return True
+
+
+def _signal_daemon(pid: int, signal_number: int) -> bool:
+    """Send a signal to the daemon, tolerating a process that already exited."""
+    try:
+        os.kill(pid, signal_number)
+    except ProcessLookupError:
+        return False  # already gone; nothing to wait for
+    except PermissionError:
+        return False  # alive but not ours to signal
     return True
 
 

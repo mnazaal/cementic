@@ -12,6 +12,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from sqlalchemy.exc import IntegrityError
 from watchdog.events import DirMovedEvent, FileMovedEvent, FileSystemEvent, FileSystemEventHandler
 from watchdog.observers import Observer
 
@@ -191,17 +192,29 @@ class SourceWatcher:
         event_handler = DocumentEventHandler(self._on_file_detected, self._on_file_deleted)
         self._event_handler = event_handler
         self._watched_roots = []
+        missing: list[str] = []
         for directory in directories:
             path = Path(directory).resolve()
-            if path.exists():
+            if path.is_dir():
                 self._watched_roots.append(path)
                 observer.schedule(event_handler, str(path), recursive=True)
             else:
-                self._logger.error("Watch directory does not exist, skipping: %s", directory)
+                missing.append(directory)
+                self._fatal("Watch directory does not exist: %s", directory)
+        if not self._watched_roots:
+            # Skipping every directory used to be log-only: the watcher still
+            # published RUNNING, survived the startup check, and `cementic
+            # status` showed healthy workers indexing nothing forever. There is
+            # no useful work to do, so fail where the user can see it.
+            raise RuntimeError(
+                "No watchable directories: " + ", ".join(missing) + ". "
+                "Nothing would be indexed."
+            )
         # Start observing *before* the initial scan: the scan hashes every
         # existing file and can take minutes, and events are only delivered
-        # after start(). Registration is idempotent, so double-seeing a file
-        # during the overlap is harmless.
+        # after start(). Double-seeing a file during the overlap is handled by
+        # _register_document's retry, not by idempotence: the insert races the
+        # unique index on (collection, source_path).
         observer.start()
         self.watcher = observer
         for root in self._watched_roots:
@@ -332,20 +345,36 @@ class SourceWatcher:
                 sha256.update(chunk)
         file_hash = sha256.hexdigest()
 
-        with self.Session() as session:
-            document = (
-                session.query(SourceDocument)
-                .filter_by(source_path=file_path, collection=self.collection)
-                .first()
-            )
-            if document is None:
-                document = SourceDocument(source_path=file_path, collection=self.collection)
-                session.add(document)
+        self.state_manager.update(current_file=file_path)
+        # Read-then-insert is not atomic, and the initial scan runs on the main
+        # thread while debounce timers fire on their own. The same file can be
+        # registered twice concurrently: both see no row, both insert, and the
+        # loser hits the unique index on (collection, source_path). That is a
+        # benign race -- the winner registered the file -- but it surfaced as
+        # "Failed to register ..." and a permanently inflated failure count.
+        for attempt in range(2):
+            try:
+                with self.Session() as session:
+                    document = (
+                        session.query(SourceDocument)
+                        .filter_by(source_path=file_path, collection=self.collection)
+                        .first()
+                    )
+                    if document is None:
+                        document = SourceDocument(
+                            source_path=file_path, collection=self.collection
+                        )
+                        session.add(document)
 
-            self.state_manager.update(current_file=file_path)
-            document.file_hash = file_hash
-            document.status = "pending"
-            session.commit()
+                    document.file_hash = file_hash
+                    document.status = "pending"
+                    session.commit()
+                break
+            except IntegrityError:
+                if attempt == 1:
+                    raise
+                # The concurrent insert has committed; the retry now updates it.
+                self._logger.debug("Concurrent registration of %s; retrying", file_path)
 
         state = self.state_manager.load()
         self.state_manager.update(processed_count=state.processed_count + 1, current_file=None)

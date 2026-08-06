@@ -34,6 +34,59 @@ def watcher_db(temp_dir: Path):
     return engine, session_factory, db_path
 
 
+class TestWatchDirectoryPreconditions:
+    """A watcher with nothing to watch must fail, not idle.
+
+    Regression: skipping every directory was log-only, so the watcher published
+    RUNNING, survived `cementic start`'s startup check, and `cementic status`
+    showed healthy workers indexing nothing indefinitely.
+    """
+
+    def test_no_watchable_directory_raises(self, watcher_config: Config, temp_dir: Path) -> None:
+        sw = SourceWatcher(watcher_config)
+        with pytest.raises(RuntimeError, match="No watchable directories"):
+            sw._start_watcher([str(temp_dir / "does-not-exist")])
+
+    def test_a_surviving_directory_is_enough(
+        self, watcher_config: Config, watcher_db, temp_dir: Path
+    ) -> None:
+        _engine, session_factory, _db_path = watcher_db
+        good = temp_dir / "present"
+        good.mkdir()
+        sw = SourceWatcher(watcher_config)
+        sw.Session = session_factory  # _start_watcher reconciles deletions at the end
+        try:
+            sw._start_watcher([str(temp_dir / "gone"), str(good)])
+            assert sw._watched_roots == [good.resolve()]
+        finally:
+            sw.stop()
+
+
+class TestConcurrentRegistration:
+    """The scan thread and debounce timers can register the same file at once."""
+
+    def test_duplicate_registration_updates_instead_of_failing(
+        self, watcher_config: Config, watcher_db, temp_dir: Path
+    ) -> None:
+        """Regression: read-then-insert raced the unique index on
+        (collection, source_path), and the loser's IntegrityError surfaced as
+        "Failed to register ..." plus a permanently inflated failure count."""
+        _engine, session_factory, _db_path = watcher_db
+        doc = temp_dir / "paper.md"
+        doc.write_text("content", encoding="utf-8")
+
+        sw = SourceWatcher(watcher_config)
+        sw.Session = session_factory
+        sw.collection = "docs"
+        sw._watched_roots = [temp_dir.resolve()]
+
+        sw._register_document(str(doc))
+        sw._register_document(str(doc))  # same file again, as the overlap does
+
+        with session_factory() as session:
+            assert session.query(SourceDocument).count() == 1
+
+
 class TestOfflineDeletionReconciliation:
     """Files deleted while cementic was stopped must drop out of search.
 

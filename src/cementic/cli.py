@@ -46,7 +46,7 @@ from cementic.embedding_runtime import (
 )
 from cementic.extract import extract_document
 from cementic.search import MAX_SEARCH_RESULTS, Searcher
-from cementic.state import StateManager
+from cementic.state import DaemonState, StateManager
 from cementic.status_service import (
     build_supervisor_status,
     check_health,
@@ -371,6 +371,31 @@ def _terminate_managed(processes: list[ManagedProcess]) -> None:
     remaining = wait_for_exit(pids, timeout_seconds=5.0)
     if remaining:
         force_kill(remaining)
+
+
+def _clear_worker_state_files() -> None:
+    """Mark both workers stopped after they were killed.
+
+    A worker writes `stopped` from its own shutdown path, which never runs under
+    SIGKILL. Without this, `status --verbose` reported "stopped, state=running,
+    pid=<dead pid>" indefinitely -- a contradiction in the same line. The
+    headline worker state was already correct (it checks liveness), so this
+    aligns the detail with it.
+    """
+    config = _get_config()
+    for state_path in (
+        config.source_watcher.state_path,
+        config.pipeline_worker.state_path,
+    ):
+        if state_path is None:
+            continue
+        try:
+            StateManager(state_path).update(
+                daemon_state=DaemonState.STOPPED, pid=None, start_token=None, current_file=None
+            )
+        except OSError:
+            continue
+
 
 
 def _wait_for_worker_startup(
@@ -1057,6 +1082,7 @@ def stop_background(
 
     if not remaining:
         _get_supervisor_state_path().unlink(missing_ok=True)
+        _clear_worker_state_files()
         if signaled_pids:
             console.print(f"stopped {len(signaled_pids)} process(es)")
         else:
@@ -1069,8 +1095,9 @@ def stop_background(
         killed = force_kill(remaining)
         time.sleep(0.5)
         still_alive = [pid for pid in killed if is_pid_running(pid)]
-        if _get_supervisor_state_path().exists():
-            _get_supervisor_state_path().unlink()
+        _get_supervisor_state_path().unlink(missing_ok=True)
+        if not still_alive:
+            _clear_worker_state_files()
         if still_alive:
             console.print(
                 f"force killed {len(remaining) - len(still_alive)} process(es); "
