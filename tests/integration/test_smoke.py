@@ -25,7 +25,10 @@ from cementic.revisions import promote_revision
 from cementic.search import Searcher
 from cementic.source_watcher import SourceWatcher
 
-PDF_FIXTURE = Path("/u/71/ibrahin1/unix/research-papers/Licklider-1960-Man-Computer Symbiosis.pdf")
+#: Generated on demand by tests/fixtures/generate_pdfs.py (see conftest's
+#: autouse fixture). Its text is built around FakeEmbeddingClient.TERMS below,
+#: so the search assertion is meaningful.
+PDF_FIXTURE = Path(__file__).resolve().parent.parent / "fixtures" / "test_doc_a.pdf"
 
 
 class FakeEmbeddingClient(EmbeddingProvider):
@@ -84,9 +87,6 @@ def _run_pipeline_once(daemon: PipelineWorker, revision_id: int) -> bool:
 def test_postgres_smoke_build_search_and_promote(
     temp_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    if not PDF_FIXTURE.exists():  # pragma: no cover - environment dependent
-        pytest.skip(f"Smoke test PDF not found: {PDF_FIXTURE}")
-
     config = _config_for(temp_dir)
     _require_postgres(config)
 
@@ -159,7 +159,7 @@ def test_postgres_smoke_build_search_and_promote(
         results = searcher.search("computer symbiosis", top_k=5, collections=[collection])
 
         assert results, "search returned no results for an indexed collection"
-        assert any("Licklider" in result["source_path"] for result in results)
+        assert any(PDF_FIXTURE.name in result["source_path"] for result in results)
     finally:
         with session_factory() as session:
             doc_ids = [
@@ -176,3 +176,13 @@ def test_postgres_smoke_build_search_and_promote(
                     synchronize_session=False
                 )
             session.commit()
+        # This test creates its own schema rather than using the pg_engine
+        # fixture, so it also owns the per-profile vector tables it produced.
+        # They carry a foreign key to chunks_v2 and would otherwise block the
+        # session-scoped teardown's drop_all.
+        with engine.connect() as conn:
+            for (table_name,) in conn.execute(
+                text("SELECT tablename FROM pg_tables WHERE tablename LIKE 'embedding_vectors_p%'")
+            ).all():
+                conn.execute(text(f"DROP TABLE IF EXISTS {table_name} CASCADE"))
+            conn.commit()

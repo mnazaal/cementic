@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import os
 import signal
+import sys
 import threading
 import zlib
 from dataclasses import dataclass
@@ -235,7 +236,7 @@ class PipelineWorker:
             and state.pid
             and is_managed_process_alive(state.pid, state.start_token)
         ):
-            self._logger.error("Pipeline worker already running with PID %s", state.pid)
+            self._fatal("Pipeline worker already running with PID %s", state.pid)
             return
 
         engine = get_engine(self.config.database.url)
@@ -243,7 +244,7 @@ class PipelineWorker:
         self.Session = get_session_factory(engine)
         worker_lock = _try_acquire_pipeline_worker_lock(engine, self.collection)
         if engine.dialect.name == "postgresql" and worker_lock is None:
-            self._logger.error(
+            self._fatal(
                 "Pipeline worker already holds DB lock for collection=%s", self.collection
             )
             return
@@ -251,10 +252,10 @@ class PipelineWorker:
         try:
             self.embedding_client = self._create_embedding_client()
             if not self.embedding_client.health_check():
-                self._logger.error("Embedding provider health check failed")
+                self._fatal("Embedding provider health check failed")
                 return
         except Exception as error:
-            self._logger.error("Failed to initialize embedding provider: %s", error)
+            self._fatal("Failed to initialize embedding provider: %s", error)
             return
 
         self.state_manager.update(
@@ -287,6 +288,16 @@ class PipelineWorker:
                     worker_lock.close()
             finally:
                 self.stop()
+
+    def _fatal(self, message: str, *args: Any) -> None:
+        """Log a fatal startup reason and echo it to stderr.
+
+        The module logger writes to its own file, but `cementic start` points the
+        user at the spawned process's stdout/stderr log. Without this echo the
+        user is sent to a file that cannot explain why the worker exited.
+        """
+        self._logger.error(message, *args)
+        print(message % args if args else message, file=sys.stderr, flush=True)
 
     def _run_processing_loop(self, revision_id: int) -> None:
         reported_error = False

@@ -98,15 +98,33 @@ def _compose_postgres():
         subprocess.run([*compose, "down"], check=False)
 
 
+def _drop_vector_tables(engine) -> None:
+    """Drop the dynamically-created per-profile vector tables.
+
+    They are not part of ``Base.metadata`` but carry a foreign key to
+    ``chunks_v2``, so leaving one behind makes ``drop_all`` fail with
+    DependentObjectsStillExist and takes the whole session down with it.
+    """
+    with engine.connect() as conn:
+        names = conn.execute(
+            text("SELECT tablename FROM pg_tables WHERE tablename LIKE 'embedding_vectors_p%'")
+        ).all()
+        for (table_name,) in names:
+            conn.execute(text(f"DROP TABLE IF EXISTS {table_name} CASCADE"))
+        conn.commit()
+
+
 @pytest.fixture(scope="session")
 def pg_engine(_compose_postgres):
     """Session-scoped PostgreSQL engine backed by the compose-managed service."""
     if not _pg_reachable():
         pytest.skip("PostgreSQL not reachable")
     engine = create_engine(_pg_url(), connect_args={"connect_timeout": 2})
+    _drop_vector_tables(engine)
     Base.metadata.drop_all(engine)
     create_tables(engine)
     yield engine
+    _drop_vector_tables(engine)
     Base.metadata.drop_all(engine)
     engine.dispose()
 

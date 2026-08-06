@@ -358,6 +358,34 @@ class TestPipelineWorkerStart:
                         worker.start("testcol")
 
 
+class TestFatalStartupReasonsReachTheBackgroundLog:
+    """Startup failures must land in the log `cementic start` names.
+
+    Regression: these paths logged to the module logger's own file
+    (pipeline_worker.log) and exited, while `cementic start` told the user to
+    look in pipeline-background.log, which captures stdout/stderr only and was
+    therefore empty.
+    """
+
+    def test_fatal_writes_to_stderr(self, temp_dir: Path, capsys) -> None:
+        config = Config()
+        config.pipeline_worker.log_file = temp_dir / "worker.log"
+        worker = PipelineWorker(config)
+
+        worker._fatal("Embedding provider health check failed")
+
+        assert "Embedding provider health check failed" in capsys.readouterr().err
+
+    def test_fatal_interpolates_arguments(self, temp_dir: Path, capsys) -> None:
+        config = Config()
+        config.pipeline_worker.log_file = temp_dir / "worker.log"
+        worker = PipelineWorker(config)
+
+        worker._fatal("Pipeline worker already running with PID %s", 4321)
+
+        assert "already running with PID 4321" in capsys.readouterr().err
+
+
 class TestWorkerProcessingLoop:
     """Tests for PipelineWorker._run_processing_loop()."""
 

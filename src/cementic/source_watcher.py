@@ -6,6 +6,7 @@ import hashlib
 import logging
 import os
 import signal
+import sys
 import threading
 from collections.abc import Callable
 from pathlib import Path
@@ -139,7 +140,7 @@ class SourceWatcher:
             and state.pid
             and is_managed_process_alive(state.pid, state.start_token)
         ):
-            self._logger.error("Source watcher already running with PID %s", state.pid)
+            self._fatal("Source watcher already running with PID %s", state.pid)
             return
 
         engine = get_engine(self.config.database.url)
@@ -175,6 +176,16 @@ class SourceWatcher:
             # the watcher is RUNNING.
             self.stop()
 
+    def _fatal(self, message: str, *args: Any) -> None:
+        """Log a fatal startup reason and echo it to stderr.
+
+        The module logger writes to its own file, but `cementic start` points the
+        user at the spawned process's stdout/stderr log. Without this echo the
+        user is sent to a file that cannot explain why the worker exited.
+        """
+        self._logger.error(message, *args)
+        print(message % args if args else message, file=sys.stderr, flush=True)
+
     def _start_watcher(self, directories: list[str]) -> None:
         observer = Observer()
         event_handler = DocumentEventHandler(self._on_file_detected, self._on_file_deleted)
@@ -197,6 +208,49 @@ class SourceWatcher:
             if self._shutdown_event.is_set():
                 return
             self._scan_existing(root)
+        if not self._shutdown_event.is_set():
+            self._reconcile_deletions()
+
+    def _reconcile_deletions(self) -> None:
+        """Mark documents whose files vanished while cementic was not running.
+
+        Deletion is otherwise only noticed through a live filesystem event, so a
+        file removed between runs kept ``status="pending"`` forever and kept
+        matching searches with a path that no longer exists. Scoped to the
+        currently-watched roots so documents indexed from other directories (or
+        other collections) are never touched.
+        """
+        if not self._watched_roots:
+            return
+        with self.Session() as session:
+            documents = (
+                session.query(SourceDocument)
+                .filter(
+                    SourceDocument.collection == self.collection,
+                    SourceDocument.status != "deleted",
+                )
+                .all()
+            )
+            missing = [
+                document
+                for document in documents
+                if self._is_under_watched_roots(document.source_path)
+                and not Path(document.source_path).exists()
+            ]
+            # Read the paths before committing: ORM attributes expire on commit
+            # and these instances are detached once the session closes.
+            missing_paths = [document.source_path for document in missing]
+            for document in missing:
+                document.status = "deleted"
+                document.file_hash = None
+            if missing:
+                session.commit()
+        for source_path in missing_paths:
+            self._logger.info(
+                "Marked document deleted while stopped: %s (collection=%s)",
+                source_path,
+                self.collection,
+            )
 
     def _scan_existing(self, directory: Path) -> None:
         extensions = supported_extensions()
@@ -226,6 +280,15 @@ class SourceWatcher:
             self._mark_document_deleted(file_path)
         except Exception as error:
             self._logger.error("Failed to mark deleted %s: %s", file_path, error)
+
+    def _is_under_watched_roots(self, file_path: str) -> bool:
+        """Whether a stored path lies under a root this run is watching.
+
+        Deliberately does not resolve: the path is already stored resolved, and
+        the file may no longer exist.
+        """
+        path = Path(file_path)
+        return any(path.is_relative_to(root) for root in self._watched_roots)
 
     def _normalize_watched_path(self, file_path: str, *, must_exist: bool) -> str | None:
         path = Path(file_path)

@@ -34,6 +34,74 @@ def watcher_db(temp_dir: Path):
     return engine, session_factory, db_path
 
 
+class TestOfflineDeletionReconciliation:
+    """Files deleted while cementic was stopped must drop out of search.
+
+    Regression: deletion was only noticed through a live filesystem event, so a
+    file removed between runs kept status="pending" forever and kept matching
+    searches with a source_path that no longer existed.
+    """
+
+    def test_missing_file_is_marked_deleted_on_startup(
+        self, watcher_config: Config, watcher_db, temp_dir: Path
+    ) -> None:
+        _engine, session_factory, _db_path = watcher_db
+        watched = temp_dir / "docs"
+        watched.mkdir()
+        gone = watched / "gone.md"
+        gone.write_text("content", encoding="utf-8")
+        kept = watched / "kept.md"
+        kept.write_text("content", encoding="utf-8")
+
+        sw = SourceWatcher(watcher_config)
+        sw.Session = session_factory
+        sw.collection = "docs"
+        sw._watched_roots = [watched.resolve()]
+        sw._register_document(str(gone))
+        sw._register_document(str(kept))
+
+        gone.unlink()  # removed while cementic was not running
+        sw._reconcile_deletions()
+
+        with session_factory() as session:
+            by_path = {
+                Path(doc.source_path).name: doc.status
+                for doc in session.query(SourceDocument).all()
+            }
+        assert by_path["gone.md"] == "deleted"
+        assert by_path["kept.md"] == "pending"
+
+    def test_documents_outside_the_watched_roots_are_untouched(
+        self, watcher_config: Config, watcher_db, temp_dir: Path
+    ) -> None:
+        """Only this run's roots are reconciled.
+
+        A document indexed from a directory this run is not watching must not be
+        marked deleted merely because it is not visible here.
+        """
+        _engine, session_factory, _db_path = watcher_db
+        watched = temp_dir / "docs"
+        watched.mkdir()
+        other = temp_dir / "elsewhere"
+        other.mkdir()
+        outside = other / "outside.md"
+        outside.write_text("content", encoding="utf-8")
+
+        sw = SourceWatcher(watcher_config)
+        sw.Session = session_factory
+        sw.collection = "docs"
+        sw._watched_roots = [other.resolve()]
+        sw._register_document(str(outside))
+
+        outside.unlink()
+        sw._watched_roots = [watched.resolve()]  # a run watching a different root
+        sw._reconcile_deletions()
+
+        with session_factory() as session:
+            document = session.query(SourceDocument).one()
+        assert document.status == "pending"
+
+
 class TestSourceWatcherLifecycle:
     """Tests for SourceWatcher thread lifecycle."""
 
