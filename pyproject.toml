@@ -36,7 +36,6 @@ dependencies = [
     "pydantic-settings>=2.0",
     "sqlalchemy>=2.0",
     "psycopg2-binary>=2.9.0",
-    "pgvector>=0.2.0",
     "watchdog>=4.0",
     "pymupdf4llm>=0.0.5",
     "pymupdf-layout>=1.27.1",

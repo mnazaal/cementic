@@ -96,12 +96,6 @@ def index_access_method(conn: Connection, index_name: str) -> str | None:
     return str(row) if row is not None else None
 
 
-def ensure_vector_table(engine: Engine, profile_id: int, dim: int) -> None:
-    """Create the profile's vector table if it does not exist."""
-    with engine.begin() as conn:
-        conn.execute(text(create_table_sql(profile_id, dim)))
-
-
 def drop_vector_table(engine: Engine, profile_id: int) -> None:
     """Drop the profile's vector table if it exists."""
     with engine.begin() as conn:

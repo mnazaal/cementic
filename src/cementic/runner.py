@@ -38,10 +38,14 @@ def run_source_watcher(
 
     try:
         bootstrapper.ensure_for_convert()
-        watcher.start(directories, collection=collection)
     except RuntimeError as e:
         console.print(f"[red]Bootstrap failed: {e}[/red]")
         raise typer.Exit(1)
+
+    try:
+        # start() installs SIGINT/SIGTERM handlers and returns on shutdown; this
+        # catches a Ctrl-C landing in the window before they are installed.
+        watcher.start(directories, collection=collection)
     except KeyboardInterrupt:
         watcher.stop()
 
@@ -68,10 +72,14 @@ def run_pipeline_worker(
 
     try:
         bootstrapper.ensure_for_index()
-        worker.start(collection=collection)
     except RuntimeError as e:
         console.print(f"[red]Bootstrap failed: {e}[/red]")
         raise typer.Exit(1)
+
+    try:
+        # start() installs SIGINT/SIGTERM handlers and returns on shutdown; this
+        # catches a Ctrl-C landing in the window before they are installed.
+        worker.start(collection=collection)
     except KeyboardInterrupt:
         worker.stop()
 

@@ -43,7 +43,6 @@ def test_convert_uses_layout_and_disables_header_footer(temp_dir: Path) -> None:
     assert result == "markdown"
     mock_md.assert_called_once_with(
         str(pdf_path),
-        pages=None,
         header=False,
         footer=False,
         use_ocr=True,
@@ -66,7 +65,6 @@ def test_convert_without_rapidocr_uses_default_ocr(temp_dir: Path) -> None:
     assert result == "markdown"
     mock_md.assert_called_once_with(
         str(pdf_path),
-        pages=None,
         header=False,
         footer=False,
         use_ocr=True,

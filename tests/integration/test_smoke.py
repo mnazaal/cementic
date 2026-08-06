@@ -105,8 +105,12 @@ def test_postgres_smoke_build_search_and_promote(
     pipeline.collection = collection
     pipeline.embedding_client = FakeEmbeddingClient()
     monkeypatch.setattr(pipeline.state_manager, "update", lambda **kwargs: None)
+    # Signature must match search._create_embedding_provider(config_json, config):
+    # a mismatched patch raises TypeError inside search and silently voids the
+    # search assertion below.
     monkeypatch.setattr(
-        "cementic.search._create_embedding_provider", lambda config_json: FakeEmbeddingClient()
+        "cementic.search._create_embedding_provider",
+        lambda config_json, config: FakeEmbeddingClient(),
     )
 
     try:
@@ -151,14 +155,11 @@ def test_postgres_smoke_build_search_and_promote(
         assert chunks > 0
         assert active_revisions > 0
 
-        try:
-            searcher = Searcher(config)
-            results = searcher.search("computer symbiosis", top_k=5, collections=[collection])
-        except Exception:  # pragma: no cover - backend/environment dependent
-            results = []
+        searcher = Searcher(config)
+        results = searcher.search("computer symbiosis", top_k=5, collections=[collection])
 
-        if results:
-            assert any("Licklider" in result["source_path"] for result in results)
+        assert results, "search returned no results for an indexed collection"
+        assert any("Licklider" in result["source_path"] for result in results)
     finally:
         with session_factory() as session:
             doc_ids = [

@@ -30,11 +30,7 @@ def _get_rapidocr_api() -> Any | None:
         return None
 
 
-def extract_pdf_markdown(
-    pdf_path: str,
-    pages: tuple[int, int] | None = None,
-    use_ocr: bool = True,
-) -> str:
+def extract_pdf_markdown(pdf_path: str, use_ocr: bool = True) -> str:
     """Extract PDF content as Markdown using pymupdf4llm.
 
     Backend selection happens upstream in ``extractor_for`` (via the
@@ -43,7 +39,7 @@ def extract_pdf_markdown(
 
     Args:
         pdf_path: Path to PDF file
-        pages: Optional tuple of (start_page, end_page) for partial conversion
+        use_ocr: Whether to run OCR over the pages
 
     Returns:
         Markdown content as string
@@ -66,7 +62,6 @@ def extract_pdf_markdown(
 
     md_text = pymupdf4llm.to_markdown(
         str(path),
-        pages=pages,
         header=False,
         footer=False,
         **ocr_kwargs,
