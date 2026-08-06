@@ -46,8 +46,9 @@ class SourceDocument(Base):
     collection: Mapped[str] = mapped_column(String(100), default="default", nullable=False)
     source_path: Mapped[str] = mapped_column(String, nullable=False)
     file_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    #: "pending" (present) or "deleted" (removed from a watched directory).
+    #: Per-artifact progress/error state lives on ExtractedDocument et al.
     status: Mapped[str] = mapped_column(String(20), default="pending", nullable=False)
-    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(default=utc_now, onupdate=utc_now)
 
@@ -185,8 +186,6 @@ class Chunk(Base):
     )
     chunk_index: Mapped[int] = mapped_column(Integer, nullable=False)
     content: Mapped[str] = mapped_column(Text, nullable=False)
-    page_start: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    page_end: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(default=utc_now, onupdate=utc_now)
 

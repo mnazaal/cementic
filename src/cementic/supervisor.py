@@ -43,32 +43,55 @@ def managed_process_start_token(record: dict[str, object]) -> str | None:
     return token if isinstance(token, str) else None
 
 
-def is_pid_running(pid: int) -> bool:
-    """Check whether a PID is currently running."""
-    try:
-        os.kill(pid, 0)
-        return True
-    except (ProcessLookupError, OSError):
-        return False
+def _proc_stat_fields(pid: int) -> list[str] | None:
+    """Fields of ``/proc/<pid>/stat`` from field 3 (state) onward, or None.
 
-
-def process_start_token(pid: int) -> str | None:
-    """Return a stable per-process start-time token, or None if unavailable.
-
-    Reads field 22 (``starttime``) of ``/proc/<pid>/stat`` on Linux. The comm
-    field (2) may contain spaces and parentheses, so we split after the final
-    ``)`` before counting fields. Returns None on any platform without ``/proc``
-    or if the process is gone, so callers degrade to a PID-only check.
+    The comm field (2) may contain spaces and parentheses, so we split after the
+    final ``)``. Returns None on any platform without ``/proc`` or if the
+    process is gone, so callers degrade to a PID-only check.
     """
     try:
         stat = Path(f"/proc/{pid}/stat").read_text()
     except (OSError, ValueError):
         return None
     try:
-        after_comm = stat[stat.rindex(")") + 2 :]
+        return stat[stat.rindex(")") + 2 :].split()
+    except ValueError:
+        return None
+
+
+def is_pid_running(pid: int) -> bool:
+    """Check whether a PID belongs to a live process.
+
+    A zombie (exited but not yet reaped by its parent) still answers
+    ``kill(pid, 0)``, so a plain signal probe reports a finished worker as
+    running -- which would make ``cementic stop`` wait out its full timeout and
+    then tell the user to ``--force`` a process that already exited. Detached
+    workers are reparented on CLI exit and are reaped late (or never, under an
+    init that does not reap), so this is the common case, not a corner one.
+    """
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    fields = _proc_stat_fields(pid)
+    if fields is None:
+        return True  # no /proc: fall back to the signal probe's answer
+    return fields[0] != "Z" if fields else True
+
+
+def process_start_token(pid: int) -> str | None:
+    """Return a stable per-process start-time token, or None if unavailable.
+
+    Reads field 22 (``starttime``) of ``/proc/<pid>/stat`` on Linux.
+    """
+    fields = _proc_stat_fields(pid)
+    if fields is None:
+        return None
+    try:
         # After the comm field, index 0 is field 3 (state); starttime is field 22.
-        return after_comm.split()[19]
-    except (ValueError, IndexError):
+        return fields[19]
+    except IndexError:
         return None
 
 
@@ -102,9 +125,12 @@ def load_supervisor_state(state_path: Path) -> SupervisorState:
 
 
 def save_supervisor_state(state_path: Path, state: SupervisorState) -> None:
-    """Persist background supervisor state."""
+    """Persist background supervisor state atomically (a concurrent ``status``
+    must never read a torn file)."""
     state_path.parent.mkdir(parents=True, exist_ok=True)
-    state_path.write_text(json.dumps(state, indent=2))
+    tmp_path = state_path.with_name(f".{state_path.name}.tmp")
+    tmp_path.write_text(json.dumps(state, indent=2))
+    os.replace(tmp_path, state_path)
 
 
 def spawn_detached(command: list[str], log_file: Path) -> int:
@@ -139,9 +165,11 @@ def force_kill(pids: list[int]) -> list[int]:
     for pid in pids:
         try:
             os.kill(pid, 9)
-        except (ProcessLookupError, OSError):
-            pass
-        else:
-            if is_pid_running(pid):
-                remaining.append(pid)
+        except ProcessLookupError:
+            continue  # already gone
+        except OSError:
+            remaining.append(pid)  # e.g. EPERM: alive but not ours to kill
+            continue
+        if is_pid_running(pid):
+            remaining.append(pid)
     return remaining

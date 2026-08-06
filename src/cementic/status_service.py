@@ -17,10 +17,10 @@ from cementic.db import (
     get_engine,
     get_session_factory,
 )
+from cementic.revisions import BUILDING_STATUSES, get_active_revision
 from cementic.state import StateManager, WorkerState
 from cementic.supervisor import (
     is_managed_process_alive,
-    is_pid_running,
     managed_process_pid,
     managed_process_start_token,
 )
@@ -118,7 +118,9 @@ def build_worker_status(state: WorkerState) -> WorkerStatus:
     if not isinstance(watched_directories, list):
         watched_directories = [str(watched_directories)]
 
-    running = bool(state.pid and is_pid_running(state.pid))
+    # Token-checked liveness: a recycled PID after a force-kill must not show
+    # as "running".
+    running = bool(state.pid and is_managed_process_alive(state.pid, state.start_token))
     return WorkerStatus(
         state=daemon_state_text(state.daemon_state),
         pid=str(state.pid) if state.pid else "N/A",
@@ -296,9 +298,14 @@ def load_pipeline_status_bulk(config: Config, collections: list[str]) -> dict[st
                 .all()
             }
 
+            # Scope through the revision's chunk chain (like total_chunks): the
+            # same embedding profile can be shared with an older revision's
+            # chunks, and counting those would overstate progress (>100%).
             embedding_conditions = [
                 and_(
                     SourceDocument.collection == collection,
+                    ExtractedDocument.extractor_profile_id == revision.extractor_profile_id,
+                    ChunkedDocument.chunk_profile_id == revision.chunk_profile_id,
                     ChunkEmbedding.embedding_profile_id == revision.embedding_profile_id,
                 )
                 for collection, revision in targets
@@ -315,6 +322,10 @@ def load_pipeline_status_bulk(config: Config, collections: list[str]) -> dict[st
                 )
                 .select_from(ChunkEmbedding)
                 .join(Chunk, ChunkEmbedding.chunk_id == Chunk.id)
+                .join(ChunkedDocument, Chunk.chunked_document_id == ChunkedDocument.id)
+                .join(
+                    ExtractedDocument, ChunkedDocument.extracted_document_id == ExtractedDocument.id
+                )
                 .join(SourceDocument, Chunk.document_id == SourceDocument.id)
                 .filter(SourceDocument.status != "deleted", or_(*embedding_conditions))
                 .group_by(SourceDocument.collection, ChunkEmbedding.status)
@@ -405,17 +416,12 @@ def load_file_progress(config: Config, collection: str) -> list[FileProgress]:
             session.query(PipelineRevision)
             .filter(
                 PipelineRevision.collection == collection,
-                PipelineRevision.status.in_(["building", "ready"]),
+                PipelineRevision.status.in_(BUILDING_STATUSES),
             )
             .order_by(PipelineRevision.id.desc())
             .first()
         )
-        active_revision = (
-            session.query(PipelineRevision)
-            .filter_by(collection=collection, status="active")
-            .order_by(PipelineRevision.id.desc())
-            .first()
-        )
+        active_revision = get_active_revision(session, collection)
         target_revision = _select_target_revision(building_revision, active_revision)
 
         if target_revision is None:

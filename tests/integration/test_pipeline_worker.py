@@ -13,6 +13,7 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
+from cementic import pipeline_worker as pipeline_worker_module
 from cementic.config import Config
 from cementic.db import (
     Base,
@@ -25,7 +26,7 @@ from cementic.db import (
 )
 from cementic.embedding_provider import EmbeddingProvider
 from cementic.pipeline_worker import PipelineWorker, compute_revision_counts
-from cementic.revisions import requeue_interrupted_artifacts
+from cementic.revisions import promote_revision, requeue_interrupted_artifacts
 from cementic.source_watcher import SourceWatcher
 from tests.integration.test_pg_helpers import cleanup_pg_tables
 
@@ -435,6 +436,220 @@ class TestTerminalFailuresAndDeletedDocs:
             assert session.query(ExtractedDocument).filter_by(status="pending").count() == 1
 
 
+class TestRevisionCompletionScoping:
+    """A revision must settle even when it shares profiles with an older one.
+
+    These are the wedge bugs: the completeness check compares counts drawn from
+    differently-scoped queries, so a revision that has actually finished never
+    satisfies the equality and the worker polls forever without ever reaching
+    ``ready`` (so `collection promote` reports "no ready revision").
+    """
+
+    def test_chunk_size_change_reaching_ready_with_shared_embedding_profile(
+        self, pg_setup, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Change chunking only: the new revision reuses the embedding profile.
+
+        Regression: embedding counts were scoped by embedding profile alone, so
+        the *old* revision's done embeddings were counted against the new
+        revision's chunk total and `done == total_chunks` was never true.
+        """
+        config, session_factory, pdf_fixtures_dir = pg_setup
+        collection = "test_chunk_change"
+
+        pipeline, source_watcher = _setup_worker(config, session_factory, collection, monkeypatch)
+        pipeline.embedding_client = FakeEmbeddingClient()
+        source_watcher._register_document(str(pdf_fixtures_dir / "test_doc_a.pdf"))
+
+        first_id = pipeline._ensure_target_revision()
+        _run_pipeline_until_idle(pipeline, first_id)
+        with session_factory() as session:
+            first = session.get(PipelineRevision, first_id)
+            assert first is not None and first.status == "ready"
+            # Promote so the old revision stays active (its chunks/embeddings
+            # are kept rather than pruned) -- the situation that triggers this.
+            promote_revision(session, collection, first, config=config)
+            session.commit()
+
+        # Same embedding model, different chunking.
+        config.pipeline.chunk_size = 32
+        config.pipeline.chunk_overlap = 8
+        second_id = pipeline._ensure_target_revision()
+        assert second_id != first_id
+
+        _run_pipeline_until_idle(pipeline, second_id)
+
+        with session_factory() as session:
+            second = session.get(PipelineRevision, second_id)
+            assert second is not None
+            assert second.embedding_profile_id == first.embedding_profile_id
+            assert second.status == "ready"
+
+    def test_chunk_failure_after_reextraction_still_reaches_ready(
+        self, sqlite_setup, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A failed chunking is counted against the extraction it belongs to.
+
+        Regression: ``chunked_failed`` was not scoped by ``source_content_hash``
+        while ``chunked_done`` was, so a failed chunking could never satisfy
+        ``chunked_done + chunked_failed == extracted_done``.
+        """
+        config, session_factory, pdf_fixtures_dir = sqlite_setup
+        collection = "test_chunk_failure"
+
+        pipeline, source_watcher = _setup_worker(config, session_factory, collection, monkeypatch)
+        pipeline.embedding_client = FakeEmbeddingClient()
+        source_watcher._register_document(str(pdf_fixtures_dir / "test_doc_a.pdf"))
+
+        revision_id = pipeline._ensure_target_revision()
+        pipeline._step_extract(revision_id)
+
+        # Break the artifact so chunking fails for this extraction.
+        with session_factory() as session:
+            extracted = session.query(ExtractedDocument).filter_by(status="done").one()
+            extracted.artifact_path = "/nonexistent/artifact.md.gz"
+            session.commit()
+
+        _run_pipeline_until_idle(pipeline, revision_id)
+
+        with session_factory() as session:
+            revision = session.get(PipelineRevision, revision_id)
+            assert revision is not None
+            chunked = session.query(ChunkedDocument).one()
+            assert chunked.status == "failed"
+            # The failure is terminal, and the build still settles.
+            assert revision.status == "ready"
+
+    def test_revision_counts_ignore_other_revisions_embeddings(
+        self, pg_setup, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """compute_revision_counts must not count out-of-chain embeddings."""
+        config, session_factory, pdf_fixtures_dir = pg_setup
+        collection = "test_counts_scope"
+
+        pipeline, source_watcher = _setup_worker(config, session_factory, collection, monkeypatch)
+        pipeline.embedding_client = FakeEmbeddingClient()
+        source_watcher._register_document(str(pdf_fixtures_dir / "test_doc_a.pdf"))
+
+        first_id = pipeline._ensure_target_revision()
+        _run_pipeline_until_idle(pipeline, first_id)
+        with session_factory() as session:
+            first = session.get(PipelineRevision, first_id)
+            promote_revision(session, collection, first, config=config)
+            session.commit()
+
+        config.pipeline.chunk_size = 32
+        config.pipeline.chunk_overlap = 8
+        second_id = pipeline._ensure_target_revision()
+        _run_pipeline_until_idle(pipeline, second_id)
+
+        with session_factory() as session:
+            second = session.get(PipelineRevision, second_id)
+            counts = compute_revision_counts(session, collection, second)
+            # Every count belongs to this revision's own chunk chain.
+            assert counts.done_embeddings == counts.total_chunks
+            assert counts.total_chunks > 0
+
+
+class TestRevisionRollback:
+    """Reverting config to a previously built revision must rebuild/republish it."""
+
+    def test_reverting_config_resurrects_retired_revision(
+        self, pg_setup, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Regression: a reverted-to retired revision stayed 'retired' forever.
+
+        ``mark_revision_ready`` only promotes ``building`` revisions, so the
+        pipeline had nothing to do and nothing to promote -- silently stuck on
+        the newer revision the user had just configured away from.
+        """
+        config, session_factory, pdf_fixtures_dir = pg_setup
+        collection = "test_rollback"
+
+        pipeline, source_watcher = _setup_worker(config, session_factory, collection, monkeypatch)
+        pipeline.embedding_client = FakeEmbeddingClient()
+        source_watcher._register_document(str(pdf_fixtures_dir / "test_doc_a.pdf"))
+
+        original_chunk_size = config.pipeline.chunk_size
+        first_id = pipeline._ensure_target_revision()
+        _run_pipeline_until_idle(pipeline, first_id)
+        with session_factory() as session:
+            first = session.get(PipelineRevision, first_id)
+            promote_revision(session, collection, first, config=config)
+            session.commit()
+
+        # Move forward, then promote, retiring the first revision.
+        config.pipeline.chunk_size = 32
+        config.pipeline.chunk_overlap = 8
+        second_id = pipeline._ensure_target_revision()
+        _run_pipeline_until_idle(pipeline, second_id)
+        with session_factory() as session:
+            second = session.get(PipelineRevision, second_id)
+            promote_revision(session, collection, second, config=config)
+            session.commit()
+            first = session.get(PipelineRevision, first_id)
+            assert first is not None and first.status == "retired"
+
+        # Roll the config back to what the first revision was built with.
+        config.pipeline.chunk_size = original_chunk_size
+        config.pipeline.chunk_overlap = 16
+        reverted_id = pipeline._ensure_target_revision()
+        assert reverted_id == first_id
+
+        with session_factory() as session:
+            reverted = session.get(PipelineRevision, reverted_id)
+            assert reverted is not None
+            assert reverted.status == "building"  # picked back up, not stuck retired
+
+        _run_pipeline_until_idle(pipeline, reverted_id)
+
+        with session_factory() as session:
+            reverted = session.get(PipelineRevision, reverted_id)
+            assert reverted is not None
+            assert reverted.status == "ready"  # promotable again
+
+
+class TestDeletedDuringExtraction:
+    """A file deleted mid-extraction must not come back as searchable."""
+
+    def test_delete_during_extraction_is_not_overwritten(
+        self, sqlite_setup, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Regression: _step_extract stamped SourceDocument.status='indexed' after
+        extraction, overwriting the watcher's 'deleted' and permanently
+        resurrecting a removed file into search results."""
+        config, session_factory, pdf_fixtures_dir = sqlite_setup
+        collection = "test_delete_race"
+
+        pipeline, source_watcher = _setup_worker(config, session_factory, collection, monkeypatch)
+        pipeline.embedding_client = FakeEmbeddingClient()
+        pdf_path = str(pdf_fixtures_dir / "test_doc_a.pdf")
+        source_watcher._register_document(pdf_path)
+
+        revision_id = pipeline._ensure_target_revision()
+
+        # Simulate the watcher observing the deletion while extraction runs.
+        real_extract_document = pipeline_worker_module.extract_document
+
+        def extract_then_delete(path: str, cfg) -> str:
+            content = real_extract_document(path, cfg)
+            with session_factory() as session:
+                doc = session.query(SourceDocument).filter_by(collection=collection).one()
+                doc.status = "deleted"
+                doc.file_hash = None
+                session.commit()
+            return content
+
+        monkeypatch.setattr(
+            "cementic.pipeline_worker.extract_document", extract_then_delete
+        )
+        pipeline._step_extract(revision_id)
+
+        with session_factory() as session:
+            doc = session.query(SourceDocument).filter_by(collection=collection).one()
+            assert doc.status == "deleted"
+
+
 class TestPipelineWorkerFullPipeline:
     """Tests for full pipeline flow on SQLite."""
 
@@ -491,7 +706,7 @@ class TestPipelineWorkerFullPipeline:
         pipeline.embedding_client = FakeEmbeddingClient()
         pipeline._shutdown_event.set()  # set shutdown before entering loop
         # Should not raise, should exit immediately
-        pipeline._run_processing_loop()
+        pipeline._run_processing_loop(pipeline._ensure_target_revision())
 
     def test_stop_writes_stopped_state(self, temp_dir: Path) -> None:
         config = _config_for(temp_dir)

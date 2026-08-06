@@ -30,7 +30,8 @@ from cementic.profiles import (
 )
 from cementic.storage import safe_remove_artifact
 
-BUILDING_STATUSES = {"building", "ready"}
+#: Revision statuses that represent an in-flight (not yet promoted) build.
+BUILDING_STATUSES = ("building", "ready")
 
 
 @dataclass(frozen=True)
@@ -105,13 +106,28 @@ def get_target_revision(
         .first()
     )
     if current is not None:
+        if current.status in ("retired", "superseded"):
+            # Config reverted to a previously built revision (e.g. rolling back a
+            # model change). Resurrect it as the building target — its artifacts
+            # are reused, so it completes and becomes promotable again. Whatever
+            # else was building for this collection is no longer the target.
+            (
+                session.query(PipelineRevision)
+                .filter(
+                    PipelineRevision.collection == collection,
+                    PipelineRevision.status.in_(BUILDING_STATUSES),
+                )
+                .update({"status": "superseded"}, synchronize_session=False)
+            )
+            current.status = "building"
+            session.flush()
         return current
 
     (
         session.query(PipelineRevision)
         .filter(
             PipelineRevision.collection == collection,
-            PipelineRevision.status.in_(["building", "ready"]),
+            PipelineRevision.status.in_(BUILDING_STATUSES),
         )
         .update({"status": "superseded"}, synchronize_session=False)
     )
@@ -169,7 +185,14 @@ def requeue_interrupted_artifacts(
         ChunkedDocument.status.in_(interrupted),
     ).update({"status": "pending"}, synchronize_session=False)
 
-    chunk_ids = select(Chunk.id).where(Chunk.document_id.in_(doc_ids))
+    # Scope to the revision's chunk chain: embeddings of chunks under another
+    # chunk profile are never embed candidates for this revision, so resetting
+    # them would only create permanently-orphaned pending rows.
+    chunked_ids = select(ChunkedDocument.id).where(
+        ChunkedDocument.extracted_document_id.in_(extracted_ids),
+        ChunkedDocument.chunk_profile_id == revision.chunk_profile_id,
+    )
+    chunk_ids = select(Chunk.id).where(Chunk.chunked_document_id.in_(chunked_ids))
     session.query(ChunkEmbedding).filter(
         ChunkEmbedding.chunk_id.in_(chunk_ids),
         ChunkEmbedding.embedding_profile_id == revision.embedding_profile_id,

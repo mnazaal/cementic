@@ -244,7 +244,7 @@ class TestDaemonStateText:
 class TestBuildWorkerStatus:
     """Tests for build_worker_status."""
 
-    @patch("cementic.status_service.is_pid_running", return_value=True)
+    @patch("cementic.status_service.is_managed_process_alive", return_value=True)
     def test_running_worker(self, mock_running) -> None:
         state = WorkerState(
             daemon_state=DaemonState.RUNNING,
@@ -261,7 +261,7 @@ class TestBuildWorkerStatus:
         assert result.processed_count == 10
         assert result.failed_count == 0
 
-    @patch("cementic.status_service.is_pid_running", return_value=False)
+    @patch("cementic.status_service.is_managed_process_alive", return_value=False)
     def test_stopped_worker(self, mock_running) -> None:
         state = WorkerState(pid=None)
         result = build_worker_status(state)

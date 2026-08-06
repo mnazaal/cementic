@@ -1,6 +1,8 @@
 """Persistent worker state management."""
 
 import json
+import os
+import threading
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
@@ -28,6 +30,9 @@ class WorkerState:
     current_file: str | None = None
     last_updated: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     pid: int | None = None
+    #: Kernel start-time token of ``pid`` (see supervisor.process_start_token);
+    #: lets liveness checks reject a recycled PID. None = unknown (older state).
+    start_token: str | None = None
 
     def to_dict(self) -> dict[str, object]:
         """Convert to dictionary."""
@@ -69,6 +74,9 @@ class WorkerState:
         raw_pid = normalized.get("pid")
         pid = raw_pid if isinstance(raw_pid, int) else None
 
+        raw_start_token = normalized.get("start_token")
+        start_token = raw_start_token if isinstance(raw_start_token, str) else None
+
         return cls(
             daemon_state=daemon_state_value,
             watched_directories=watched_directories,
@@ -77,18 +85,25 @@ class WorkerState:
             current_file=current_file,
             last_updated=last_updated,
             pid=pid,
+            start_token=start_token,
         )
 
 
 class StateManager:
-    """Manages persistent on-disk worker state."""
+    """Manages persistent on-disk worker state.
+
+    Writes are atomic (tmp + rename) and read-modify-write ``update`` calls are
+    serialized with a lock, since the watcher's debounce timers call it from
+    concurrent threads while ``cementic status`` reads the same file.
+    """
 
     def __init__(self, state_path: Path | None) -> None:
-        """Initialize state manager."""
+        """Initialize state manager. Does not touch the filesystem (read-only
+        commands construct one just to ``load``); ``save`` creates the directory."""
         if state_path is None:
             raise ValueError("state_path cannot be None")
         self.state_path = state_path
-        self.state_path.parent.mkdir(parents=True, exist_ok=True)
+        self._lock = threading.Lock()
 
     def load(self) -> WorkerState:
         """Load state from file."""
@@ -103,10 +118,12 @@ class StateManager:
             return WorkerState()
 
     def save(self, state: WorkerState) -> None:
-        """Save state to file."""
+        """Save state to file atomically."""
         state.last_updated = datetime.now(timezone.utc).isoformat()
-        with open(self.state_path, "w") as f:
-            json.dump(state.to_dict(), f, indent=2)
+        self.state_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = self.state_path.with_name(f".{self.state_path.name}.tmp")
+        tmp_path.write_text(json.dumps(state.to_dict(), indent=2), encoding="utf-8")
+        os.replace(tmp_path, self.state_path)
 
     def update(
         self,
@@ -116,22 +133,26 @@ class StateManager:
         failed_count: Any = UNSET,
         current_file: Any = UNSET,
         pid: Any = UNSET,
+        start_token: Any = UNSET,
     ) -> WorkerState:
         """Update specific fields and save."""
-        state = self.load()
+        with self._lock:
+            state = self.load()
 
-        if daemon_state is not UNSET:
-            state.daemon_state = daemon_state
-        if watched_directories is not UNSET:
-            state.watched_directories = watched_directories
-        if processed_count is not UNSET:
-            state.processed_count = processed_count
-        if failed_count is not UNSET:
-            state.failed_count = failed_count
-        if current_file is not UNSET:
-            state.current_file = current_file
-        if pid is not UNSET:
-            state.pid = pid
+            if daemon_state is not UNSET:
+                state.daemon_state = daemon_state
+            if watched_directories is not UNSET:
+                state.watched_directories = watched_directories
+            if processed_count is not UNSET:
+                state.processed_count = processed_count
+            if failed_count is not UNSET:
+                state.failed_count = failed_count
+            if current_file is not UNSET:
+                state.current_file = current_file
+            if pid is not UNSET:
+                state.pid = pid
+            if start_token is not UNSET:
+                state.start_token = start_token
 
-        self.save(state)
-        return state
+            self.save(state)
+            return state

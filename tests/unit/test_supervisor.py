@@ -22,9 +22,10 @@ class TestIsPidRunning:
     """Tests for is_pid_running."""
 
     def test_running_pid(self) -> None:
-        # os.kill(pid, 0) succeeds = running
+        # os.kill(pid, 0) succeeds and the process is in a live state
         with patch("os.kill", return_value=None):
-            assert is_pid_running(1234) is True
+            with patch("cementic.supervisor._proc_stat_fields", return_value=["S", "1", "1"]):
+                assert is_pid_running(1234) is True
 
     @patch("os.kill", side_effect=ProcessLookupError)
     def test_missing_pid(self, mock_kill) -> None:
@@ -33,6 +34,20 @@ class TestIsPidRunning:
     @patch("os.kill", side_effect=OSError)
     def test_os_error_pid(self, mock_kill) -> None:
         assert is_pid_running(1234) is False
+
+    def test_zombie_pid_is_not_running(self) -> None:
+        """A detached worker that exited but wasn't reaped still answers
+        kill(pid, 0); treating it as running makes `cementic stop` wait out its
+        full timeout and then wrongly tell the user to --force it."""
+        with patch("os.kill", return_value=None):
+            with patch("cementic.supervisor._proc_stat_fields", return_value=["Z", "1", "1"]):
+                assert is_pid_running(1234) is False
+
+    def test_without_proc_falls_back_to_signal_probe(self) -> None:
+        """Non-Linux platforms have no /proc: keep the kill(pid, 0) answer."""
+        with patch("os.kill", return_value=None):
+            with patch("cementic.supervisor._proc_stat_fields", return_value=None):
+                assert is_pid_running(1234) is True
 
 
 class TestLoadSupervisorState:
@@ -133,14 +148,17 @@ class TestForceKill:
     @patch("os.kill", side_effect=ProcessLookupError)
     @patch("cementic.supervisor.is_pid_running")
     def test_kill_process_lookup_error(self, mock_running, mock_kill) -> None:
-        # is_pid_running should NOT be called because OSError short-circuits
+        # Already gone: nothing left to report, no liveness check needed.
         result = force_kill([1234])
         assert result == []
+        mock_running.assert_not_called()
 
-    @patch("os.kill", side_effect=OSError)
-    def test_kill_os_error(self, mock_kill) -> None:
+    @patch("os.kill", side_effect=PermissionError)
+    def test_kill_not_permitted_is_reported_not_swallowed(self, mock_kill) -> None:
+        # EPERM means the process exists but isn't ours to kill -- reporting it
+        # as successfully killed would be a lie to the user.
         result = force_kill([1234])
-        assert result == []
+        assert result == [1234]
 
     @patch("os.kill")
     @patch("cementic.supervisor.is_pid_running", return_value=True)

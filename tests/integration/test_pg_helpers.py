@@ -90,8 +90,6 @@ def seed_active_vector_collection(
             chunked_document_id=chunked.id,
             chunk_index=index,
             content=content,
-            page_start=1,
-            page_end=1,
         )
         session.add(chunk)
         session.flush()

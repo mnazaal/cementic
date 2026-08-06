@@ -350,7 +350,9 @@ def _write_daemon_pid_file(pid_file: Path, pid: int) -> None:
     for the daemon later (mirrors the supervisor's managed-process records)."""
     pid_file.parent.mkdir(parents=True, exist_ok=True)
     record = {"pid": pid, "start_token": process_start_token(pid)}
-    pid_file.write_text(json.dumps(record), encoding="utf-8")
+    tmp_path = pid_file.with_name(f".{pid_file.name}.tmp")
+    tmp_path.write_text(json.dumps(record), encoding="utf-8")
+    os.replace(tmp_path, pid_file)
 
 
 def _read_daemon_pid_file(pid_file: Path) -> tuple[int, str | None] | None:

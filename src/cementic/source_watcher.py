@@ -7,7 +7,6 @@ import logging
 import os
 import signal
 import threading
-import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -19,6 +18,7 @@ from cementic.config import Config, get_config
 from cementic.db import SourceDocument, create_tables, get_engine, get_session_factory
 from cementic.extract import supported_extensions
 from cementic.state import DaemonState, StateManager
+from cementic.supervisor import is_managed_process_alive, process_start_token
 
 
 class DocumentEventHandler(FileSystemEventHandler):
@@ -131,36 +131,47 @@ class SourceWatcher:
     def start(self, directories: list[str], collection: str = "default") -> None:
         self.collection = collection
         state = self.state_manager.load()
-        if state.daemon_state == DaemonState.RUNNING and state.pid:
-            try:
-                os.kill(state.pid, 0)
-                self._logger.error("Source watcher already running with PID %s", state.pid)
-                return
-            except (OSError, ProcessLookupError):
-                pass
+        # PID + start-token: a recycled PID after `stop --force` must not block
+        # a fresh start.
+        if (
+            state.daemon_state == DaemonState.RUNNING
+            and state.pid
+            and is_managed_process_alive(state.pid, state.start_token)
+        ):
+            self._logger.error("Source watcher already running with PID %s", state.pid)
+            return
 
         engine = get_engine(self.config.database.url)
         create_tables(engine)
         self.Session = get_session_factory(engine)
 
+        # Counters are per-session: reset so `status` reports this run, not an
+        # ever-growing total across restarts.
         self.state_manager.update(
             daemon_state=DaemonState.RUNNING,
             watched_directories=directories,
             pid=os.getpid(),
+            start_token=process_start_token(os.getpid()),
+            processed_count=0,
+            failed_count=0,
+            current_file=None,
         )
 
         signal.signal(signal.SIGTERM, self._handle_shutdown)
         signal.signal(signal.SIGINT, self._handle_shutdown)
 
-        self._start_watcher(directories)
-        self._logger.info(
-            "Source watcher started watching: %s (collection=%s)", directories, collection
-        )
-
         try:
+            self._start_watcher(directories)
+            self._logger.info(
+                "Source watcher started watching: %s (collection=%s)", directories, collection
+            )
+            # The signal handlers set the shutdown event, so a plain wait loop
+            # suffices past this point.
             while not self._shutdown_event.is_set():
-                time.sleep(1)
-        except KeyboardInterrupt:
+                self._shutdown_event.wait(1)
+        finally:
+            # However this run ends, the state file must not be left claiming
+            # the watcher is RUNNING.
             self.stop()
 
     def _start_watcher(self, directories: list[str]) -> None:
@@ -173,9 +184,16 @@ class SourceWatcher:
             if path.exists():
                 self._watched_roots.append(path)
                 observer.schedule(event_handler, str(path), recursive=True)
-                self._scan_existing(path)
+            else:
+                self._logger.error("Watch directory does not exist, skipping: %s", directory)
+        # Start observing *before* the initial scan: the scan hashes every
+        # existing file and can take minutes, and events are only delivered
+        # after start(). Registration is idempotent, so double-seeing a file
+        # during the overlap is harmless.
         observer.start()
         self.watcher = observer
+        for root in self._watched_roots:
+            self._scan_existing(root)
 
     def _scan_existing(self, directory: Path) -> None:
         extensions = supported_extensions()
@@ -192,6 +210,8 @@ class SourceWatcher:
             self._register_document(file_path)
         except Exception as error:
             self._logger.error("Failed to register %s: %s", file_path, error)
+            state = self.state_manager.load()
+            self.state_manager.update(failed_count=state.failed_count + 1, current_file=None)
 
     def _on_file_deleted(self, file_path: str) -> None:
         try:
@@ -254,7 +274,6 @@ class SourceWatcher:
             self.state_manager.update(current_file=file_path)
             document.file_hash = file_hash
             document.status = "pending"
-            document.error_message = None
             session.commit()
 
         state = self.state_manager.load()
@@ -275,7 +294,6 @@ class SourceWatcher:
                 return
             document.status = "deleted"
             document.file_hash = None
-            document.error_message = None
             session.commit()
         self._logger.info(
             "Marked document deleted: %s (collection=%s)", normalized_path, self.collection

@@ -64,8 +64,6 @@ def _create_minimal_pipeline(session, *, embedding_dim: int = 4) -> tuple[int, i
         chunked_document_id=chunked.id,
         chunk_index=1,
         content="test chunk for ann index",
-        page_start=1,
-        page_end=1,
     )
     session.add(chunk)
     session.flush()
@@ -108,6 +106,12 @@ def _cleanup(pg_engine, emb_prof_id: int) -> None:
         conn.commit()
 
 
+def _create_vector_table(engine, profile_id: int, dim: int) -> None:
+    """Create a profile's vector table the same way the embed step does."""
+    with engine.begin() as conn:
+        conn.execute(text(vector_store.create_table_sql(profile_id, dim)))
+
+
 @pytest.mark.pg
 class TestAnnIndex:
     """Build each ANN index method on a real per-profile vector table and search it."""
@@ -120,7 +124,7 @@ class TestAnnIndex:
             session.commit()
 
         try:
-            vector_store.ensure_vector_table(pg_engine, emb_prof_id, 4)
+            _create_vector_table(pg_engine, emb_prof_id, 4)
             with pg_engine.begin() as conn:
                 vector_store.upsert_vectors(conn, emb_prof_id, [(chunk_id, [0.1, 0.2, 0.3, 0.4])])
 
@@ -159,7 +163,7 @@ class TestAnnIndex:
             session.commit()
 
         try:
-            vector_store.ensure_vector_table(pg_engine, emb_prof_id, 4)
+            _create_vector_table(pg_engine, emb_prof_id, 4)
             with pg_engine.begin() as conn:
                 vector_store.upsert_vectors(conn, emb_prof_id, [(chunk_id, [0.5, 0.6, 0.7, 0.8])])
             ensure_embedding_ann_index(
@@ -180,7 +184,7 @@ class TestAnnIndex:
 
         index_name = vector_store.vector_index_name(emb_prof_id)
         try:
-            vector_store.ensure_vector_table(pg_engine, emb_prof_id, 4)
+            _create_vector_table(pg_engine, emb_prof_id, 4)
             with pg_engine.begin() as conn:
                 vector_store.upsert_vectors(conn, emb_prof_id, [(chunk_id, [0.1, 0.2, 0.3, 0.4])])
 

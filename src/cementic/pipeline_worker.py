@@ -6,12 +6,12 @@ import logging
 import os
 import signal
 import threading
-import time
 import zlib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import requests
 from sqlalchemy import and_, or_, text
 from sqlalchemy.orm import Session
 
@@ -39,6 +39,7 @@ from cementic.revisions import (
 )
 from cementic.state import DaemonState, StateManager
 from cementic.storage import extracted_document_path, read_extracted_text, write_extracted_text
+from cementic.supervisor import is_managed_process_alive, process_start_token
 from cementic.vector_store import create_table_sql, upsert_vectors
 
 PIPELINE_WORKER_LOCK_NAMESPACE = 0xC3E17C
@@ -51,7 +52,14 @@ def _pipeline_worker_lock_key(collection: str) -> int:
 
 
 def _try_acquire_pipeline_worker_lock(engine: Any, collection: str) -> Any | None:
-    """Acquire a PostgreSQL session advisory lock, returning the holding connection."""
+    """Acquire a PostgreSQL session advisory lock, returning the holding connection.
+
+    The lock is bound to the returned connection's backend session: it is held
+    for as long as that connection lives, and released when the worker process
+    exits. If the connection drops (e.g. Postgres restart) the lock goes with
+    it, so this is a best-effort guard against two workers on one collection,
+    backed by the per-run state file, not a distributed mutex.
+    """
     if engine.dialect.name != "postgresql":
         return None
     connection = engine.connect()
@@ -135,31 +143,30 @@ def _compute_revision_counts(
         )
         .count()
     )
+    # Both chunked counts must partition exactly the set _step_chunk drains
+    # (extractions with status "done", current content hash): asymmetric scoping
+    # here makes `chunked_done + chunked_failed == extracted_done` unreachable
+    # and wedges the revision in "building" forever.
+    chunked_scope = (
+        SourceDocument.collection == collection,
+        SourceDocument.status != "deleted",
+        ExtractedDocument.extractor_profile_id == revision.extractor_profile_id,
+        ExtractedDocument.status == "done",
+        ChunkedDocument.chunk_profile_id == revision.chunk_profile_id,
+        ChunkedDocument.source_content_hash == ExtractedDocument.content_hash,
+    )
     chunked_done = (
         session.query(ChunkedDocument)
         .join(ExtractedDocument, ChunkedDocument.extracted_document_id == ExtractedDocument.id)
         .join(SourceDocument, ExtractedDocument.document_id == SourceDocument.id)
-        .filter(
-            SourceDocument.collection == collection,
-            SourceDocument.status != "deleted",
-            ExtractedDocument.extractor_profile_id == revision.extractor_profile_id,
-            ChunkedDocument.chunk_profile_id == revision.chunk_profile_id,
-            ChunkedDocument.status == "done",
-            ChunkedDocument.source_content_hash == ExtractedDocument.content_hash,
-        )
+        .filter(*chunked_scope, ChunkedDocument.status == "done")
         .count()
     )
     chunked_failed = (
         session.query(ChunkedDocument)
         .join(ExtractedDocument, ChunkedDocument.extracted_document_id == ExtractedDocument.id)
         .join(SourceDocument, ExtractedDocument.document_id == SourceDocument.id)
-        .filter(
-            SourceDocument.collection == collection,
-            SourceDocument.status != "deleted",
-            ExtractedDocument.extractor_profile_id == revision.extractor_profile_id,
-            ChunkedDocument.chunk_profile_id == revision.chunk_profile_id,
-            ChunkedDocument.status == "failed",
-        )
+        .filter(*chunked_scope, ChunkedDocument.status == "failed")
         .count()
     )
     total_chunks = (
@@ -175,28 +182,33 @@ def _compute_revision_counts(
         )
         .count()
     )
+    # Embedding counts must be scoped through the revision's chunk chain, exactly
+    # like total_chunks. The same embedding profile can be shared with an older
+    # revision's chunks (e.g. after a chunk_size change with the same model);
+    # counting those too makes `done + failed == total_chunks` unreachable.
+    embedding_scope = (
+        SourceDocument.collection == collection,
+        SourceDocument.status != "deleted",
+        ExtractedDocument.extractor_profile_id == revision.extractor_profile_id,
+        ChunkedDocument.chunk_profile_id == revision.chunk_profile_id,
+        ChunkEmbedding.embedding_profile_id == revision.embedding_profile_id,
+    )
     done_embeddings = (
         session.query(ChunkEmbedding)
         .join(Chunk, ChunkEmbedding.chunk_id == Chunk.id)
+        .join(ChunkedDocument, Chunk.chunked_document_id == ChunkedDocument.id)
+        .join(ExtractedDocument, ChunkedDocument.extracted_document_id == ExtractedDocument.id)
         .join(SourceDocument, Chunk.document_id == SourceDocument.id)
-        .filter(
-            SourceDocument.collection == collection,
-            SourceDocument.status != "deleted",
-            ChunkEmbedding.embedding_profile_id == revision.embedding_profile_id,
-            ChunkEmbedding.status == "done",
-        )
+        .filter(*embedding_scope, ChunkEmbedding.status == "done")
         .count()
     )
     failed_embeddings = (
         session.query(ChunkEmbedding)
         .join(Chunk, ChunkEmbedding.chunk_id == Chunk.id)
+        .join(ChunkedDocument, Chunk.chunked_document_id == ChunkedDocument.id)
+        .join(ExtractedDocument, ChunkedDocument.extracted_document_id == ExtractedDocument.id)
         .join(SourceDocument, Chunk.document_id == SourceDocument.id)
-        .filter(
-            SourceDocument.collection == collection,
-            SourceDocument.status != "deleted",
-            ChunkEmbedding.embedding_profile_id == revision.embedding_profile_id,
-            ChunkEmbedding.status == "failed",
-        )
+        .filter(*embedding_scope, ChunkEmbedding.status == "failed")
         .count()
     )
     return PipelineCounts(
@@ -250,13 +262,16 @@ class PipelineWorker:
     def start(self, collection: str = "default") -> None:
         self.collection = collection
         state = self.state_manager.load()
-        if state.daemon_state == DaemonState.RUNNING and state.pid:
-            try:
-                os.kill(state.pid, 0)
-                self._logger.error("Pipeline worker already running with PID %s", state.pid)
-                return
-            except (OSError, ProcessLookupError):
-                pass
+        # PID + start-token: a recycled PID after `stop --force` must not block
+        # a fresh start. The Postgres advisory lock below is the authoritative
+        # mutual exclusion; this is just a fast local pre-check.
+        if (
+            state.daemon_state == DaemonState.RUNNING
+            and state.pid
+            and is_managed_process_alive(state.pid, state.start_token)
+        ):
+            self._logger.error("Pipeline worker already running with PID %s", state.pid)
+            return
 
         engine = get_engine(self.config.database.url)
         create_tables(engine)
@@ -277,22 +292,30 @@ class PipelineWorker:
             self._logger.error("Failed to initialize embedding provider: %s", error)
             return
 
-        self.state_manager.update(daemon_state=DaemonState.RUNNING, pid=os.getpid())
+        self.state_manager.update(
+            daemon_state=DaemonState.RUNNING,
+            pid=os.getpid(),
+            start_token=process_start_token(os.getpid()),
+            current_file=None,
+        )
         signal.signal(signal.SIGTERM, self._handle_shutdown)
         signal.signal(signal.SIGINT, self._handle_shutdown)
         self._logger.info("Pipeline worker started for collection=%s", self.collection)
 
+        # The target revision is a function of config, which is read once per
+        # process, so resolve it once here and thread the id through the loop.
+        revision_id = self._ensure_target_revision()
+
         # Re-queue any artifacts a previous run left failed or interrupted, so a
         # fresh start retries them (failures are terminal only within one run).
         with self.Session() as session:
-            revision = get_target_revision(
-                session, self.collection, self.config, self.embedding_client
-            )
-            requeue_interrupted_artifacts(session, self.collection, revision)
-            session.commit()
+            revision = session.get(PipelineRevision, revision_id)
+            if revision is not None:
+                requeue_interrupted_artifacts(session, self.collection, revision)
+                session.commit()
 
         try:
-            self._run_processing_loop()
+            self._run_processing_loop(revision_id)
         finally:
             try:
                 if worker_lock is not None:
@@ -300,17 +323,24 @@ class PipelineWorker:
             finally:
                 self.stop()
 
-    def _run_processing_loop(self) -> None:
+    def _run_processing_loop(self, revision_id: int) -> None:
         while not self._shutdown_event.is_set():
-            revision_id = self._ensure_target_revision()
-            if self._step_extract(revision_id):
+            try:
+                if self._step_extract(revision_id):
+                    continue
+                if self._step_chunk(revision_id):
+                    continue
+                if self._step_embed(revision_id):
+                    continue
+                self._mark_revision_ready_if_complete(revision_id)
+            except Exception:
+                # A transient failure (Postgres restart, network blip) must not
+                # kill the worker: log, back off, retry. Interrupted rows are
+                # re-queued on the next pass or the next `cementic start`.
+                self._logger.exception("Pipeline step failed; retrying after backoff")
+                self._shutdown_event.wait(5 * self.config.pipeline_worker.poll_interval)
                 continue
-            if self._step_chunk(revision_id):
-                continue
-            if self._step_embed(revision_id):
-                continue
-            self._mark_revision_ready_if_complete(revision_id)
-            time.sleep(self.config.pipeline_worker.poll_interval)
+            self._shutdown_event.wait(self.config.pipeline_worker.poll_interval)
 
     def _ensure_target_revision(self) -> int:
         with self.Session() as session:
@@ -388,11 +418,10 @@ class PipelineWorker:
 
         with self.Session() as session:
             extracted = session.get(ExtractedDocument, extracted_id)
-            document = (
-                session.get(SourceDocument, extracted.document_id)
-                if extracted is not None
-                else None
-            )
+            # Deliberately no SourceDocument.status write here: per-artifact
+            # status lives on ExtractedDocument, and overwriting the source row
+            # would resurrect a document the watcher marked "deleted" while the
+            # extraction was running.
             if extracted is not None:
                 extracted.source_file_hash = file_hash
                 extracted.artifact_path = (
@@ -401,9 +430,6 @@ class PipelineWorker:
                 extracted.content_hash = content_hash
                 extracted.status = status
                 extracted.error_message = error_message
-            if document is not None:
-                document.status = "indexed" if status == "done" else "failed"
-                document.error_message = error_message
             session.commit()
 
         self.state_manager.update(current_file=None)
@@ -469,6 +495,9 @@ class PipelineWorker:
             with self.Session() as session:
                 chunked = session.get(ChunkedDocument, chunked_id)
                 if chunked is not None:
+                    # Record the source hash so the failure is counted by the
+                    # hash-scoped revision counts (else the build never settles).
+                    chunked.source_content_hash = extracted.content_hash
                     chunked.status = "failed"
                     chunked.error_message = "Missing extracted artifact path"
                     session.commit()
@@ -509,8 +538,6 @@ class PipelineWorker:
                             chunked_document_id=chunked_id,
                             chunk_index=item.chunk_index,
                             content=item.content,
-                            page_start=item.page_start,
-                            page_end=item.page_end,
                         )
                     )
                 chunked.total_chunks = len(chunk_items)
@@ -586,9 +613,23 @@ class PipelineWorker:
         )
         # Message stamped on any row that ends up without a vector: the batch-wide
         # exception if the whole call failed, or a per-row note if the batch
-        # succeeded but an individual embedding came back None.
+        # succeeded but an individual embedding came back missing.
+        embeddings: list[list[float] | None]
         try:
-            embeddings = provider.embed_batch(texts) if provider is not None else []
+            raw = provider.embed_batch(texts) if provider is not None else []
+            embeddings = list(raw)
+        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as error:
+            # Provider connectivity failure — a fact about the daemon, not these
+            # texts. Release the claim instead of stamping terminal failures,
+            # try to bring the provider back (autostart per config), and let the
+            # poll interval provide the backoff.
+            self._logger.error("Embedding provider unreachable: %s", error)
+            self._release_claimed_embeddings([chunk_id for chunk_id, _ in claimed], profile_id)
+            try:
+                self.embedding_client = self._create_embedding_client()
+            except Exception as restart_error:
+                self._logger.error("Embedding provider restart failed: %s", restart_error)
+            return False
         except Exception as error:
             embeddings = [None for _ in claimed]
             failure_message = str(error)
@@ -628,6 +669,16 @@ class PipelineWorker:
                     row.error_message = None
             session.commit()
         return True
+
+    def _release_claimed_embeddings(self, chunk_ids: list[int], profile_id: int) -> None:
+        """Return a claimed-but-unembedded batch to ``pending`` (provider outage)."""
+        with self.Session() as session:
+            session.query(ChunkEmbedding).filter(
+                ChunkEmbedding.chunk_id.in_(chunk_ids),
+                ChunkEmbedding.embedding_profile_id == profile_id,
+                ChunkEmbedding.status == "processing",
+            ).update({"status": "pending"}, synchronize_session=False)
+            session.commit()
 
     def _mark_revision_ready_if_complete(self, revision_id: int) -> None:
         with self.Session() as session:

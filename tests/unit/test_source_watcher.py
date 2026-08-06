@@ -149,7 +149,6 @@ class TestSourceWatcher:
 
         assert document.status == "deleted"
         assert document.file_hash is None
-        assert document.error_message is None
 
     def test_setup_logging_reuses_existing_file_handler(self, temp_dir):
         """Repeated construction should not duplicate file handlers."""

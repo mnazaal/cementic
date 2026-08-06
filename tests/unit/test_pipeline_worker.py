@@ -367,23 +367,21 @@ class TestWorkerProcessingLoop:
         worker = PipelineWorker(config)
 
         with (
-            patch.object(worker, "_ensure_target_revision", return_value=42) as mock_revision,
             patch.object(worker, "_step_extract", return_value=False) as mock_extract,
             patch.object(worker, "_step_chunk", return_value=False) as mock_chunk,
             patch.object(worker, "_step_embed", return_value=False) as mock_embed,
             patch.object(worker, "_mark_revision_ready_if_complete") as mock_mark,
-            patch("time.sleep") as mock_sleep,
+            patch.object(worker._shutdown_event, "wait") as mock_wait,
         ):
-            # Make sleep set the shutdown event so loop exits after one iteration
-            mock_sleep.side_effect = lambda _: worker._shutdown_event.set()
-            worker._run_processing_loop()
+            # The idle wait ends the run, so the loop makes exactly one pass.
+            mock_wait.side_effect = lambda _: worker._shutdown_event.set()
+            worker._run_processing_loop(42)
 
-        mock_revision.assert_called_once()
         mock_extract.assert_called_once_with(42)
         mock_chunk.assert_called_once_with(42)
         mock_embed.assert_called_once_with(42)
         mock_mark.assert_called_once_with(42)
-        mock_sleep.assert_called_once()
+        mock_wait.assert_called_once()
 
     def test_loop_skips_when_extract_does_work(self, temp_dir: Path) -> None:
         """When _step_extract returns True the loop continues immediately."""
@@ -396,20 +394,45 @@ class TestWorkerProcessingLoop:
             return True
 
         with (
-            patch.object(worker, "_ensure_target_revision", return_value=1),
             patch.object(worker, "_step_extract", side_effect=extract_once),
             patch.object(worker, "_step_chunk") as mock_chunk,
             patch.object(worker, "_step_embed") as mock_embed,
             patch.object(worker, "_mark_revision_ready_if_complete") as mock_mark,
-            patch("time.sleep") as mock_sleep,
+            patch.object(worker._shutdown_event, "wait") as mock_wait,
         ):
-            worker._run_processing_loop()
+            worker._run_processing_loop(1)
 
         # When extract does work, the loop continues immediately and skips the rest.
         mock_chunk.assert_not_called()
         mock_embed.assert_not_called()
         mock_mark.assert_not_called()
-        mock_sleep.assert_not_called()
+        mock_wait.assert_not_called()
+
+    def test_loop_survives_a_failing_step(self, temp_dir: Path) -> None:
+        """A transient error (e.g. Postgres restart) must not kill the worker."""
+        config = Config()
+        config.pipeline_worker.log_file = temp_dir / "worker.log"
+        worker = PipelineWorker(config)
+        calls: list[int] = []
+
+        def flaky_extract(_revision_id: int) -> bool:
+            calls.append(1)
+            if len(calls) == 1:
+                raise RuntimeError("server closed the connection unexpectedly")
+            worker._shutdown_event.set()
+            return False
+
+        with (
+            patch.object(worker, "_step_extract", side_effect=flaky_extract),
+            patch.object(worker, "_step_chunk", return_value=False),
+            patch.object(worker, "_step_embed", return_value=False),
+            patch.object(worker, "_mark_revision_ready_if_complete"),
+            patch.object(worker._shutdown_event, "wait"),
+        ):
+            worker._run_processing_loop(7)
+
+        # Retried after the failure rather than exiting on the first exception.
+        assert len(calls) == 2
 
 
 class TestPipelineWorkerEmbedStep:
