@@ -1,6 +1,7 @@
 """Tests for persistent llama.cpp runtime helpers."""
 
 import json
+import time
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -273,6 +274,34 @@ class TestDaemonLifecycle:
         assert command[command.index("--verbose") + 1] == "true"
 
 
+class TestAutostartChecksTheModelFirst:
+    """Autostart must verify the model before spawning a server around it.
+
+    Regression: `search` and `embed` reach the autostart path without ever
+    running the bootstrapper, so a missing or mistyped model path spawned
+    `llama_cpp.server --model /does/not/exist`, the child died instantly, and
+    the user got a generic startup failure instead of "model not found at ...".
+    """
+
+    def test_missing_model_reported_before_spawning(self, temp_dir) -> None:
+        config = Config()
+        config.llama_cpp.model_path = str(temp_dir / "absent.gguf")
+        config.bootstrap.auto_download_llama_model = False
+        config.llama_cpp.daemon_pid_file = temp_dir / "d.pid"
+        config.llama_cpp.daemon_log_file = temp_dir / "d.log"
+
+        with (
+            patch("cementic.embedding_runtime.RemoteEmbeddingClient._list_models",
+                  return_value=None),
+            patch("cementic.embedding_runtime._daemon_pid_alive", return_value=False),
+            patch("cementic.embedding_runtime._start_llama_cpp_daemon") as spawn,
+        ):
+            with pytest.raises(RuntimeError, match="model not found"):
+                get_llama_cpp_runtime_client(config=config, autostart=True)
+
+        spawn.assert_not_called()
+
+
 class TestWaitForDaemon:
     """Tests for _wait_for_daemon_ready."""
 
@@ -280,13 +309,62 @@ class TestWaitForDaemon:
         client = MagicMock(spec=RemoteEmbeddingClient)
         client.matches_expected_runtime.return_value = True
         # Should not raise
-        _wait_for_daemon_ready(client, timeout_seconds=5)
+        _wait_for_daemon_ready(client, timeout_seconds=5, config=Config())
 
     def test_daemon_timeout_raises(self) -> None:
         client = MagicMock(spec=RemoteEmbeddingClient)
         client.matches_expected_runtime.return_value = False
         with pytest.raises(RuntimeError, match="did not become ready"):
-            _wait_for_daemon_ready(client, timeout_seconds=0.01)
+            _wait_for_daemon_ready(client, timeout_seconds=0.01, config=Config())
+
+    def test_dead_daemon_fails_immediately_instead_of_waiting(self, temp_dir) -> None:
+        """A child that exits must be noticed, not waited out.
+
+        Regression: corrupt model, missing file, port in use and OOM all produced
+        the same "did not become ready in time" sentence after the full timeout,
+        with no hint that a log existed.
+        """
+        config = Config()
+        config.llama_cpp.daemon_log_file = temp_dir / "daemon.log"
+        client = MagicMock(spec=RemoteEmbeddingClient)
+        client.matches_expected_runtime.return_value = False
+
+        started = time.monotonic()
+        with patch("cementic.embedding_runtime.is_managed_process_alive", return_value=False):
+            with pytest.raises(RuntimeError, match="exited during startup"):
+                _wait_for_daemon_ready(
+                    client, timeout_seconds=30, config=config, pid=4242, start_token="t"
+                )
+        assert time.monotonic() - started < 5  # did not wait out the 30s budget
+
+    def test_failure_message_carries_the_log_path_and_tail(self, temp_dir) -> None:
+        config = Config()
+        log_file = temp_dir / "daemon.log"
+        log_file.write_text(
+            "loading model...\nerror loading model: unable to open GGUF\n", encoding="utf-8"
+        )
+        config.llama_cpp.daemon_log_file = log_file
+        client = MagicMock(spec=RemoteEmbeddingClient)
+        client.matches_expected_runtime.return_value = False
+
+        with patch("cementic.embedding_runtime.is_managed_process_alive", return_value=False):
+            with pytest.raises(RuntimeError) as excinfo:
+                _wait_for_daemon_ready(
+                    client, timeout_seconds=5, config=config, pid=4242, start_token="t"
+                )
+
+        message = str(excinfo.value)
+        assert str(log_file) in message
+        assert "unable to open GGUF" in message
+
+    def test_missing_log_file_is_not_fatal(self, temp_dir) -> None:
+        config = Config()
+        config.llama_cpp.daemon_log_file = temp_dir / "absent.log"
+        client = MagicMock(spec=RemoteEmbeddingClient)
+        client.matches_expected_runtime.return_value = False
+
+        with pytest.raises(RuntimeError, match="did not become ready"):
+            _wait_for_daemon_ready(client, timeout_seconds=0.01, config=config)
 
 
 class TestEmbeddingRuntime:

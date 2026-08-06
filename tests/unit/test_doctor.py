@@ -3,7 +3,7 @@
 from unittest.mock import MagicMock, patch
 
 from cementic.config import Config
-from cementic.doctor import collect_doctor_report
+from cementic.doctor import _daemon_state, collect_doctor_report
 
 
 def _config_with_model_path(tmp_path, exists: bool):
@@ -13,6 +13,95 @@ def _config_with_model_path(tmp_path, exists: bool):
         model_path.write_bytes(b"fake")
     config.llama_cpp.model_path = str(model_path)
     return config
+
+
+class TestConfigCheck:
+    """The config check must be able to fail.
+
+    Regression: its status was a literal "ok", so a malformed or unreadable
+    config file -- silently discarded, leaving cementic on defaults with the
+    wrong database and model -- was reported as fine, pointing at the very file
+    that was not being used.
+    """
+
+    @patch("cementic.doctor._daemon_state", return_value=(True, "reachable"))
+    @patch("cementic.doctor.get_engine")
+    def test_malformed_config_file_fails_the_check(
+        self, mock_get_engine, mock_daemon, tmp_path, monkeypatch
+    ) -> None:
+        mock_get_engine.side_effect = Exception("no db in this test")
+        bad = tmp_path / "cementic.toml"
+        bad.write_text("this is [not valid TOML", encoding="utf-8")
+        monkeypatch.setenv("CEMENTIC_CONFIG", str(bad))
+
+        report = collect_doctor_report(Config())
+
+        assert report["checks"]["config"]["status"] == "fail"
+        assert "malformed TOML" in report["checks"]["config"]["message"]
+        assert report["ok"] is False
+
+    @patch("cementic.doctor._daemon_state", return_value=(True, "reachable"))
+    @patch("cementic.doctor.get_engine")
+    def test_valid_config_file_passes(
+        self, mock_get_engine, mock_daemon, tmp_path, monkeypatch
+    ) -> None:
+        mock_get_engine.side_effect = Exception("no db in this test")
+        good = tmp_path / "cementic.toml"
+        good.write_text("[pipeline]\nchunk_size = 256\n", encoding="utf-8")
+        monkeypatch.setenv("CEMENTIC_CONFIG", str(good))
+
+        report = collect_doctor_report(Config())
+
+        assert report["checks"]["config"]["status"] == "ok"
+
+    @patch("cementic.doctor._daemon_state", return_value=(True, "reachable"))
+    @patch("cementic.doctor.get_engine")
+    def test_no_config_file_is_not_a_failure(
+        self, mock_get_engine, mock_daemon, tmp_path
+    ) -> None:
+        """Running without a config file is normal, not an error."""
+        mock_get_engine.side_effect = Exception("no db in this test")
+
+        report = collect_doctor_report(Config())
+
+        assert report["checks"]["config"]["status"] == "ok"
+
+
+class TestDaemonCheck:
+    """A busy daemon must not be reported as broken.
+
+    Regression: doctor used the /v1/models probe alone, which llama_cpp.server
+    can block for the whole duration of an in-flight embedding batch. Running
+    `status --doctor` during indexing therefore said the daemon was unreachable,
+    and with autostart disabled exited non-zero.
+    """
+
+    @patch("cementic.doctor.llama_daemon_status", return_value="running, pid=4242")
+    @patch("cementic.doctor._daemon_reachable", return_value=False)
+    def test_busy_daemon_is_healthy(self, mock_reachable, mock_status) -> None:
+        healthy, message = _daemon_state(Config())
+        assert healthy is True
+        assert "busy" in message
+
+    @patch("cementic.doctor.llama_daemon_status", return_value="stopped")
+    @patch("cementic.doctor._daemon_reachable", return_value=False)
+    def test_dead_daemon_is_not_healthy(self, mock_reachable, mock_status) -> None:
+        healthy, _message = _daemon_state(Config())
+        assert healthy is False
+
+    @patch("cementic.doctor.llama_daemon_status", return_value="stopped")
+    @patch("cementic.doctor._daemon_reachable", return_value=False)
+    @patch("cementic.doctor.get_engine")
+    def test_dead_daemon_fails_when_autostart_disabled(
+        self, mock_get_engine, mock_reachable, mock_status, tmp_path
+    ) -> None:
+        mock_get_engine.side_effect = Exception("no db in this test")
+        config = _config_with_model_path(tmp_path, exists=True)
+        config.llama_cpp.daemon_autostart = False
+
+        report = collect_doctor_report(config)
+
+        assert report["checks"]["daemon"]["status"] == "fail"
 
 
 class TestModelCheck:

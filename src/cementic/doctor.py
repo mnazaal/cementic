@@ -7,8 +7,14 @@ from typing import Any
 import requests
 from sqlalchemy import text
 
-from cementic.config import Config, resolve_config_path, resolve_llama_model_path
+from cementic.config import (
+    Config,
+    config_file_error,
+    resolve_config_path,
+    resolve_llama_model_path,
+)
 from cementic.db import REQUIRED_DB_EXTENSIONS, get_engine
+from cementic.embedding_runtime import llama_daemon_status
 
 
 def _status(ok: bool, *, warning: bool = False) -> str:
@@ -56,6 +62,23 @@ def _daemon_reachable(config: Config) -> bool:
         return False
 
 
+def _daemon_state(config: Config) -> tuple[bool, str]:
+    """Return (healthy, message) for the embedding daemon.
+
+    ``llama_cpp.server`` serializes every request behind one model lock, so
+    ``/v1/models`` can block for the whole duration of an in-flight embedding
+    batch. Judging on that probe alone reported a daemon that was busy indexing
+    as broken -- and with autostart disabled that made `status --doctor` exit
+    non-zero mid-build. Fall back to process liveness, exactly as
+    ``status_service.check_health`` already does.
+    """
+    if _daemon_reachable(config):
+        return True, "reachable"
+    if llama_daemon_status(config).startswith("running"):
+        return True, "running but busy (serving a request); not idle enough to answer /v1/models"
+    return False, ""
+
+
 def collect_doctor_report(config: Config) -> dict[str, Any]:
     """Collect read-only readiness diagnostics.
 
@@ -64,11 +87,20 @@ def collect_doctor_report(config: Config) -> dict[str, Any]:
     """
     config_path = resolve_config_path()
     model_path = resolve_llama_model_path(config.llama_cpp.model_path)
+    # A malformed or unreadable config file is silently discarded and cementic
+    # falls back to defaults. Reporting "ok" here -- while pointing at the very
+    # file that is not being used -- was the one check that could never fail.
+    config_error = config_file_error()
     checks: dict[str, Any] = {
         "config": {
-            "status": "ok",
+            "status": "ok" if config_error is None else "fail",
             "path": str(config_path) if config_path is not None else None,
             "database_url": config.database.url.render_as_string(hide_password=True),
+            "message": (
+                "loaded"
+                if config_error is None
+                else f"{config_error}; this file is being ignored and defaults are in use"
+            ),
         }
     }
 
@@ -114,21 +146,22 @@ def collect_doctor_report(config: Config) -> dict[str, Any]:
         ),
     }
 
-    daemon_reachable = _daemon_reachable(config)
+    daemon_healthy, daemon_message = _daemon_state(config)
     daemon_autostart = config.llama_cpp.daemon_autostart
-    daemon_ok = daemon_reachable or daemon_autostart
+    daemon_ok = daemon_healthy or daemon_autostart
     checks["daemon"] = {
-        "status": "ok" if daemon_reachable else "warning" if daemon_autostart else "fail",
-        "reachable": daemon_reachable,
+        "status": "ok" if daemon_healthy else "warning" if daemon_autostart else "fail",
+        "reachable": daemon_healthy,
         "autostart": daemon_autostart,
         "message": (
-            "reachable"
-            if daemon_reachable
-            else "not reachable now; cementic can autostart it when needed"
-            if daemon_autostart
-            else "not reachable and daemon_autostart is disabled"
+            daemon_message
+            or (
+                "not running; cementic can autostart it when needed"
+                if daemon_autostart
+                else "not running and daemon_autostart is disabled"
+            )
         ),
     }
 
-    ok = database_ok and extension_ok and model_ok and daemon_ok
+    ok = (config_error is None) and database_ok and extension_ok and model_ok and daemon_ok
     return {"ok": ok, "checks": checks}

@@ -4,6 +4,7 @@ import hashlib
 from unittest.mock import Mock, patch
 
 import pytest
+from pydantic import SecretStr
 
 from cementic.bootstrap import Bootstrapper
 from cementic.config import Config
@@ -49,33 +50,59 @@ class TestEnsureRuntime:
 class TestPostgresReady:
     """Postgres is external; cementic only probes it."""
 
-    def test_database_ready_true(self) -> None:
+    def test_database_error_none_when_reachable(self) -> None:
         config = Config()
         bootstrapper = Bootstrapper(config)
         with patch("cementic.bootstrap.get_engine") as mock_engine:
             mock_engine.return_value.connect.return_value.__enter__.return_value = Mock()
-            assert bootstrapper._database_ready() is True
+            assert bootstrapper._database_error() is None
 
-    def test_database_ready_false(self) -> None:
+    def test_database_error_returns_the_cause(self) -> None:
         config = Config()
         bootstrapper = Bootstrapper(config)
-        with patch("cementic.bootstrap.get_engine", side_effect=ConnectionError):
-            assert bootstrapper._database_ready() is False
+        with patch("cementic.bootstrap.get_engine", side_effect=ConnectionError("refused")):
+            error = bootstrapper._database_error()
+        assert isinstance(error, ConnectionError)
 
     def test_ensure_postgres_ready_ok_when_reachable(self) -> None:
         config = Config()
         bootstrapper = Bootstrapper(config)
-        with patch.object(bootstrapper, "_database_ready", return_value=True):
+        with patch.object(bootstrapper, "_database_error", return_value=None):
             bootstrapper._ensure_postgres_ready()  # must not raise
 
     def test_ensure_postgres_ready_raises_with_compose_hint(self) -> None:
         config = Config()
         bootstrapper = Bootstrapper(config)
         with (
-            patch.object(bootstrapper, "_database_ready", return_value=False),
+            patch.object(bootstrapper, "_database_error", return_value=ConnectionError("x")),
             pytest.raises(RuntimeError, match="cementic init postgres"),
         ):
             bootstrapper._ensure_postgres_ready()
+
+    def test_failure_message_reports_the_underlying_cause(self) -> None:
+        """A wrong password must not read as "cannot reach Postgres".
+
+        Regression: every failure collapsed to the same unreachable message with
+        advice to run `init postgres`, which is wrong when the server is up and
+        only the credentials are bad.
+        """
+        config = Config()
+        bootstrapper = Bootstrapper(config)
+        cause = RuntimeError('password authentication failed for user "cementic"')
+        with (
+            patch.object(bootstrapper, "_database_error", return_value=cause),
+            pytest.raises(RuntimeError, match="password authentication failed"),
+        ):
+            bootstrapper._ensure_postgres_ready()
+
+    def test_failure_message_does_not_leak_the_password(self) -> None:
+        config = Config()
+        config.database.password = SecretStr("hunter2-secret")
+        bootstrapper = Bootstrapper(config)
+        with patch.object(bootstrapper, "_database_error", return_value=ConnectionError("x")):
+            with pytest.raises(RuntimeError) as excinfo:
+                bootstrapper._ensure_postgres_ready()
+        assert "hunter2-secret" not in str(excinfo.value)
 
 
 class TestEnsureLlamaModel:

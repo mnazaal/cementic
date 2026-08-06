@@ -84,10 +84,12 @@ class Bootstrapper:
         raise RuntimeError(f"Unsupported embedding provider: {provider}")
 
     def _ensure_postgres_ready(self) -> None:
-        if self._database_ready():
+        error = self._database_error()
+        if error is None:
             return
+        # URL.__str__ hides the password, so this is safe to print.
         raise RuntimeError(
-            f"Cannot reach Postgres at {self.config.database.url}. {_COMPOSE_HINT}"
+            f"Cannot use Postgres at {self.config.database.url}: {error}. {_COMPOSE_HINT}"
         )
 
     def _model_path_is_default(self) -> bool:
@@ -162,11 +164,19 @@ class Bootstrapper:
             temp_path.unlink(missing_ok=True)
             raise
 
-    def _database_ready(self) -> bool:
+    def _database_error(self) -> Exception | None:
+        """Return why the database is unusable, or None if it is fine.
+
+        Returns the exception rather than a bool so callers can report *why*.
+        Collapsing it to False made a wrong password, a missing database and an
+        expired certificate all surface as "Cannot reach Postgres" with advice
+        to run `init postgres` -- actively misleading when the server is up and
+        only the credentials are wrong.
+        """
         try:
             engine = get_engine(self.config.database.url)
             with engine.connect() as conn:
                 conn.execute(text("SELECT 1"))
-            return True
-        except Exception:
-            return False
+            return None
+        except Exception as error:
+            return error

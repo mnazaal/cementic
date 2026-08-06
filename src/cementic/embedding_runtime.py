@@ -318,13 +318,30 @@ def get_llama_cpp_runtime_client(
             "run `cementic embedding start` or set CEMENTIC_LLAMA_DAEMON_AUTOSTART=true"
         )
 
+    # Check the model is actually there before spawning a server around it.
+    # `search` and `embed` reach this path without ever running the bootstrapper,
+    # so a missing or mistyped model produced `llama_cpp.server --model
+    # /does/not/exist`, a child that died instantly, and a generic startup
+    # failure -- instead of the accurate "model not found at ..." message that
+    # already exists. Imported locally to keep this module's import graph free of
+    # the database layer that bootstrap pulls in.
+    from cementic.bootstrap import Bootstrapper
+
+    Bootstrapper(config).ensure_embedding_runtime()
+
     print(
-        "starting embedding daemon (first search after a restart can take 30s+)...",
+        "starting embedding daemon (a cold start loads the model; this can take 30s+)...",
         file=sys.stderr,
     )
     _stop_mismatched_llama_cpp_daemon(config)
-    _start_llama_cpp_daemon(config, spec=runtime_spec)
-    _wait_for_daemon_ready(client, timeout_seconds=config.llama_cpp.daemon_start_timeout_seconds)
+    daemon_pid = _start_llama_cpp_daemon(config, spec=runtime_spec)
+    _wait_for_daemon_ready(
+        client,
+        timeout_seconds=config.llama_cpp.daemon_start_timeout_seconds,
+        config=config,
+        pid=daemon_pid,
+        start_token=process_start_token(daemon_pid),
+    )
     return client
 
 
@@ -482,7 +499,8 @@ def stop_llama_cpp_runtime(config: Config) -> bool:
 def _start_llama_cpp_daemon(
     config: Config,
     spec: EmbeddingRuntimeSpec | None = None,
-) -> None:
+) -> int:
+    """Spawn the llama.cpp server and return its PID."""
     log_file = config.llama_cpp.daemon_log_file
     pid_file = config.llama_cpp.daemon_pid_file
     if log_file is None or pid_file is None:
@@ -531,6 +549,7 @@ def _start_llama_cpp_daemon(
     pid = spawn_detached(command, log_file)
     # llama_cpp.server does not write its own PID file; record it for teardown.
     _write_daemon_pid_file(pid_file, pid)
+    return pid
 
 
 def _poll_until_ready(client: RemoteEmbeddingClient, timeout_seconds: float) -> bool:
@@ -542,6 +561,63 @@ def _poll_until_ready(client: RemoteEmbeddingClient, timeout_seconds: float) -> 
     return False
 
 
-def _wait_for_daemon_ready(client: RemoteEmbeddingClient, timeout_seconds: int) -> None:
-    if not _poll_until_ready(client, timeout_seconds):
-        raise RuntimeError("llama.cpp embedding daemon did not become ready in time")
+def _log_tail(log_file: Path | None, lines: int = 12) -> str:
+    """Return the last few lines of the daemon log, or '' if unavailable."""
+    if log_file is None:
+        return ""
+    try:
+        content = log_file.read_text(encoding="utf-8", errors="replace").strip()
+    except OSError:
+        return ""
+    if not content:
+        return ""
+    return "\n".join(content.splitlines()[-lines:])
+
+
+def _daemon_failure_message(reason: str, config: Config) -> str:
+    """Build a daemon startup error that points at the evidence."""
+    log_file = config.llama_cpp.daemon_log_file
+    message = reason
+    if log_file is not None:
+        message += f"\nDaemon log: {log_file}"
+    tail = _log_tail(log_file)
+    if tail:
+        message += f"\n--- last lines of the daemon log ---\n{tail}"
+    return message
+
+
+def _wait_for_daemon_ready(
+    client: RemoteEmbeddingClient,
+    timeout_seconds: int,
+    *,
+    config: Config,
+    pid: int | None = None,
+    start_token: str | None = None,
+) -> None:
+    """Wait for the freshly spawned daemon, failing fast if it dies.
+
+    Watches the child process as well as the endpoint. Every distinct startup
+    failure -- corrupt GGUF, missing model, port already bound, out of memory,
+    n_gpu_layers too high -- used to surface as the same sentence after the full
+    timeout, with no hint that a log existed. The child usually dies within a
+    second, so noticing that turns a blind 30s wait into an immediate, specific
+    error carrying the log that explains it.
+    """
+    deadline = time.time() + timeout_seconds
+    while time.time() < deadline:
+        if client.matches_expected_runtime():
+            return
+        if pid is not None and not is_managed_process_alive(pid, start_token):
+            raise RuntimeError(
+                _daemon_failure_message(
+                    f"llama.cpp embedding daemon (PID {pid}) exited during startup.",
+                    config,
+                )
+            )
+        time.sleep(0.2)
+    raise RuntimeError(
+        _daemon_failure_message(
+            f"llama.cpp embedding daemon did not become ready within {timeout_seconds}s.",
+            config,
+        )
+    )

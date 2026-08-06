@@ -68,6 +68,44 @@ def resolve_llama_model_path(model_path: str) -> Path:
     return (cementic_data_dir() / raw).resolve()
 
 
+def config_file_error() -> str | None:
+    """Why the active config file could not be loaded, or None if it is fine.
+
+    Returns None both when there is no config file (nothing to load) and when
+    one loaded cleanly; the distinction is ``resolve_config_path()``'s job.
+
+    Exists so `cementic status --doctor` can report an unusable config. A
+    malformed or unreadable file is silently discarded and cementic runs on
+    defaults -- the wrong database, the wrong model -- which is exactly the
+    situation a diagnostic command must not describe as "ok".
+    """
+    path = resolve_config_path()
+    if path is None:
+        return None
+    try:
+        with open(path, "rb") as handle:
+            tomllib.load(handle)
+    except tomllib.TOMLDecodeError as error:
+        return f"malformed TOML: {error}"
+    except OSError as error:
+        return f"unreadable: {error}"
+    return None
+
+
+#: Config-file problems already reported, so the warning is not repeated once
+#: per section. Each sub-model reads the file through its own settings source
+#: (nine of them), which otherwise printed the identical warning nine times.
+_warned_config_problems: set[tuple[str, str]] = set()
+
+
+def _warn_once(path: Path, problem: str) -> None:
+    key = (str(path), problem)
+    if key in _warned_config_problems:
+        return
+    _warned_config_problems.add(key)
+    print(f"warning: ignoring {problem} config file {path}", file=sys.stderr)
+
+
 def load_config_file() -> dict[str, Any]:
     """Read the active TOML config file into a dict (empty if none/invalid)."""
     path = resolve_config_path()
@@ -76,10 +114,12 @@ def load_config_file() -> dict[str, Any]:
     try:
         with open(path, "rb") as handle:
             return tomllib.load(handle)
-    except tomllib.TOMLDecodeError as error:
-        print(f"warning: ignoring malformed config file {path}: {error}", file=sys.stderr)
+    except tomllib.TOMLDecodeError:
+        _warn_once(path, "malformed")
         return {}
     except OSError:
+        # Previously silent: an unreadable config left no trace at all.
+        _warn_once(path, "unreadable")
         return {}
 
 
@@ -191,8 +231,12 @@ class LlamaCppConfig(_SectionSettings):
     daemon_host: str = Field(default="127.0.0.1", description="llama.cpp daemon host")
     daemon_port: int = Field(default=11555, description="llama.cpp daemon port")
     daemon_start_timeout_seconds: int = Field(
-        default=30,
-        description="Seconds to wait for the llama.cpp daemon to become ready",
+        default=120,
+        description="Seconds to wait for the llama.cpp daemon to become ready. "
+        "A cold start loads a multi-GB model from disk; the previous 30s default "
+        "contradicted cementic's own 'can take 30s+' warning and gave up on "
+        "daemons that were still starting successfully. Startup now fails fast "
+        "when the process dies, so this budget only bounds a genuinely slow load.",
     )
     llama_embed_timeout_seconds: int = Field(
         default=120,
