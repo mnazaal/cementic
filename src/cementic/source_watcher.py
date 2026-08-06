@@ -8,6 +8,7 @@ import os
 import signal
 import sys
 import threading
+import time
 from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import Any
@@ -21,6 +22,11 @@ from cementic.db import SourceDocument, create_tables, get_engine, get_session_f
 from cementic.extract import supported_extensions
 from cementic.state import DaemonState, StateManager
 from cementic.supervisor import is_managed_process_alive, process_start_token
+
+#: Minimum gap between "now working on X" state-file writes. Display only, so a
+#: little staleness is fine; the alternative is one full read-modify-write per
+#: file during a bulk scan.
+_CURRENT_FILE_PUBLISH_INTERVAL_SECONDS = 0.5
 
 
 class DocumentEventHandler(FileSystemEventHandler):
@@ -125,6 +131,7 @@ class SourceWatcher:
         self.Session: Any = None
         self.collection = "default"
         self._watched_roots: list[Path] = []
+        self._last_current_file_publish = 0.0
 
     def _setup_logging(self) -> logging.Logger:
         logger = logging.getLogger("cementic.source_watcher")
@@ -322,6 +329,21 @@ class SourceWatcher:
         except Exception as error:
             self._logger.error("Failed to mark deleted %s: %s", file_path, error)
 
+    def _publish_current_file(self, file_path: str) -> None:
+        """Publish "now working on X", at most once per interval.
+
+        Purely for display in `cementic status --verbose`, but each write is a
+        JSON read, a full write and a rename. During the initial scan of a large
+        tree that is one such round-trip per file on top of the SHA-256 read, so
+        it is rate-limited. The processed/failed counters are *not* throttled --
+        those are exact.
+        """
+        now = time.monotonic()
+        if now - self._last_current_file_publish < _CURRENT_FILE_PUBLISH_INTERVAL_SECONDS:
+            return
+        self._last_current_file_publish = now
+        self.state_manager.update(current_file=file_path)
+
     def _is_under_watched_roots(self, file_path: str) -> bool:
         """Whether a stored path lies under a root this run is watching.
 
@@ -373,7 +395,7 @@ class SourceWatcher:
                 sha256.update(chunk)
         file_hash = sha256.hexdigest()
 
-        self.state_manager.update(current_file=file_path)
+        self._publish_current_file(file_path)
         # Read-then-insert is not atomic, and the initial scan runs on the main
         # thread while debounce timers fire on their own. The same file can be
         # registered twice concurrently: both see no row, both insert, and the

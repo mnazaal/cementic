@@ -1,7 +1,9 @@
 """Tests for artifact storage helpers."""
 
 import hashlib
+import os
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -81,6 +83,39 @@ class TestWriteReadExtracted:
         write_extracted_text(path, "first")
         write_extracted_text(path, "second longer content")
         assert read_extracted_text(path) == "second longer content"
+
+
+class TestTempArtifactCleanup:
+    """A failed write must not leave a temp file behind.
+
+    Regression: nothing sweeps `.<name>.tmp`, and `collection remove` only
+    deletes paths recorded in the database, so a worker killed mid-write left
+    one on disk permanently.
+    """
+
+    def test_failed_write_removes_the_temp_file(self, tmp_path: Path) -> None:
+        target = tmp_path / "doc.md.gz"
+        with patch("cementic.storage.gzip.compress", side_effect=OSError("disk full")):
+            with pytest.raises(OSError, match="disk full"):
+                write_extracted_text(target, "content")
+
+        assert list(tmp_path.glob(".*tmp")) == []
+        assert not target.exists()
+
+    def test_temp_name_is_process_specific(self, tmp_path: Path) -> None:
+        """Two workers must not contend for the same temp path."""
+        target = tmp_path / "doc.md.gz"
+        seen: list[str] = []
+        real_write_bytes = Path.write_bytes
+
+        def capture(self, data):  # noqa: ANN001 - test shim
+            seen.append(self.name)
+            return real_write_bytes(self, data)
+
+        with patch.object(Path, "write_bytes", capture):
+            write_extracted_text(target, "content")
+
+        assert seen and str(os.getpid()) in seen[0]
 
 
 class TestSafeRemoveArtifact:
