@@ -79,6 +79,19 @@ def query_tuning_sql(
 # --- imperative shells -------------------------------------------------------
 
 
+def vector_table_exists(conn: Connection, profile_id: int) -> bool:
+    """Whether a profile's vector table has been created yet.
+
+    The table is created on demand, so a revision that has not embedded anything
+    yet has none. Callers that build indexes or query vectors must check first
+    rather than assume.
+    """
+    result = conn.execute(
+        text("SELECT to_regclass(:name)"), {"name": vector_table_name(profile_id)}
+    ).scalar()
+    return result is not None
+
+
 def index_access_method(conn: Connection, index_name: str) -> str | None:
     """Return the access method (``hnsw``/``diskann``) of an index, or None.
 

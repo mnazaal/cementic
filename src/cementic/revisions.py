@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import cast
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
@@ -29,6 +29,7 @@ from cementic.profiles import (
     get_or_create_extractor_profile,
 )
 from cementic.storage import safe_remove_artifact
+from cementic.vector_store import create_table_sql
 
 #: Revision statuses that represent an in-flight (not yet promoted) build.
 BUILDING_STATUSES = ("building", "ready")
@@ -221,6 +222,27 @@ def promote_revision(
     session.flush()
     prune_collection_history(session, collection, config=config)
     return revision
+
+
+def ensure_revision_vector_table(session: Session, revision: PipelineRevision) -> None:
+    """Create the revision's per-profile vector table if it does not exist yet.
+
+    Done up front rather than on the first successful embedding so that a
+    revision which produces no vectors at all still has a table to index, and so
+    the ANN index built at promotion time covers every vector inserted later.
+    """
+    bind = session.get_bind()
+    if bind is None:
+        raise RuntimeError("Session is not bound to an engine")
+    if bind.dialect.name != "postgresql":
+        return
+    session.execute(
+        text(
+            create_table_sql(
+                revision.embedding_profile_id, revision.embedding_profile.embedding_dim
+            )
+        )
+    )
 
 
 def ensure_revision_ann_index(

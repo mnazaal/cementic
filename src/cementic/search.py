@@ -20,6 +20,7 @@ from cementic.vector_store import (
     query_tuning_sql,
     to_vector_literal,
     vector_index_name,
+    vector_table_exists,
     vector_table_name,
 )
 
@@ -125,7 +126,7 @@ class Searcher:
             combined: list[SearchResult] = []
             for revision in revisions:
                 table = vector_table_name(revision.embedding_profile_id)
-                if not _vector_table_exists(session, table):
+                if not vector_table_exists(session.connection(), revision.embedding_profile_id):
                     continue
                 # Tune for the index that actually exists rather than the
                 # configured method, which can drift until the index is rebuilt.
@@ -230,12 +231,6 @@ class Searcher:
             .all()
         )
         return _searchable_revisions(revisions)
-
-
-def _vector_table_exists(session: Any, table_name: str) -> bool:
-    """Whether a per-profile vector table exists yet (None if not built)."""
-    result = session.execute(text("SELECT to_regclass(:name)"), {"name": table_name}).scalar()
-    return result is not None
 
 
 def _create_embedding_provider(config_json: str, config: Config) -> Any:

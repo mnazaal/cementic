@@ -31,15 +31,6 @@ from cementic.source_watcher import SourceWatcher
 from tests.integration.test_pg_helpers import cleanup_pg_tables
 
 
-@pytest.fixture(autouse=True)
-def _skip_ann_index(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Skip the ANN index build here (covered by test_db_pg / test_revisions_pg)."""
-    monkeypatch.setattr(
-        "cementic.pipeline_worker.ensure_revision_ann_index",
-        lambda *args, **kwargs: None,
-    )
-
-
 class FakeEmbeddingClient(EmbeddingProvider):
     """Deterministic fake embedding client for integration tests."""
 
@@ -344,6 +335,41 @@ class TestTerminalFailuresAndDeletedDocs:
             assert revision.status == "ready"  # the build finishes despite the failure
             extracted = session.query(ExtractedDocument).one()
             assert extracted.status == "failed"
+
+    @pytest.mark.pg
+    def test_revision_with_zero_vectors_reaches_ready_on_postgres(
+        self, pg_setup, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A build that embeds nothing still reaches ``ready`` against real Postgres.
+
+        Regression: the per-profile vector table was only created on the first
+        successful embedding, but the ANN index was built unconditionally once the
+        revision completed. With every document failing extraction there were no
+        vectors, so `CREATE INDEX` raised UndefinedTable; the worker's retry loop
+        swallowed it and the revision stayed `building` forever, with
+        `cementic collection promote` reporting "no ready revision" indefinitely.
+        This only reproduces on Postgres -- SQLite has no ANN index to build.
+        """
+        config, session_factory, pdf_fixtures_dir = pg_setup
+        collection = "test_zero_vectors"
+
+        pipeline, source_watcher = _setup_worker(config, session_factory, collection, monkeypatch)
+        pipeline.embedding_client = FakeEmbeddingClient()
+
+        source_watcher._register_document(str(pdf_fixtures_dir / "test_doc_a.pdf"))
+        with session_factory() as session:
+            doc = session.query(SourceDocument).filter_by(collection=collection).first()
+            assert doc is not None
+            doc.source_path = "/nonexistent/file.pdf"  # force extraction failure
+            session.commit()
+
+        revision_id = pipeline._ensure_target_revision()
+        _run_pipeline_until_idle(pipeline, revision_id)
+
+        with session_factory() as session:
+            revision = session.get(PipelineRevision, revision_id)
+            assert revision is not None
+            assert revision.status == "ready"
 
     def test_failed_extraction_is_not_reselected_within_run(
         self, sqlite_setup, monkeypatch: pytest.MonkeyPatch

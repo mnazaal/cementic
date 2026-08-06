@@ -10,7 +10,12 @@ from sqlalchemy import ForeignKey, Index, Integer, String, Text, create_engine, 
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship, sessionmaker
 
 from cementic.index_strategies import IndexParams, build_index_ddl
-from cementic.vector_store import index_access_method, vector_index_name, vector_table_name
+from cementic.vector_store import (
+    index_access_method,
+    vector_index_name,
+    vector_table_exists,
+    vector_table_name,
+)
 
 if TYPE_CHECKING:
     from sqlalchemy.engine import URL, Engine
@@ -381,7 +386,15 @@ def ensure_embedding_ann_index(
 
     The method (`hnsw`/`diskann`) is resolved through the index-strategy
     registry; this is the thin imperative shell that executes its pure DDL.
+
+    No-ops when the vector table does not exist yet. A revision can legitimately
+    complete with zero vectors (an empty watch directory, or one where every
+    document failed to extract), and `CREATE INDEX ... IF NOT EXISTS` guards only
+    the index name, not the table -- so indexing one unconditionally would raise
+    and leave the revision stuck in `building` forever.
     """
+    if engine.dialect.name != "postgresql":
+        return
     index_name = vector_index_name(profile_id)
     ddl = build_index_ddl(
         method=method,
@@ -392,6 +405,8 @@ def ensure_embedding_ann_index(
         params=params,
     )
     with engine.connect() as conn:
+        if not vector_table_exists(conn, profile_id):
+            return
         _ensure_ann_access_method(conn, method)
         # If an index already exists under a different method, drop it first so a
         # method switch actually takes effect (CREATE INDEX IF NOT EXISTS alone

@@ -99,6 +99,7 @@ class TestEnsureVectorExtensions:
 def test_ensure_embedding_ann_index_builds_hnsw_on_profile_table() -> None:
     mock_conn = MagicMock()
     mock_engine = MagicMock()
+    mock_engine.dialect.name = "postgresql"
     mock_engine.connect.return_value.__enter__.return_value = mock_conn
     mock_engine.connect.return_value.__exit__.return_value = False
 
@@ -114,6 +115,7 @@ def test_ensure_embedding_ann_index_builds_diskann() -> None:
     mock_conn = MagicMock()
     mock_conn.execute.return_value.scalar.return_value = True
     mock_engine = MagicMock()
+    mock_engine.dialect.name = "postgresql"
     mock_engine.connect.return_value.__enter__.return_value = mock_conn
     mock_engine.connect.return_value.__exit__.return_value = False
 
@@ -143,6 +145,7 @@ def test_ensure_ann_access_method_skips_hnsw_preflight() -> None:
 def test_ensure_embedding_ann_index_rejects_unsupported_metric() -> None:
     """Unsupported distance metric raises ValueError before any DB call."""
     mock_engine = MagicMock()
+    mock_engine.dialect.name = "postgresql"
     with pytest.raises(ValueError, match="Unsupported distance metric"):
         ensure_embedding_ann_index(
             mock_engine,

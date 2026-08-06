@@ -90,12 +90,8 @@ class TestE2EPipeline:
     """Full pipeline build and status tests (requires PostgreSQL)."""
 
     @pytest.fixture(autouse=True)
-    def _e2e_env(self, pg_engine, monkeypatch: pytest.MonkeyPatch):
-        """Skip the index build (covered elsewhere) and clean up PG between tests."""
-        monkeypatch.setattr(
-            "cementic.pipeline_worker.ensure_revision_ann_index",
-            lambda *args, **kwargs: None,
-        )
+    def _e2e_env(self, pg_engine):
+        """Clean up PG between tests. The ANN index build runs for real here."""
         yield
         with sessionmaker(bind=pg_engine)() as session:
             cleanup_pg_tables(session)

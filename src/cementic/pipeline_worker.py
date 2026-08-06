@@ -33,6 +33,7 @@ from cementic.embedding_runtime import create_provider, runtime_spec_from_config
 from cementic.extract import extract_document
 from cementic.revisions import (
     ensure_revision_ann_index,
+    ensure_revision_vector_table,
     get_target_revision,
     mark_revision_ready,
     requeue_interrupted_artifacts,
@@ -347,6 +348,7 @@ class PipelineWorker:
             revision = get_target_revision(
                 session, self.collection, self.config, self.embedding_client
             )
+            ensure_revision_vector_table(session, revision)
             session.commit()
             return revision.id
 
