@@ -17,7 +17,14 @@ from cementic.db import (
     get_engine,
     get_session_factory,
 )
-from cementic.revisions import BUILDING_STATUSES, get_active_revision
+from cementic.revisions import (
+    BUILDING_STATUSES,
+    chunk_scope,
+    chunked_scope,
+    embedding_scope,
+    extracted_scope,
+    get_active_revision,
+)
 from cementic.state import StateManager, WorkerState
 from cementic.supervisor import (
     is_managed_process_alive,
@@ -234,11 +241,14 @@ def load_pipeline_status_bulk(config: Config, collections: list[str]) -> dict[st
         failed_embeddings: dict[str, int] = {}
 
         if targets:
+            # Every scope below is the same definition the pipeline worker's own
+            # completeness check uses. They were separate copies and drifted:
+            # status omitted the source/content hash equalities and counted every
+            # non-"done" chunking as failed, so `cementic status` reported queued
+            # work as failures and showed 100% extracted for files that had
+            # changed on disk and still owed a re-extraction.
             extractor_conditions = [
-                and_(
-                    SourceDocument.collection == collection,
-                    ExtractedDocument.extractor_profile_id == revision.extractor_profile_id,
-                )
+                and_(SourceDocument.collection == collection, *extracted_scope(revision))
                 for collection, revision in targets
             ]
             for collection, status, count in (
@@ -258,12 +268,12 @@ def load_pipeline_status_bulk(config: Config, collections: list[str]) -> dict[st
             ):
                 (extracted_done if status == "done" else extracted_failed)[collection] = count
 
+            chunked_conditions = [
+                and_(SourceDocument.collection == collection, *chunked_scope(revision))
+                for collection, revision in targets
+            ]
             chunk_conditions = [
-                and_(
-                    SourceDocument.collection == collection,
-                    ExtractedDocument.extractor_profile_id == revision.extractor_profile_id,
-                    ChunkedDocument.chunk_profile_id == revision.chunk_profile_id,
-                )
+                and_(SourceDocument.collection == collection, *chunk_scope(revision))
                 for collection, revision in targets
             ]
             for collection, status, count in (
@@ -276,7 +286,11 @@ def load_pipeline_status_bulk(config: Config, collections: list[str]) -> dict[st
                     ExtractedDocument, ChunkedDocument.extracted_document_id == ExtractedDocument.id
                 )
                 .join(SourceDocument, ExtractedDocument.document_id == SourceDocument.id)
-                .filter(SourceDocument.status != "deleted", or_(*chunk_conditions))
+                .filter(
+                    SourceDocument.status != "deleted",
+                    ChunkedDocument.status.in_(["done", "failed"]),
+                    or_(*chunked_conditions),
+                )
                 .group_by(SourceDocument.collection, ChunkedDocument.status)
                 .all()
             ):
@@ -298,16 +312,8 @@ def load_pipeline_status_bulk(config: Config, collections: list[str]) -> dict[st
                 .all()
             }
 
-            # Scope through the revision's chunk chain (like total_chunks): the
-            # same embedding profile can be shared with an older revision's
-            # chunks, and counting those would overstate progress (>100%).
             embedding_conditions = [
-                and_(
-                    SourceDocument.collection == collection,
-                    ExtractedDocument.extractor_profile_id == revision.extractor_profile_id,
-                    ChunkedDocument.chunk_profile_id == revision.chunk_profile_id,
-                    ChunkEmbedding.embedding_profile_id == revision.embedding_profile_id,
-                )
+                and_(SourceDocument.collection == collection, *embedding_scope(revision))
                 for collection, revision in targets
             ]
             embedding_status_map = {

@@ -32,8 +32,12 @@ from cementic.embedding_provider import EmbeddingProvider
 from cementic.embedding_runtime import create_provider, runtime_spec_from_config
 from cementic.extract import extract_document
 from cementic.revisions import (
+    chunk_scope,
+    chunked_scope,
+    embedding_scope,
     ensure_revision_ann_index,
     ensure_revision_vector_table,
+    extracted_scope,
     get_target_revision,
     mark_revision_ready,
     requeue_interrupted_artifacts,
@@ -115,59 +119,32 @@ def _compute_revision_counts(
     session: Session, collection: str, revision: PipelineRevision
 ) -> PipelineCounts:
     """Query the database for current revision progress counts."""
-    documents = (
-        session.query(SourceDocument)
-        .filter(SourceDocument.collection == collection, SourceDocument.status != "deleted")
-        .count()
-    )
+    live = (SourceDocument.collection == collection, SourceDocument.status != "deleted")
+    documents = session.query(SourceDocument).filter(*live).count()
     extracted_done = (
         session.query(ExtractedDocument)
         .join(SourceDocument, ExtractedDocument.document_id == SourceDocument.id)
-        .filter(
-            SourceDocument.collection == collection,
-            SourceDocument.status != "deleted",
-            ExtractedDocument.extractor_profile_id == revision.extractor_profile_id,
-            ExtractedDocument.status == "done",
-            ExtractedDocument.source_file_hash == SourceDocument.file_hash,
-        )
+        .filter(*live, *extracted_scope(revision), ExtractedDocument.status == "done")
         .count()
     )
     extracted_failed = (
         session.query(ExtractedDocument)
         .join(SourceDocument, ExtractedDocument.document_id == SourceDocument.id)
-        .filter(
-            SourceDocument.collection == collection,
-            SourceDocument.status != "deleted",
-            ExtractedDocument.extractor_profile_id == revision.extractor_profile_id,
-            ExtractedDocument.status == "failed",
-            ExtractedDocument.source_file_hash == SourceDocument.file_hash,
-        )
+        .filter(*live, *extracted_scope(revision), ExtractedDocument.status == "failed")
         .count()
-    )
-    # Both chunked counts must partition exactly the set _step_chunk drains
-    # (extractions with status "done", current content hash): asymmetric scoping
-    # here makes `chunked_done + chunked_failed == extracted_done` unreachable
-    # and wedges the revision in "building" forever.
-    chunked_scope = (
-        SourceDocument.collection == collection,
-        SourceDocument.status != "deleted",
-        ExtractedDocument.extractor_profile_id == revision.extractor_profile_id,
-        ExtractedDocument.status == "done",
-        ChunkedDocument.chunk_profile_id == revision.chunk_profile_id,
-        ChunkedDocument.source_content_hash == ExtractedDocument.content_hash,
     )
     chunked_done = (
         session.query(ChunkedDocument)
         .join(ExtractedDocument, ChunkedDocument.extracted_document_id == ExtractedDocument.id)
         .join(SourceDocument, ExtractedDocument.document_id == SourceDocument.id)
-        .filter(*chunked_scope, ChunkedDocument.status == "done")
+        .filter(*live, *chunked_scope(revision), ChunkedDocument.status == "done")
         .count()
     )
     chunked_failed = (
         session.query(ChunkedDocument)
         .join(ExtractedDocument, ChunkedDocument.extracted_document_id == ExtractedDocument.id)
         .join(SourceDocument, ExtractedDocument.document_id == SourceDocument.id)
-        .filter(*chunked_scope, ChunkedDocument.status == "failed")
+        .filter(*live, *chunked_scope(revision), ChunkedDocument.status == "failed")
         .count()
     )
     total_chunks = (
@@ -175,32 +152,17 @@ def _compute_revision_counts(
         .join(ChunkedDocument, Chunk.chunked_document_id == ChunkedDocument.id)
         .join(ExtractedDocument, ChunkedDocument.extracted_document_id == ExtractedDocument.id)
         .join(SourceDocument, Chunk.document_id == SourceDocument.id)
-        .filter(
-            SourceDocument.collection == collection,
-            SourceDocument.status != "deleted",
-            ExtractedDocument.extractor_profile_id == revision.extractor_profile_id,
-            ChunkedDocument.chunk_profile_id == revision.chunk_profile_id,
-        )
+        .filter(*live, *chunk_scope(revision))
         .count()
     )
-    # Embedding counts must be scoped through the revision's chunk chain, exactly
-    # like total_chunks. The same embedding profile can be shared with an older
-    # revision's chunks (e.g. after a chunk_size change with the same model);
-    # counting those too makes `done + failed == total_chunks` unreachable.
-    embedding_scope = (
-        SourceDocument.collection == collection,
-        SourceDocument.status != "deleted",
-        ExtractedDocument.extractor_profile_id == revision.extractor_profile_id,
-        ChunkedDocument.chunk_profile_id == revision.chunk_profile_id,
-        ChunkEmbedding.embedding_profile_id == revision.embedding_profile_id,
-    )
+    embedding_conditions = (*live, *embedding_scope(revision))
     done_embeddings = (
         session.query(ChunkEmbedding)
         .join(Chunk, ChunkEmbedding.chunk_id == Chunk.id)
         .join(ChunkedDocument, Chunk.chunked_document_id == ChunkedDocument.id)
         .join(ExtractedDocument, ChunkedDocument.extracted_document_id == ExtractedDocument.id)
         .join(SourceDocument, Chunk.document_id == SourceDocument.id)
-        .filter(*embedding_scope, ChunkEmbedding.status == "done")
+        .filter(*embedding_conditions, ChunkEmbedding.status == "done")
         .count()
     )
     failed_embeddings = (
@@ -209,7 +171,7 @@ def _compute_revision_counts(
         .join(ChunkedDocument, Chunk.chunked_document_id == ChunkedDocument.id)
         .join(ExtractedDocument, ChunkedDocument.extracted_document_id == ExtractedDocument.id)
         .join(SourceDocument, Chunk.document_id == SourceDocument.id)
-        .filter(*embedding_scope, ChunkEmbedding.status == "failed")
+        .filter(*embedding_conditions, ChunkEmbedding.status == "failed")
         .count()
     )
     return PipelineCounts(

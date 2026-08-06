@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import cast
+from typing import Any, cast
 
 from sqlalchemy import select, text
 from sqlalchemy.engine import Engine
@@ -71,6 +71,60 @@ def _default_revision_label(revision: PipelineRevision) -> str:
         f"{revision.extractor_profile.name}-"
         f"{revision.chunk_profile.fingerprint[:8]}-"
         f"{revision.embedding_profile.provider}-{revision.embedding_profile.fingerprint[:8]}"
+    )
+
+
+def extracted_scope(revision: PipelineRevision) -> tuple[Any, ...]:
+    """Conditions selecting the extractions that count toward ``revision``.
+
+    The source-hash equality matters: an extraction carrying a stale hash is work
+    still owed after the file changed on disk, not work done. Omitting it makes
+    progress read complete while the build can never finish.
+
+    These builders are the single definition of "what counts", shared by the
+    worker's completeness check and by `cementic status`. The two used to carry
+    separate copies and drifted apart.
+    """
+    return (
+        ExtractedDocument.extractor_profile_id == revision.extractor_profile_id,
+        ExtractedDocument.source_file_hash == SourceDocument.file_hash,
+    )
+
+
+def chunked_scope(revision: PipelineRevision) -> tuple[Any, ...]:
+    """Conditions selecting the chunkings that count toward ``revision``.
+
+    Must partition exactly the set ``_step_chunk`` drains: asymmetric scoping
+    makes ``chunked_done + chunked_failed == extracted_done`` unreachable and
+    wedges the revision in "building" forever.
+    """
+    return (
+        *extracted_scope(revision),
+        ExtractedDocument.status == "done",
+        ChunkedDocument.chunk_profile_id == revision.chunk_profile_id,
+        ChunkedDocument.source_content_hash == ExtractedDocument.content_hash,
+    )
+
+
+def chunk_scope(revision: PipelineRevision) -> tuple[Any, ...]:
+    """Conditions selecting the chunks that count toward ``revision``."""
+    return (
+        ExtractedDocument.extractor_profile_id == revision.extractor_profile_id,
+        ChunkedDocument.chunk_profile_id == revision.chunk_profile_id,
+    )
+
+
+def embedding_scope(revision: PipelineRevision) -> tuple[Any, ...]:
+    """Conditions selecting the embeddings that count toward ``revision``.
+
+    Scoped through the revision's chunk chain, exactly like ``chunk_scope``: the
+    same embedding profile can be shared with an older revision's chunks (e.g.
+    after a chunk_size change with the same model), and counting those makes
+    ``done + failed == total_chunks`` unreachable.
+    """
+    return (
+        *chunk_scope(revision),
+        ChunkEmbedding.embedding_profile_id == revision.embedding_profile_id,
     )
 
 

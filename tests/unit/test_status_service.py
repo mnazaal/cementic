@@ -18,6 +18,7 @@ from cementic.db import (
     PipelineRevision,
     SourceDocument,
 )
+from cementic.pipeline_worker import compute_revision_counts
 from cementic.state import DaemonState, WorkerState
 from cementic.status_service import (
     HealthStatus,
@@ -87,14 +88,22 @@ def _seed_collection_with_documents(
         )
         session.add(doc)
         session.flush()
+        # Hashes must mirror what the real pipeline writes: extraction records
+        # the source hash it consumed, chunking records the content hash it
+        # consumed. Progress is only "done" when those still match upstream.
         extracted = ExtractedDocument(
-            document_id=doc.id, extractor_profile_id=revision.extractor_profile_id, status="done"
+            document_id=doc.id,
+            extractor_profile_id=revision.extractor_profile_id,
+            source_file_hash=f"h{i}",
+            content_hash=f"c{i}",
+            status="done",
         )
         session.add(extracted)
         session.flush()
         chunked = ChunkedDocument(
             extracted_document_id=extracted.id,
             chunk_profile_id=revision.chunk_profile_id,
+            source_content_hash=f"c{i}",
             status="done",
         )
         session.add(chunked)
@@ -111,6 +120,87 @@ def _seed_collection_with_documents(
             )
         )
     return revision
+
+
+class TestStatusAgreesWithWorkerCounts:
+    """`cementic status` must report exactly what the worker counts.
+
+    These are two separate query paths over the same data. They carried
+    duplicate scope definitions and drifted: status omitted the source/content
+    hash equalities and bucketed every non-"done" chunking as failed. The result
+    was a status panel that reported queued work as failures and showed 100%
+    extracted for files that had changed on disk and still owed re-extraction --
+    while the revision quietly never reached `ready`.
+    """
+
+    def _session_factory(self):
+        engine = create_engine("sqlite:///:memory:")
+        Base.metadata.create_all(engine)
+        return engine, sessionmaker(bind=engine, expire_on_commit=False)
+
+    def _status_for(self, engine, session_factory, collection: str):
+        with (
+            patch("cementic.status_service.get_engine", return_value=engine),
+            patch("cementic.status_service.get_session_factory", return_value=session_factory),
+        ):
+            return load_pipeline_status_bulk(Config(), [collection])[collection]
+
+    def test_queued_chunking_is_not_reported_as_failed(self) -> None:
+        engine, session_factory = self._session_factory()
+        with session_factory() as session:
+            revision = _seed_revision(session, "queued")
+            doc = SourceDocument(collection="queued", source_path="/a.pdf", file_hash="h")
+            session.add(doc)
+            session.flush()
+            extracted = ExtractedDocument(
+                document_id=doc.id,
+                extractor_profile_id=revision.extractor_profile_id,
+                source_file_hash="h",
+                content_hash="c",
+                status="done",
+            )
+            session.add(extracted)
+            session.flush()
+            session.add(
+                ChunkedDocument(
+                    extracted_document_id=extracted.id,
+                    chunk_profile_id=revision.chunk_profile_id,
+                    source_content_hash="c",
+                    status="pending",  # merely queued, not failed
+                )
+            )
+            session.commit()
+            worker_counts = compute_revision_counts(session, "queued", revision)
+
+        status = self._status_for(engine, session_factory, "queued")
+        assert status.chunked_failed == 0
+        assert status.chunked_failed == worker_counts.chunked_failed
+
+    def test_stale_extraction_is_not_counted_as_done(self) -> None:
+        engine, session_factory = self._session_factory()
+        with session_factory() as session:
+            revision = _seed_revision(session, "stale")
+            # The watched file changed on disk: its hash moved on, but the
+            # existing extraction still carries the old one.
+            doc = SourceDocument(collection="stale", source_path="/a.pdf", file_hash="new")
+            session.add(doc)
+            session.flush()
+            session.add(
+                ExtractedDocument(
+                    document_id=doc.id,
+                    extractor_profile_id=revision.extractor_profile_id,
+                    source_file_hash="old",
+                    content_hash="c",
+                    status="done",
+                )
+            )
+            session.commit()
+            worker_counts = compute_revision_counts(session, "stale", revision)
+
+        status = self._status_for(engine, session_factory, "stale")
+        assert status.extracted_done == 0
+        assert status.extraction_pct == 0.0
+        assert status.extracted_done == worker_counts.extracted_done
 
 
 class TestLoadPipelineStatusBulk:
