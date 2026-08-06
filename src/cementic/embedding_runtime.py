@@ -20,6 +20,7 @@ from cementic.embedding_text import (
     format_document_text_for_model,
     format_query_text_for_model,
 )
+from cementic.filelock import file_lock
 from cementic.supervisor import (
     is_managed_process_alive,
     process_start_token,
@@ -113,6 +114,20 @@ def llama_cpp_runtime_fingerprint(
         sort_keys=True,
     )
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+#: Long enough to wait out another process's cold model load rather than
+#: giving up and spawning a competing daemon.
+_DAEMON_LOCK_TIMEOUT_SECONDS = 180.0
+
+
+def _daemon_lock_path(config: Config) -> Path:
+    """Lock file guarding daemon stop/spawn, beside the pid file."""
+    pid_file = config.llama_cpp.daemon_pid_file
+    if pid_file is None:
+        raise RuntimeError("llama.cpp daemon paths are not configured")
+    return pid_file.with_name(f"{pid_file.name}.lock")
+
 
 
 class RemoteEmbeddingClient(EmbeddingProvider):
@@ -333,15 +348,24 @@ def get_llama_cpp_runtime_client(
         "starting embedding daemon (a cold start loads the model; this can take 30s+)...",
         file=sys.stderr,
     )
-    _stop_mismatched_llama_cpp_daemon(config)
-    daemon_pid = _start_llama_cpp_daemon(config, spec=runtime_spec)
-    _wait_for_daemon_ready(
-        client,
-        timeout_seconds=config.llama_cpp.daemon_start_timeout_seconds,
-        config=config,
-        pid=daemon_pid,
-        start_token=process_start_token(daemon_pid),
-    )
+    # Serialise stop-then-spawn across processes. Two racers that both saw no
+    # daemon would both spawn on the same port: one wins the bind, the loser
+    # exits, and whichever wrote the pid file last could record the *loser's*
+    # PID -- leaving a live daemon holding the port and a multi-GB model that
+    # `embedding stop` then reports as "already stopped".
+    with file_lock(_daemon_lock_path(config), timeout=_DAEMON_LOCK_TIMEOUT_SECONDS):
+        # Another process may have started a matching daemon while we waited.
+        if client.matches_expected_runtime():
+            return client
+        _stop_mismatched_llama_cpp_daemon(config)
+        daemon_pid = _start_llama_cpp_daemon(config, spec=runtime_spec)
+        _wait_for_daemon_ready(
+            client,
+            timeout_seconds=config.llama_cpp.daemon_start_timeout_seconds,
+            config=config,
+            pid=daemon_pid,
+            start_token=process_start_token(daemon_pid),
+        )
     return client
 
 

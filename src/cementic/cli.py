@@ -45,6 +45,7 @@ from cementic.embedding_runtime import (
     stop_llama_cpp_runtime,
 )
 from cementic.extract import extract_document
+from cementic.filelock import LockUnavailableError, file_lock
 from cementic.search import MAX_SEARCH_RESULTS, Searcher
 from cementic.state import DaemonState, StateManager
 from cementic.status_service import (
@@ -436,6 +437,12 @@ def _get_data_dir() -> Path:
     return state_path.parent
 
 
+def _get_start_lock_path() -> Path:
+    """Lock file serialising `cementic start`'s check-then-spawn sequence."""
+    return _get_data_dir() / "start.lock"
+
+
+
 def _get_supervisor_state_path() -> Path:
     """Lazy supervisor state path."""
     return _get_data_dir() / "supervisor.json"
@@ -808,6 +815,20 @@ def start_background(
     # name something else entirely.
     directories = [str(Path(d).resolve()) for d in directories]
 
+    # Serialise the whole check-then-spawn-then-record sequence. Two concurrent
+    # `cementic start` runs could both see nothing running, both spawn, and the
+    # second's supervisor record replace the first's -- leaving the first pair
+    # running and invisible to `cementic stop`.
+    try:
+        with file_lock(_get_start_lock_path(), timeout=0):
+            _start_background_locked(directories, collection)
+    except LockUnavailableError:
+        console.print("[yellow]Another `cementic start` is already in progress[/yellow]")
+        raise typer.Exit(1)
+
+
+def _start_background_locked(directories: list[str], collection: str) -> None:
+    """The body of `cementic start`, run while holding the start lock."""
     state = _load_supervisor_state()
     running = [proc for proc in _supervisor_processes(state) if _is_managed_proc_alive(proc)]
 

@@ -914,6 +914,29 @@ class TestBackgroundCommands:
         assert second_command[4:] == ["--collection", "test"]
 
     @patch("cementic.cli.spawn_detached")
+    def test_concurrent_start_is_refused_rather_than_racing(self, mock_spawn, temp_dir: Path):
+        """A second `cementic start` must not spawn while one is mid-flight.
+
+        Regression: check-then-spawn-then-record was unsynchronised, so two
+        concurrent runs could both see nothing running, both spawn, and the
+        second's supervisor record replace the first's -- leaving the first pair
+        running and invisible to `cementic stop`.
+        """
+        from cementic.filelock import file_lock
+
+        lock_path = temp_dir / "start.lock"
+        with (
+            patch("cementic.cli._get_start_lock_path", return_value=lock_path),
+            patch("cementic.cli.Bootstrapper"),
+        ):
+            with file_lock(lock_path, timeout=0):  # stand in for the other process
+                result = runner.invoke(app, ["start", str(temp_dir), "--collection", "test"])
+
+        assert result.exit_code == 1
+        assert "already in progress" in result.output
+        mock_spawn.assert_not_called()
+
+    @patch("cementic.cli.spawn_detached")
     def test_start_stops_the_survivor_when_one_worker_dies(self, mock_spawn, temp_dir: Path):
         """A partial startup must not leave an unmanaged worker running.
 
