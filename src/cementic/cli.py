@@ -1425,11 +1425,21 @@ def chunk(
         # file should be a one-line error, not a traceback.
         err_console.print(f"chunk failed: {error}")
         raise typer.Exit(1)
-    for piece in chunk_text(
-        text,
-        chunk_size=chunk_size if chunk_size is not None else cfg.pipeline.chunk_size,
-        chunk_overlap=chunk_overlap if chunk_overlap is not None else cfg.pipeline.chunk_overlap,
-    ):
+    size = chunk_size if chunk_size is not None else cfg.pipeline.chunk_size
+    overlap = chunk_overlap if chunk_overlap is not None else cfg.pipeline.chunk_overlap
+    try:
+        pieces = chunk_text(text, chunk_size=size, chunk_overlap=overlap)
+    except ValueError as error:
+        # Reachable from a plausible invocation: passing only --chunk-size leaves
+        # the overlap at its (larger) configured default, so say where each value
+        # came from rather than printing a traceback.
+        err_console.print(f"chunk failed: {error} (chunk_size={size}, chunk_overlap={overlap})")
+        if chunk_overlap is None:
+            err_console.print(
+                "hint: --chunk-overlap defaults to the config value; pass it explicitly"
+            )
+        raise typer.Exit(1)
+    for piece in pieces:
         typer.echo(json.dumps({"index": piece.chunk_index, "content": piece.content}))
 
 

@@ -299,6 +299,36 @@ class TestEmbeddingCommands:
         mock_status.assert_called_once_with()
 
 
+class TestChunkCommand:
+    """Test the stdin/stdout chunk filter."""
+
+    def test_chunk_size_below_configured_overlap_reports_an_error(self):
+        """Regression: this printed a full traceback.
+
+        Passing only --chunk-size leaves --chunk-overlap at the configured
+        default (128), so `cementic chunk --chunk-size 4` -- an entirely
+        reasonable invocation -- tripped chunk_text's validation outside any
+        handler.
+        """
+        result = runner.invoke(app, ["chunk", "--chunk-size", "4"], input="hello world")
+
+        assert result.exit_code == 1
+        assert "Traceback" not in result.output
+        assert "chunk_overlap must be smaller than chunk_size" in result.output
+        assert "chunk_size=4" in result.output
+        assert "--chunk-overlap defaults to the config value" in result.output
+
+    def test_explicit_consistent_flags_succeed(self):
+        result = runner.invoke(
+            app,
+            ["chunk", "--chunk-size", "4", "--chunk-overlap", "1"],
+            input="hello world this is a test",
+        )
+
+        assert result.exit_code == 0
+        assert json.loads(result.output.splitlines()[0])["index"] == 0
+
+
 class TestSearchCommand:
     """Test search command."""
 
