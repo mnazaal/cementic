@@ -107,10 +107,19 @@ def chunked_scope(revision: PipelineRevision) -> tuple[Any, ...]:
 
 
 def chunk_scope(revision: PipelineRevision) -> tuple[Any, ...]:
-    """Conditions selecting the chunks that count toward ``revision``."""
+    """Conditions selecting the chunks that count toward ``revision``.
+
+    Restricted to chunks under a *done* chunked document, because that is
+    exactly what ``_step_embed`` drains. Without the status condition
+    ``total_chunks`` could count chunks the embed step will never claim, making
+    ``done + failed == total_chunks`` unreachable and wedging the revision in
+    "building" forever -- the same class of asymmetry that the extraction and
+    chunking counts already guard against.
+    """
     return (
         ExtractedDocument.extractor_profile_id == revision.extractor_profile_id,
         ChunkedDocument.chunk_profile_id == revision.chunk_profile_id,
+        ChunkedDocument.status == "done",
     )
 
 

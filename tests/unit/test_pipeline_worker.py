@@ -4,6 +4,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, Mock, patch
 
 import pytest
+import requests
 from sqlalchemy import create_engine, event
 from sqlalchemy.orm import sessionmaker
 
@@ -26,6 +27,7 @@ from cementic.pipeline_worker import (
     _pipeline_worker_lock_key,
     _revision_is_complete,
     _try_acquire_pipeline_worker_lock,
+    is_retryable_embed_error,
 )
 
 
@@ -195,6 +197,43 @@ class TestPipelineWorkerStop:
         state = json.loads(state_file.read_text())
         assert state["daemon_state"] == "stopped"
         assert state["pid"] is None
+
+
+class TestIsRetryableEmbedError:
+    """Provider-side failures must not be recorded against the documents.
+
+    Regression: only ConnectionError and Timeout counted as retryable, but
+    raise_for_status() raises HTTPError -- so a momentary 503 from llama.cpp
+    stamped every chunk in the batch permanently failed, which blocks
+    `collection promote` and silently omits them when forced.
+    """
+
+    def _http_error(self, status: int) -> requests.exceptions.HTTPError:
+        response = requests.Response()
+        response.status_code = status
+        return requests.exceptions.HTTPError(response=response)
+
+    @pytest.mark.parametrize("status", [408, 425, 429, 500, 502, 503, 504])
+    def test_server_side_statuses_are_retryable(self, status: int) -> None:
+        assert is_retryable_embed_error(self._http_error(status)) is True
+
+    @pytest.mark.parametrize("status", [400, 401, 403, 404, 413, 422])
+    def test_request_side_statuses_are_terminal(self, status: int) -> None:
+        """A 4xx about the request itself will not fix itself on retry."""
+        assert is_retryable_embed_error(self._http_error(status)) is False
+
+    def test_connection_and_timeout_remain_retryable(self) -> None:
+        assert is_retryable_embed_error(requests.exceptions.ConnectionError()) is True
+        assert is_retryable_embed_error(requests.exceptions.Timeout()) is True
+        assert is_retryable_embed_error(requests.exceptions.ChunkedEncodingError()) is True
+
+    def test_unrelated_errors_are_terminal(self) -> None:
+        assert is_retryable_embed_error(ValueError("bad data")) is False
+        assert is_retryable_embed_error(KeyError("embedding")) is False
+
+    def test_http_error_without_a_response_is_terminal(self) -> None:
+        """Defensive: HTTPError can be constructed without a response."""
+        assert is_retryable_embed_error(requests.exceptions.HTTPError()) is False
 
 
 class TestRevisionIsComplete:

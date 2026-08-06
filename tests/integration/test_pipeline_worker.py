@@ -55,10 +55,29 @@ class FakeEmbeddingClient(EmbeddingProvider):
 
 
 class FailingEmbeddingClient(FakeEmbeddingClient):
-    """Embedding client that raises on every call for error path testing."""
+    """Embedding client whose texts cannot be embedded at all.
+
+    Fails single-text embedding as well as the batch: a batch failure alone is
+    now retried one text at a time, so overriding only ``embed_batch`` would
+    describe a *recoverable* batch, not unembeddable data.
+    """
+
+    def embed(self, text: str) -> list[float]:
+        raise RuntimeError("injected embedding failure")
 
     def embed_batch(self, texts: list[str]) -> list[list[float] | None]:
         raise RuntimeError("injected embedding failure")
+
+
+class BatchOnlyFailureClient(FakeEmbeddingClient):
+    """Batch calls fail, individual calls succeed.
+
+    Models an all-or-nothing batch endpoint rejecting one oversized input: the
+    other chunks in the batch are perfectly embeddable.
+    """
+
+    def embed_batch(self, texts: list[str]) -> list[list[float] | None]:
+        raise RuntimeError("batch rejected")
 
 
 def _config_for(temp_dir: Path) -> Config:
@@ -300,6 +319,36 @@ class TestPipelineWorkerErrorPaths:
         with session_factory() as session:
             failed_count = session.query(ChunkEmbedding).filter_by(status="failed").count()
             assert failed_count > 0
+
+    @pytest.mark.pg
+    def test_batch_failure_falls_back_to_embedding_chunks_individually(
+        self, pg_setup, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """One unembeddable chunk must not fail its whole batch.
+
+        Regression: a batch call is all-or-nothing, so a single bad input marked
+        all batch_size (default 32) chunks permanently failed -- which then
+        blocks `collection promote`, and forcing past it silently drops them
+        from the published index.
+        """
+        config, session_factory, pdf_fixtures_dir = pg_setup
+        collection = "test_batch_isolation"
+
+        pipeline, source_watcher = _setup_worker(config, session_factory, collection, monkeypatch)
+        source_watcher._register_document(str(pdf_fixtures_dir / "test_doc_a.pdf"))
+        pipeline.embedding_client = FakeEmbeddingClient()
+        revision = pipeline._ensure_target_revision()
+        pipeline._step_extract(revision)
+        pipeline._step_chunk(revision)
+
+        pipeline.embedding_client = BatchOnlyFailureClient()
+        pipeline._step_embed(revision)
+
+        with session_factory() as session:
+            done = session.query(ChunkEmbedding).filter_by(status="done").count()
+            failed = session.query(ChunkEmbedding).filter_by(status="failed").count()
+        assert done > 0, "individually-embeddable chunks must still be saved"
+        assert failed == 0
 
 
 class TestTerminalFailuresAndDeletedDocs:

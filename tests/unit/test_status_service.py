@@ -176,6 +176,53 @@ class TestStatusAgreesWithWorkerCounts:
         assert status.chunked_failed == 0
         assert status.chunked_failed == worker_counts.chunked_failed
 
+    def test_chunks_under_an_unfinished_chunking_are_not_counted(self) -> None:
+        """`total_chunks` must count only what the embed step will drain.
+
+        _step_embed claims chunks whose ChunkedDocument is "done". Counting
+        chunks under any other status put rows in the denominator that could
+        never reach done or failed, so `done + failed == total_chunks` was
+        unreachable and the revision stayed "building" forever.
+        """
+        engine, session_factory = self._session_factory()
+        with session_factory() as session:
+            revision = _seed_revision(session, "partial")
+            doc = SourceDocument(collection="partial", source_path="/a.pdf", file_hash="h")
+            session.add(doc)
+            session.flush()
+            extracted = ExtractedDocument(
+                document_id=doc.id,
+                extractor_profile_id=revision.extractor_profile_id,
+                source_file_hash="h",
+                content_hash="c",
+                status="done",
+            )
+            session.add(extracted)
+            session.flush()
+            # Chunking is still in flight; its chunks are not embed candidates.
+            chunked = ChunkedDocument(
+                extracted_document_id=extracted.id,
+                chunk_profile_id=revision.chunk_profile_id,
+                source_content_hash="c",
+                status="processing",
+            )
+            session.add(chunked)
+            session.flush()
+            session.add(
+                Chunk(
+                    document_id=doc.id,
+                    chunked_document_id=chunked.id,
+                    chunk_index=0,
+                    content="c",
+                )
+            )
+            session.commit()
+            worker_counts = compute_revision_counts(session, "partial", revision)
+
+        status = self._status_for(engine, session_factory, "partial")
+        assert worker_counts.total_chunks == 0
+        assert status.total_chunks == worker_counts.total_chunks
+
     def test_stale_extraction_is_not_counted_as_done(self) -> None:
         engine, session_factory = self._session_factory()
         with session_factory() as session:

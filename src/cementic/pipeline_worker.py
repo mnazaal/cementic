@@ -96,6 +96,34 @@ class PipelineCounts:
     failed_embeddings: int = 0
 
 
+#: HTTP statuses that describe the server's condition rather than the request:
+#: overload, rate limiting, a model reload, an OOM kill. Retrying the same texts
+#: later is expected to succeed.
+_RETRYABLE_HTTP_STATUSES = frozenset({408, 425, 429, 500, 502, 503, 504})
+
+
+def is_retryable_embed_error(error: BaseException) -> bool:
+    """Whether an embedding failure is about the provider, not the texts (pure).
+
+    Only ConnectionError and Timeout used to count as retryable, but
+    ``raise_for_status()`` raises ``HTTPError`` -- so a momentary 503 from
+    llama.cpp (reloading, out of memory, overloaded) stamped every chunk in the
+    batch as permanently ``failed``. Those failures then block
+    ``collection promote``, and forcing past them silently omits the chunks from
+    the published index. A transient server condition must not be recorded as a
+    property of the documents.
+    """
+    if isinstance(error, (requests.exceptions.ConnectionError, requests.exceptions.Timeout)):
+        return True
+    if isinstance(error, requests.exceptions.ChunkedEncodingError):
+        return True
+    if isinstance(error, requests.exceptions.HTTPError):
+        response = getattr(error, "response", None)
+        status = getattr(response, "status_code", None)
+        return status in _RETRYABLE_HTTP_STATUSES
+    return False
+
+
 def _revision_is_complete(counts: PipelineCounts) -> bool:
     """Return True when every pipeline stage has finished for all documents."""
     if counts.extracted_done + counts.extracted_failed != counts.documents:
@@ -629,21 +657,18 @@ class PipelineWorker:
         try:
             raw = provider.embed_batch(texts) if provider is not None else []
             embeddings = list(raw)
-        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as error:
-            # Provider connectivity failure — a fact about the daemon, not these
-            # texts. Release the claim instead of stamping terminal failures,
-            # try to bring the provider back (autostart per config), and let the
-            # poll interval provide the backoff.
-            self._logger.error("Embedding provider unreachable: %s", error)
-            self._release_claimed_embeddings([chunk_id for chunk_id, _ in claimed], profile_id)
-            try:
-                self.embedding_client = self._create_embedding_client()
-            except Exception as restart_error:
-                self._logger.error("Embedding provider restart failed: %s", restart_error)
-            return False
         except Exception as error:
-            embeddings = [None for _ in claimed]
-            failure_message = str(error)
+            if is_retryable_embed_error(error):
+                return self._release_after_provider_failure(error, claimed, profile_id)
+            # A genuine data failure. Retry one text at a time so a single bad
+            # chunk is marked failed on its own instead of taking the other
+            # batch_size - 1 down with it and blocking promotion.
+            try:
+                embeddings, failure_message = self._embed_individually(provider, texts, error)
+            except Exception as retry_error:
+                # The provider went away mid-retry: still a provider fact, so
+                # the claim must be released rather than stranded.
+                return self._release_after_provider_failure(retry_error, claimed, profile_id)
         else:
             if len(embeddings) != len(claimed):
                 failure_message = (
@@ -688,6 +713,47 @@ class PipelineWorker:
             self._release_claimed_embeddings([chunk_id for chunk_id, _ in claimed], profile_id)
             raise
         return True
+
+    def _release_after_provider_failure(
+        self, error: Exception, claimed: list[tuple[int, str]], profile_id: int
+    ) -> bool:
+        """Return a claimed batch to ``pending`` after a provider-side failure.
+
+        The failure describes the daemon, not these texts, so nothing is stamped
+        terminal. Reconnects (autostart per config) and lets the poll interval
+        provide the backoff.
+        """
+        self._logger.error("Embedding provider unavailable: %s", error)
+        self._release_claimed_embeddings([chunk_id for chunk_id, _ in claimed], profile_id)
+        try:
+            self.embedding_client = self._create_embedding_client()
+        except Exception as restart_error:
+            self._logger.error("Embedding provider restart failed: %s", restart_error)
+        return False
+
+    def _embed_individually(
+        self, provider: EmbeddingProvider | None, texts: list[str], batch_error: Exception
+    ) -> tuple[list[list[float] | None], str]:
+        """Re-embed a failed batch one text at a time.
+
+        A batch call is all-or-nothing, so one unembeddable chunk previously
+        failed its whole batch (default 32). Those failures are terminal for the
+        run and block ``collection promote``, so isolating the offender keeps
+        the other chunks in the index. A retryable error here re-raises so the
+        caller's release-and-back-off path still applies.
+        """
+        if provider is None:
+            return [None for _ in texts], str(batch_error)
+        results: list[list[float] | None] = []
+        for text_value in texts:
+            try:
+                results.append(provider.embed(text_value))
+            except Exception as error:
+                if is_retryable_embed_error(error):
+                    raise
+                self._logger.warning("Chunk could not be embedded: %s", error)
+                results.append(None)
+        return results, str(batch_error)
 
     def _release_claimed_embeddings(self, chunk_ids: list[int], profile_id: int) -> None:
         """Return a claimed-but-unembedded batch to ``pending`` (provider outage)."""
