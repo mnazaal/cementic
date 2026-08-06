@@ -70,6 +70,23 @@ class TestLoadSupervisorState:
         result = load_supervisor_state(path)
         assert result == {}
 
+    def test_non_object_json(self, temp_dir: Path) -> None:
+        """`null` or a list parses fine but would break every caller's .get()."""
+        path = temp_dir / "state.json"
+        for payload in ("null", "[1, 2]", '"text"'):
+            path.write_text(payload)
+            assert load_supervisor_state(path) == {}
+
+    def test_unreadable_file(self, temp_dir: Path) -> None:
+        """An unreadable state file must not abort start/status/stop."""
+        path = temp_dir / "state.json"
+        path.write_text("{}")
+        path.chmod(0o000)
+        try:
+            assert load_supervisor_state(path) == {}
+        finally:
+            path.chmod(0o644)
+
 
 class TestSaveSupervisorState:
     """Tests for save_supervisor_state."""

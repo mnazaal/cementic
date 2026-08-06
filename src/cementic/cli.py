@@ -328,6 +328,23 @@ def _is_managed_proc_alive(process: dict[str, object]) -> bool:
 _STARTUP_GRACE_SECONDS = 2.0
 
 
+def _terminate_managed(processes: list[ManagedProcess]) -> None:
+    """Stop spawned workers, escalating to SIGKILL for anything that lingers."""
+    pids = [
+        proc.pid
+        for proc in processes
+        if is_managed_process_alive(proc.pid, proc.start_token)
+    ]
+    for pid in pids:
+        try:
+            os.kill(pid, 15)
+        except OSError:
+            continue
+    remaining = wait_for_exit(pids, timeout_seconds=5.0)
+    if remaining:
+        force_kill(remaining)
+
+
 def _wait_for_worker_startup(
     processes: list[ManagedProcess], grace_seconds: float = _STARTUP_GRACE_SECONDS
 ) -> list[ManagedProcess]:
@@ -733,6 +750,11 @@ def start_background(
             console.print(f"[red]Error: Directory does not exist: {d}[/red]")
         raise typer.Exit(1)
 
+    # Absolute from here on: the detached workers and any later `cementic status`
+    # can run from a different working directory, where a relative path would
+    # name something else entirely.
+    directories = [str(Path(d).resolve()) for d in directories]
+
     state = _load_supervisor_state()
     running = [proc for proc in _supervisor_processes(state) if _is_managed_proc_alive(proc)]
 
@@ -755,34 +777,42 @@ def start_background(
     source_watcher_log = data_dir / "source-watcher-background.log"
     pipeline_log = data_dir / "pipeline-background.log"
 
-    source_watcher_pid = spawn_detached(
-        [*base_cmd, "source-watcher", *directories, "--collection", collection],
-        source_watcher_log,
-    )
-    pipeline_pid = spawn_detached(
-        [
-            *base_cmd,
-            "pipeline-worker",
-            "--collection",
-            collection,
-        ],
-        pipeline_log,
-    )
+    spawned: list[ManagedProcess] = []
+    try:
+        # `--` ends option parsing so a directory whose name begins with "-" is
+        # not read as a flag by the runner.
+        source_watcher_pid = spawn_detached(
+            [*base_cmd, "source-watcher", "--collection", collection, "--", *directories],
+            source_watcher_log,
+        )
+        spawned.append(
+            ManagedProcess(
+                "source-watcher",
+                source_watcher_pid,
+                str(source_watcher_log),
+                process_start_token(source_watcher_pid),
+            )
+        )
+        pipeline_pid = spawn_detached(
+            [*base_cmd, "pipeline-worker", "--collection", collection],
+            pipeline_log,
+        )
+        spawned.append(
+            ManagedProcess(
+                "pipeline-worker",
+                pipeline_pid,
+                str(pipeline_log),
+                process_start_token(pipeline_pid),
+            )
+        )
+    except OSError as error:
+        # The first spawn can succeed and the second fail (ENOMEM, EMFILE,
+        # unwritable log dir). Without this the survivor keeps running with no
+        # supervisor record, so `cementic stop` could never find it again.
+        _terminate_managed(spawned)
+        console.print(f"[red]cementic failed to start: {error}[/red]")
+        raise typer.Exit(1)
 
-    spawned = [
-        ManagedProcess(
-            "source-watcher",
-            source_watcher_pid,
-            str(source_watcher_log),
-            process_start_token(source_watcher_pid),
-        ),
-        ManagedProcess(
-            "pipeline-worker",
-            pipeline_pid,
-            str(pipeline_log),
-            process_start_token(pipeline_pid),
-        ),
-    ]
     _save_supervisor_state(
         {
             "collection": collection,
@@ -799,6 +829,17 @@ def start_background(
         console.print("[red]cementic failed to start:[/red]")
         for managed in dead:
             console.print(f"- {managed.name} exited immediately; see {managed.log_file}")
+        # Stop whatever did come up and clear the record. Leaving a survivor
+        # running would hold the collection's advisory lock and make the next
+        # `cementic start` refuse with "already running" -- contradicting the
+        # failure just reported, with no hint that `cementic stop` is the way out.
+        dead_pids = {managed.pid for managed in dead}
+        survivors = [managed for managed in spawned if managed.pid not in dead_pids]
+        if survivors:
+            _terminate_managed(survivors)
+            for managed in survivors:
+                console.print(f"- stopped {managed.name} (PID {managed.pid})")
+        _get_supervisor_state_path().unlink(missing_ok=True)
         raise typer.Exit(1)
 
     console.print("[green]Started cementic in background[/green]")
@@ -977,9 +1018,13 @@ def stop_background(
     remaining = wait_for_exit(signaled_pids, timeout_seconds=timeout_seconds)
 
     if not remaining:
-        if _get_supervisor_state_path().exists():
-            _get_supervisor_state_path().unlink()
-        console.print(f"stopped {len(signaled_pids)} process(es)")
+        _get_supervisor_state_path().unlink(missing_ok=True)
+        if signaled_pids:
+            console.print(f"stopped {len(signaled_pids)} process(es)")
+        else:
+            # Recorded processes had already exited; "stopped 0 process(es)" read
+            # as though a stop had happened and hid that they died on their own.
+            console.print("no running processes found; cleared stale state")
         return
 
     if force:
@@ -1097,8 +1142,12 @@ def remove_collection(
         remove_artifacts(result.artifact_paths, config=_get_config())
         drop_orphan_vector_tables(engine, result.vector_profile_ids)
     except Exception as e:
+        # The delete is already committed, so this is a warning about leftovers
+        # on disk, not a failed removal. Exiting non-zero here contradicted both
+        # the comment above and the documented behaviour, and told scripts the
+        # collection had not been removed when it had.
         console.print(f"warning: collection deleted but cleanup failed: {e}")
-        raise typer.Exit(1)
+        return
     console.print(f"vector_tables_dropped: {len(result.vector_profile_ids)}")
 
 

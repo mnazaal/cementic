@@ -87,9 +87,17 @@ def list_collections(session: Session) -> list[CollectionSummary]:
 
 
 def delete_collection_records(session: Session, collection: str) -> DeleteCollectionResult | None:
-    """Delete a collection from the database and return removed artifact paths."""
+    """Delete a collection from the database and return removed artifact paths.
+
+    Returns None only when the collection is genuinely unknown. A collection can
+    own revisions without owning any documents -- `cementic start` on a directory
+    with no supported files creates exactly that -- and returning early on the
+    document check left those rows undeletable: `collection list` (which reads
+    document rows) never showed them, and `collection remove` said "not found".
+    """
     docs = session.query(SourceDocument).filter_by(collection=collection).all()
-    if not docs:
+    revision_count = session.query(PipelineRevision).filter_by(collection=collection).count()
+    if not docs and not revision_count:
         return None
 
     doc_ids = [doc.id for doc in docs]

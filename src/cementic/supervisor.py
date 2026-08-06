@@ -113,15 +113,23 @@ def is_managed_process_alive(pid: int, start_token: str | None) -> bool:
 
 
 def load_supervisor_state(state_path: Path) -> SupervisorState:
-    """Load background supervisor state from disk."""
+    """Load background supervisor state from disk, or ``{}`` if unusable.
+
+    Tolerates an unreadable or non-object file as well as malformed JSON: every
+    caller treats "no state" as "nothing recorded", whereas an uncaught OSError
+    or a JSON ``null`` reaching ``state.get(...)`` would abort `cementic
+    start`/`status`/`stop` with a traceback.
+    """
     if not state_path.exists():
         return {}
 
     try:
-        payload = json.loads(state_path.read_text())
-        return cast(SupervisorState, payload)
-    except json.JSONDecodeError:
+        payload = json.loads(state_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
         return {}
+    if not isinstance(payload, dict):
+        return {}
+    return cast(SupervisorState, payload)
 
 
 def save_supervisor_state(state_path: Path, state: SupervisorState) -> None:

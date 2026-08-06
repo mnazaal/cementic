@@ -170,6 +170,56 @@ class TestListCollections:
         assert small == large
 
 
+class TestDeleteCollectionRecordsWithoutDocuments:
+    """A collection can own revisions but no documents.
+
+    Regression: `cementic start` on a directory with no supported files creates
+    exactly that, and the early return on the document check made those rows
+    invisible to `collection list` and undeletable via `collection remove`,
+    which reported "not found".
+    """
+
+    def test_revision_only_collection_is_deleted(self) -> None:
+        engine = create_engine("sqlite://")
+        Base.metadata.create_all(engine)
+        session = sessionmaker(bind=engine)()
+        extractor = ExtractorProfile(fingerprint="e", name="default", config_json="{}")
+        chunk_profile = ChunkProfile(fingerprint="c", config_json="{}")
+        embedding_profile = EmbeddingProfile(
+            fingerprint="m",
+            provider="llama-cpp",
+            model_identifier="x",
+            embedding_dim=4,
+            distance_metric="cosine",
+            config_json="{}",
+        )
+        session.add_all([extractor, chunk_profile, embedding_profile])
+        session.flush()
+        session.add(
+            PipelineRevision(
+                collection="ghost",
+                extractor_profile_id=extractor.id,
+                chunk_profile_id=chunk_profile.id,
+                embedding_profile_id=embedding_profile.id,
+                status="building",
+            )
+        )
+        session.commit()
+
+        result = delete_collection_records(session, "ghost")
+
+        assert result is not None
+        assert result.deleted_docs == 0
+        assert session.query(PipelineRevision).filter_by(collection="ghost").count() == 0
+
+    def test_genuinely_unknown_collection_still_returns_none(self) -> None:
+        engine = create_engine("sqlite://")
+        Base.metadata.create_all(engine)
+        session = sessionmaker(bind=engine)()
+
+        assert delete_collection_records(session, "never-existed") is None
+
+
 class TestDeleteCollectionRecords:
     """Tests for delete_collection_records."""
 

@@ -23,6 +23,7 @@ from cementic.collections import PromotionOutcome
 from cementic.config import Config, default_config_path
 from cementic.pipeline_worker import PipelineCounts
 from cementic.status_service import WorkerStatus
+from cementic.supervisor import ManagedProcess
 
 runner = CliRunner()
 
@@ -831,6 +832,64 @@ class TestBackgroundCommands:
         assert first_command[1:4] == ["-m", "cementic.runner", "source-watcher"]
         assert second_command[1:4] == ["-m", "cementic.runner", "pipeline-worker"]
         assert second_command[4:] == ["--collection", "test"]
+
+    @patch("cementic.cli.spawn_detached")
+    def test_start_stops_the_survivor_when_one_worker_dies(self, mock_spawn, temp_dir: Path):
+        """A partial startup must not leave an unmanaged worker running.
+
+        Regression: only the dead worker was reported. The survivor kept running
+        and holding the collection's advisory lock, and because the supervisor
+        state file had already been written, the next `cementic start` refused
+        with "already running" -- contradicting the failure just printed.
+        """
+        mock_spawn.side_effect = [1111, 2222]
+        state_path = temp_dir / "supervisor.json"
+        dead = ManagedProcess("source-watcher", 1111, "/tmp/sw.log", None)
+
+        with (
+            patch("cementic.cli._get_supervisor_state_path", return_value=state_path),
+            patch("cementic.cli.Bootstrapper"),
+            patch("cementic.cli._wait_for_worker_startup", return_value=[dead]),
+            patch("cementic.cli._terminate_managed") as mock_terminate,
+        ):
+            result = runner.invoke(app, ["start", str(temp_dir), "--collection", "test"])
+
+        assert result.exit_code == 1
+        assert "failed to start" in result.output
+        # The pipeline worker survived, so it must be stopped and reported.
+        mock_terminate.assert_called_once()
+        survivors = mock_terminate.call_args.args[0]
+        assert [proc.pid for proc in survivors] == [2222]
+        assert "stopped pipeline-worker (PID 2222)" in result.output
+        # ...and the stale record removed, so the next start is not refused.
+        assert not state_path.exists()
+
+    @patch("cementic.cli._wait_for_worker_startup", return_value=[])
+    @patch("cementic.cli.spawn_detached")
+    def test_start_passes_directories_after_end_of_options(
+        self, mock_spawn, mock_startup, temp_dir: Path
+    ):
+        """Directories are absolute and separated by `--`.
+
+        A directory whose name begins with "-" would otherwise be parsed as a
+        flag by the runner, and a relative path means something different in the
+        detached worker's working directory.
+        """
+        mock_spawn.side_effect = [1111, 2222]
+        odd_dir = temp_dir / "-notes"
+        odd_dir.mkdir()
+
+        with (
+            patch("cementic.cli._get_supervisor_state_path", return_value=temp_dir / "s.json"),
+            patch("cementic.cli.Bootstrapper"),
+        ):
+            # `--` is needed at this level too, for the same reason.
+            result = runner.invoke(app, ["start", "--collection", "test", "--", str(odd_dir)])
+
+        assert result.exit_code == 0
+        watcher_command = mock_spawn.call_args_list[0].args[0]
+        assert watcher_command[-2] == "--"
+        assert watcher_command[-1] == str(odd_dir.resolve())
 
     @patch("cementic.cli._wait_for_worker_startup", return_value=[])
     @patch("cementic.cli.spawn_detached")
