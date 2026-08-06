@@ -84,6 +84,23 @@ def get_active_revision(session: Session, collection: str) -> PipelineRevision |
     )
 
 
+def _supersede_other_in_flight_revisions(
+    session: Session, collection: str, *, keep_id: int | None = None
+) -> None:
+    """Mark every in-flight revision of one collection superseded, except ``keep_id``.
+
+    Exactly one revision per collection may be in flight at a time; the rest are
+    abandoned builds that nothing will ever finish.
+    """
+    query = session.query(PipelineRevision).filter(
+        PipelineRevision.collection == collection,
+        PipelineRevision.status.in_(BUILDING_STATUSES),
+    )
+    if keep_id is not None:
+        query = query.filter(PipelineRevision.id != keep_id)
+    query.update({"status": "superseded"}, synchronize_session=False)
+
+
 def get_target_revision(
     session: Session,
     collection: str,
@@ -107,31 +124,23 @@ def get_target_revision(
         .first()
     )
     if current is not None:
+        # Whatever else was in flight for this collection is no longer the
+        # target, whatever the target's own status is. Skipping this when the
+        # target was already `active` (config reverted to the promoted revision)
+        # used to leave the abandoned build stuck in `building` forever: nothing
+        # ever worked on it, `cementic status` reported it as building
+        # indefinitely, and pruning -- which only collects `superseded` and old
+        # `retired` revisions -- pinned its artifacts on disk permanently.
+        _supersede_other_in_flight_revisions(session, collection, keep_id=current.id)
         if current.status in ("retired", "superseded"):
             # Config reverted to a previously built revision (e.g. rolling back a
             # model change). Resurrect it as the building target — its artifacts
-            # are reused, so it completes and becomes promotable again. Whatever
-            # else was building for this collection is no longer the target.
-            (
-                session.query(PipelineRevision)
-                .filter(
-                    PipelineRevision.collection == collection,
-                    PipelineRevision.status.in_(BUILDING_STATUSES),
-                )
-                .update({"status": "superseded"}, synchronize_session=False)
-            )
+            # are reused, so it completes and becomes promotable again.
             current.status = "building"
-            session.flush()
+        session.flush()
         return current
 
-    (
-        session.query(PipelineRevision)
-        .filter(
-            PipelineRevision.collection == collection,
-            PipelineRevision.status.in_(BUILDING_STATUSES),
-        )
-        .update({"status": "superseded"}, synchronize_session=False)
-    )
+    _supersede_other_in_flight_revisions(session, collection)
 
     revision = PipelineRevision(
         collection=collection,

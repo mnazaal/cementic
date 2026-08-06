@@ -4,9 +4,17 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
 
 from cementic.config import Config
-from cementic.db import PipelineRevision
+from cementic.db import (
+    Base,
+    ChunkProfile,
+    EmbeddingProfile,
+    ExtractorProfile,
+    PipelineRevision,
+)
 from cementic.revisions import (
     _default_revision_label,
     _revision_prune_plan,
@@ -53,6 +61,29 @@ class TestGetActiveRevision:
         assert result is None
 
 
+def _sqlite_session_with_profiles():
+    """A real session plus one extractor/chunk profile and two embedding profiles."""
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine)()
+    extractor = ExtractorProfile(fingerprint="ext", name="default", config_json="{}")
+    chunk = ChunkProfile(fingerprint="chk", config_json="{}")
+    embeddings = [
+        EmbeddingProfile(
+            fingerprint=f"emb-{name}",
+            provider="llama-cpp",
+            model_identifier=name,
+            embedding_dim=4,
+            distance_metric="cosine",
+            config_json="{}",
+        )
+        for name in ("a", "b")
+    ]
+    session.add_all([extractor, chunk, *embeddings])
+    session.flush()
+    return session, (extractor, chunk, *embeddings)
+
+
 class TestGetTargetRevision:
     """Tests for get_target_revision."""
 
@@ -68,6 +99,53 @@ class TestGetTargetRevision:
 
         result = get_target_revision(session, "col", cfg)
         assert result is existing
+
+    @pytest.mark.parametrize("target_status", ["active", "retired", "superseded"])
+    def test_other_in_flight_revision_is_superseded(self, target_status: str) -> None:
+        """Only one revision per collection may stay in flight.
+
+        Regression: the supersede step ran only when the target was `retired` or
+        `superseded`. Reverting config back to the *active* revision therefore
+        left the abandoned build stuck in `building` forever -- nothing ever
+        worked on it, `cementic status` displayed it as building indefinitely,
+        and prune_collection_history (which collects only `superseded` and old
+        `retired` revisions) pinned its artifacts on disk permanently.
+        """
+        session, profiles = _sqlite_session_with_profiles()
+        extractor, chunk, embedding_a, embedding_b = profiles
+
+        target = PipelineRevision(
+            collection="c",
+            extractor_profile_id=extractor.id,
+            chunk_profile_id=chunk.id,
+            embedding_profile_id=embedding_a.id,
+            status=target_status,
+            label="target",
+        )
+        abandoned = PipelineRevision(
+            collection="c",
+            extractor_profile_id=extractor.id,
+            chunk_profile_id=chunk.id,
+            embedding_profile_id=embedding_b.id,
+            status="building",
+            label="abandoned",
+        )
+        session.add_all([target, abandoned])
+        session.commit()
+
+        with (
+            patch("cementic.revisions.get_or_create_extractor_profile", return_value=extractor),
+            patch("cementic.revisions.get_or_create_chunk_profile", return_value=chunk),
+            patch("cementic.revisions.get_or_create_embedding_profile", return_value=embedding_a),
+        ):
+            result = get_target_revision(session, "c", Config())
+        session.commit()
+
+        assert result.id == target.id
+        assert abandoned.status == "superseded"
+        # A reverted-to revision is resurrected; an active one stays active.
+        expected = "active" if target_status == "active" else "building"
+        assert target.status == expected
 
     @patch("cementic.revisions._default_revision_label", return_value="test-label")
     @patch("cementic.revisions.get_or_create_extractor_profile")
