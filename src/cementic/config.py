@@ -286,7 +286,17 @@ class PipelineConfig(_SectionSettings):
     )
     _toml_section = "pipeline"
 
-    chunk_size: int = Field(default=512, ge=1, description="Tokens per chunk")
+    chunk_size: int = Field(
+        default=512,
+        ge=1,
+        description="Tokens per chunk, counted with the tiktoken encoding named "
+        "in chunk.TOKENIZER -- not the embedding model's own tokenizer. It "
+        "matching llama_cpp.n_ctx (also 512) looks like an overflow waiting to "
+        "happen, but was measured against the default Nomic model with English, "
+        "CJK, source code and diacritic-heavy text: full chunks embed without "
+        "error and remain tail-sensitive, so nothing is silently truncated. "
+        "Re-measure before raising this or lowering n_ctx.",
+    )
     chunk_overlap: int = Field(default=128, ge=0, description="Token overlap between chunks")
     embedding_provider: str = Field(
         default="llama-cpp",
