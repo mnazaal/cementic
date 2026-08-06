@@ -8,13 +8,16 @@ from typing import cast
 
 from sqlalchemy.orm import Session
 
+from cementic.chunk import TOKENIZER
 from cementic.config import Config
 from cementic.db import ChunkProfile, EmbeddingProfile, ExtractorProfile
 from cementic.embedding_provider import EmbeddingFacts, EmbeddingProvider
 from cementic.embedding_runtime import runtime_spec_from_config
 
 EMBEDDING_TEXT_FORMAT_VERSION = "v1"
-CHUNKING_VERSION = "v1"
+# v2: chunk_text no longer emits a duplicate tail chunk when a chunk ends exactly
+# at the end of the text, so chunk output changed for boundary-length documents.
+CHUNKING_VERSION = "v2"
 EXTRACTION_VERSION = "v1"
 
 
@@ -48,7 +51,7 @@ def build_chunk_profile_payload(config: Config) -> dict[str, object]:
     return {
         "chunk_size": config.pipeline.chunk_size,
         "chunk_overlap": config.pipeline.chunk_overlap,
-        "tokenizer": "cl100k_base",
+        "tokenizer": TOKENIZER,
         "version": CHUNKING_VERSION,
     }
 

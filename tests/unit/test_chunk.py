@@ -1,7 +1,8 @@
 """Tests for text chunking module."""
 import pytest
+import tiktoken
 
-from cementic.chunk import TextChunk, chunk_text
+from cementic.chunk import TOKENIZER, TextChunk, chunk_text
 
 
 class TestChunkText:
@@ -47,14 +48,6 @@ class TestChunkText:
         chunks = chunk_text("", chunk_size=100, chunk_overlap=0)
         assert len(chunks) == 0
 
-    def test_chunk_with_model_parameter(self):
-        """Test chunking with specific model encoding."""
-        text = "Hello world this is a test"
-        chunks = chunk_text(text, chunk_size=10, chunk_overlap=2, model="cl100k_base")
-
-        assert len(chunks) >= 1
-        assert all(isinstance(chunk, TextChunk) for chunk in chunks)
-
     def test_chunk_boundary_condition(self):
         """Test chunking at exact boundary."""
         # Create text that will produce known number of chunks
@@ -86,21 +79,34 @@ class TestChunkText:
             chunk_text("a b c", chunk_size=5, chunk_overlap=-1)
 
 
-class TestTextChunk:
-    """Test TextChunk dataclass."""
+class TestNoDuplicateTailChunk:
+    """A chunk ending exactly at the end of the text must not be re-emitted.
 
-    def test_text_chunk_creation(self):
-        """Test creating a TextChunk."""
-        chunk = TextChunk(content="Test content", chunk_index=0, page_start=1, page_end=2)
+    Stepping past a chunk that already consumed the last token produces a final
+    chunk that is a pure suffix of its predecessor -- duplicate content that gets
+    embedded and can surface twice in search results.
+    """
 
-        assert chunk.content == "Test content"
-        assert chunk.chunk_index == 0
-        assert chunk.page_start == 1
-        assert chunk.page_end == 2
+    @staticmethod
+    def _text_of_tokens(count: int) -> str:
+        encoding = tiktoken.get_encoding(TOKENIZER)
+        return encoding.decode(encoding.encode("alpha beta gamma delta " * count)[:count])
 
-    def test_text_chunk_optional_fields(self):
-        """Test TextChunk with optional fields."""
-        chunk = TextChunk(content="Test content", chunk_index=0)
+    def test_exact_multiple_of_step_emits_no_suffix_duplicate(self):
+        # 512 tokens with size 512 => the first chunk consumes everything.
+        chunks = chunk_text(self._text_of_tokens(512), chunk_size=512, chunk_overlap=128)
 
-        assert chunk.page_start is None
-        assert chunk.page_end is None
+        assert len(chunks) == 1
+
+    def test_two_step_boundary_emits_no_suffix_duplicate(self):
+        # 896 = 512 + (512 - 128): the second chunk ends exactly at the end.
+        chunks = chunk_text(self._text_of_tokens(896), chunk_size=512, chunk_overlap=128)
+
+        assert len(chunks) == 2
+        assert chunks[-1].content not in chunks[0].content
+
+    def test_non_boundary_length_still_emits_remainder(self):
+        chunks = chunk_text(self._text_of_tokens(600), chunk_size=512, chunk_overlap=128)
+
+        assert len(chunks) == 2
+        assert [chunk.chunk_index for chunk in chunks] == [0, 1]

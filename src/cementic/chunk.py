@@ -6,6 +6,10 @@ from dataclasses import dataclass
 
 import tiktoken
 
+#: Tokenizer used for chunking. Also recorded in chunk profiles (see profiles.py),
+#: so changing it re-versions every chunk profile.
+TOKENIZER = "cl100k_base"
+
 
 @dataclass
 class TextChunk:
@@ -13,15 +17,12 @@ class TextChunk:
 
     content: str
     chunk_index: int
-    page_start: int | None = None
-    page_end: int | None = None
 
 
 def chunk_text(
     text: str,
     chunk_size: int = 512,
     chunk_overlap: int = 128,
-    model: str = "cl100k_base",
 ) -> list[TextChunk]:
     """Chunk text into overlapping segments using tiktoken.
 
@@ -29,7 +30,6 @@ def chunk_text(
         text: Input text to chunk
         chunk_size: Number of tokens per chunk
         chunk_overlap: Number of overlapping tokens between chunks
-        model: Tiktoken model encoding to use
 
     Returns:
         List of TextChunk objects
@@ -41,33 +41,22 @@ def chunk_text(
     if chunk_overlap >= chunk_size:
         raise ValueError("chunk_overlap must be smaller than chunk_size")
 
-    encoding = tiktoken.get_encoding(model)
+    encoding = tiktoken.get_encoding(TOKENIZER)
     tokens = encoding.encode(text)
 
     chunks: list[TextChunk] = []
-
-    # Early return for empty input
-    if len(tokens) == 0:
-        return chunks
     start = 0
     chunk_index = 0
 
     while start < len(tokens):
-        # Get chunk tokens
         end = min(start + chunk_size, len(tokens))
-        chunk_tokens = tokens[start:end]
-
-        # Decode back to text
-        chunk_text = encoding.decode(chunk_tokens)
-
-        # Create chunk
-        chunk = TextChunk(
-            content=chunk_text,
-            chunk_index=chunk_index,
+        chunks.append(
+            TextChunk(content=encoding.decode(tokens[start:end]), chunk_index=chunk_index)
         )
-        chunks.append(chunk)
-
-        # Move to next chunk with overlap
+        # Stop once a chunk reaches the end of the text: stepping again would
+        # emit a chunk that is purely a suffix of this one (duplicate content).
+        if end == len(tokens):
+            break
         start += chunk_size - chunk_overlap
         chunk_index += 1
 
