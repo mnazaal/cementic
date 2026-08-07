@@ -1,26 +1,39 @@
 # cementic — architecture & design
 
-<!-- session-handoff:begin (2026-08-06) -->
+<!-- session-handoff:begin (2026-08-07) -->
 ## Where the work stands
 
-**Entry point:** run `cementic collection promote test` then
-`cementic search "..." -c test`. That is the one thing not yet exercised
-end-to-end on the fixed code. After that, decide whether to merge
-`claude/hygiene-fixes` (below) — there is no other queued work.
+A second full code review of the CLI and every path it reaches (2026-08-07).
+**Nothing was fixed** — the review is read-only and complete. All findings, with
+file:line, user-visible symptom, and repro commands, are in
+[`notes/code-review-2026-08-07.html`](notes/code-review-2026-08-07.html).
+"Open review findings" below carries only the priority order.
 
-**Branch:** `claude/hygiene-fixes`, **5 commits not merged to `main`**:
-`27e5ab0`, `6d56d9a`, `e93d79c`, `9d50d48`, and the commit carrying this block.
-The worktree is clean once that commit lands. Earlier batches (21 commits) are
-already merged.
+**Entry point:** run `uv lock` and commit it. CI is red on `main` right now —
+all three jobs install with `uv sync --locked`, and `uv lock --check` fails
+because `uv.lock` still lists the removed `pgvector` dependency. One command,
+and nothing else can be validated in CI until it lands. Then add a named volume
+to both `compose.yml` files (finding B2) before touching anything else.
 
-**Origin of this work:** a full code review of the CLI and every path it
-reaches. Findings and fixes are in the git history — 24 commits, each naming the
-user-visible symptom it fixes. `CHANGELOG.md` carries the user-facing summary.
-Nothing from the review plan is outstanding.
+**Branch:** `claude/code-review-2026-08-07`, **two commits ahead of `main`, not
+merged and not pushed** — `b39f6f6` (the review note) and the commit carrying
+this block and the section below. Working tree clean; `git merge-tree` reports
+no conflicts against `main`, so it fast-forwards.
 
-**Verification state:** `610 unit + 102 integration passing, 0 skipped`, ruff
-and mypy clean. Test DB is `cementic_test`; the user's real `cementic` database
-holds 5 documents and revision 1 in `ready`.
+`claude/hygiene-fixes` still exists but is **fully merged** — the previous
+handoff block claimed 5 unmerged commits (`27e5ab0`, `6d56d9a`, `e93d79c`,
+`9d50d48`, `cb5cace`); `git merge-base --is-ancestor` confirms all five are on
+`main`. That branch can be deleted.
+
+**Verification state:** ruff clean, mypy clean, **610 unit tests pass in 16s**
+locally. Every finding in the note is something the suite does not cover. CI has
+never been green on this state (see entry point).
+
+**Live database state:** the real `cementic` DB holds collection `test`, 5
+documents, 172/172 chunks embedded, revision 1 in `ready` with **no active
+revision**. Both worker state files read `process=stopped, state=running`; that
+is the known state-file bug (the pipeline worker writes `RUNNING` outside the
+`try/finally` that would clear it), not a live process. No cleanup needed.
 
 ### Environment facts that cost time to rediscover
 
@@ -34,21 +47,20 @@ holds 5 documents and revision 1 in `ready`.
 - Postgres answers on `localhost:5432`; the container engine is *not* reachable
   from an agent sandbox, and the sandbox is in its own PID namespace, so `ps`
   cannot see the user's worker processes. Ask the user to run process checks.
+- The embedding daemon was up and healthy during the review, so DB-backed and
+  embedding-backed commands are exercisable directly.
 - Commits must be on a `claude/*` branch (`AGENT_BRANCH_PREFIX`), and commit
   messages containing dependency-directory names can trip a path guard — write
   the message to a file and use `git commit -F`.
+- Shell cwd resets to the repo root between tool calls; redirect probe output to
+  an absolute scratch path or it lands in the repo.
 
-### Deliberately not done
-
-Review findings judged not worth fixing — not oversights, and distinct from the
-feature roadmap in `TODO.md`. Reasoning is in the relevant commit messages:
-ANN pre-filter recall on shared vector tables (inherent to ANN +
-post-filter; the actionable slice is purging vectors for deleted documents),
-`check_health` treating a live-but-broken daemon as healthy (documented
-tradeoff), DiskANN + inner-product `storage_layout` (unreachable while only
-cosine exists), and reading model identity from GGUF metadata instead of the
-filename (the filename heuristic is now at least *reported* by
-`cementic embedding start`).
+**Not carried forward:** the previous entry point (`cementic collection promote
+test` then `search -c test`) is still unexercised. Running it now would only
+demonstrate two known bugs rather than confirm health — `collection list` labels
+that `ready` revision `building`, and promoting a `ready` revision that has since
+absorbed new work publishes it without re-checking completeness. Do it once both
+have landed.
 <!-- session-handoff:end -->
 
 Design rationale and roadmap for cementic: a CLI that watches directories of
@@ -188,6 +200,57 @@ it matters.
   in-memory, lowest latency) vs DiskANN (pgvectorscale, disk-resident, low RAM at
   scale). The method is applied when the index is built and takes effect on the
   next rebuild; it never re-embeds.
+
+## Open review findings
+
+Full detail — file:line, symptom, repro — in
+[`notes/code-review-2026-08-07.html`](notes/code-review-2026-08-07.html). Fix
+order, highest first:
+
+1. **`uv lock`** (B1) — CI is red until this lands.
+2. **A named volume in both `compose.yml` files** (B2) — the packaged Compose
+   setup stores Postgres data in the container layer, and `cementic stop --help`,
+   `README.md`, and the generated README all recommend `docker compose down`.
+   The Quadlet template already does this correctly.
+3. **Silently wrong search answers** — queries over `n_ctx` are truncated with no
+   warning (C1.1, measured), and the search SQL omits the freshness conditions
+   `revisions.py` calls "the single definition of what counts" (C1.2), so a
+   failed re-extraction serves stale content forever. Fix C1.2 by reusing the
+   scope builders rather than hand-writing the predicates a third time.
+4. **The config silent-drop trio** (C2.2, C2.3, H9) — a misspelled *section*, and
+   a missing `CEMENTIC_CONFIG` file, are both dropped while `config path` and
+   `status --doctor` report success; a misspelled *key* raises a raw traceback.
+5. **`config init` disables the model checksum pin** (H1) — `./models/…` vs
+   `models/…` compared as strings — plus the undeclared `click` and `pymupdf`
+   imports.
+6. **Failure visibility** (C2.5, H3, C2.7, C2.8), then `status`'s 120s block (C2.4).
+7. **`collection list` calls a `ready` revision `building`** (H4) — one line, and
+   it misreports the live `test` collection.
+8. **What gets published** (C2.1 empty extractions counted as success, H2 the
+   `ready` latch, C1.3 `ef_search` below `MAX_SEARCH_RESULTS`).
+
+Dead code is at branch/parameter level only — no whole function in `src/` is
+unreachable. The note lists the nine items and three duplicated subsystems worth
+consolidating; the "busy vs dead" triplicate is *why* `status`, `--doctor`, and
+`search` disagree about what "healthy" means.
+
+### Deliberately not done
+
+Findings from the **first** review (2026-08-06) judged not worth fixing — not
+oversights, and distinct from the feature roadmap in `TODO.md`. Reasoning is in
+the relevant commit messages: ANN pre-filter recall on shared vector tables
+(inherent to ANN + post-filter; the actionable slice is purging vectors for
+deleted documents), `check_health` treating a live-but-broken daemon as healthy
+(documented tradeoff), DiskANN + inner-product `storage_layout` (unreachable
+while only cosine exists), and reading model identity from GGUF metadata instead
+of the filename (the filename heuristic is now at least *reported* by
+`cementic embedding start`).
+
+Two of those were re-derived independently by the second review with new
+evidence, and are worth reopening rather than re-closing: the `check_health`
+tradeoff also makes `cementic status` block for 120s to return an answer it
+already had (C2.4), and the filename heuristic silently disables Nomic task
+prefixes while `models/nomic-embed-text-v1.5.f16.gguf` sits in the repo.
 
 ## Deferred
 
