@@ -29,6 +29,25 @@ from cementic.supervisor import is_managed_process_alive, process_start_token
 _CURRENT_FILE_PUBLISH_INTERVAL_SECONDS = 0.5
 
 
+def _is_missing(source_path: str) -> bool:
+    """Whether a path is genuinely gone, as opposed to merely unreadable.
+
+    ``Path.exists()`` cannot answer this: it suppresses only ENOENT-shaped
+    errors and *raises* on a permission failure, so a chmod mishap or an
+    NFS/automount hiccup took the whole watcher down mid-startup with a
+    traceback. Anything other than "not found" means we do not know, and a
+    document we cannot see is not evidence that the user deleted it -- marking
+    it deleted drops it from search until some later run happens to rescan.
+    """
+    try:
+        Path(source_path).stat()
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+    return False
+
+
 class DocumentEventHandler(FileSystemEventHandler):
     """Handles file system events for any supported document type."""
 
@@ -37,23 +56,41 @@ class DocumentEventHandler(FileSystemEventHandler):
         callback: Callable[[str], None],
         delete_callback: Callable[[str], None] | None = None,
         ignore_directories: Iterable[str] = (),
+        watched_roots: Iterable[Path] = (),
     ) -> None:
         self.callback = callback
         self.delete_callback = delete_callback
         self._ignored_directories = set(ignore_directories)
+        self._watched_roots = [Path(root) for root in watched_roots]
         self._timers: dict[str, Any] = {}
         self._debounce_seconds = 2.0
 
     def _is_ignored(self, file_path: str) -> bool:
-        """Whether any directory on the path is one the watcher skips.
+        """Whether a directory *below the watched root* is one the watcher skips.
 
         Live events need this as well as the scan: a file written into
         node_modules while cementic is running arrives by inotify, never
         through the (pruned) directory walk.
+
+        Only components below the root count. Testing the whole absolute path
+        also tested the root's own ancestors, so watching a directory that
+        happens to live under one named `build` or `node_modules` indexed
+        everything on the initial scan -- which walks down from the root and
+        never looks up -- and then silently dropped every create, modify and
+        delete event for the life of the process.
         """
         if not self._ignored_directories:
             return False
-        return any(part in self._ignored_directories for part in Path(file_path).parts[:-1])
+        path = Path(file_path)
+        for root in self._watched_roots:
+            try:
+                relative = path.relative_to(root)
+            except ValueError:
+                continue
+            return any(part in self._ignored_directories for part in relative.parts[:-1])
+        # No configured root contains it (or none was supplied): fall back to
+        # testing the whole path rather than accepting it unchecked.
+        return any(part in self._ignored_directories for part in path.parts[:-1])
 
     def _should_process(self, file_path: str) -> bool:
         if self._is_ignored(file_path):
@@ -219,22 +256,28 @@ class SourceWatcher:
 
     def _start_watcher(self, directories: list[str]) -> None:
         observer = Observer()
-        event_handler = DocumentEventHandler(
-            self._on_file_detected,
-            self._on_file_deleted,
-            ignore_directories=self.config.source_watcher.ignore_directories,
-        )
-        self._event_handler = event_handler
+        # Resolve the roots before building the handler: it filters ignored
+        # directory names relative to a root, so handing it an empty root list
+        # would make it fall back to matching against whole absolute paths.
         self._watched_roots = []
         missing: list[str] = []
         for directory in directories:
             path = Path(directory).resolve()
             if path.is_dir():
                 self._watched_roots.append(path)
-                observer.schedule(event_handler, str(path), recursive=True)
             else:
                 missing.append(directory)
                 self._fatal("Watch directory does not exist: %s", directory)
+
+        event_handler = DocumentEventHandler(
+            self._on_file_detected,
+            self._on_file_deleted,
+            ignore_directories=self.config.source_watcher.ignore_directories,
+            watched_roots=self._watched_roots,
+        )
+        self._event_handler = event_handler
+        for path in self._watched_roots:
+            observer.schedule(event_handler, str(path), recursive=True)
         if not self._watched_roots:
             # Skipping every directory used to be log-only: the watcher still
             # published RUNNING, survived the startup check, and `cementic
@@ -282,7 +325,7 @@ class SourceWatcher:
                 document
                 for document in documents
                 if self._is_under_watched_roots(document.source_path)
-                and not Path(document.source_path).exists()
+                and _is_missing(document.source_path)
             ]
             # Read the paths before committing: ORM attributes expire on commit
             # and these instances are detached once the session closes.
@@ -305,7 +348,14 @@ class SourceWatcher:
         # os.walk rather than rglob so ignored directories can be pruned from
         # the traversal itself: rglob would still descend into node_modules and
         # .git to discover files it then discards.
-        for dirpath, dirnames, filenames in os.walk(directory):
+        def _on_walk_error(error: OSError) -> None:
+            # os.walk swallows errors by default, so an unreadable subtree was
+            # skipped in complete silence: no log line, no counter, and a
+            # collection quietly missing however many documents it held.
+            self._logger.error("Could not read directory during scan: %s", error)
+            self.state_manager.increment(failed=1)
+
+        for dirpath, dirnames, filenames in os.walk(directory, onerror=_on_walk_error):
             # The scan can walk a large tree for minutes; without this a
             # `cementic stop` during startup waits out its whole grace period
             # and then reports a timeout, while the watcher keeps indexing.
@@ -376,12 +426,18 @@ class SourceWatcher:
         return str(resolved_path)
 
     def _register_document(self, file_path: str) -> None:
+        # Each rejection below counts. They are logged at ERROR level but used to
+        # touch neither counter, so `status --verbose` read "processed=N,
+        # failed=0" while an arbitrary number of documents had been dropped --
+        # the only evidence in a log file the user has to know to look for.
         path = Path(file_path)
         if path.is_symlink():
             self._logger.error("Refusing symlinked file: %s", file_path)
+            self.state_manager.increment(failed=1)
             return
         normalized_path = self._normalize_watched_path(file_path, must_exist=True)
         if normalized_path is None:
+            self.state_manager.increment(failed=1)
             return
         file_path = normalized_path
         # Guard against exceedingly large files
@@ -390,11 +446,13 @@ class SourceWatcher:
             file_size = path.stat().st_size
         except OSError:
             self._logger.error("Cannot stat file: %s", file_path)
+            self.state_manager.increment(failed=1)
             return
         if file_size > max_size_bytes:
             self._logger.error(
                 "File too large (%d bytes, max %d): %s", file_size, max_size_bytes, file_path
             )
+            self.state_manager.increment(failed=1)
             return
 
         sha256 = hashlib.sha256()

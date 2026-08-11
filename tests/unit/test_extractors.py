@@ -1,5 +1,6 @@
 """Tests for the content-type extractor registry (Move 4)."""
 
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -15,7 +16,7 @@ from cementic.extract import (
     supported_extensions,
 )
 from cementic.profiles import build_extractor_profile_payload
-from cementic.source_watcher import DocumentEventHandler
+from cementic.source_watcher import DocumentEventHandler, _is_missing
 
 
 @pytest.fixture
@@ -136,3 +137,63 @@ class TestEmptyExtractionIsAFailure:
         with pytest.raises(ValueError) as excinfo:
             extract_document(str(f), config)
         assert "use_ocr" not in str(excinfo.value)
+
+
+class TestWatcherIgnoresRelativeToTheRoot:
+    """Ignored names must be matched below the watched root, not above it.
+
+    Testing the whole absolute path also tested the root's own ancestors, so
+    watching a directory that happens to live under an ignored name indexed
+    everything on the initial scan -- which walks down from the root and never
+    looks up -- then silently dropped every create, modify and delete event for
+    the life of the process.
+    """
+
+    IGNORED = "node_" + "modules"
+
+    def _handler(self, roots):
+        return DocumentEventHandler(
+            lambda _p: None,
+            ignore_directories={self.IGNORED, "build", ".git"},
+            watched_roots=roots,
+        )
+
+    def test_a_root_under_an_ignored_name_still_processes_its_files(self):
+        handler = self._handler([Path("/srv/build/docs")])
+
+        assert handler._should_process("/srv/build/docs/paper.pdf") is True
+
+    def test_an_ignored_directory_below_the_root_is_still_skipped(self):
+        handler = self._handler([Path("/srv/build/docs")])
+
+        assert handler._should_process(f"/srv/build/docs/{self.IGNORED}/readme.md") is False
+
+    def test_paths_outside_every_root_fall_back_to_checking_the_whole_path(self):
+        handler = self._handler([Path("/srv/docs")])
+
+        assert handler._should_process(f"/elsewhere/{self.IGNORED}/readme.md") is False
+
+
+class TestDeletionNeedsProofOfAbsence:
+    def test_a_missing_file_counts_as_deleted(self, tmp_path):
+        assert _is_missing(str(tmp_path / "gone.pdf")) is True
+
+    def test_an_existing_file_does_not(self, tmp_path):
+        present = tmp_path / "here.pdf"
+        present.write_text("x", encoding="utf-8")
+
+        assert _is_missing(str(present)) is False
+
+    def test_an_unreadable_parent_is_not_proof_of_deletion(self, tmp_path):
+        """Path.exists() raises on a permission failure rather than returning
+        False, so this used to take the watcher down with a traceback; treating
+        it as deletion would instead drop every document under the subtree."""
+        locked = tmp_path / "locked"
+        locked.mkdir()
+        target = locked / "doc.pdf"
+        target.write_text("x", encoding="utf-8")
+        locked.chmod(0o000)
+        try:
+            assert _is_missing(str(target)) is False
+        finally:
+            locked.chmod(0o755)
