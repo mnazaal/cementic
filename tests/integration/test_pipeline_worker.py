@@ -170,7 +170,14 @@ class TestPipelineWorkerErrorPaths:
         with pytest.raises(ValueError, match="Unknown embedding provider"):
             worker._create_embedding_client()
 
-    def test_start_health_check_fails(self, temp_dir: Path) -> None:
+    def test_start_aborts_when_the_provider_cannot_embed(self, temp_dir: Path) -> None:
+        """The startup gate checks capability, not just identity.
+
+        It used to call health_check(), which only asks whether the daemon
+        *lists* the expected model -- so one that answered /v1/models but failed
+        every embed passed the gate and then failed every batch retryably,
+        leaving the worker looping.
+        """
         config = _config_for(temp_dir)
         worker = PipelineWorker(config)
         worker.state_manager.update()
@@ -187,10 +194,16 @@ class TestPipelineWorkerErrorPaths:
             Base.metadata.create_all(engine)
 
             fake_client = FakeEmbeddingClient()
-            type(fake_client).health_check = property(lambda self: False)
-            mock_create.return_value = fake_client
-            worker.start("test_health")
+            # Patch the instance, not the class: assigning to
+            # type(fake_client) leaked into every later test using this fake.
+            with patch.object(
+                fake_client, "describe", side_effect=RuntimeError("embedding=True not set")
+            ):
+                mock_create.return_value = fake_client
+                worker.start("test_health")
+
             mock_loop.assert_not_called()
+        assert worker.fatal_reason is not None and "cannot embed" in worker.fatal_reason
 
     def test_start_embedding_init_fails(self, temp_dir: Path) -> None:
         config = _config_for(temp_dir)

@@ -11,7 +11,7 @@ import zlib
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 
 import requests
 from sqlalchemy import and_, or_, text
@@ -317,11 +317,15 @@ class PipelineWorker:
 
         try:
             self.embedding_client = self._create_embedding_client()
-            if not self.embedding_client.health_check():
-                self._fatal("Embedding provider health check failed")
-                return
+            # describe(), not health_check(): the latter only asks whether the
+            # daemon *lists* the expected model, so one that answers /v1/models
+            # but fails every embed passed this gate and then failed every batch
+            # -- and those failures are retryable, so the worker looped on them.
+            # describe() performs a real embed round-trip, which is the property
+            # actually required here, and its cost is paid once per start.
+            self.embedding_client.describe()
         except Exception as error:
-            self._fatal("Failed to initialize embedding provider: %s", error)
+            self._fatal("Embedding provider cannot embed: %s", error)
             return
 
         self.state_manager.update(
@@ -698,7 +702,7 @@ class PipelineWorker:
             embeddings = list(raw)
         except Exception as error:
             if is_retryable_embed_error(error):
-                return self._release_after_provider_failure(error, claimed, profile_id)
+                self._release_after_provider_failure(error, claimed, profile_id)
             # A genuine data failure. Retry one text at a time so a single bad
             # chunk is marked failed on its own instead of taking the other
             # batch_size - 1 down with it and blocking promotion.
@@ -707,7 +711,7 @@ class PipelineWorker:
             except Exception as retry_error:
                 # The provider went away mid-retry: still a provider fact, so
                 # the claim must be released rather than stranded.
-                return self._release_after_provider_failure(retry_error, claimed, profile_id)
+                self._release_after_provider_failure(retry_error, claimed, profile_id)
         else:
             if len(embeddings) != len(claimed):
                 failure_message = (
@@ -755,12 +759,22 @@ class PipelineWorker:
 
     def _release_after_provider_failure(
         self, error: Exception, claimed: list[tuple[int, str]], profile_id: int
-    ) -> bool:
-        """Return a claimed batch to ``pending`` after a provider-side failure.
+    ) -> NoReturn:
+        """Return a claimed batch to ``pending``, then re-raise the failure.
 
         The failure describes the daemon, not these texts, so nothing is stamped
-        terminal. Reconnects (autostart per config) and lets the poll interval
-        provide the backoff.
+        terminal. Reconnects (autostart per config), then re-raises into the
+        processing loop, which records the reason and backs off.
+
+        Re-raising is what makes the failure visible. Returning ``False`` read as
+        "no work this pass", so a provider that was down for days was
+        indistinguishable from an idle worker: `cementic status` showed the
+        workers running with no last error while progress had simply stopped,
+        and the same 32 chunks were re-claimed every poll forever.
+
+        Publishing ``last_error`` from here instead would leave the loop's
+        ``reported_error`` flag unset, so the clear-on-recovery path would never
+        run and a worker that recovered would look broken indefinitely.
         """
         self._logger.error("Embedding provider unavailable: %s", error)
         self._release_claimed_embeddings([chunk_id for chunk_id, _ in claimed], profile_id)
@@ -768,7 +782,7 @@ class PipelineWorker:
             self.embedding_client = self._create_embedding_client()
         except Exception as restart_error:
             self._logger.error("Embedding provider restart failed: %s", restart_error)
-        return False
+        raise error
 
     def _embed_individually(
         self, provider: EmbeddingProvider | None, texts: list[str], batch_error: Exception

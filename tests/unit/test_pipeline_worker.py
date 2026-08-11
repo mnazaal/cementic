@@ -821,3 +821,94 @@ class TestStepChunkSelectionIsBounded:
         small = self._run_and_count_queries(temp_dir, n_already_done=2)
         large = self._run_and_count_queries(temp_dir, n_already_done=50)
         assert small == large
+
+
+class TestProviderFailuresAreVisible:
+    """A provider that is down must not look like an idle worker.
+
+    Returning False from the release path read as "no work this pass", so the
+    loop never recorded anything: `cementic status` showed the workers running
+    with no last error while progress had simply stopped, and the same batch was
+    re-claimed every poll forever.
+    """
+
+    def _worker(self, temp_dir: Path) -> PipelineWorker:
+        config = Config()
+        config.pipeline_worker.log_file = temp_dir / "worker.log"
+        config.pipeline_worker.state_path = temp_dir / "state.json"
+        return PipelineWorker(config)
+
+    def test_release_after_provider_failure_re_raises(self, temp_dir: Path) -> None:
+        worker = self._worker(temp_dir)
+        error = requests.exceptions.ConnectionError("daemon refused")
+
+        with (
+            patch.object(worker, "_release_claimed_embeddings") as mock_release,
+            patch.object(worker, "_create_embedding_client"),
+            pytest.raises(requests.exceptions.ConnectionError),
+        ):
+            worker._release_after_provider_failure(error, [(1, "a"), (2, "b")], profile_id=7)
+
+        # The claim is returned to `pending` before the raise, so the chunks are
+        # retried rather than stranded in `processing`.
+        mock_release.assert_called_once_with([1, 2], 7)
+
+    def test_release_re_raises_even_when_the_reconnect_fails(self, temp_dir: Path) -> None:
+        worker = self._worker(temp_dir)
+        error = requests.exceptions.Timeout("gone")
+
+        with (
+            patch.object(worker, "_release_claimed_embeddings"),
+            patch.object(worker, "_create_embedding_client", side_effect=OSError("no daemon")),
+            pytest.raises(requests.exceptions.Timeout),
+        ):
+            worker._release_after_provider_failure(error, [(1, "a")], profile_id=1)
+
+    def test_a_down_provider_reaches_the_state_file(self, temp_dir: Path) -> None:
+        """End of the chain: the raise propagates to the loop, which publishes it."""
+        worker = self._worker(temp_dir)
+
+        with (
+            patch.object(worker, "_step_extract", return_value=False),
+            patch.object(worker, "_step_chunk", return_value=False),
+            patch.object(
+                worker,
+                "_step_embed",
+                side_effect=requests.exceptions.ConnectionError("daemon refused"),
+            ),
+            patch.object(worker._shutdown_event, "wait") as mock_wait,
+        ):
+            mock_wait.side_effect = lambda _: worker._shutdown_event.set()
+            worker._run_processing_loop(1)
+
+        state = worker.state_manager.load()
+        assert state.last_error is not None
+        assert "daemon refused" in state.last_error
+        assert state.last_error_at is not None
+
+
+class TestStartupGateChecksEmbedding:
+    def test_startup_requires_a_working_embed_not_just_a_listing(self, temp_dir: Path) -> None:
+        """health_check() only asks whether the daemon lists the model, so one
+        that answers /v1/models but fails every embed passed the gate and then
+        failed every batch -- retryably, so the worker looped on it."""
+        config = Config()
+        config.pipeline_worker.log_file = temp_dir / "worker.log"
+        config.pipeline_worker.state_path = temp_dir / "state.json"
+        worker = PipelineWorker(config)
+
+        client = MagicMock()
+        client.health_check.return_value = True
+        client.describe.side_effect = RuntimeError("model was not loaded with embedding=True")
+
+        with (
+            patch("cementic.pipeline_worker.get_engine"),
+            patch("cementic.pipeline_worker.create_tables"),
+            patch("cementic.pipeline_worker.get_session_factory"),
+            patch.object(worker, "_create_embedding_client", return_value=client),
+        ):
+            worker.start(collection="c")
+
+        assert worker.fatal_reason is not None
+        assert "cannot embed" in worker.fatal_reason
+        client.describe.assert_called_once()
