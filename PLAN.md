@@ -265,6 +265,26 @@ should not be trusted:
 - The `pymupdf._get_layout` guard is **retracted**: the attribute is declared in
   pymupdf 1.27.1, so the current code is correct.
 
+### Fixed on `claude/review-round-three`
+
+Items 1-4, 7 and 8 of the list below, each with regression tests: empty
+extractions, the config diagnosability cluster (including the value-leak in
+error messages), provider failures reaching `status` together with a capability
+startup gate, `~`/relative path handling, the per-file view's freshness
+predicates, and the unindexable-dimension pre-flight.
+
+Two notes for whoever picks this up:
+
+- **Test fixtures were unrealistic, not the code.** Three `load_file_progress`
+  tests seeded artifact rows without the hashes the worker writes. Both step
+  functions set those on the *failure* path too (`pipeline_worker.py:494`,
+  `:606`), so the fixtures — not the new predicates — were wrong. Check that
+  before assuming a similar failure means a regression.
+- **A relative `artifacts_path` is still relative** — to where cementic was
+  started. Anchoring at load time removes the silent-no-op deletion, but it
+  cannot make a relative path mean the same thing from two directories. A real
+  mismatch is now refused rather than quietly succeeding.
+
 ### Still open, in execution order
 
 Ordering is by (user impact × likelihood), with dependencies noted. Each item
