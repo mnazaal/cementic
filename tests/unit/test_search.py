@@ -374,3 +374,59 @@ class TestSearcher:
         # Only the active-revisions query runs; building revisions are not loaded,
         # and the vector search now goes through session.execute (not .query).
         assert mock_session.query.call_count == 1
+
+
+class TestSearchOnlyServesCurrentContent:
+    """Search must apply the same definition of "current" as the rest of cementic.
+
+    Filtering on profile ids alone serves the *old* content of a file whose
+    re-extraction failed: the superseded rows keep ``status='done'`` and match
+    the profile ids, so stale text ranks normally and indefinitely.
+    """
+
+    @patch("cementic.search.get_engine")
+    @patch("cementic.search.get_session_factory")
+    @patch("cementic.search._create_embedding_provider")
+    def test_knn_query_requires_hashes_to_match_the_source(
+        self, mock_create_embedding_provider, mock_session_factory, mock_get_engine
+    ):
+        revision = SimpleNamespace(
+            collection="default",
+            embedding_profile_id=1,
+            chunk_profile_id=2,
+            extractor_profile_id=1,
+            embedding_profile=SimpleNamespace(
+                config_json=(
+                    '{"provider": "llama-cpp", '
+                    '"model_identifier": "nomic-embed-text", "embedding_dim": 768}'
+                ),
+                model_identifier="nomic-embed-text",
+                embedding_dim=768,
+                distance_metric="cosine",
+            ),
+        )
+        exec_result = MagicMock()
+        exec_result.scalar.return_value = 1
+        exec_result.__iter__.return_value = iter([])
+
+        mock_session = MagicMock()
+        mock_session.__enter__.return_value = mock_session
+        mock_session.__exit__.return_value = False
+        mock_session.query.side_effect = [TestSearcher.RevisionQuery([revision])]
+        mock_session.execute.return_value = exec_result
+        mock_session_factory.return_value = lambda: mock_session
+
+        embedding_provider = MagicMock()
+        embedding_provider.health_check.return_value = True
+        embedding_provider.embed.return_value = [0.1] * 768
+        mock_create_embedding_provider.return_value = embedding_provider
+
+        Searcher().search("hello")
+
+        knn_sql = " ".join(
+            str(call.args[0]) for call in mock_session.execute.call_args_list if call.args
+        )
+        assert "ed.source_file_hash = sd.file_hash" in knn_sql
+        assert "cd.source_content_hash = ed.content_hash" in knn_sql
+        assert "ed.status = 'done'" in knn_sql
+        assert "cd.status = 'done'" in knn_sql

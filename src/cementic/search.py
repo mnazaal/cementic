@@ -14,7 +14,7 @@ from cementic.embedding_runtime import (
     create_provider,
     runtime_spec_from_profile_json,
 )
-from cementic.revisions import BUILDING_STATUSES, get_active_revision
+from cementic.revisions import BUILDING_STATUSES, CURRENT_CONTENT_SQL, get_active_revision
 from cementic.vector_store import (
     index_access_method,
     query_tuning_sql,
@@ -165,6 +165,7 @@ class Searcher:
                     "AND sd.status <> 'deleted' "
                     "AND cd.chunk_profile_id = :chunk_profile_id "
                     "AND ed.extractor_profile_id = :extractor_profile_id "
+                    f"AND {CURRENT_CONTENT_SQL} "
                     f"ORDER BY ev.embedding {distance_operator} (:query)::vector "
                     "LIMIT :k"
                 )
