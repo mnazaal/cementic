@@ -4,6 +4,7 @@ from unittest.mock import MagicMock, patch
 
 from cementic.config import Config
 from cementic.doctor import _daemon_state, collect_doctor_report
+from cementic.embedding_runtime import DaemonHealth
 
 
 def _config_with_model_path(tmp_path, exists: bool):
@@ -76,24 +77,21 @@ class TestDaemonCheck:
     and with autostart disabled exited non-zero.
     """
 
-    @patch("cementic.doctor.llama_daemon_status", return_value="running, pid=4242")
-    @patch("cementic.doctor._daemon_reachable", return_value=False)
-    def test_busy_daemon_is_healthy(self, mock_reachable, mock_status) -> None:
+    @patch("cementic.doctor.probe_daemon", return_value=DaemonHealth.BUSY)
+    def test_busy_daemon_is_healthy(self, mock_probe) -> None:
         healthy, message = _daemon_state(Config())
         assert healthy is True
         assert "busy" in message
 
-    @patch("cementic.doctor.llama_daemon_status", return_value="stopped")
-    @patch("cementic.doctor._daemon_reachable", return_value=False)
-    def test_dead_daemon_is_not_healthy(self, mock_reachable, mock_status) -> None:
+    @patch("cementic.doctor.probe_daemon", return_value=DaemonHealth.DOWN)
+    def test_dead_daemon_is_not_healthy(self, mock_probe) -> None:
         healthy, _message = _daemon_state(Config())
         assert healthy is False
 
-    @patch("cementic.doctor.llama_daemon_status", return_value="stopped")
-    @patch("cementic.doctor._daemon_reachable", return_value=False)
+    @patch("cementic.doctor.probe_daemon", return_value=DaemonHealth.DOWN)
     @patch("cementic.doctor.get_engine")
     def test_dead_daemon_fails_when_autostart_disabled(
-        self, mock_get_engine, mock_reachable, mock_status, tmp_path
+        self, mock_get_engine, mock_probe, tmp_path
     ) -> None:
         mock_get_engine.side_effect = Exception("no db in this test")
         config = _config_with_model_path(tmp_path, exists=True)
@@ -107,7 +105,7 @@ class TestDaemonCheck:
 class TestModelCheck:
     """Missing model is a warning (not a hard failure) when auto-download is on."""
 
-    @patch("cementic.doctor._daemon_reachable", return_value=True)
+    @patch("cementic.doctor.probe_daemon", return_value=DaemonHealth.HEALTHY)
     @patch("cementic.doctor.get_engine")
     def test_missing_model_with_autodownload_is_warning_not_fail(
         self, mock_get_engine, mock_daemon, tmp_path
@@ -121,7 +119,7 @@ class TestModelCheck:
         assert report["checks"]["model"]["status"] == "warning"
         assert report["checks"]["model"]["exists"] is False
 
-    @patch("cementic.doctor._daemon_reachable", return_value=True)
+    @patch("cementic.doctor.probe_daemon", return_value=DaemonHealth.HEALTHY)
     @patch("cementic.doctor.get_engine")
     def test_missing_model_without_autodownload_is_fail(
         self, mock_get_engine, mock_daemon, tmp_path
@@ -134,7 +132,7 @@ class TestModelCheck:
 
         assert report["checks"]["model"]["status"] == "fail"
 
-    @patch("cementic.doctor._daemon_reachable", return_value=True)
+    @patch("cementic.doctor.probe_daemon", return_value=DaemonHealth.HEALTHY)
     @patch("cementic.doctor.get_engine")
     def test_present_model_is_ok_regardless_of_autodownload(
         self, mock_get_engine, mock_daemon, tmp_path
@@ -147,7 +145,7 @@ class TestModelCheck:
 
         assert report["checks"]["model"]["status"] == "ok"
 
-    @patch("cementic.doctor._daemon_reachable", return_value=True)
+    @patch("cementic.doctor.probe_daemon", return_value=DaemonHealth.HEALTHY)
     def test_missing_model_with_autodownload_does_not_force_overall_not_ok(
         self, mock_daemon, tmp_path
     ) -> None:

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from typing import Any
 
-import requests
 from sqlalchemy import text
 
 from cementic.config import (
@@ -14,7 +13,11 @@ from cementic.config import (
     resolve_llama_model_path,
 )
 from cementic.db import REQUIRED_DB_EXTENSIONS, get_engine
-from cementic.embedding_runtime import llama_daemon_status
+from cementic.embedding_runtime import (
+    DaemonHealth,
+    build_llama_cpp_client,
+    probe_daemon,
+)
 
 
 def _status(ok: bool, *, warning: bool = False) -> str:
@@ -51,31 +54,24 @@ def _extension_check(conn: Any, name: str) -> dict[str, Any]:
     }
 
 
-def _daemon_reachable(config: Config) -> bool:
-    try:
-        response = requests.get(
-            f"http://{config.llama_cpp.daemon_host}:{config.llama_cpp.daemon_port}/v1/models",
-            timeout=2,
-        )
-        return response.ok
-    except requests.RequestException:
-        return False
-
-
 def _daemon_state(config: Config) -> tuple[bool, str]:
     """Return (healthy, message) for the embedding daemon.
 
-    ``llama_cpp.server`` serializes every request behind one model lock, so
-    ``/v1/models`` can block for the whole duration of an in-flight embedding
-    batch. Judging on that probe alone reported a daemon that was busy indexing
-    as broken -- and with autostart disabled that made `status --doctor` exit
-    non-zero mid-build. Fall back to process liveness, exactly as
-    ``status_service.check_health`` already does.
+    Shares one probe with `cementic status`, rather than the bare reachability
+    check this used to do. That check asked only whether *something* answered on
+    the port, so any llama.cpp server -- serving any model -- reported as ok,
+    and the two commands could describe the same daemon differently.
     """
-    if _daemon_reachable(config):
+    health = probe_daemon(build_llama_cpp_client(config), config, wait_seconds=0.0)
+    if health is DaemonHealth.HEALTHY:
         return True, "reachable"
-    if llama_daemon_status(config).startswith("running"):
+    if health is DaemonHealth.BUSY:
+        # Serializing every request behind one model lock means a daemon that is
+        # busy indexing cannot answer; that is not the same as broken, and
+        # calling it broken made `status --doctor` exit non-zero mid-build.
         return True, "running but busy (serving a request); not idle enough to answer /v1/models"
+    if health is DaemonHealth.WRONG_MODEL:
+        return False, "serving a different model than this config expects"
     return False, ""
 
 

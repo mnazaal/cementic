@@ -405,25 +405,34 @@ def check_health(config: Config) -> HealthStatus:
 
         llama_daemon = llama_daemon_status(config)
 
+    # One quick probe, no waiting. This used to build the client through
+    # `create_provider`, whose own busy-poll blocks for up to two minutes -- and
+    # then the result was overridden from the pid file anyway, which was already
+    # known above. A status read must not wait out an in-flight batch.
     embedding_healthy = False
-    try:
-        from cementic.embedding_runtime import create_provider, runtime_spec_from_config
+    if embedding_provider == "llama-cpp":
+        from cementic.embedding_runtime import DaemonHealth, build_llama_cpp_client, probe_daemon
 
-        client = create_provider(runtime_spec_from_config(config), config, autostart=False)
-        embedding_healthy = client.health_check()
-    except Exception:
-        embedding_healthy = False
+        try:
+            health = probe_daemon(build_llama_cpp_client(config), config, wait_seconds=0.0)
+        except Exception:
+            health = DaemonHealth.DOWN
+        # BUSY counts as healthy: the process is confirmed alive and merely
+        # mid-batch. WRONG_MODEL does not -- the daemon answered, and what it
+        # serves is not what this config asks for. Treating that as healthy is
+        # what let a stale daemon look fine to `status` while search and the
+        # worker restarted it from under each other.
+        embedding_healthy = health in (DaemonHealth.HEALTHY, DaemonHealth.BUSY)
+        if health is DaemonHealth.WRONG_MODEL:
+            llama_daemon = "running, serving a different model"
+    else:
+        try:
+            from cementic.embedding_runtime import create_provider, runtime_spec_from_config
 
-    # llama_cpp.server serializes all requests behind a single model lock, so
-    # /v1/models can legitimately block for the full duration of an in-flight
-    # embedding batch (seconds to tens of seconds) -- no HTTP timeout/retry
-    # budget can distinguish "busy" from "down" without either being too slow
-    # or too eager to false-flag. The PID+start-token liveness check is
-    # instant and process-level, so if the daemon process is confirmed alive,
-    # a blocked HTTP probe means busy, not unhealthy.
-    if embedding_provider == "llama-cpp" and not embedding_healthy:
-        if llama_daemon.startswith("running"):
-            embedding_healthy = True
+            client = create_provider(runtime_spec_from_config(config), config, autostart=False)
+            embedding_healthy = client.health_check()
+        except Exception:
+            embedding_healthy = False
 
     return HealthStatus(
         db_reachable=db_reachable,

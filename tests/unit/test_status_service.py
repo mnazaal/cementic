@@ -18,6 +18,7 @@ from cementic.db import (
     PipelineRevision,
     SourceDocument,
 )
+from cementic.embedding_runtime import RemoteEmbeddingClient
 from cementic.pipeline_worker import compute_revision_counts
 from cementic.state import DaemonState, WorkerState
 from cementic.status_service import (
@@ -520,7 +521,7 @@ class TestCheckHealth:
     def test_db_reachable(self) -> None:
         config = Config()
         with patch("cementic.status_service.get_engine") as mock_engine:
-            with patch("cementic.embedding_runtime.get_llama_cpp_runtime_client") as mock_client:
+            with patch("cementic.embedding_runtime.build_llama_cpp_client") as mock_client:
                 mock_conn = MagicMock()
                 mock_engine.return_value.connect.return_value.__enter__.return_value = mock_conn
                 mock_client.return_value.health_check.return_value = True
@@ -534,7 +535,7 @@ class TestCheckHealth:
         assert result.db_reachable is False
 
     @patch("cementic.status_service.get_engine")
-    @patch("cementic.embedding_runtime.get_llama_cpp_runtime_client")
+    @patch("cementic.embedding_runtime.build_llama_cpp_client")
     def test_health_llama_cpp_healthy(self, mock_client, mock_engine) -> None:
         config = Config()
         config.pipeline.embedding_provider = "llama-cpp"
@@ -547,7 +548,7 @@ class TestCheckHealth:
         assert result.embedding_healthy is True
 
     @patch("cementic.status_service.get_engine")
-    @patch("cementic.embedding_runtime.get_llama_cpp_runtime_client")
+    @patch("cementic.embedding_runtime.build_llama_cpp_client")
     def test_health_llama_cpp_unhealthy(self, mock_client, mock_engine) -> None:
         config = Config()
         config.pipeline.embedding_provider = "llama-cpp"
@@ -559,26 +560,56 @@ class TestCheckHealth:
         assert result.embedding_healthy is False
 
     def test_health_llama_cpp_busy_not_unhealthy(self, temp_dir) -> None:
-        """HTTP health probe can fail while a large embedding batch holds
-        llama_cpp.server's request lock; if the daemon process is confirmed
-        alive via the PID file, that's busy, not unhealthy."""
+        """A daemon mid-batch cannot answer /v1/models, because llama_cpp.server
+        serializes every request behind one lock. With the process confirmed
+        alive, that is busy, not unhealthy -- and the probe must reach that
+        verdict without waiting the batch out."""
         config = Config()
         config.pipeline.embedding_provider = "llama-cpp"
         pid_file = temp_dir / "daemon.pid"
         pid_file.write_text("42")
         config.llama_cpp.daemon_pid_file = pid_file
 
-        with patch("cementic.status_service.get_engine"):
-            with patch(
-                "cementic.embedding_runtime.is_managed_process_alive", return_value=True
-            ):
-                with patch(
-                    "cementic.embedding_runtime.get_llama_cpp_runtime_client"
-                ) as mock_client:
-                    mock_client.return_value.health_check.return_value = False
-                    result = check_health(config)
-                    assert "running" in result.llama_daemon
-                    assert result.embedding_healthy is True
+        client = MagicMock(spec=RemoteEmbeddingClient)
+        client.probe_served_runtime.return_value = None  # no answer
+
+        with (
+            patch("cementic.status_service.get_engine"),
+            patch("cementic.embedding_runtime.is_managed_process_alive", return_value=True),
+            patch("cementic.embedding_runtime.build_llama_cpp_client", return_value=client),
+            patch("cementic.embedding_runtime._poll_until_ready") as mock_poll,
+        ):
+            result = check_health(config)
+
+        assert "running" in result.llama_daemon
+        assert result.embedding_healthy is True
+        mock_poll.assert_not_called()
+
+    def test_health_llama_cpp_wrong_model_is_not_healthy(self, temp_dir) -> None:
+        """The daemon answered; what it serves is not what this config asks for.
+
+        The old pid-file fallback flipped this back to healthy, so a stale
+        daemon looked fine to `status` while search and the worker restarted it
+        from under each other.
+        """
+        config = Config()
+        config.pipeline.embedding_provider = "llama-cpp"
+        pid_file = temp_dir / "daemon.pid"
+        pid_file.write_text("42")
+        config.llama_cpp.daemon_pid_file = pid_file
+
+        client = MagicMock(spec=RemoteEmbeddingClient)
+        client.probe_served_runtime.return_value = False  # answered, but not ours
+
+        with (
+            patch("cementic.status_service.get_engine"),
+            patch("cementic.embedding_runtime.is_managed_process_alive", return_value=True),
+            patch("cementic.embedding_runtime.build_llama_cpp_client", return_value=client),
+        ):
+            result = check_health(config)
+
+        assert result.embedding_healthy is False
+        assert "different model" in result.llama_daemon
 
     def test_health_llama_daemon_running(self, temp_dir) -> None:
         config = Config()
@@ -592,7 +623,7 @@ class TestCheckHealth:
                 "cementic.embedding_runtime.is_managed_process_alive", return_value=True
             ):
                 with patch(
-                    "cementic.embedding_runtime.get_llama_cpp_runtime_client"
+                    "cementic.embedding_runtime.build_llama_cpp_client"
                 ) as mock_client:
                     mock_client.return_value.health_check.return_value = True
                     result = check_health(config)
@@ -606,7 +637,7 @@ class TestCheckHealth:
 
         with patch("cementic.status_service.get_engine"):
             with patch(
-                "cementic.embedding_runtime.get_llama_cpp_runtime_client"
+                "cementic.embedding_runtime.build_llama_cpp_client"
             ) as mock_client:
                 mock_client.return_value.health_check.return_value = True
                 result = check_health(config)
@@ -621,7 +652,7 @@ class TestCheckHealth:
 
         with patch("cementic.status_service.get_engine"):
             with patch(
-                "cementic.embedding_runtime.get_llama_cpp_runtime_client"
+                "cementic.embedding_runtime.build_llama_cpp_client"
             ) as mock_client:
                 mock_client.return_value.health_check.return_value = True
                 result = check_health(config)

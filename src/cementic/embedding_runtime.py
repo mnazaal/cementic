@@ -9,6 +9,7 @@ import signal
 import sys
 import time
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 from typing import Any, Callable
 
@@ -238,11 +239,21 @@ class RemoteEmbeddingClient(EmbeddingProvider):
                     time.sleep(0.3)
         return None
 
-    def matches_expected_runtime(self) -> bool:
+    def probe_served_runtime(self) -> bool | None:
+        """Tri-state: True serving ours, False serving another, None no answer.
+
+        Collapsing "no answer" into False is what let three callers disagree
+        about what healthy means: a daemon serving the *wrong* model and one
+        that is merely mid-batch became indistinguishable, so a fallback meant
+        to cover busyness also excused a genuine mismatch.
+        """
         models = self._list_models()
-        if not models:
-            return False
+        if models is None:
+            return None
         return any(str(model.get("id")) == self.expected_fingerprint for model in models)
+
+    def matches_expected_runtime(self) -> bool:
+        return self.probe_served_runtime() is True
 
     def health_check(self) -> bool:
         return self.matches_expected_runtime()
@@ -279,6 +290,42 @@ class RemoteEmbeddingClient(EmbeddingProvider):
         return self._embedding_dim
 
 
+def build_llama_cpp_client(
+    config: Config, spec: EmbeddingRuntimeSpec | None = None
+) -> RemoteEmbeddingClient:
+    """Construct a client for the configured runtime, performing no I/O.
+
+    Separated from ``get_llama_cpp_runtime_client`` so a caller that only wants
+    to *ask about* the daemon does not also inherit its start/restart machinery.
+    `cementic status` used to build its client through that path, which polls
+    for up to two minutes on a busy daemon before returning an answer the pid
+    file already had.
+    """
+    runtime_spec = spec or runtime_spec_from_config(config)
+    if runtime_spec.provider != "llama-cpp":
+        raise ValueError(f"Expected llama-cpp runtime spec, got {runtime_spec.provider}")
+    n_ctx = runtime_spec.n_ctx or config.llama_cpp.n_ctx
+    n_gpu_layers = (
+        runtime_spec.n_gpu_layers
+        if runtime_spec.n_gpu_layers is not None
+        else config.llama_cpp.n_gpu_layers
+    )
+    return RemoteEmbeddingClient(
+        host=config.llama_cpp.daemon_host,
+        port=config.llama_cpp.daemon_port,
+        embedding_dim=runtime_spec.embedding_dim,
+        expected_fingerprint=llama_cpp_runtime_fingerprint(
+            model_path=runtime_spec.model_identifier,
+            n_ctx=n_ctx,
+            n_batch=n_ctx,
+            n_gpu_layers=n_gpu_layers,
+            verbose=runtime_spec.verbose,
+        ),
+        model_identifier=runtime_spec.model_identifier,
+        timeout=float(config.llama_cpp.llama_embed_timeout_seconds),
+    )
+
+
 def get_llama_cpp_runtime_client(
     config: Config,
     spec: EmbeddingRuntimeSpec | None = None,
@@ -286,30 +333,10 @@ def get_llama_cpp_runtime_client(
 ) -> RemoteEmbeddingClient:
     """Return a client for the llama.cpp embedding server for one runtime spec."""
     runtime_spec = spec or runtime_spec_from_config(config)
-    if runtime_spec.provider != "llama-cpp":
-        raise ValueError(f"Expected llama-cpp runtime spec, got {runtime_spec.provider}")
-
-    n_ctx = runtime_spec.n_ctx or config.llama_cpp.n_ctx
-    n_gpu_layers = (
-        runtime_spec.n_gpu_layers
-        if runtime_spec.n_gpu_layers is not None
-        else config.llama_cpp.n_gpu_layers
-    )
-    fingerprint = llama_cpp_runtime_fingerprint(
-        model_path=runtime_spec.model_identifier,
-        n_ctx=n_ctx,
-        n_batch=n_ctx,
-        n_gpu_layers=n_gpu_layers,
-        verbose=runtime_spec.verbose,
-    )
-    client = RemoteEmbeddingClient(
-        host=config.llama_cpp.daemon_host,
-        port=config.llama_cpp.daemon_port,
-        embedding_dim=runtime_spec.embedding_dim,
-        expected_fingerprint=fingerprint,
-        model_identifier=runtime_spec.model_identifier,
-        timeout=float(config.llama_cpp.llama_embed_timeout_seconds),
-    )
+    client = build_llama_cpp_client(config, runtime_spec)
+    # The client already carries the fingerprint it was built from; recomputing
+    # it here is a second chance for the two to disagree.
+    fingerprint = client.expected_fingerprint
 
     models = client._list_models()
     if models is not None:
@@ -377,25 +404,51 @@ def get_llama_cpp_runtime_client(
     return client
 
 
-def client_is_healthy_or_busy(client: EmbeddingProvider, config: Config) -> bool:
-    """Health check that tells a busy llama.cpp daemon apart from a dead one.
+class DaemonHealth(str, Enum):
+    """What a probe of the embedding daemon established."""
 
-    A single ``health_check()`` probe can't distinguish "mid-batch, lock
-    held" from "down" (see ``RemoteEmbeddingClient._list_models``). For a
-    ``RemoteEmbeddingClient``, fall back to PID+start-token liveness and a
-    longer poll before reporting unhealthy.
+    #: Answered, and is serving the runtime we expect.
+    HEALTHY = "healthy"
+    #: Did not answer, but the process is confirmed alive: mid-batch, not down.
+    BUSY = "busy"
+    #: Answered, serving something else. A config change, not busyness.
+    WRONG_MODEL = "wrong_model"
+    #: No answer and no live process.
+    DOWN = "down"
+
+
+def probe_daemon(
+    client: EmbeddingProvider, config: Config, *, wait_seconds: float = 0.0
+) -> DaemonHealth:
+    """Classify the embedding daemon, spending at most ``wait_seconds`` waiting.
+
+    One helper with an explicit budget, replacing three implementations that
+    used three different probes and three different timeouts -- which is why
+    `status`, `--doctor` and `search` could each report something different
+    about the same daemon.
+
+    ``wait_seconds=0`` costs one ``/v1/models`` round (a couple of seconds at
+    most) and never polls, which is what a status read wants. Only a caller that
+    genuinely needs the daemon *now* should pay to wait out a batch.
     """
-    if client.health_check():
-        return True
     if not isinstance(client, RemoteEmbeddingClient):
-        return False
+        return DaemonHealth.HEALTHY if client.health_check() else DaemonHealth.DOWN
+
+    served = client.probe_served_runtime()
+    if served is True:
+        return DaemonHealth.HEALTHY
+    if served is False:
+        # It answered. Whatever is loaded is not what this config asks for, and
+        # no amount of waiting changes that.
+        return DaemonHealth.WRONG_MODEL
     if not _daemon_pid_alive(config):
-        return False
-    extended_timeout = max(
-        config.llama_cpp.daemon_start_timeout_seconds,
-        config.llama_cpp.llama_embed_timeout_seconds,
-    )
-    return _poll_until_ready(client, extended_timeout)
+        return DaemonHealth.DOWN
+    # No answer, but the process is alive. llama_cpp.server serializes every
+    # request behind one lock, so a daemon mid-batch is indistinguishable from a
+    # dead one over HTTP alone.
+    if wait_seconds > 0 and _poll_until_ready(client, wait_seconds):
+        return DaemonHealth.HEALTHY
+    return DaemonHealth.BUSY
 
 
 def _create_llama_cpp_provider(

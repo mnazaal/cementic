@@ -10,17 +10,18 @@ import requests
 from cementic.config import Config, resolve_llama_model_path
 from cementic.embedding_provider import EmbeddingProvider
 from cementic.embedding_runtime import (
+    DaemonHealth,
     EmbeddingRuntimeSpec,
     RemoteEmbeddingClient,
     _read_daemon_pid_file,
     _start_llama_cpp_daemon,
     _stop_mismatched_llama_cpp_daemon,
     _wait_for_daemon_ready,
-    client_is_healthy_or_busy,
     create_provider,
     get_llama_cpp_runtime_client,
     llama_cpp_runtime_fingerprint,
     llama_daemon_status,
+    probe_daemon,
     runtime_spec_from_config,
     runtime_spec_from_profile_json,
     stop_llama_cpp_runtime,
@@ -640,41 +641,63 @@ class TestCreateProvider:
             create_provider(spec, Config())
 
 
-class TestClientIsHealthyOrBusy:
-    """Searcher's health gate mirrors the busy-vs-down distinction."""
+class TestProbeDaemon:
+    """One probe with an explicit budget, replacing three that disagreed.
 
-    def test_healthy_client_short_circuits(self) -> None:
+    Collapsing "no answer" into False made a daemon serving the *wrong* model
+    indistinguishable from one merely mid-batch, so a fallback meant to excuse
+    busyness also excused a genuine mismatch.
+    """
+
+    def test_serving_our_runtime_is_healthy(self) -> None:
         client = MagicMock(spec=RemoteEmbeddingClient)
-        client.health_check.return_value = True
-        assert client_is_healthy_or_busy(client, Config()) is True
+        client.probe_served_runtime.return_value = True
+        assert probe_daemon(client, Config()) is DaemonHealth.HEALTHY
 
-    def test_non_remote_client_unhealthy_is_unhealthy(self) -> None:
-        client = MagicMock(spec=EmbeddingProvider)
-        client.health_check.return_value = False
-        assert client_is_healthy_or_busy(client, Config()) is False
+    def test_answering_with_another_model_is_wrong_model(self) -> None:
+        client = MagicMock(spec=RemoteEmbeddingClient)
+        client.probe_served_runtime.return_value = False
+        assert probe_daemon(client, Config()) is DaemonHealth.WRONG_MODEL
 
     @patch("cementic.embedding_runtime._daemon_pid_alive", return_value=False)
-    def test_remote_client_unhealthy_and_daemon_dead_is_unhealthy(self, mock_alive) -> None:
+    def test_no_answer_and_no_process_is_down(self, mock_alive) -> None:
         client = MagicMock(spec=RemoteEmbeddingClient)
-        client.health_check.return_value = False
-        assert client_is_healthy_or_busy(client, Config()) is False
+        client.probe_served_runtime.return_value = None
+        assert probe_daemon(client, Config()) is DaemonHealth.DOWN
+
+    @patch("cementic.embedding_runtime._poll_until_ready")
+    @patch("cementic.embedding_runtime._daemon_pid_alive", return_value=True)
+    def test_no_answer_with_a_live_process_is_busy_and_does_not_wait(
+        self, mock_alive, mock_poll
+    ) -> None:
+        """The default budget is zero: a status read must not wait out a batch."""
+        client = MagicMock(spec=RemoteEmbeddingClient)
+        client.probe_served_runtime.return_value = None
+
+        assert probe_daemon(client, Config()) is DaemonHealth.BUSY
+        mock_poll.assert_not_called()
 
     @patch("cementic.embedding_runtime._poll_until_ready", return_value=True)
     @patch("cementic.embedding_runtime._daemon_pid_alive", return_value=True)
-    def test_remote_client_unhealthy_but_daemon_alive_waits_and_recovers(
-        self, mock_alive, mock_poll
-    ) -> None:
+    def test_a_caller_that_asks_to_wait_can_recover(self, mock_alive, mock_poll) -> None:
         client = MagicMock(spec=RemoteEmbeddingClient)
-        client.health_check.return_value = False
-        assert client_is_healthy_or_busy(client, Config()) is True
+        client.probe_served_runtime.return_value = None
+
+        assert probe_daemon(client, Config(), wait_seconds=30) is DaemonHealth.HEALTHY
         mock_poll.assert_called_once()
 
     @patch("cementic.embedding_runtime._poll_until_ready", return_value=False)
     @patch("cementic.embedding_runtime._daemon_pid_alive", return_value=True)
-    def test_remote_client_stays_unhealthy_if_never_frees(self, mock_alive, mock_poll) -> None:
+    def test_waiting_and_never_freeing_stays_busy(self, mock_alive, mock_poll) -> None:
         client = MagicMock(spec=RemoteEmbeddingClient)
+        client.probe_served_runtime.return_value = None
+
+        assert probe_daemon(client, Config(), wait_seconds=30) is DaemonHealth.BUSY
+
+    def test_a_non_remote_provider_degrades_to_its_own_check(self) -> None:
+        client = MagicMock(spec=EmbeddingProvider)
         client.health_check.return_value = False
-        assert client_is_healthy_or_busy(client, Config()) is False
+        assert probe_daemon(client, Config()) is DaemonHealth.DOWN
 
 
 class TestDaemonPidFile:

@@ -286,7 +286,7 @@ class TestSearcher:
     @patch("cementic.search.get_engine")
     @patch("cementic.search.get_session_factory")
     @patch("cementic.search._create_embedding_provider")
-    def test_search_rejects_unhealthy_embedding_provider(
+    def test_search_surfaces_a_provider_that_cannot_be_reached(
         self, mock_create_embedding_provider, mock_session_factory, mock_get_engine
     ):
         active_revision = SimpleNamespace(
@@ -311,17 +311,17 @@ class TestSearcher:
         mock_session.query.return_value = self.RevisionQuery([active_revision])
         mock_session_factory.return_value = lambda: mock_session
 
-        embedding_provider = MagicMock()
-        embedding_provider.health_check.return_value = False
-        mock_create_embedding_provider.return_value = embedding_provider
+        # Search no longer re-probes health: _create_embedding_provider only
+        # returns once the served fingerprint is confirmed, and raises with a
+        # more specific reason otherwise. The second probe re-asked a question
+        # already answered, and could itself wait out an in-flight batch.
+        mock_create_embedding_provider.side_effect = RuntimeError(
+            "llama.cpp embedding daemon appears busy"
+        )
 
         searcher = Searcher()
-        try:
+        with pytest.raises(RuntimeError, match="busy"):
             searcher.search("hello")
-        except RuntimeError as error:
-            assert "not healthy" in str(error)
-        else:
-            raise AssertionError("Expected RuntimeError")
 
     @patch("cementic.search.get_engine")
     @patch("cementic.search.get_session_factory")

@@ -12,7 +12,6 @@ from cementic.chunk import TOKENIZER
 from cementic.config import Config, get_config
 from cementic.db import PipelineRevision, get_engine, get_session_factory
 from cementic.embedding_runtime import (
-    client_is_healthy_or_busy,
     create_provider,
     runtime_spec_from_profile_json,
 )
@@ -149,11 +148,14 @@ class Searcher:
                 runtime_spec_from_profile_json(embedding_profile.config_json).n_ctx
                 or self.config.llama_cpp.n_ctx,
             )
+            # No separate health probe here: _create_embedding_provider only
+            # returns once the served fingerprint is confirmed, and raises with a
+            # better message otherwise. Re-probing re-asked a question already
+            # answered, and if the worker started a batch in between, that second
+            # probe could itself wait out the batch -- adding minutes to a search.
             embedding_client = _create_embedding_provider(
                 embedding_profile.config_json, self.config
             )
-            if not client_is_healthy_or_busy(embedding_client, self.config):
-                raise RuntimeError("Active embedding provider is not healthy")
             query_embedding = embedding_client.embed(embedding_client.format_query(query))
             query_literal = to_vector_literal(query_embedding)
             distance_metric = embedding_profile.distance_metric
