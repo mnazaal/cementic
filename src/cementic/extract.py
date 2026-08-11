@@ -134,13 +134,37 @@ def extractor_for(path: str, config: Config) -> tuple[str, ExtractorFn] | None:
     return None
 
 
+def extraction_is_empty(content: str) -> bool:
+    """Whether an extraction produced nothing usable (pure)."""
+    return not content.strip()
+
+
+def _empty_extraction_reason(path: str, config: Config) -> str:
+    """Explain an empty extraction, naming the knob most likely responsible."""
+    if Path(path).suffix.lower() == ".pdf" and not config.extraction.use_ocr:
+        return (
+            "extracted no text: the PDF has no text layer (a scan or images), "
+            "and extraction.use_ocr is off"
+        )
+    return "extracted no text: the file has no readable text content"
+
+
 def extract_document(path: str, config: Config) -> str:
-    """Extract any supported document to Markdown/text — the single dispatch."""
+    """Extract any supported document to Markdown/text — the single dispatch.
+
+    An empty result is an error, not an empty success. Recorded as success it
+    became a `done` extraction with zero chunks, which satisfies every
+    completeness check -- so a directory of scanned PDFs reported no failures,
+    reached `ready`, and promoted an index with nothing in it.
+    """
     resolved = extractor_for(path, config)
     if resolved is None:
         raise ValueError(f"no extractor for '{Path(path).suffix.lower() or '(none)'}'")
     _name, fn = resolved
-    return fn(path, config)
+    content = fn(path, config)
+    if extraction_is_empty(content):
+        raise ValueError(_empty_extraction_reason(path, config))
+    return content
 
 
 def extractor_registry_payload() -> list[dict[str, object]]:

@@ -9,6 +9,7 @@ from cementic.config import Config
 from cementic.extract import (
     ExtractorSpec,
     extract_document,
+    extraction_is_empty,
     extractor_for,
     extractor_registry_payload,
     supported_extensions,
@@ -96,3 +97,42 @@ def test_adding_one_registry_entry_is_all_it_takes(monkeypatch, config):
     # the watcher picks it up with no change of its own
     handler = DocumentEventHandler(lambda _p: None)
     assert handler._should_process("/some/file.xyz") is True
+
+
+class TestEmptyExtractionIsAFailure:
+    """An empty extraction must not be recorded as a successful one.
+
+    Recorded as success it becomes a `done` extraction with zero chunks, which
+    satisfies every completeness check: a directory of scanned PDFs then reports
+    no failures, reaches `ready`, and promotes an index with nothing in it.
+    """
+
+    @pytest.mark.parametrize(
+        ("content", "empty"),
+        [("", True), ("   \n\t ", True), ("x", False), ("# Heading", False)],
+    )
+    def test_emptiness_predicate(self, content, empty):
+        assert extraction_is_empty(content) is empty
+
+    def test_whitespace_only_document_is_rejected(self, tmp_path, config):
+        f = tmp_path / "blank.md"
+        f.write_text("   \n\n\t", encoding="utf-8")
+
+        with pytest.raises(ValueError, match="extracted no text"):
+            extract_document(str(f), config)
+
+    def test_pdf_message_names_the_ocr_setting(self, config):
+        """The likeliest cause is a scan with OCR off, so say which knob to change."""
+        config.extraction.use_ocr = False
+
+        with patch("cementic.extract.extract_pdf_markdown", return_value=""):
+            with pytest.raises(ValueError, match="extraction.use_ocr is off"):
+                extract_document("/docs/scan.pdf", config)
+
+    def test_non_pdf_message_does_not_blame_ocr(self, tmp_path, config):
+        f = tmp_path / "blank.txt"
+        f.write_text("", encoding="utf-8")
+
+        with pytest.raises(ValueError) as excinfo:
+            extract_document(str(f), config)
+        assert "use_ocr" not in str(excinfo.value)
