@@ -1899,6 +1899,25 @@ class TestFilterCommands:
         result = runner.invoke(app, ["extract"])
         assert "USAGE:" in result.output
 
+    @pytest.mark.parametrize(
+        "error",
+        [
+            IsADirectoryError("Is a directory"),
+            PermissionError("Permission denied"),
+            OSError(40, "Too many levels of symbolic links"),
+        ],
+        ids=["directory", "unreadable", "symlink-loop"],
+    )
+    def test_extract_reports_ordinary_os_errors_without_a_traceback(self, error):
+        """Only FileNotFoundError was caught, so a directory named `notes.md`,
+        an unreadable file, or a symlink loop produced a full traceback."""
+        with patch("cementic.cli.extract_document", side_effect=error):
+            result = runner.invoke(app, ["extract", "thing.md"])
+
+        assert result.exit_code == 1
+        assert "extract failed" in result.stderr
+        assert "Traceback" not in result.output
+
     def test_chunk_missing_file_errors_to_stderr(self, tmp_path):
         result = runner.invoke(app, ["chunk", str(tmp_path / "nope.txt")])
         assert result.exit_code == 1

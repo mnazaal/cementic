@@ -132,6 +132,10 @@ class SourceWatcher:
         self.collection = "default"
         self._watched_roots: list[Path] = []
         self._last_current_file_publish = 0.0
+        #: Why startup aborted, or None. The "already running" path returns
+        #: normally, so without this the runner exits 0 on a worker that never
+        #: started and anything keying on exit status concludes success.
+        self.fatal_reason: str | None = None
 
     def _setup_logging(self) -> logging.Logger:
         logger = logging.getLogger("cementic.source_watcher")
@@ -207,7 +211,9 @@ class SourceWatcher:
         user is sent to a file that cannot explain why the worker exited.
         """
         self._logger.error(message, *args)
-        print(message % args if args else message, file=sys.stderr, flush=True)
+        rendered = message % args if args else message
+        self.fatal_reason = rendered
+        print(rendered, file=sys.stderr, flush=True)
 
     def _start_watcher(self, directories: list[str]) -> None:
         observer = Observer()

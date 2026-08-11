@@ -49,11 +49,13 @@ name = "cementic"
 version = "0.1.0b1"
 source = { editable = "." }
 dependencies = [
+    { name = "click" },
     { name = "llama-cpp-python", extra = ["server"] },
     { name = "platformdirs" },
     { name = "psycopg2-binary" },
     { name = "pydantic" },
     { name = "pydantic-settings" },
+    { name = "pymupdf" },
     { name = "pymupdf-layout" },
     { name = "pymupdf4llm" },
     { name = "rapidocr" },
@@ -80,6 +82,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "click", specifier = ">=8.1,<9" },
     { name = "coverage", marker = "extra == 'dev'", specifier = ">=7.0" },
     { name = "llama-cpp-python", extras = ["server"], specifier = ">=0.3.23" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.8.0" },
@@ -87,6 +90,7 @@ requires-dist = [
     { name = "psycopg2-binary", specifier = ">=2.9.0" },
     { name = "pydantic", specifier = ">=2.0" },
     { name = "pydantic-settings", specifier = ">=2.0" },
+    { name = "pymupdf", specifier = ">=1.27.1" },
     { name = "pymupdf-layout", specifier = ">=1.27.1" },
     { name = "pymupdf4llm", specifier = ">=0.0.5" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },

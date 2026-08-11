@@ -46,6 +46,8 @@ def run_source_watcher(
         # start() installs SIGINT/SIGTERM handlers and returns on shutdown; this
         # catches a Ctrl-C landing in the window before they are installed.
         watcher.start(directories, collection=collection)
+        if watcher.fatal_reason:
+            raise typer.Exit(1)
     except KeyboardInterrupt:
         watcher.stop()
     except RuntimeError as e:
@@ -88,6 +90,14 @@ def run_pipeline_worker(
         worker.start(collection=collection)
     except KeyboardInterrupt:
         worker.stop()
+        return
+    # A fatal startup failure (already running, DB lock held, embedding runtime
+    # unreachable) returns normally from start(), so without this the process
+    # exits 0 and any systemd unit or CI check keying on exit status concludes
+    # the worker is running. The source watcher already exits 1 for its own
+    # fatal case.
+    if worker.fatal_reason:
+        raise typer.Exit(1)
 
 
 def main() -> None:

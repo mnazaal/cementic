@@ -260,6 +260,10 @@ class PipelineWorker:
         self.Session: Any = None
         self.embedding_client: EmbeddingProvider | None = None
         self.collection = "default"
+        #: Why startup aborted, or None. ``start()`` returns normally on a fatal
+        #: startup failure, so without this the runner exits 0 and any systemd
+        #: unit or CI check keying on exit status concludes the worker is fine.
+        self.fatal_reason: str | None = None
 
     def _setup_logging(self) -> logging.Logger:
         logger = logging.getLogger("cementic.pipeline")
@@ -362,7 +366,9 @@ class PipelineWorker:
         user is sent to a file that cannot explain why the worker exited.
         """
         self._logger.error(message, *args)
-        print(message % args if args else message, file=sys.stderr, flush=True)
+        rendered = message % args if args else message
+        self.fatal_reason = rendered
+        print(rendered, file=sys.stderr, flush=True)
 
     def _run_processing_loop(self, revision_id: int) -> None:
         reported_error = False

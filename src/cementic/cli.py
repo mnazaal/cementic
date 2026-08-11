@@ -1165,8 +1165,10 @@ def stop_background(
                 f"force killed {len(remaining) - len(still_alive)} process(es); "
                 f"could not kill: {', '.join(str(pid) for pid in still_alive)}"
             )
-        else:
-            console.print(f"force stopped {len(remaining)} process(es)")
+            # Exiting 0 here told `cementic stop && cementic start` that the
+            # workers were gone; the start then refused with "already running".
+            raise typer.Exit(1)
+        console.print(f"force stopped {len(remaining)} process(es)")
         return
 
     still_running = [proc for proc in processes if managed_process_pid(proc) in remaining]
@@ -1183,6 +1185,9 @@ def stop_background(
         f"still running PID(s): {', '.join(str(pid) for pid in remaining)}"
     )
     console.print("use --force to kill stubborn processes")
+    # Same reason as the force path above: nothing was stopped, so a caller
+    # chaining on success must not proceed.
+    raise typer.Exit(1)
 
 
 @embedding_app.command("start", short_help="Start embedding runtime")
@@ -1555,7 +1560,10 @@ def extract(path: str = typer.Argument(..., help="Path to a document file")) -> 
     cfg = _get_config()
     try:
         markdown = extract_document(path, cfg)
-    except (FileNotFoundError, ValueError, RuntimeError) as error:
+    except (OSError, ValueError, RuntimeError) as error:
+        # OSError rather than FileNotFoundError: a directory named `notes.md`
+        # raises IsADirectoryError, an unreadable file PermissionError, and a
+        # symlink loop ELOOP -- all ordinary inputs that produced a traceback.
         err_console.print(f"extract failed: {error}")
         raise typer.Exit(1)
     typer.echo(markdown)
