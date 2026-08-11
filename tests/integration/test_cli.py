@@ -9,7 +9,15 @@ from typer.testing import CliRunner
 
 from cementic.cli import app
 from cementic.config import get_config
-from cementic.db import Base, PipelineRevision, SourceDocument
+from cementic.db import (
+    Base,
+    Chunk,
+    ChunkedDocument,
+    ChunkEmbedding,
+    ExtractedDocument,
+    PipelineRevision,
+    SourceDocument,
+)
 from cementic.profiles import (
     get_or_create_chunk_profile,
     get_or_create_embedding_profile,
@@ -88,29 +96,93 @@ class TestListCollectionsCommand:
         assert "c1" in result.stdout
 
 
+def _seed_ready_revision(session, collection: str, *, with_document: bool) -> PipelineRevision:
+    """Create a ready revision, optionally with one fully-processed document.
+
+    Promotion re-checks completeness against current counts, so a revision with
+    no work in it is refused. `with_document=False` builds exactly that case.
+    """
+    config = get_config()
+    extractor_profile = get_or_create_extractor_profile(session, config)
+    chunk_profile = get_or_create_chunk_profile(session, config)
+    embedding_profile = get_or_create_embedding_profile(session, config)
+
+    revision = PipelineRevision(
+        collection=collection,
+        extractor_profile_id=extractor_profile.id,
+        chunk_profile_id=chunk_profile.id,
+        embedding_profile_id=embedding_profile.id,
+        status="ready",
+        label="test-rev",
+    )
+    session.add(revision)
+
+    if with_document:
+        document = SourceDocument(
+            collection=collection, source_path=f"/{collection}.pdf", file_hash="a"
+        )
+        document.status = "pending"
+        session.add(document)
+        session.flush()
+        extracted = ExtractedDocument(
+            document_id=document.id,
+            extractor_profile_id=extractor_profile.id,
+            status="done",
+            source_file_hash="a",
+            content_hash="c",
+        )
+        session.add(extracted)
+        session.flush()
+        chunked = ChunkedDocument(
+            extracted_document_id=extracted.id,
+            chunk_profile_id=chunk_profile.id,
+            status="done",
+            source_content_hash="c",
+        )
+        session.add(chunked)
+        session.flush()
+        chunk = Chunk(
+            document_id=document.id,
+            chunked_document_id=chunked.id,
+            chunk_index=0,
+            content="chunk text",
+        )
+        session.add(chunk)
+        session.flush()
+        session.add(
+            ChunkEmbedding(
+                chunk_id=chunk.id,
+                embedding_profile_id=embedding_profile.id,
+                status="done",
+            )
+        )
+
+    session.commit()
+    return revision
+
+
 class TestPromoteCommand:
     """Tests for the promote CLI command."""
 
     def test_promote_ready_revision(self, runner, sqlite_engine, sqlite_session):
-        config = get_config()
-        extractor_profile = get_or_create_extractor_profile(sqlite_session, config)
-        chunk_profile = get_or_create_chunk_profile(sqlite_session, config)
-        embedding_profile = get_or_create_embedding_profile(sqlite_session, config)
-
-        revision = PipelineRevision(
-            collection="pcol",
-            extractor_profile_id=extractor_profile.id,
-            chunk_profile_id=chunk_profile.id,
-            embedding_profile_id=embedding_profile.id,
-            status="ready",
-            label="test-rev",
-        )
-        sqlite_session.add(revision)
-        sqlite_session.commit()
+        _seed_ready_revision(sqlite_session, "pcol", with_document=True)
 
         with patch("cementic.cli.get_engine", return_value=sqlite_engine):
             result = runner.invoke(app, ["collection", "promote", "pcol"])
         assert result.exit_code == 0
+        assert "promoted" in result.stdout
+
+    def test_promote_refuses_a_revision_with_no_documents(
+        self, runner, sqlite_engine, sqlite_session
+    ):
+        """Promotion retires whatever is active, so publishing an empty revision
+        removes search coverage rather than merely adding none."""
+        _seed_ready_revision(sqlite_session, "emptycol", with_document=False)
+
+        with patch("cementic.cli.get_engine", return_value=sqlite_engine):
+            result = runner.invoke(app, ["collection", "promote", "emptycol"])
+        assert result.exit_code == 1
+        assert "no documents" in result.stdout
 
 
 class TestListRevisionCommand:

@@ -636,9 +636,12 @@ def _in_flight_revision_text(ready_label: str | None, building_label: str | None
     revision was reported as `building=...` -- hiding the one fact the promote
     workflow turns on, that there is something ready to promote.
     """
+    # Labels are interpolated into a markup-enabled string, so escape them: a
+    # label containing a closing tag would raise MarkupError mid-render, and one
+    # containing an opening tag would be swallowed.
     if ready_label:
-        return f"[green]ready={ready_label}[/green]"
-    return f"building={building_label or '-'}"
+        return f"[green]ready={escape(ready_label)}[/green]"
+    return f"building={escape(building_label) if building_label else '-'}"
 
 
 def _print_collection_detail(

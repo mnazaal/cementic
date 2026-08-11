@@ -101,6 +101,25 @@ For services that should survive logout/reboot, also run:
 loginctl enable-linger "$USER"
 ```
 
+## Upgrading a setup generated before named volumes
+
+Earlier generated setups had no `volumes:` entry, so the database lived in the
+container's own writable layer. Recreating the container against this file
+starts from a **fresh, empty** named volume — the old data stays in the discarded
+layer and your index looks empty.
+
+If you are regenerating over an existing setup, copy the data across before
+recreating, with the container still running:
+
+```bash
+docker compose stop
+docker cp cementic-postgres:/var/lib/postgresql - > pgdata.tar
+# or: podman cp cementic-postgres:/var/lib/postgresql - > pgdata.tar
+```
+
+Keep that archive until `cementic status` reports your collections again. If you
+would rather rebuild than migrate, `cementic start` will re-index from source.
+
 ## Stop or remove
 
 Stop the service but keep data/image:

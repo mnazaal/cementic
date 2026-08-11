@@ -46,15 +46,22 @@ def run_source_watcher(
         # start() installs SIGINT/SIGTERM handlers and returns on shutdown; this
         # catches a Ctrl-C landing in the window before they are installed.
         watcher.start(directories, collection=collection)
-        if watcher.fatal_reason:
-            raise typer.Exit(1)
     except KeyboardInterrupt:
+        # A clean Ctrl-C shutdown, not a startup failure: return rather than
+        # falling through to the fatal-reason check below.
         watcher.stop()
+        return
     except RuntimeError as e:
         # e.g. every watch directory vanished between `cementic start`'s check
         # and here. A one-line reason on stderr lands in the background log the
         # CLI points at; a traceback would not explain anything.
         console.print(f"[red]Source watcher failed: {e}[/red]")
+        raise typer.Exit(1)
+    # Outside the try: `typer.Exit` subclasses `RuntimeError`, so raising this
+    # inside it would be caught by the handler above and reported as
+    # "Source watcher failed: 1" -- swallowing the real reason on its way to
+    # the background log the CLI points the user at.
+    if watcher.fatal_reason:
         raise typer.Exit(1)
 
 

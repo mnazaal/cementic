@@ -374,18 +374,21 @@ class TestEmbeddingRuntime:
         first = llama_cpp_runtime_fingerprint(
             model_path="model.gguf",
             n_ctx=512,
+            n_batch=512,
             n_gpu_layers=0,
             verbose=False,
         )
         second = llama_cpp_runtime_fingerprint(
             model_path="model.gguf",
             n_ctx=512,
+            n_batch=512,
             n_gpu_layers=0,
             verbose=False,
         )
         third = llama_cpp_runtime_fingerprint(
             model_path="other.gguf",
             n_ctx=512,
+            n_batch=512,
             n_gpu_layers=0,
             verbose=False,
         )
@@ -569,6 +572,7 @@ class TestEmbeddingRuntime:
         fingerprint.assert_called_once_with(
             model_path="profile-model.gguf",
             n_ctx=1024,
+            n_batch=1024,
             n_gpu_layers=2,
             verbose=True,
         )
@@ -720,3 +724,18 @@ class TestDaemonPidFile:
         status = llama_daemon_status(config)
         assert "running" in status
         assert "4321" in status
+
+
+def test_runtime_fingerprint_tracks_the_batch_size() -> None:
+    """n_batch caps how many tokens the server embeds per input, so it changes
+    what the daemon does. It also has to be in the alias so a daemon left
+    running by a version that never passed --n_batch is not silently reused
+    with its old 512-token cap."""
+    small = llama_cpp_runtime_fingerprint(
+        model_path="m.gguf", n_ctx=2048, n_batch=512, n_gpu_layers=0, verbose=False
+    )
+    matched = llama_cpp_runtime_fingerprint(
+        model_path="m.gguf", n_ctx=2048, n_batch=2048, n_gpu_layers=0, verbose=False
+    )
+
+    assert small != matched

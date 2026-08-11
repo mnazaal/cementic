@@ -241,3 +241,22 @@ def pg_config(pg_engine) -> Config:
 def pdf_fixtures_dir() -> Path:
     """Directory containing test PDF fixtures."""
     return Path(__file__).resolve().parent.parent / "fixtures"
+
+
+#: Fixtures that require a real PostgreSQL server. Anything depending on one of
+#: these (directly or transitively) belongs to the ``pg`` job.
+_PG_FIXTURES = frozenset({"pg_engine", "pg_session", "pg_config", "pg_setup"})
+
+
+def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
+    """Mark every Postgres-dependent test ``pg``, rather than trusting authors to.
+
+    Hand-marking drifted: five tests took the Postgres fixtures without the
+    marker, so ``-m pg`` deselected them and ``-m "not pg"`` selected them only
+    for their own fixture to skip. They ran in neither CI job -- including the
+    full build-to-ready pipeline test -- which is exactly the coverage gap that
+    lets a promote regression reach main.
+    """
+    for item in items:
+        if _PG_FIXTURES & set(getattr(item, "fixturenames", ())):
+            item.add_marker(pytest.mark.pg)

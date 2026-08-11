@@ -87,6 +87,7 @@ def llama_cpp_runtime_fingerprint(
     *,
     model_path: str,
     n_ctx: int,
+    n_batch: int,
     n_gpu_layers: int,
     verbose: bool,
 ) -> str:
@@ -108,6 +109,12 @@ def llama_cpp_runtime_fingerprint(
         {
             "model_path": model_path,
             "n_ctx": n_ctx,
+            # The batch size caps how many tokens the server will embed per
+            # input, so it changes what the daemon does. It also has to be in
+            # the alias for a second reason: a daemon left running by a version
+            # that did not pass --n_batch otherwise fingerprints identically and
+            # gets reused, keeping its 512-token cap until a manual restart.
+            "n_batch": n_batch,
             "n_gpu_layers": n_gpu_layers,
             "verbose": verbose,
         },
@@ -291,6 +298,7 @@ def get_llama_cpp_runtime_client(
     fingerprint = llama_cpp_runtime_fingerprint(
         model_path=runtime_spec.model_identifier,
         n_ctx=n_ctx,
+        n_batch=n_ctx,
         n_gpu_layers=n_gpu_layers,
         verbose=runtime_spec.verbose,
     )
@@ -561,6 +569,7 @@ def _start_llama_cpp_daemon(
     fingerprint = llama_cpp_runtime_fingerprint(
         model_path=runtime_spec.model_identifier,
         n_ctx=n_ctx,
+        n_batch=n_ctx,
         n_gpu_layers=n_gpu_layers,
         verbose=runtime_spec.verbose,
     )

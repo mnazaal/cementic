@@ -125,7 +125,6 @@ class Searcher:
             raise ValueError(f"top_k must be between 1 and {MAX_SEARCH_RESULTS}")
         if len(query) > MAX_QUERY_CHARS:
             raise ValueError(f"query too long: {len(query)} characters (max {MAX_QUERY_CHARS})")
-        _reject_query_over_context(query, self.config.llama_cpp.n_ctx)
 
         with self.Session() as session:
             revisions = self._load_searchable_revisions(session, collections)
@@ -140,6 +139,16 @@ class Searcher:
                 )
 
             embedding_profile = revisions[0].embedding_profile
+            # Bound the query against the window of the profile the daemon will
+            # actually load, not current config. They diverge whenever config
+            # changed after indexing, and the wrong one is wrong both ways: it
+            # rejects queries that would have fit, and admits queries that get
+            # silently truncated -- the failure this check exists to prevent.
+            _reject_query_over_context(
+                query,
+                runtime_spec_from_profile_json(embedding_profile.config_json).n_ctx
+                or self.config.llama_cpp.n_ctx,
+            )
             embedding_client = _create_embedding_provider(
                 embedding_profile.config_json, self.config
             )

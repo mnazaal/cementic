@@ -24,7 +24,6 @@ from cementic.revisions import (
     embedding_scope,
     extracted_scope,
     get_active_revision,
-    revision_label_if_status,
 )
 from cementic.state import StateManager, WorkerState
 from cementic.supervisor import (
@@ -206,16 +205,28 @@ def load_pipeline_status_bulk(config: Config, collections: list[str]) -> dict[st
         )
 
         active_by_collection: dict[str, PipelineRevision] = {}
+        in_flight_by_collection: dict[str, PipelineRevision] = {}
+        ready_by_collection: dict[str, PipelineRevision] = {}
         building_by_collection: dict[str, PipelineRevision] = {}
         for revision in revision_rows:
             if revision.status == "active":
                 active_by_collection.setdefault(revision.collection, revision)
+                continue
+            # Target selection wants the newest not-yet-active revision, whatever
+            # its status.
+            in_flight_by_collection.setdefault(revision.collection, revision)
+            # Reporting must not collapse the two into that one slot: a ready
+            # revision behind a newer building one is the normal state after any
+            # profile-affecting config change, and collapsing them hid the
+            # promotable revision that `collection promote` targets.
+            if revision.status == "ready":
+                ready_by_collection.setdefault(revision.collection, revision)
             else:
                 building_by_collection.setdefault(revision.collection, revision)
 
         target_by_collection = {
             collection: _select_target_revision(
-                building_by_collection.get(collection), active_by_collection.get(collection)
+                in_flight_by_collection.get(collection), active_by_collection.get(collection)
             )
             for collection in collections
         }
@@ -367,11 +378,9 @@ def load_pipeline_status_bulk(config: Config, collections: list[str]) -> dict[st
             chunking_pct=_safe_pct(c_done, e_done),
             embedding_pct=_safe_pct(d_embeddings, t_chunks),
             active_revision_label=getattr(active_by_collection.get(collection), "label", None),
-            ready_revision_label=revision_label_if_status(
-                building_by_collection.get(collection), "ready"
-            ),
-            building_revision_label=revision_label_if_status(
-                building_by_collection.get(collection), "building"
+            ready_revision_label=getattr(ready_by_collection.get(collection), "label", None),
+            building_revision_label=getattr(
+                building_by_collection.get(collection), "label", None
             ),
         )
     return result

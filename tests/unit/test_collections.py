@@ -173,6 +173,43 @@ class TestListCollections:
         assert result[0].ready_revision_label == "v9"
         assert result[0].building_revision_label is None
 
+    def test_ready_revision_is_still_reported_behind_a_newer_building_one(self) -> None:
+        """The normal state after a config change: a finished revision awaiting
+        promotion, plus a newer build. Reporting the highest-id non-active
+        revision alone showed only the build, hiding the promotable one that
+        `collection promote` actually targets."""
+        engine, session = _new_session()
+        extractor, chunk_profile, embedding_profile = _seed_profiles(session, suffix="rb")
+        extractor2, chunk_profile2, embedding_profile2 = _seed_profiles(session, suffix="rb2")
+        session.add(SourceDocument(collection="c1", source_path="/a.pdf", file_hash="h"))
+        session.add(
+            PipelineRevision(
+                collection="c1",
+                label="ready-rev",
+                status="ready",
+                extractor_profile_id=extractor.id,
+                chunk_profile_id=chunk_profile.id,
+                embedding_profile_id=embedding_profile.id,
+            )
+        )
+        session.flush()
+        session.add(
+            PipelineRevision(
+                collection="c1",
+                label="building-rev",
+                status="building",
+                extractor_profile_id=extractor2.id,
+                chunk_profile_id=chunk_profile2.id,
+                embedding_profile_id=embedding_profile2.id,
+            )
+        )
+        session.commit()
+
+        result = list_collections(session)
+
+        assert result[0].ready_revision_label == "ready-rev"
+        assert result[0].building_revision_label == "building-rev"
+
     def test_query_count_does_not_scale_with_collection_count(self) -> None:
         def run(n_collections: int) -> int:
             engine, session = _new_session()

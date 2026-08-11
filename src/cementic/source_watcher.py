@@ -159,6 +159,8 @@ class SourceWatcher:
 
     def start(self, directories: list[str], collection: str = "default") -> None:
         self.collection = collection
+        # A previous run's reason must not make this start look failed.
+        self.fatal_reason = None
         state = self.state_manager.load()
         # PID + start-token: a recycled PID after `stop --force` must not block
         # a fresh start.

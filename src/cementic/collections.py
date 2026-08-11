@@ -20,7 +20,6 @@ from cementic.pipeline_worker import (
 from cementic.revisions import (
     drain_pending_artifact_removals,
     promote_revision,
-    revision_label_if_status,
 )
 from cementic.storage import safe_remove_artifact
 from cementic.vector_store import drop_vector_table
@@ -72,7 +71,12 @@ def list_collections(session: Session) -> list[CollectionSummary]:
     }
 
     active_by_collection: dict[str, PipelineRevision] = {}
+    ready_by_collection: dict[str, PipelineRevision] = {}
     building_by_collection: dict[str, PipelineRevision] = {}
+    # Ready and building need separate slots, not one "not active" slot chosen
+    # by highest id: a ready revision sitting behind a newer building one is the
+    # normal state after any profile-affecting config change, and collapsing
+    # them hid the promotable revision that `collection promote` targets.
     for revision in (
         session.query(PipelineRevision)
         .filter(PipelineRevision.status.in_(["active", "building", "ready"]))
@@ -81,6 +85,8 @@ def list_collections(session: Session) -> list[CollectionSummary]:
     ):
         if revision.status == "active":
             active_by_collection.setdefault(revision.collection, revision)
+        elif revision.status == "ready":
+            ready_by_collection.setdefault(revision.collection, revision)
         else:
             building_by_collection.setdefault(revision.collection, revision)
 
@@ -89,12 +95,8 @@ def list_collections(session: Session) -> list[CollectionSummary]:
             name=name,
             documents=documents_by_collection.get(name, 0),
             active_revision_label=getattr(active_by_collection.get(name), "label", None),
-            ready_revision_label=revision_label_if_status(
-                building_by_collection.get(name), "ready"
-            ),
-            building_revision_label=revision_label_if_status(
-                building_by_collection.get(name), "building"
-            ),
+            ready_revision_label=getattr(ready_by_collection.get(name), "label", None),
+            building_revision_label=getattr(building_by_collection.get(name), "label", None),
         )
         for name in collection_names
     ]

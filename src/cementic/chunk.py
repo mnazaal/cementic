@@ -76,12 +76,13 @@ def chunk_text(
         # finish a character are exactly the ones the next chunk skips.
         first_byte = _character_boundary(data, offsets[start])
         last_byte = _character_boundary(data, offsets[end])
-        chunks.append(
-            TextChunk(
-                content=data[first_byte:last_byte].decode("utf-8", errors="replace"),
-                chunk_index=chunk_index,
-            )
-        )
+        content = data[first_byte:last_byte].decode("utf-8", errors="replace")
+        # Widening both ends can empty a slice whose every token was part of one
+        # character -- reachable at small chunk_size, which the config and the
+        # `chunk` command both accept. Storing and embedding "" would spend a
+        # result slot on a blank preview.
+        if content:
+            chunks.append(TextChunk(content=content, chunk_index=chunk_index))
         # Stop once a chunk reaches the end of the text: stepping again would
         # emit a chunk that is purely a suffix of this one (duplicate content).
         if end == len(tokens):
