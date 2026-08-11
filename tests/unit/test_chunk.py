@@ -110,3 +110,42 @@ class TestNoDuplicateTailChunk:
 
         assert len(chunks) == 2
         assert [chunk.chunk_index for chunk in chunks] == [0, 1]
+
+
+class TestMultiByteCharacterBoundaries:
+    """Chunk boundaries must not cut through multi-byte characters.
+
+    The tokenizer is byte-level, so a token slice can split one character.
+    Decoding such a slice directly emitted U+FFFD, and that corruption was what
+    got embedded and shown in search results -- silently, for any corpus with
+    emoji or non-Latin scripts.
+    """
+
+    CASES = {
+        "emoji": "Vector search is great \U0001f600\U0001f601\U0001f602\U0001f923 " * 60,
+        "devanagari": "सूचनांक खोज की दुनिया " * 60,
+        "cjk": "上下文窗口と埋め込み検索 " * 60,
+    }
+
+    @pytest.mark.parametrize("name", sorted(CASES))
+    def test_no_replacement_characters_at_production_settings(self, name):
+        chunks = chunk_text(self.CASES[name], chunk_size=512, chunk_overlap=128)
+
+        assert chunks
+        assert not any("�" in chunk.content for chunk in chunks)
+
+    @pytest.mark.parametrize("name", sorted(CASES))
+    def test_no_replacement_characters_at_tiny_chunk_sizes(self, name):
+        """Small chunks split characters far more often, so they are the
+        sensitive case: at 512/128 some scripts happen not to trip it."""
+        chunks = chunk_text(self.CASES[name], chunk_size=10, chunk_overlap=3)
+
+        assert not any("�" in chunk.content for chunk in chunks)
+
+    @pytest.mark.parametrize("name", sorted(CASES))
+    def test_non_overlapping_chunks_reassemble_losslessly(self, name):
+        text = self.CASES[name]
+
+        chunks = chunk_text(text, chunk_size=16, chunk_overlap=0)
+
+        assert "".join(chunk.content for chunk in chunks) == text
