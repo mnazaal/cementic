@@ -17,7 +17,11 @@ from cementic.pipeline_worker import (
     revision_failure_total,
     revision_is_complete,
 )
-from cementic.revisions import drain_pending_artifact_removals, promote_revision
+from cementic.revisions import (
+    drain_pending_artifact_removals,
+    promote_revision,
+    revision_label_if_status,
+)
 from cementic.storage import safe_remove_artifact
 from cementic.vector_store import drop_vector_table
 
@@ -41,6 +45,7 @@ class CollectionSummary:
     name: str
     documents: int
     active_revision_label: str | None
+    ready_revision_label: str | None
     building_revision_label: str | None
 
 
@@ -84,7 +89,12 @@ def list_collections(session: Session) -> list[CollectionSummary]:
             name=name,
             documents=documents_by_collection.get(name, 0),
             active_revision_label=getattr(active_by_collection.get(name), "label", None),
-            building_revision_label=getattr(building_by_collection.get(name), "label", None),
+            ready_revision_label=revision_label_if_status(
+                building_by_collection.get(name), "ready"
+            ),
+            building_revision_label=revision_label_if_status(
+                building_by_collection.get(name), "building"
+            ),
         )
         for name in collection_names
     ]

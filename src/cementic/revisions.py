@@ -122,6 +122,20 @@ def chunk_scope(revision: PipelineRevision) -> tuple[Any, ...]:
     )
 
 
+def revision_label_if_status(revision: Any | None, status: str) -> str | None:
+    """Label of ``revision`` when it is in ``status``, else None (pure).
+
+    Both summary builders bucket every non-active revision together, since
+    that is what target selection needs. Reporting must not: a `ready`
+    revision shown as `building` hides the one fact the promote workflow
+    depends on -- that there is something to promote.
+    """
+    if revision is None or getattr(revision, "status", None) != status:
+        return None
+    label: str | None = getattr(revision, "label", None)
+    return label
+
+
 #: The freshness half of the scope builders, as a SQL fragment for the one
 #: consumer that cannot use them: ``search.py``'s KNN query runs against a
 #: per-embedding-profile vector table whose name is computed, so it is raw SQL

@@ -497,6 +497,7 @@ class TestDataClasses:
             chunking_pct=87.5,
             embedding_pct=64.0,
             active_revision_label="v1",
+            ready_revision_label=None,
             building_revision_label="v2",
         )
         assert ps.documents == 10

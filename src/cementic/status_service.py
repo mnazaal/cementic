@@ -24,6 +24,7 @@ from cementic.revisions import (
     embedding_scope,
     extracted_scope,
     get_active_revision,
+    revision_label_if_status,
 )
 from cementic.state import StateManager, WorkerState
 from cementic.supervisor import (
@@ -75,6 +76,7 @@ class PipelineStatus:
     chunking_pct: float
     embedding_pct: float
     active_revision_label: str | None
+    ready_revision_label: str | None
     building_revision_label: str | None
 
 
@@ -365,7 +367,12 @@ def load_pipeline_status_bulk(config: Config, collections: list[str]) -> dict[st
             chunking_pct=_safe_pct(c_done, e_done),
             embedding_pct=_safe_pct(d_embeddings, t_chunks),
             active_revision_label=getattr(active_by_collection.get(collection), "label", None),
-            building_revision_label=getattr(building_by_collection.get(collection), "label", None),
+            ready_revision_label=revision_label_if_status(
+                building_by_collection.get(collection), "ready"
+            ),
+            building_revision_label=revision_label_if_status(
+                building_by_collection.get(collection), "building"
+            ),
         )
     return result
 

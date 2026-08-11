@@ -659,6 +659,7 @@ class TestBackgroundCommands:
                 name="research",
                 documents=10,
                 active_revision_label="rev-1",
+                ready_revision_label=None,
                 building_revision_label="rev-2",
             )
         ]
@@ -678,6 +679,7 @@ class TestBackgroundCommands:
                 chunking_pct=87.5,
                 embedding_pct=66.7,
                 active_revision_label="rev-1",
+                ready_revision_label=None,
                 building_revision_label="rev-2",
             )
         }
@@ -764,6 +766,7 @@ class TestBackgroundCommands:
             chunking_pct=87.5,
             embedding_pct=66.7,
             active_revision_label="rev-1",
+            ready_revision_label=None,
             building_revision_label="rev-2",
         )
 
@@ -848,6 +851,7 @@ class TestBackgroundCommands:
             chunking_pct=0.0,
             embedding_pct=0.0,
             active_revision_label=None,
+            ready_revision_label=None,
             building_revision_label=None,
         )
 
@@ -924,6 +928,7 @@ class TestBackgroundCommands:
             chunking_pct=100.0,
             embedding_pct=100.0,
             active_revision_label="rev-1",
+            ready_revision_label=None,
             building_revision_label="None",
         )
 
@@ -1166,6 +1171,7 @@ class TestBackgroundCommands:
             name="research",
             documents=10,
             active_revision_label="rev-1",
+            ready_revision_label=None,
             building_revision_label="rev-2",
         )
         mock_session = MagicMock()

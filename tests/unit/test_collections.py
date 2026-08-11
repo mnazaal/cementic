@@ -143,6 +143,35 @@ class TestListCollections:
         assert result[0].documents == 5
         assert result[0].active_revision_label == "v1"
         assert result[0].building_revision_label == "v2"
+        assert result[0].ready_revision_label is None
+
+    def test_ready_revision_is_not_reported_as_building(self) -> None:
+        """A finished revision awaiting promotion must say so.
+
+        Both summary builders bucket every non-active revision together, which
+        target selection needs but reporting must not: shown as `building`, the
+        one fact the promote workflow turns on -- that something is ready --
+        was never surfaced by any command.
+        """
+        engine, session = _new_session()
+        extractor, chunk_profile, embedding_profile = _seed_profiles(session, suffix="r")
+        session.add(SourceDocument(collection="c1", source_path="/a.pdf", file_hash="h"))
+        session.add(
+            PipelineRevision(
+                collection="c1",
+                label="v9",
+                status="ready",
+                extractor_profile_id=extractor.id,
+                chunk_profile_id=chunk_profile.id,
+                embedding_profile_id=embedding_profile.id,
+            )
+        )
+        session.commit()
+
+        result = list_collections(session)
+
+        assert result[0].ready_revision_label == "v9"
+        assert result[0].building_revision_label is None
 
     def test_query_count_does_not_scale_with_collection_count(self) -> None:
         def run(n_collections: int) -> int:

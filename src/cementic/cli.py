@@ -629,6 +629,18 @@ def _print_status_summary(
         console.print(f"embedding daemon: {health.llama_daemon}")
 
 
+def _in_flight_revision_text(ready_label: str | None, building_label: str | None) -> str:
+    """Render the not-yet-active revision under the status it is actually in.
+
+    Both summary builders bucket ready and building together, so a finished
+    revision was reported as `building=...` -- hiding the one fact the promote
+    workflow turns on, that there is something ready to promote.
+    """
+    if ready_label:
+        return f"[green]ready={ready_label}[/green]"
+    return f"building={building_label or '-'}"
+
+
 def _print_collection_detail(
     collection: str,
     pipeline_status: Any,
@@ -655,8 +667,12 @@ def _print_collection_detail(
     )
     console.print(
         f"{'revision':<11} active={ps.active_revision_label or '-'}  "
-        f"building={ps.building_revision_label or '-'}"
+        f"{_in_flight_revision_text(ps.ready_revision_label, ps.building_revision_label)}"
     )
+    if ps.ready_revision_label:
+        console.print(
+            f"{'':<11} run `cementic collection promote {collection}` to serve it"
+        )
     failures = []
     if ps.extracted_failed:
         failures.append(f"extract={ps.extracted_failed}")
@@ -759,6 +775,7 @@ def _print_status_json(
                         "chunking_pct": ps.chunking_pct,
                         "embedding_pct": ps.embedding_pct,
                         "active_revision_label": ps.active_revision_label,
+                        "ready_revision_label": ps.ready_revision_label,
                         "building_revision_label": ps.building_revision_label,
                     }
                 output["collections"] = collections_data
@@ -780,6 +797,7 @@ def _print_status_json(
                     "chunking_pct": ps.chunking_pct,
                     "embedding_pct": ps.embedding_pct,
                     "active_revision_label": ps.active_revision_label,
+                    "ready_revision_label": ps.ready_revision_label,
                     "building_revision_label": ps.building_revision_label,
                 }
                 if verbose:
@@ -1290,7 +1308,7 @@ def list_collection_command() -> None:
             console.print(
                 f"  {row.name:<{name_w}}   {row.documents:>{doc_w},} docs   "
                 f"active={row.active_revision_label or '-'}  "
-                f"building={row.building_revision_label or '-'}"
+                f"{_in_flight_revision_text(row.ready_revision_label, row.building_revision_label)}"
             )
     except Exception as error:
         _report_db_error(error, "collection list")
