@@ -173,3 +173,35 @@ class TestGetOrCreateEmbeddingProfile:
         # Value comes from payload (which equals config since freshly built),
         # not hardcoded from config attribute path
         assert profile.embedding_dim == 999
+
+
+class TestTextPolicyIsPartOfEmbeddingIdentity:
+    """The task-prefix policy is selected from the model *filename*.
+
+    Renaming a GGUF, or mirroring it under another name, silently switches to
+    plain text. While the policy was absent from the payload, prefixed and
+    unprefixed corpora shared one profile and one vector table -- two
+    incompatible vector spaces in a single index, which is what the sibling
+    text_format_version exists to prevent.
+    """
+
+    def _payload_for(self, model_path: str) -> dict:
+        config = Config()
+        config.llama_cpp.model_path = model_path
+        return build_embedding_profile_payload(config)
+
+    def test_policy_is_recorded(self):
+        payload = self._payload_for("models/nomic-embed-text-v2-moe.Q8_0.gguf")
+
+        assert payload["text_policy"] == "nomic-v2-task-prefix"
+
+    def test_a_renamed_model_records_a_different_policy(self):
+        payload = self._payload_for("models/renamed.gguf")
+
+        assert payload["text_policy"] == "plain"
+
+    def test_a_rename_forks_the_profile_instead_of_sharing_its_table(self):
+        prefixed = self._payload_for("models/nomic-embed-text-v2-moe.Q8_0.gguf")
+        renamed = self._payload_for("models/renamed.gguf")
+
+        assert _fingerprint(prefixed) != _fingerprint(renamed)

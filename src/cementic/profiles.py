@@ -13,6 +13,7 @@ from cementic.config import Config
 from cementic.db import ChunkProfile, EmbeddingProfile, ExtractorProfile
 from cementic.embedding_provider import EmbeddingFacts, EmbeddingProvider
 from cementic.embedding_runtime import runtime_spec_from_config
+from cementic.embedding_text import describe_text_policy
 
 #: Identity of the embedding-input formatting rules in embedding_text.py. Bump
 #: this whenever those rules change: it is part of the embedding profile
@@ -89,6 +90,14 @@ def build_embedding_profile_payload(
         "n_gpu_layers": spec.n_gpu_layers,
         "verbose": spec.verbose,
         "text_format_version": EMBEDDING_TEXT_FORMAT_VERSION,
+        # The task-prefix policy is chosen from the model *filename*, so
+        # renaming a GGUF (or mirroring it under another name) silently switches
+        # to plain text. Left out of the payload, prefixed and unprefixed
+        # corpora shared one profile and one vector table -- two incompatible
+        # vector spaces mixed in a single index, which is exactly what
+        # text_format_version beside it exists to prevent. Recording it makes a
+        # rename fork the profile and rebuild instead.
+        "text_policy": describe_text_policy(spec.model_identifier),
     }
 
 
