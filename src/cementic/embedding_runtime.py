@@ -581,6 +581,15 @@ def _start_llama_cpp_daemon(
         fingerprint,
         "--n_ctx",
         str(n_ctx),
+        # The server truncates every embedding input at n_batch tokens, whose
+        # own default is 512 -- so without these, raising n_ctx silently did
+        # nothing and inputs were still cut at 512. Both are derived from
+        # n_ctx, which is already in the runtime fingerprint, so pinning them
+        # here does not re-version anything.
+        "--n_batch",
+        str(n_ctx),
+        "--n_ubatch",
+        str(n_ctx),
         "--n_gpu_layers",
         str(n_gpu_layers),
         "--embedding",

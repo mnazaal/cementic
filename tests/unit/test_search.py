@@ -3,10 +3,13 @@
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from cementic.search import (
     Searcher,
     SearchResult,
     _distance_operator,
+    _reject_query_over_context,
     _score_from_distance,
     _searchable_revisions,
 )
@@ -430,3 +433,30 @@ class TestSearchOnlyServesCurrentContent:
         assert "cd.source_content_hash = ed.content_hash" in knn_sql
         assert "ed.status = 'done'" in knn_sql
         assert "cd.status = 'done'" in knn_sql
+
+
+class TestQueryContextBound:
+    """A query over the model's context window must be refused, not truncated.
+
+    The server silently drops everything past the limit, so the tail of a long
+    query stopped affecting results: two queries sharing a long prefix and
+    differing only in their final words returned bit-identical scores.
+    """
+
+    def test_query_over_the_context_window_is_rejected(self):
+        query = "vector database design and retrieval augmented generation " * 130
+
+        with pytest.raises(ValueError, match="context window"):
+            _reject_query_over_context(query, 512)
+
+    def test_ordinary_query_is_accepted(self):
+        _reject_query_over_context("transformer inference latency", 512)
+
+    def test_bound_follows_the_configured_context_window(self):
+        """The char-based cap could not do this: it was fixed at 8000 chars
+        regardless of the window the model was actually loaded with."""
+        query = "retrieval augmented generation " * 100
+
+        _reject_query_over_context(query, 4096)
+        with pytest.raises(ValueError, match="context window"):
+            _reject_query_over_context(query, 256)

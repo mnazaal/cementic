@@ -5,8 +5,10 @@ from __future__ import annotations
 # mypy: disable-error-code="import-untyped"
 from typing import Any, TypedDict
 
+import tiktoken
 from sqlalchemy import text
 
+from cementic.chunk import TOKENIZER
 from cementic.config import Config, get_config
 from cementic.db import PipelineRevision, get_engine, get_session_factory
 from cementic.embedding_runtime import (
@@ -26,6 +28,30 @@ from cementic.vector_store import (
 
 MAX_SEARCH_RESULTS = 50
 MAX_QUERY_CHARS = 8_000
+
+
+#: Fraction of the context window a query may occupy. The counting tokenizer
+#: (cl100k_base, shared with chunking) is not the embedding model's own, so the
+#: margin absorbs the disagreement plus any task prefix the provider prepends.
+_QUERY_CONTEXT_MARGIN = 0.9
+
+
+def _reject_query_over_context(query: str, n_ctx: int) -> None:
+    """Raise if the query cannot fit the embedding model's context window.
+
+    The server truncates over-long input silently, so the tail of a long query
+    simply stopped affecting the results: two queries sharing a long prefix and
+    differing only in their final words returned bit-identical scores. Refusing
+    is the honest answer -- a silently truncated query looks like a working one.
+    """
+    budget = max(1, int(n_ctx * _QUERY_CONTEXT_MARGIN))
+    tokens = len(tiktoken.get_encoding(TOKENIZER).encode(query))
+    if tokens > budget:
+        raise ValueError(
+            f"query too long: about {tokens} tokens, but the embedding model's "
+            f"context window is {n_ctx} (usable {budget}). Shorten the query -- "
+            "the model would silently ignore everything past the limit."
+        )
 
 
 class SearchResult(TypedDict):
@@ -99,6 +125,7 @@ class Searcher:
             raise ValueError(f"top_k must be between 1 and {MAX_SEARCH_RESULTS}")
         if len(query) > MAX_QUERY_CHARS:
             raise ValueError(f"query too long: {len(query)} characters (max {MAX_QUERY_CHARS})")
+        _reject_query_over_context(query, self.config.llama_cpp.n_ctx)
 
         with self.Session() as session:
             revisions = self._load_searchable_revisions(session, collections)
@@ -141,6 +168,7 @@ class Searcher:
                     actual_method,
                     hnsw_ef_search=self.config.index.hnsw_ef_search,
                     diskann_query_rescore=self.config.index.diskann_query_rescore,
+                    top_k=top_k,
                 )
                 if tuning is not None:
                     session.execute(text(tuning))

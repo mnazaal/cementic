@@ -66,11 +66,16 @@ def upsert_sql(profile_id: int) -> str:
 
 
 def query_tuning_sql(
-    method: str, *, hnsw_ef_search: int, diskann_query_rescore: int
+    method: str, *, hnsw_ef_search: int, diskann_query_rescore: int, top_k: int = 1
 ) -> str | None:
-    """``SET LOCAL`` statement for the method's query-time knob, or None."""
+    """``SET LOCAL`` statement for the method's query-time knob, or None.
+
+    An HNSW scan yields at most ``ef_search`` candidates, so a configured value
+    below the requested ``top_k`` caps the result count with no indication: the
+    default 40 is under the documented maximum of 50 results.
+    """
     if method == "hnsw":
-        return f"SET LOCAL hnsw.ef_search = {int(hnsw_ef_search)}"
+        return f"SET LOCAL hnsw.ef_search = {max(int(hnsw_ef_search), int(top_k))}"
     if method == "diskann":
         return f"SET LOCAL diskann.query_rescore = {int(diskann_query_rescore)}"
     return None

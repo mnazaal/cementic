@@ -60,3 +60,18 @@ def test_query_tuning_sql() -> None:
         "SET LOCAL diskann.query_rescore = 120"
     )
     assert query_tuning_sql("other", hnsw_ef_search=40, diskann_query_rescore=50) is None
+
+
+def test_hnsw_ef_search_is_never_below_the_requested_result_count() -> None:
+    """An HNSW scan yields at most ef_search candidates, so a configured value
+    under top_k silently caps the result count: the default 40 sits below the
+    documented maximum of 50 results."""
+    assert query_tuning_sql(
+        "hnsw", hnsw_ef_search=40, diskann_query_rescore=50, top_k=50
+    ) == "SET LOCAL hnsw.ef_search = 50"
+
+
+def test_hnsw_ef_search_keeps_a_configured_value_above_the_result_count() -> None:
+    assert query_tuning_sql(
+        "hnsw", hnsw_ef_search=200, diskann_query_rescore=50, top_k=10
+    ) == "SET LOCAL hnsw.ef_search = 200"
