@@ -7,6 +7,8 @@ exactly what happened during development, repeatedly, before this guard existed.
 
 from __future__ import annotations
 
+import pytest
+
 from cementic.config import Config
 from tests.integration.conftest import _TEST_DB_SUFFIX, _configured_url, _pg_url
 
@@ -29,6 +31,7 @@ def test_server_and_credentials_still_come_from_the_real_config() -> None:
     )
 
 
+@pytest.mark.pg
 def test_pg_config_fixture_points_at_the_test_database(pg_config: Config) -> None:
     """Anything opening its own connection from this config (e.g. Searcher)
     must land in the test database, not the user's."""

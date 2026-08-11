@@ -27,6 +27,11 @@ from cementic.search import Searcher
 from cementic.source_watcher import SourceWatcher
 from tests.integration.conftest import _pg_url
 
+#: Needs a real Postgres, so it belongs to the ``pg`` job. Without this the
+#: module is excluded from ``-m pg`` and self-skips under ``-m "not pg"``,
+#: leaving the only end-to-end build/promote/search path with no CI coverage.
+pytestmark = pytest.mark.pg
+
 #: Generated on demand by tests/fixtures/generate_pdfs.py (see conftest's
 #: autouse fixture). Its text is built around FakeEmbeddingClient.TERMS below,
 #: so the search assertion is meaningful.
