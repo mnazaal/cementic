@@ -9,11 +9,10 @@ file:line, user-visible symptom, and repro commands, are in
 [`notes/code-review-2026-08-07.html`](notes/code-review-2026-08-07.html).
 "Open review findings" below carries only the priority order.
 
-**Entry point:** run `uv lock` and commit it. CI is red on `main` right now —
-all three jobs install with `uv sync --locked`, and `uv lock --check` fails
-because `uv.lock` still lists the removed `pgvector` dependency. One command,
-and nothing else can be validated in CI until it lands. Then add a named volume
-to both `compose.yml` files (finding B2) before touching anything else.
+**Entry point:** ~~run `uv lock`~~ — done on 2026-08-11 along with the named
+volume in both `compose.yml` files, on `claude/review-fixes-2026-08-11`
+(unmerged). `uv lock --check` now passes. The next entry point is the config
+diagnosability cluster; see "Still open" below.
 
 **Branch:** `claude/code-review-2026-08-07`, **two commits ahead of `main`, not
 merged and not pushed** — `b39f6f6` (the review note) and the commit carrying
@@ -219,52 +218,60 @@ promote gate by a worker restart; `index.method` unreachable on a built system;
 malformed `CEMENTIC_DB_URL` in the three commands meant to explain it; and two
 CI marker holes that make a green run meaningless.
 
-Fix order, highest first:
+### Fixed on `claude/review-fixes-2026-08-11`
 
-1. **CI honesty** — `uv lock` (B1), then `pytestmark = pytest.mark.pg` on
-   `test_db_isolation`'s fixture test and on `test_smoke` (N17). Until both land,
-   a green CI run does not mean the suite ran: the "not pg" job would launch a
-   30-60min from-source Postgres build, and the only end-to-end smoke test runs
-   in no job at all.
-2. **The two data-destruction paths** — a named volume in both `compose.yml`
-   files (B2; the Quadlet template already does this correctly), and a guard on
-   `init postgres --force` so it cannot `rmtree` an arbitrary directory (N1).
-3. **What gets published** — `promote_ready_revision` must require
-   `_revision_is_complete`, and `_revision_is_complete` must require
-   `documents > 0`. One fix closes three findings: promoting an empty index
-   (N2), a restart laundering failures past the gate (N3), and the `ready`
-   one-way latch (H2). Then C2.1 (empty extractions counted as success).
-4. **Silently wrong search answers** — query truncation (C1.1) and the missing
-   `--n_batch` (N5) are one mechanism, fix together; the search SQL's missing
-   freshness predicates (C1.2 — reuse the scope builders rather than
-   hand-writing them a third time); chunk-boundary U+FFFD corruption (C1.4);
-   `ef_search` below `MAX_SEARCH_RESULTS` (C1.3).
-5. **Config diagnosability** — C2.2 (misspelled section), C2.3 (missing
+Seven commits, each with regression tests; 635 unit tests, ruff and mypy strict
+all clean, and `uv lock --check` passes.
+
+1. **CI honesty** — B1 (`uv lock`) and N17 (`pg` markers). The "not pg" job no
+   longer drags a 30-60min from-source Postgres build into a database-free job,
+   and the only end-to-end smoke test now runs somewhere.
+2. **Both data-destruction paths** — B2 (named volume in both `compose.yml`,
+   plus the generated README naming `down -v` as the destructive one) and N1
+   (`init postgres --force` overwrites template files in place instead of
+   `rmtree`-ing whatever it was pointed at).
+3. **What gets published** — N2 + N3 + H2 closed together: promotion re-checks
+   completeness against current counts, `revision_is_complete` requires
+   `documents > 0`, and nothing publishes an empty revision even under
+   `--force` (promotion retires the active one, so that removes coverage).
+4. **Silently wrong search answers** — C1.4 (chunk boundaries now align to whole
+   characters; concatenation of non-overlapping chunks became lossless),
+   C1.2 (freshness predicates, with the definition centralised beside the scope
+   builders as `CURRENT_CONTENT_SQL`), C1.1 + N5 (query bounded in tokens
+   against the window; `--n_batch`/`--n_ubatch` now follow `n_ctx`), C1.3
+   (`ef_search` never below the requested `top_k`).
+5. **H4** — a `ready` revision reports as ready, and `status` names the promote
+   command for it.
+6. **Failure reporting** — N8 (`stop` exit codes), H3 (runner exit code on fatal
+   worker startup failure), H8 (`extract` catches `OSError`), plus the
+   undeclared `click` and `pymupdf` dependencies.
+
+### Still open, highest first
+
+1. **Config diagnosability** — C2.2 (misspelled section), C2.3 (missing
    `CEMENTIC_CONFIG`), H9 (misspelled key → raw traceback), N7 (malformed DB
-   URL), N9 (doctor passes configs `start` rejects). Together these are why no
-   diagnostic can currently diagnose a broken config.
-6. **Supply chain / first run** — H1 (`config init` disables the checksum pin via
-   a `./models/…` string compare), the undeclared `click` and `pymupdf` imports,
-   N10 (download failures as raw tracebacks).
-7. **Failure visibility** — C2.5, H3, C2.7, C2.8, N8 (`stop` exits 0 on failure),
-   N13 (healthy-looking wrong-model daemon); then C2.4's 120s block, via the
-   "busy vs dead" consolidation that is *why* `status`, `--doctor` and `search`
-   disagree about what healthy means.
-8. **Reporting the lifecycle** — H4 (`ready` shown as `building`) and N4
-   (`index.method` silently dead; `collection reindex` from TODO.md is the
-   natural trigger).
+   URL tracebacks in the three commands meant to explain it), N9 (doctor passes
+   configs `start` rejects). Together these are why no diagnostic can currently
+   diagnose a broken config.
+2. **C2.1** — an empty extraction is recorded as success, so a directory of
+   scanned PDFs reports 100% indexed with every document unsearchable.
+3. **Supply chain / first run** — H1 (`config init` disables the checksum pin via
+   a `./models/…` string compare) and N10 (download failures as raw tracebacks;
+   shared temp path for concurrent downloads).
+4. **Failure visibility** — C2.5, C2.7, C2.8, N13 (healthy-looking wrong-model
+   daemon); then C2.4's 120s block, via the "busy vs dead" consolidation that is
+   *why* `status`, `--doctor` and `search` disagree about what healthy means.
+5. **N4** — `index.method` is unreachable on a built system; `collection reindex`
+   from TODO.md is the natural trigger.
+6. **Deferred deliberately:** `hnsw.iterative_scan` (the other half of C1.3).
+   It addresses post-filter recall on the shared vector table, but a pgvector
+   older than 0.8 rejects the parameter and would break *all* search, so it
+   needs verification against a live database first.
 
-Dead code remains branch/parameter level — no whole function in `src/` is
-unreachable. Both notes list the items; 2026-08-11 adds an unreachable branch in
-`extract_pdf_markdown` that would join dict reprs into "extracted text" if it
-ever ran, a `distance_metric` parsed but never applied, and two dead DB columns.
-
-### Implementation order for the current pass
-
-Landing 1-3 first (CI honesty, data destruction, publish correctness), each with
-tests, then 4 onward. Steps 1 and 2 are mechanical; step 3 is the first one that
-changes behaviour users depend on, so it needs regression tests for both the
-empty-revision and requeue-laundering paths before the change.
+Also open: H5 (`~` unexpanded), H6 (`ignore_directories` replaces defaults), H7
+and N11 (watcher ignore/deletion edge cases), H10/N2-fingerprint (model identity
+by path string), H11/N10-status (`load_file_progress` predicates), H12, H13,
+N6, N12, N14, N16, and the dead-code and trim lists in both notes.
 
 ### Deliberately not done
 
