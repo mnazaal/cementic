@@ -203,36 +203,68 @@ it matters.
 
 ## Open review findings
 
-Full detail — file:line, symptom, repro — in
-[`notes/code-review-2026-08-07.html`](notes/code-review-2026-08-07.html). Fix
-order, highest first:
+Two read-only reviews, both still open against an unchanged `src/`:
+[`notes/code-review-2026-08-07.html`](notes/code-review-2026-08-07.html) (first
+full pass) and
+[`notes/code-review-2026-08-11.html`](notes/code-review-2026-08-11.html) (third
+pass — five unprimed reviewers, so its overlaps are independent re-derivations,
+and it carries only what is *new* plus the re-confirmation map). File:line,
+symptom and repro live in the notes; this section carries only the fix order.
 
-1. **`uv lock`** (B1) — CI is red until this lands.
-2. **A named volume in both `compose.yml` files** (B2) — the packaged Compose
-   setup stores Postgres data in the container layer, and `cementic stop --help`,
-   `README.md`, and the generated README all recommend `docker compose down`.
-   The Quadlet template already does this correctly.
-3. **Silently wrong search answers** — queries over `n_ctx` are truncated with no
-   warning (C1.1, measured), and the search SQL omits the freshness conditions
-   `revisions.py` calls "the single definition of what counts" (C1.2), so a
-   failed re-extraction serves stale content forever. Fix C1.2 by reusing the
-   scope builders rather than hand-writing the predicates a third time.
-4. **The config silent-drop trio** (C2.2, C2.3, H9) — a misspelled *section*, and
-   a missing `CEMENTIC_CONFIG` file, are both dropped while `config path` and
-   `status --doctor` report success; a misspelled *key* raises a raw traceback.
-5. **`config init` disables the model checksum pin** (H1) — `./models/…` vs
-   `models/…` compared as strings — plus the undeclared `click` and `pymupdf`
-   imports.
-6. **Failure visibility** (C2.5, H3, C2.7, C2.8), then `status`'s 120s block (C2.4).
-7. **`collection list` calls a `ready` revision `building`** (H4) — one line, and
-   it misreports the live `test` collection.
-8. **What gets published** (C2.1 empty extractions counted as success, H2 the
-   `ready` latch, C1.3 `ef_search` below `MAX_SEARCH_RESULTS`).
+The 2026-08-11 pass re-confirmed ~20 findings independently (both blockers among
+them) and added: an unguarded `shutil.rmtree` in `init postgres --force`; a
+revision reaching `ready` with zero documents; failure counts laundered past the
+promote gate by a worker restart; `index.method` unreachable on a built system;
+`--n_batch` never passed, so raising `n_ctx` is a no-op; raw tracebacks on a
+malformed `CEMENTIC_DB_URL` in the three commands meant to explain it; and two
+CI marker holes that make a green run meaningless.
 
-Dead code is at branch/parameter level only — no whole function in `src/` is
-unreachable. The note lists the nine items and three duplicated subsystems worth
-consolidating; the "busy vs dead" triplicate is *why* `status`, `--doctor`, and
-`search` disagree about what "healthy" means.
+Fix order, highest first:
+
+1. **CI honesty** — `uv lock` (B1), then `pytestmark = pytest.mark.pg` on
+   `test_db_isolation`'s fixture test and on `test_smoke` (N17). Until both land,
+   a green CI run does not mean the suite ran: the "not pg" job would launch a
+   30-60min from-source Postgres build, and the only end-to-end smoke test runs
+   in no job at all.
+2. **The two data-destruction paths** — a named volume in both `compose.yml`
+   files (B2; the Quadlet template already does this correctly), and a guard on
+   `init postgres --force` so it cannot `rmtree` an arbitrary directory (N1).
+3. **What gets published** — `promote_ready_revision` must require
+   `_revision_is_complete`, and `_revision_is_complete` must require
+   `documents > 0`. One fix closes three findings: promoting an empty index
+   (N2), a restart laundering failures past the gate (N3), and the `ready`
+   one-way latch (H2). Then C2.1 (empty extractions counted as success).
+4. **Silently wrong search answers** — query truncation (C1.1) and the missing
+   `--n_batch` (N5) are one mechanism, fix together; the search SQL's missing
+   freshness predicates (C1.2 — reuse the scope builders rather than
+   hand-writing them a third time); chunk-boundary U+FFFD corruption (C1.4);
+   `ef_search` below `MAX_SEARCH_RESULTS` (C1.3).
+5. **Config diagnosability** — C2.2 (misspelled section), C2.3 (missing
+   `CEMENTIC_CONFIG`), H9 (misspelled key → raw traceback), N7 (malformed DB
+   URL), N9 (doctor passes configs `start` rejects). Together these are why no
+   diagnostic can currently diagnose a broken config.
+6. **Supply chain / first run** — H1 (`config init` disables the checksum pin via
+   a `./models/…` string compare), the undeclared `click` and `pymupdf` imports,
+   N10 (download failures as raw tracebacks).
+7. **Failure visibility** — C2.5, H3, C2.7, C2.8, N8 (`stop` exits 0 on failure),
+   N13 (healthy-looking wrong-model daemon); then C2.4's 120s block, via the
+   "busy vs dead" consolidation that is *why* `status`, `--doctor` and `search`
+   disagree about what healthy means.
+8. **Reporting the lifecycle** — H4 (`ready` shown as `building`) and N4
+   (`index.method` silently dead; `collection reindex` from TODO.md is the
+   natural trigger).
+
+Dead code remains branch/parameter level — no whole function in `src/` is
+unreachable. Both notes list the items; 2026-08-11 adds an unreachable branch in
+`extract_pdf_markdown` that would join dict reprs into "extracted text" if it
+ever ran, a `distance_metric` parsed but never applied, and two dead DB columns.
+
+### Implementation order for the current pass
+
+Landing 1-3 first (CI honesty, data destruction, publish correctness), each with
+tests, then 4 onward. Steps 1 and 2 are mechanical; step 3 is the first one that
+changes behaviour users depend on, so it needs regression tests for both the
+empty-revision and requeue-laundering paths before the change.
 
 ### Deliberately not done
 
