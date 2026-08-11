@@ -24,12 +24,17 @@ class TestExtractErrorPaths:
 
     @patch("cementic.extract.pymupdf4llm.to_markdown")
     def test_non_string_return_type(self, mock_to_md: MagicMock) -> None:
-        """When to_markdown returns a list, join to string."""
+        """Page chunks are refused, not stringified.
+
+        Unreachable today (page_chunks is never requested), but if the upstream
+        contract changes they arrive as dicts, and joining their str() would
+        store and embed the reprs as though they were the document.
+        """
         mock_to_md.return_value = ["page 1 text", "page 2 text"]
 
         with patch("pathlib.Path.exists", return_value=True):
-            result = extract_pdf_markdown("/fake/path.pdf")
-        assert result == "page 1 text\n\npage 2 text"
+            with pytest.raises(RuntimeError, match="page chunks"):
+                extract_pdf_markdown("/fake/path.pdf")
 
     @patch("cementic.extract.pymupdf4llm.to_markdown")
     @patch("cementic.extract._get_rapidocr_api")
@@ -60,14 +65,18 @@ class TestExtractErrorPaths:
     def test_ocr_enabled_without_rapidocr(
         self, mock_ocr: MagicMock, mock_to_md: MagicMock
     ) -> None:
-        """use_ocr=True when rapidocr not installed: no ocr_function passed."""
+        """Configured OCR with no rapidocr is refused rather than degraded.
+
+        It used to proceed without OCR, and the un-OCR'd text went into an
+        immutable artifact -- so the corpus carried the degradation while the
+        config still said OCR was on.
+        """
         mock_to_md.return_value = "text"
 
         with patch("pathlib.Path.exists", return_value=True):
-            result = extract_pdf_markdown("/fake/path.pdf", use_ocr=True)
-        assert result == "text"
-        call_kwargs = mock_to_md.call_args.kwargs
-        assert "ocr_function" not in call_kwargs
+            with pytest.raises(RuntimeError, match="rapidocr"):
+                extract_pdf_markdown("/fake/path.pdf", use_ocr=True)
+        mock_to_md.assert_not_called()
 
 
 class TestImportFailures:

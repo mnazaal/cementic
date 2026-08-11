@@ -50,25 +50,17 @@ def test_convert_uses_layout_and_disables_header_footer(temp_dir: Path) -> None:
     )
 
 
-def test_convert_without_rapidocr_uses_default_ocr(temp_dir: Path) -> None:
-    """Conversion still works when rapidocr bindings are unavailable."""
+def test_configured_ocr_without_rapidocr_is_refused(temp_dir: Path) -> None:
+    """Silently falling back to no OCR wrote the un-OCR'd result into an
+    immutable artifact, so the whole corpus carried the degradation with the
+    config still claiming OCR was on."""
     pdf_path = temp_dir / "sample.pdf"
     pdf_path.write_bytes(b"%PDF-1.4\n")
 
     with patch("cementic.extract.pymupdf._get_layout", object()):
         with patch("cementic.extract._get_rapidocr_api", return_value=None):
-            with patch(
-                "cementic.extract.pymupdf4llm.to_markdown", return_value="markdown"
-            ) as mock_md:
-                result = extract_pdf_markdown(str(pdf_path))
-
-    assert result == "markdown"
-    mock_md.assert_called_once_with(
-        str(pdf_path),
-        header=False,
-        footer=False,
-        use_ocr=True,
-    )
+            with pytest.raises(RuntimeError, match="rapidocr"):
+                extract_pdf_markdown(str(pdf_path), use_ocr=True)
 
 
 def test_convert_requires_pymupdf_layout(temp_dir: Path) -> None:
@@ -81,13 +73,14 @@ def test_convert_requires_pymupdf_layout(temp_dir: Path) -> None:
             extract_pdf_markdown(str(pdf_path))
 
 
-def test_convert_joins_iterable_markdown_chunks(temp_dir: Path) -> None:
-    """Non-string markdown result is joined into one string."""
+def test_page_chunks_are_refused_rather_than_stringified(temp_dir: Path) -> None:
+    """Unreachable today, since page_chunks is never requested. If the upstream
+    contract changes, page chunks arrive as dicts and the old code str()-joined
+    them -- storing and embedding their reprs as though they were the document."""
     pdf_path = temp_dir / "sample.pdf"
     pdf_path.write_bytes(b"%PDF-1.4\n")
 
     with patch("cementic.extract.pymupdf._get_layout", object()):
         with patch("cementic.extract.pymupdf4llm.to_markdown", return_value=["one", "two"]):
-            result = extract_pdf_markdown(str(pdf_path), use_ocr=False)
-
-    assert result == "one\n\ntwo"
+            with pytest.raises(RuntimeError, match="page chunks"):
+                extract_pdf_markdown(str(pdf_path), use_ocr=False)

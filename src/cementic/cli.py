@@ -1250,7 +1250,13 @@ def start_embedding_runtime() -> None:
 def stop_embedding_runtime() -> None:
     """Stop the configured embedding runtime service."""
     config = _get_config()
-    stopped = stop_llama_cpp_runtime(config)
+    try:
+        stopped = stop_llama_cpp_runtime(config)
+    except RuntimeError as error:
+        # The daemon is still up. Saying "stopped" here used to come with
+        # discarding its pid file, so nothing could find it again.
+        console.print(f"embedding stop failed: {error}")
+        raise typer.Exit(1)
     console.print("embedding: stopped" if stopped else "embedding: already stopped")
 
 

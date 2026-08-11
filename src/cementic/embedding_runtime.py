@@ -582,26 +582,55 @@ def stop_llama_cpp_runtime(config: Config) -> bool:
     # Unguarded, that turned a normal race into a traceback out of
     # `cementic embedding stop` -- and out of any search or index that happened
     # to be restarting the daemon. supervisor.force_kill already handles this.
-    if not _signal_daemon(pid, signal.SIGTERM):
+    signalled = _signal_daemon(pid, signal.SIGTERM)
+    if signalled is _SignalResult.GONE:
         pid_file.unlink(missing_ok=True)
         return False
+    if signalled is _SignalResult.NOT_OURS:
+        # Alive, and not ours to signal. Deleting the pid file here would lose
+        # the only record of a daemon that still holds the port, so `embedding
+        # status` would report stopped forever with no way back to it.
+        raise RuntimeError(
+            f"llama.cpp daemon (pid {pid}) is running but cannot be signalled by this user"
+        )
     remaining = wait_for_exit([pid], timeout_seconds=5.0)
     if remaining:
         _signal_daemon(pid, signal.SIGKILL)
-        wait_for_exit([pid], timeout_seconds=2.0)
+        remaining = wait_for_exit([pid], timeout_seconds=2.0)
+    if remaining:
+        # It survived SIGKILL (uninterruptible sleep, e.g. unmapping a
+        # multi-GB model over network storage). Reporting success and dropping
+        # the pid file would strand it holding the port.
+        raise RuntimeError(
+            f"llama.cpp daemon (pid {pid}) did not exit after SIGKILL; it still holds "
+            f"port {config.llama_cpp.daemon_port}"
+        )
     pid_file.unlink(missing_ok=True)
     return True
 
 
-def _signal_daemon(pid: int, signal_number: int) -> bool:
-    """Send a signal to the daemon, tolerating a process that already exited."""
+class _SignalResult(str, Enum):
+    """Outcome of signalling the daemon."""
+
+    SENT = "sent"
+    GONE = "gone"
+    NOT_OURS = "not_ours"
+
+
+def _signal_daemon(pid: int, signal_number: int) -> _SignalResult:
+    """Send a signal to the daemon, distinguishing "already gone" from "not ours".
+
+    Collapsing the two meant a daemon owned by another user was treated as
+    already exited: the pid file was deleted and the stop reported as a no-op,
+    leaving a live process nothing could find again.
+    """
     try:
         os.kill(pid, signal_number)
     except ProcessLookupError:
-        return False  # already gone; nothing to wait for
+        return _SignalResult.GONE
     except PermissionError:
-        return False  # alive but not ours to signal
-    return True
+        return _SignalResult.NOT_OURS
+    return _SignalResult.SENT
 
 
 def _start_llama_cpp_daemon(

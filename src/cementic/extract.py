@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import contextlib
+import sys
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -57,20 +59,35 @@ def extract_pdf_markdown(pdf_path: str, use_ocr: bool = True) -> str:
     ocr_kwargs: dict[str, Any] = {"use_ocr": use_ocr}
     if use_ocr:
         rapidocr_api = _get_rapidocr_api()
-        if rapidocr_api is not None:
-            ocr_kwargs["ocr_function"] = rapidocr_api.exec_ocr
+        if rapidocr_api is None:
+            raise RuntimeError(
+                "extraction.use_ocr is enabled but rapidocr is not importable. "
+                "Extraction would silently fall back to no OCR and write the "
+                "result into an immutable artifact, so the whole corpus would "
+                "carry it. Install rapidocr or set extraction.use_ocr = false."
+            )
+        ocr_kwargs["ocr_function"] = rapidocr_api.exec_ocr
 
-    md_text = pymupdf4llm.to_markdown(
-        str(path),
-        header=False,
-        footer=False,
-        **ocr_kwargs,
-    )
+    # pymupdf4llm writes its own OCR notices to stdout. `cementic extract` puts
+    # the markdown on stdout, so in `extract | chunk` an upstream print becomes
+    # document content. Send anything it prints to stderr instead.
+    with contextlib.redirect_stdout(sys.stderr):
+        md_text = pymupdf4llm.to_markdown(
+            str(path),
+            header=False,
+            footer=False,
+            **ocr_kwargs,
+        )
 
-    if isinstance(md_text, str):
-        return md_text
-
-    return "\n\n".join(str(page_chunk) for page_chunk in md_text)
+    if not isinstance(md_text, str):
+        # Only reachable if the upstream contract changes: page chunks come back
+        # as dicts, and the previous code str()-joined them, so their reprs
+        # would have been stored and embedded as though they were the document.
+        raise RuntimeError(
+            "pymupdf4llm returned page chunks rather than markdown text; "
+            "cementic never requests page_chunks"
+        )
+    return md_text
 
 
 @dataclass(frozen=True)

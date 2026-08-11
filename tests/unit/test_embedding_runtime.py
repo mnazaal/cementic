@@ -209,13 +209,15 @@ class TestDaemonLifecycle:
         mock_kill.assert_any_call(12345, 15)  # signal.SIGTERM
         assert not pid_file.exists()
 
-    @patch("cementic.embedding_runtime.wait_for_exit", return_value=[12345])
+    # Survives SIGTERM, then exits under SIGKILL: the wait reports it alive the
+    # first time and gone the second.
+    @patch("cementic.embedding_runtime.wait_for_exit", side_effect=[[12345], []])
     @patch("cementic.embedding_runtime.os.kill")
     @patch("cementic.embedding_runtime.is_managed_process_alive", return_value=True)
     def test_restart_live_pid_sigterm_then_sigkill(
         self, mock_running, mock_kill, mock_wait, temp_dir
     ) -> None:
-        """Live PID → SIGTERM → processes remain → SIGKILL → pid file unlinked."""
+        """Live PID → SIGTERM → still there → SIGKILL → gone → pid file unlinked."""
         pid_file = temp_dir / "daemon.pid"
         pid_file.write_text("12345")
         config = Config()
@@ -224,6 +226,41 @@ class TestDaemonLifecycle:
         mock_kill.assert_any_call(12345, 15)  # signal.SIGTERM
         mock_kill.assert_any_call(12345, 9)   # signal.SIGKILL
         assert not pid_file.exists()
+
+    @patch("cementic.embedding_runtime.wait_for_exit", return_value=[12345])
+    @patch("cementic.embedding_runtime.os.kill")
+    @patch("cementic.embedding_runtime.is_managed_process_alive", return_value=True)
+    def test_a_daemon_that_survives_sigkill_is_reported_not_stopped(
+        self, mock_running, mock_kill, mock_wait, temp_dir
+    ) -> None:
+        """Reporting success here dropped the pid file too, stranding a live
+        daemon on the port with nothing able to find it again."""
+        pid_file = temp_dir / "daemon.pid"
+        pid_file.write_text("12345")
+        config = Config()
+        config.llama_cpp.daemon_pid_file = pid_file
+
+        with pytest.raises(RuntimeError, match="did not exit"):
+            stop_llama_cpp_runtime(config)
+
+        assert pid_file.exists()
+
+    @patch("cementic.embedding_runtime.os.kill", side_effect=PermissionError)
+    @patch("cementic.embedding_runtime.is_managed_process_alive", return_value=True)
+    def test_a_daemon_owned_by_another_user_is_not_treated_as_gone(
+        self, mock_running, mock_kill, temp_dir
+    ) -> None:
+        """"Cannot signal" was conflated with "already exited", so the pid file
+        was deleted and the stop reported as a no-op."""
+        pid_file = temp_dir / "daemon.pid"
+        pid_file.write_text("12345")
+        config = Config()
+        config.llama_cpp.daemon_pid_file = pid_file
+
+        with pytest.raises(RuntimeError, match="cannot be signalled"):
+            stop_llama_cpp_runtime(config)
+
+        assert pid_file.exists()
 
     def test_start_daemon_missing_log_file_raises(self) -> None:
         config = Config()
