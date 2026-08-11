@@ -3,16 +3,44 @@
 from __future__ import annotations
 
 import typer
+from pydantic import ValidationError
 from rich.console import Console
+from rich.markup import escape
 
 from cementic.bootstrap import Bootstrapper
-from cementic.config import get_config
+from cementic.config import (
+    Config,
+    ConfigError,
+    format_config_error,
+    get_config,
+    resolve_config_path,
+)
 from cementic.pipeline_worker import PipelineWorker
 from cementic.source_watcher import SourceWatcher
 from cementic.validation import validate_collection_name
 
 app = typer.Typer(help="Internal cementic runner")
 console = Console()
+
+
+def _load_config() -> Config:
+    """Load config, reporting a broken one in one line instead of a traceback.
+
+    The spawned workers write to a log file the CLI points the user at, so a
+    pydantic traceback there is a wall of text in the one place that is supposed
+    to explain why indexing never started.
+    """
+    # escape(): these messages quote section names like "[llama_cpp]", which rich
+    # would otherwise consume as markup.
+    try:
+        return get_config()
+    except ConfigError as error:
+        console.print(f"[red]config error: {escape(str(error))}[/red]")
+        raise typer.Exit(1)
+    except ValidationError as error:
+        detail = format_config_error(error, resolve_config_path())
+        console.print(f"[red]config error: {escape(detail)}[/red]")
+        raise typer.Exit(1)
 
 
 @app.command("source-watcher")
@@ -32,7 +60,7 @@ def run_source_watcher(
         console.print(f"[red]Error: {e}[/red]")
         raise typer.Exit(1)
 
-    config = get_config()
+    config = _load_config()
     watcher = SourceWatcher(config)
     bootstrapper = Bootstrapper(config)
 
@@ -81,7 +109,7 @@ def run_pipeline_worker(
         console.print(f"[red]Error: {e}[/red]")
         raise typer.Exit(1)
 
-    config = get_config()
+    config = _load_config()
     worker = PipelineWorker(config)
     bootstrapper = Bootstrapper(config)
 

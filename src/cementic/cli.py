@@ -14,6 +14,7 @@ from typing import Any, TypeVar, cast
 
 import click
 import typer
+from pydantic import ValidationError
 from rich.console import Console
 from rich.markup import escape
 from sqlalchemy.exc import InterfaceError, OperationalError, ProgrammingError
@@ -31,7 +32,9 @@ from cementic.collections import (
 )
 from cementic.config import (
     Config,
+    ConfigError,
     default_config_path,
+    format_config_error,
     get_config,
     resolve_config_path,
 )
@@ -204,10 +207,26 @@ _config: Config | None = None
 
 
 def _get_config() -> Config:
-    """Lazy-load the config singleton."""
+    """Lazy-load the config singleton, reporting config problems in one line.
+
+    Every command routes through here, so this is where a broken config stops
+    being a multi-screen pydantic traceback. A failed load is deliberately not
+    cached: fixing the file and re-running must work.
+    """
     global _config
     if _config is None:
-        _config = get_config()
+        try:
+            _config = get_config()
+        # escape(): these messages quote section names like "[llama_cpp]", which
+        # rich would otherwise consume as markup -- dropping the one detail the
+        # message exists to convey.
+        except ConfigError as error:
+            console.print(f"[red]config error: {escape(str(error))}[/red]")
+            raise typer.Exit(1)
+        except ValidationError as error:
+            detail = format_config_error(error, resolve_config_path())
+            console.print(f"[red]config error: {escape(detail)}[/red]")
+            raise typer.Exit(1)
     return _config
 
 

@@ -1,14 +1,18 @@
 """Tests for configuration module."""
 
 import os
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+from pydantic import ValidationError
 
 from cementic.config import (
     Config,
+    ConfigError,
     DatabaseConfig,
     LlamaCppConfig,
+    format_config_error,
     get_config,
     load_config_file,
     resolve_config_path,
@@ -246,3 +250,129 @@ class TestConfig:
         """Index config rejects non-positive build/query parameters."""
         with pytest.raises(ValueError, match="greater than or equal to 1"):
             Config(index={"hnsw_m": 0})
+
+
+class TestConfigProblemsAreReported:
+    """A broken config must be diagnosable.
+
+    A typo inside a known section was already a hard failure, but a typo in the
+    section *name* was invisible: the section was dropped and its settings fell
+    back to plausible defaults, which is the expensive direction -- a dropped
+    `[pipeline] chunk_size` changes the embedding profile, recoverable only by a
+    full re-index.
+    """
+
+    def _write(self, tmp_path, text: str, monkeypatch) -> Path:
+        path = tmp_path / "cementic.toml"
+        path.write_text(text, encoding="utf-8")
+        monkeypatch.setenv("CEMENTIC_CONFIG", str(path))
+        return path
+
+    def test_unknown_section_is_refused_with_a_suggestion(self, tmp_path, monkeypatch):
+        self._write(tmp_path, '[llamacpp]\nmodel_path = "/x.gguf"\n', monkeypatch)
+
+        with pytest.raises(ConfigError) as excinfo:
+            get_config()
+        assert "[llamacpp]" in str(excinfo.value)
+        assert "llama_cpp" in str(excinfo.value)
+
+    def test_every_problem_is_reported_at_once(self, tmp_path, monkeypatch):
+        """pydantic stops at the first broken section, so a pre-scan is the only
+        way the user fixes more than one typo per run."""
+        self._write(tmp_path, "[llamacpp]\nx = 1\n\n[pipelines]\nchunk_size = 64\n", monkeypatch)
+
+        with pytest.raises(ConfigError) as excinfo:
+            get_config()
+        assert "llamacpp" in str(excinfo.value)
+        assert "pipelines" in str(excinfo.value)
+
+    def test_unknown_key_in_a_known_section_is_reported(self, tmp_path, monkeypatch):
+        self._write(tmp_path, '[llama_cpp]\nmodel_pth = "/x.gguf"\n', monkeypatch)
+
+        with pytest.raises(ConfigError) as excinfo:
+            get_config()
+        assert "model_pth" in str(excinfo.value)
+
+    def test_top_level_key_is_reported_rather_than_dropped(self, tmp_path, monkeypatch):
+        self._write(tmp_path, "chunk_size = 999\n", monkeypatch)
+
+        with pytest.raises(ConfigError):
+            get_config()
+
+    def test_valid_config_still_loads(self, tmp_path, monkeypatch):
+        self._write(tmp_path, "[pipeline]\nchunk_size = 256\n", monkeypatch)
+
+        assert get_config().pipeline.chunk_size == 256
+
+    def test_nested_table_is_not_a_false_positive(self, tmp_path, monkeypatch):
+        self._write(tmp_path, '[extraction.backends]\npdf = "pymupdf4llm"\n', monkeypatch)
+
+        assert get_config().extraction.backends["pdf"] == "pymupdf4llm"
+
+
+class TestExplicitConfigPathIsHonoured:
+    def test_missing_file_is_an_error_not_a_fallback(self, tmp_path, monkeypatch):
+        """A stale path in a service unit used to run against entirely different
+        settings, with `config path` printing the fallback."""
+        monkeypatch.setenv("CEMENTIC_CONFIG", str(tmp_path / "nope.toml"))
+
+        with pytest.raises(ConfigError, match="does not exist"):
+            get_config()
+
+    def test_directory_is_an_error(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("CEMENTIC_CONFIG", str(tmp_path))
+
+        with pytest.raises(ConfigError, match="is a directory"):
+            get_config()
+
+    def test_unset_env_var_still_falls_back(self, monkeypatch):
+        monkeypatch.delenv("CEMENTIC_CONFIG", raising=False)
+
+        assert get_config() is not None
+
+
+class TestConfigErrorsDoNotLeakValues:
+    """pydantic embeds the offending value in both str(exc) and errors()["input"],
+    so a mistyped credential key would otherwise be printed into the terminal and
+    into the worker log files the CLI points users at."""
+
+    def test_mistyped_credential_key_does_not_echo_its_value(self, tmp_path, monkeypatch):
+        secret = "PLACEHOLDER-CANARY-VALUE"
+        path = tmp_path / "cementic.toml"
+        path.write_text(f'[database]\npasswrd = "{secret}"\n', encoding="utf-8")
+        monkeypatch.setenv("CEMENTIC_CONFIG", str(path))
+
+        with pytest.raises(ConfigError) as excinfo:
+            get_config()
+        assert secret not in str(excinfo.value)
+        assert "passwrd" in str(excinfo.value)
+
+    def test_formatter_never_echoes_a_bad_value(self, monkeypatch):
+        monkeypatch.setenv("CEMENTIC_DB_PORT", "PLACEHOLDER-CANARY-VALUE")
+
+        with pytest.raises(ValidationError) as excinfo:
+            Config()
+        rendered = format_config_error(excinfo.value, None)
+        assert "PLACEHOLDER-CANARY-VALUE" not in rendered
+        assert "port" in rendered
+
+
+class TestDatabaseUrlIsValidatedAsConfig:
+    def test_malformed_url_is_a_config_error(self, monkeypatch):
+        """Left to the `url` property it surfaced as a raw ArgumentError from
+        whichever command touched it first -- including the message `start`
+        builds to explain the failure."""
+        monkeypatch.setenv("CEMENTIC_DB_URL", "not a url")
+
+        with pytest.raises(ValidationError, match="not a valid SQLAlchemy URL"):
+            Config()
+
+    def test_empty_url_still_means_unset(self, monkeypatch):
+        monkeypatch.setenv("CEMENTIC_DB_URL", "")
+
+        assert Config().database.url.get_backend_name() == "postgresql"
+
+    def test_valid_url_is_accepted(self, monkeypatch):
+        monkeypatch.setenv("CEMENTIC_DB_URL", "postgresql://u:p@h:5432/d")
+
+        assert Config().database.url.database == "d"
