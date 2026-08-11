@@ -1,5 +1,6 @@
 """Tests for configuration module."""
 
+import json
 import os
 from pathlib import Path
 from unittest.mock import patch
@@ -16,8 +17,10 @@ from cementic.config import (
     get_config,
     load_config_file,
     resolve_config_path,
+    resolve_llama_model_path,
 )
 from cementic.index_strategies import supported_index_methods
+from cementic.storage import extracted_document_path
 
 
 class TestConfigFile:
@@ -376,3 +379,75 @@ class TestDatabaseUrlIsValidatedAsConfig:
         monkeypatch.setenv("CEMENTIC_DB_URL", "postgresql://u:p@h:5432/d")
 
         assert Config().database.url.database == "d"
+
+
+class TestPathsAreExpandedAndAnchored:
+    """TOML and systemd `Environment=` do no shell expansion.
+
+    A hand-written `~/Documents` stayed a literal `~` directory created under the
+    working directory, and a relative artifacts root was worse than wrong: it is
+    used both to build the paths stored in the database and to resolve them
+    again, so a reader in a different directory checked containment against its
+    own root and "removed" a file that was never there.
+    """
+
+    def test_tilde_in_artifacts_path_expands(self, monkeypatch):
+        monkeypatch.setenv("CEMENTIC_STORAGE_ARTIFACTS_PATH", "~/cementic-artifacts")
+
+        path = Config().storage.artifacts_path
+
+        assert "~" not in path.parts
+        assert path.is_absolute()
+
+    def test_tilde_in_model_path_expands(self, monkeypatch):
+        monkeypatch.setenv("CEMENTIC_LLAMA_MODEL_PATH", "~/models/m.gguf")
+
+        resolved = resolve_llama_model_path(Config().llama_cpp.model_path)
+
+        assert "~" not in resolved.parts
+        assert resolved.is_absolute()
+
+    def test_relative_paths_are_anchored_to_the_working_directory(self, monkeypatch, tmp_path):
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("CEMENTIC_STORAGE_ARTIFACTS_PATH", "artifacts")
+
+        path = Config().storage.artifacts_path
+
+        assert path.is_absolute()
+        assert path.parent == tmp_path
+
+    def test_artifact_paths_derived_from_the_root_are_absolute(self, monkeypatch, tmp_path):
+        """Anchoring at load time is what makes containment checks meaningful.
+
+        A relative root stayed relative, so `safe_remove_artifact` resolved both
+        the stored path and the root against whatever directory the caller
+        happened to be in: containment passed vacuously and the unlink no-opped
+        on a path that did not exist, deleting the rows while the bytes stayed.
+        A relative setting is still relative to where cementic was started -- it
+        is now merely unambiguous, and a genuine mismatch is refused rather than
+        silently succeeding.
+        """
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("CEMENTIC_STORAGE_ARTIFACTS_PATH", "artifacts")
+
+        config = Config()
+        artifact = extracted_document_path(config, "coll", 1, 2)
+
+        assert config.storage.artifacts_path.is_absolute()
+        assert artifact.is_absolute()
+        assert artifact.is_relative_to(tmp_path)
+
+    @pytest.mark.parametrize(
+        "env_var",
+        [
+            "CEMENTIC_SOURCE_WATCHER_LOG_FILE",
+            "CEMENTIC_PIPELINE_WORKER_LOG_FILE",
+            "CEMENTIC_LLAMA_DAEMON_PID_FILE",
+        ],
+    )
+    def test_every_path_setting_is_expanded(self, monkeypatch, env_var):
+        monkeypatch.setenv(env_var, "~/somewhere/file")
+
+        dumped = Config().model_dump(mode="json")
+
+        assert "~" not in json.dumps(dumped)

@@ -93,7 +93,11 @@ def resolve_llama_model_path(model_path: str) -> Path:
     - otherwise it resolves under the cementic data directory, which is where an
       auto-downloaded model is written.
     """
-    raw = Path(model_path)
+    # expanduser first: "~/models/x.gguf" is neither absolute nor existent as
+    # written, so it used to resolve to a literal "~" directory *inside* the
+    # data dir -- the configured model was never found and auto-download was
+    # attempted against a nonsense path.
+    raw = Path(model_path).expanduser()
     if raw.is_absolute():
         return raw
     if raw.exists():
@@ -633,6 +637,39 @@ class Config(BaseSettings):
     pipeline_worker: PipelineWorkerConfig = Field(default_factory=PipelineWorkerConfig)
     bootstrap: BootstrapConfig = Field(default_factory=BootstrapConfig)
 
+    def _normalize_paths(self) -> None:
+        """Expand ``~`` and anchor relative paths to the current directory.
+
+        TOML and systemd ``Environment=`` do no shell expansion, so a
+        hand-written ``~/Documents`` stayed a literal ``~`` directory created
+        under the working directory. A relative path was worse than wrong: the
+        artifacts root is used both to build the paths stored in the database
+        and to resolve them again later, so a reader in a different directory
+        checked containment against its own root and "removed" a file that was
+        never there -- deleting the rows while the bytes stayed on disk.
+
+        ``Path.cwd() / p`` rather than ``resolve()``: resolving also follows
+        symlinks, which would rewrite paths under a symlinked temp or home
+        directory into something the caller never configured.
+        """
+
+        def anchored(path: Path) -> Path:
+            expanded = path.expanduser()
+            return expanded if expanded.is_absolute() else Path.cwd() / expanded
+
+        for section, field in (
+            (self.source_watcher, "log_file"),
+            (self.source_watcher, "state_path"),
+            (self.pipeline_worker, "log_file"),
+            (self.pipeline_worker, "state_path"),
+            (self.llama_cpp, "daemon_pid_file"),
+            (self.llama_cpp, "daemon_log_file"),
+            (self.storage, "artifacts_path"),
+        ):
+            current = getattr(section, field)
+            if current is not None:
+                setattr(section, field, anchored(Path(current)))
+
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
 
@@ -661,6 +698,10 @@ class Config(BaseSettings):
 
         if self.storage.artifacts_path is None:
             self.storage.artifacts_path = data_dir / "artifacts"
+
+        # After the defaults are filled, so it covers both what the user set and
+        # what we derived.
+        self._normalize_paths()
 
 
 def get_config() -> Config:
