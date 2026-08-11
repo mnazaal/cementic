@@ -15,6 +15,7 @@ from cementic.pipeline_worker import (
     PipelineCounts,
     compute_revision_counts,
     revision_failure_total,
+    revision_is_complete,
 )
 from cementic.revisions import drain_pending_artifact_removals, promote_revision
 from cementic.storage import safe_remove_artifact
@@ -196,14 +197,16 @@ def find_ready_revision(session: Session, collection: str) -> PipelineRevision |
 class PromotionOutcome:
     """Result of attempting to promote a collection's ready revision.
 
-    ``status`` is one of ``"promoted"``, ``"no_ready"`` (nothing to promote), or
-    ``"blocked_by_failures"`` (a ready revision exists but built with failures and
-    ``force`` was not set, so it was left untouched).
+    ``status`` is one of ``"promoted"``, ``"no_ready"`` (nothing to promote),
+    ``"empty"`` (the ready revision has no live documents), ``"incomplete"`` (it
+    has unfinished work and ``force`` was not set), or ``"blocked_by_failures"``
+    (it built with failures and ``force`` was not set). Every non-promoted
+    outcome leaves the revision untouched.
     """
 
     status: str
     revision: PipelineRevision | None = None
-    failures: PipelineCounts | None = None
+    counts: PipelineCounts | None = None
 
 
 def promote_ready_revision(
@@ -211,9 +214,15 @@ def promote_ready_revision(
 ) -> PromotionOutcome:
     """Promote the newest ready revision for one collection.
 
-    A revision can reach ``ready`` with failed documents/chunks (failures are
-    terminal so the build can finish). Promoting one silently would publish a
-    partial index, so unless ``force`` is set this refuses and reports the failure
+    ``ready`` records that a revision was complete once, not that it still is:
+    nothing flips it back to ``building`` when the watcher registers new
+    documents, and ``requeue_interrupted_artifacts`` resets failed rows to
+    ``pending`` on every ``cementic start``. So completeness is re-checked here
+    against current counts rather than trusted from the status.
+
+    A revision can also reach ``ready`` with failed documents/chunks (failures
+    are terminal so the build can finish). Promoting one silently would publish
+    a partial index, so unless ``force`` is set this refuses and reports the
     counts instead.
     """
     revision = find_ready_revision(session, collection)
@@ -221,8 +230,15 @@ def promote_ready_revision(
         return PromotionOutcome("no_ready")
 
     counts = compute_revision_counts(session, collection, revision)
+    if counts.documents == 0:
+        # Promotion retires whatever is currently active, so publishing an
+        # empty revision removes search coverage rather than merely adding
+        # none. There is no reading of --force under which that is wanted.
+        return PromotionOutcome("empty", revision=revision, counts=counts)
+    if not force and not revision_is_complete(counts):
+        return PromotionOutcome("incomplete", revision=revision, counts=counts)
     if not force and revision_failure_total(counts) > 0:
-        return PromotionOutcome("blocked_by_failures", revision=revision, failures=counts)
+        return PromotionOutcome("blocked_by_failures", revision=revision, counts=counts)
 
     promote_revision(session, collection, revision, config=config)
     session.commit()

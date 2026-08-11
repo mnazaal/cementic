@@ -148,8 +148,16 @@ def is_retryable_embed_error(error: BaseException) -> bool:
     return False
 
 
-def _revision_is_complete(counts: PipelineCounts) -> bool:
+def revision_is_complete(counts: PipelineCounts) -> bool:
     """Return True when every pipeline stage has finished for all documents."""
+    if counts.documents == 0:
+        # All-zero counts satisfy every equality below, so without this a
+        # revision reaches `ready` before the watcher has registered its first
+        # document. On a fresh `cementic start` that is the normal race rather
+        # than a rare one: both workers spawn together and the pipeline
+        # worker's first pass usually wins. Promoting the result publishes an
+        # empty index while reporting zero failures.
+        return False
     if counts.extracted_done + counts.extracted_failed != counts.documents:
         return False
     if counts.chunked_done + counts.chunked_failed != counts.extracted_done:
@@ -801,7 +809,7 @@ class PipelineWorker:
 
     def _revision_complete(self, session: Session, revision: PipelineRevision) -> bool:
         counts = _compute_revision_counts(session, self.collection, revision)
-        return _revision_is_complete(counts)
+        return revision_is_complete(counts)
 
     def _handle_shutdown(self, signum: int, frame: object) -> None:
         """Signal handler: set the shutdown flag and nothing else.

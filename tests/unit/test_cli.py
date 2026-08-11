@@ -1097,7 +1097,7 @@ class TestBackgroundCommands:
         mock_session.__exit__.return_value = False
         mock_get_session_factory.return_value = lambda: mock_session
 
-        outcome = PromotionOutcome(status="blocked_by_failures", revision=revision, failures=counts)
+        outcome = PromotionOutcome(status="blocked_by_failures", revision=revision, counts=counts)
         with patch("cementic.cli.promote_ready_revision", return_value=outcome):
             result = runner.invoke(app, ["collection", "promote", "research"])
 

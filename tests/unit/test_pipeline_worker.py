@@ -25,9 +25,9 @@ from cementic.pipeline_worker import (
     PipelineCounts,
     PipelineWorker,
     _pipeline_worker_lock_key,
-    _revision_is_complete,
     _try_acquire_pipeline_worker_lock,
     is_retryable_embed_error,
+    revision_is_complete,
 )
 
 
@@ -237,37 +237,45 @@ class TestIsRetryableEmbedError:
 
 
 class TestRevisionIsComplete:
-    """Tests for the pure _revision_is_complete function."""
+    """Tests for the pure revision_is_complete function."""
 
     def test_all_stages_match(self) -> None:
         counts = PipelineCounts(
             documents=3, extracted_done=3, chunked_done=3, total_chunks=9, done_embeddings=9
         )
-        assert _revision_is_complete(counts) is True
+        assert revision_is_complete(counts) is True
 
     def test_extracted_fewer_than_documents(self) -> None:
         counts = PipelineCounts(
             documents=3, extracted_done=2, chunked_done=2, total_chunks=6, done_embeddings=6
         )
-        assert _revision_is_complete(counts) is False
+        assert revision_is_complete(counts) is False
 
     def test_chunked_fewer_than_extracted(self) -> None:
         counts = PipelineCounts(
             documents=3, extracted_done=3, chunked_done=2, total_chunks=6, done_embeddings=6
         )
-        assert _revision_is_complete(counts) is False
+        assert revision_is_complete(counts) is False
 
     def test_embeddings_fewer_than_total_chunks(self) -> None:
         counts = PipelineCounts(
             documents=3, extracted_done=3, chunked_done=3, total_chunks=9, done_embeddings=8
         )
-        assert _revision_is_complete(counts) is False
+        assert revision_is_complete(counts) is False
 
-    def test_zero_documents_complete(self) -> None:
+    def test_zero_documents_is_not_complete(self) -> None:
+        """A revision with nothing in it must not be promotable.
+
+        All-zero counts satisfy every stage equality, so treating them as
+        complete marked a revision `ready` before the watcher had registered
+        its first document -- the normal race on a fresh `cementic start`,
+        since both workers spawn together. Promoting that published an empty
+        index and reported zero failures doing it.
+        """
         counts = PipelineCounts(
             documents=0, extracted_done=0, chunked_done=0, total_chunks=0, done_embeddings=0
         )
-        assert _revision_is_complete(counts) is True
+        assert revision_is_complete(counts) is False
 
     def test_failed_extraction_counts_as_terminal(self) -> None:
         """A corrupt document should not block an otherwise terminal revision forever."""
@@ -279,7 +287,7 @@ class TestRevisionIsComplete:
             total_chunks=6,
             done_embeddings=6,
         )
-        assert _revision_is_complete(counts) is True
+        assert revision_is_complete(counts) is True
 
     def test_failed_embedding_counts_as_terminal(self) -> None:
         """A failed chunk embedding is terminal for readiness."""
@@ -291,7 +299,7 @@ class TestRevisionIsComplete:
             done_embeddings=1,
             failed_embeddings=1,
         )
-        assert _revision_is_complete(counts) is True
+        assert revision_is_complete(counts) is True
 
 
 class TestPipelineWorkerStart:

@@ -32,11 +32,18 @@ from cementic.pipeline_worker import PipelineCounts
 
 
 def _counts(*, extracted_failed: int = 0, chunked_failed: int = 0, failed_embeddings: int = 0):
+    """Counts for a revision that is *complete*, with the given failures.
+
+    Failures are folded into each stage's total so the stage equalities still
+    balance. Left unbalanced, the revision reads as merely unfinished and
+    promotion is refused for that reason instead of the one under test.
+    """
+    extracted_done = 1 + chunked_failed
     return PipelineCounts(
-        documents=1,
-        extracted_done=1,
+        documents=extracted_done + extracted_failed,
+        extracted_done=extracted_done,
         chunked_done=1,
-        total_chunks=1,
+        total_chunks=1 + failed_embeddings,
         done_embeddings=1,
         extracted_failed=extracted_failed,
         chunked_failed=chunked_failed,
@@ -444,7 +451,7 @@ class TestPromoteReadyRevision:
 
         outcome = promote_ready_revision(session, "c1", config=_config)
         assert outcome.status == "blocked_by_failures"
-        assert outcome.failures is not None and outcome.failures.extracted_failed == 2
+        assert outcome.counts is not None and outcome.counts.extracted_failed == 2
         mock_promote.assert_not_called()
         assert not session.commit.called
 
@@ -464,3 +471,70 @@ class TestPromoteReadyRevision:
         assert outcome.status == "promoted"
         mock_promote.assert_called_once_with(session, "c1", revision, config=_config)
         assert session.commit.called
+
+    @patch(
+        "cementic.collections.compute_revision_counts",
+        return_value=PipelineCounts(
+            documents=5, extracted_done=1, chunked_done=1, total_chunks=1, done_embeddings=1
+        ),
+    )
+    @patch("cementic.collections.promote_revision")
+    def test_refuses_a_ready_revision_carrying_unfinished_work(
+        self, mock_promote: MagicMock, _mock_counts: MagicMock, _config: Config
+    ) -> None:
+        """`ready` says a revision was complete once, not that it still is.
+
+        Nothing flips it back to `building` when the watcher registers new
+        documents, and every `cementic start` resets failed rows to pending, so
+        the failure counts alone can read zero while work is outstanding.
+        """
+        session = MagicMock()
+        session.query().filter_by().order_by().first.return_value = MagicMock(
+            spec=PipelineRevision
+        )
+
+        outcome = promote_ready_revision(session, "c1", config=_config)
+        assert outcome.status == "incomplete"
+        assert outcome.counts is not None and outcome.counts.documents == 5
+        mock_promote.assert_not_called()
+        assert not session.commit.called
+
+    @patch(
+        "cementic.collections.compute_revision_counts",
+        return_value=PipelineCounts(
+            documents=5, extracted_done=1, chunked_done=1, total_chunks=1, done_embeddings=1
+        ),
+    )
+    @patch("cementic.collections.promote_revision")
+    def test_force_publishes_an_incomplete_revision(
+        self, mock_promote: MagicMock, _mock_counts: MagicMock, _config: Config
+    ) -> None:
+        session = MagicMock()
+        revision = MagicMock(spec=PipelineRevision)
+        session.query().filter_by().order_by().first.return_value = revision
+
+        outcome = promote_ready_revision(session, "c1", config=_config, force=True)
+        assert outcome.status == "promoted"
+        mock_promote.assert_called_once_with(session, "c1", revision, config=_config)
+
+    @patch(
+        "cementic.collections.compute_revision_counts",
+        return_value=PipelineCounts(
+            documents=0, extracted_done=0, chunked_done=0, total_chunks=0, done_embeddings=0
+        ),
+    )
+    @patch("cementic.collections.promote_revision")
+    def test_refuses_an_empty_revision_even_with_force(
+        self, mock_promote: MagicMock, _mock_counts: MagicMock, _config: Config
+    ) -> None:
+        """Promotion retires the active revision, so publishing an empty one
+        removes search coverage rather than merely adding none."""
+        session = MagicMock()
+        session.query().filter_by().order_by().first.return_value = MagicMock(
+            spec=PipelineRevision
+        )
+
+        outcome = promote_ready_revision(session, "c1", config=_config, force=True)
+        assert outcome.status == "empty"
+        mock_promote.assert_not_called()
+        assert not session.commit.called

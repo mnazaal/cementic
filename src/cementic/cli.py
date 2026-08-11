@@ -1328,7 +1328,7 @@ def promote_collection(
             # Read everything we need while the session is open; ORM attributes
             # expire on commit and would raise once the session closes.
             status = outcome.status
-            failures = outcome.failures
+            counts = outcome.counts
             revision_label = (
                 outcome.revision.label or outcome.revision.id
                 if outcome.revision is not None
@@ -1342,15 +1342,39 @@ def promote_collection(
     if status == "no_ready":
         console.print("status: no ready revision")
         return
+    if status == "empty":
+        console.print("status: nothing to promote (revision has no documents)")
+        console.print(
+            "promoting would retire the active revision and leave nothing searchable"
+        )
+        raise typer.Exit(1)
+    if status == "incomplete":
+        pending = []
+        if counts is not None:
+            not_extracted = counts.documents - counts.extracted_done - counts.extracted_failed
+            not_chunked = counts.extracted_done - counts.chunked_done - counts.chunked_failed
+            not_embedded = counts.total_chunks - counts.done_embeddings - counts.failed_embeddings
+            if not_extracted > 0:
+                pending.append(f"extract={not_extracted}")
+            if not_chunked > 0:
+                pending.append(f"chunk={not_chunked}")
+            if not_embedded > 0:
+                pending.append(f"embed={not_embedded}")
+        console.print(f"status: incomplete ({', '.join(pending)} pending)")
+        console.print(
+            "the revision took on new work after it was marked ready; "
+            "wait for `cementic status` to show it finished, or --force to publish it as-is"
+        )
+        raise typer.Exit(1)
     if status == "blocked_by_failures":
         parts = []
-        if failures is not None:
-            if failures.extracted_failed:
-                parts.append(f"extract={failures.extracted_failed}")
-            if failures.chunked_failed:
-                parts.append(f"chunk={failures.chunked_failed}")
-            if failures.failed_embeddings:
-                parts.append(f"embed={failures.failed_embeddings}")
+        if counts is not None:
+            if counts.extracted_failed:
+                parts.append(f"extract={counts.extracted_failed}")
+            if counts.chunked_failed:
+                parts.append(f"chunk={counts.chunked_failed}")
+            if counts.failed_embeddings:
+                parts.append(f"embed={counts.failed_embeddings}")
         console.print(f"status: blocked ({', '.join(parts)} failed)")
         console.print("re-run with --force to promote anyway")
         raise typer.Exit(1)
