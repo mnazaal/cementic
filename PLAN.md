@@ -246,32 +246,103 @@ all clean, and `uv lock --check` passes.
    worker startup failure), H8 (`extract` catches `OSError`), plus the
    undeclared `click` and `pymupdf` dependencies.
 
-### Still open, highest first
+### Round-two review (2026-08-11, four reviewers)
 
-1. **Config diagnosability** — C2.2 (misspelled section), C2.3 (missing
-   `CEMENTIC_CONFIG`), H9 (misspelled key → raw traceback), N7 (malformed DB
-   URL tracebacks in the three commands meant to explain it), N9 (doctor passes
-   configs `start` rejects). Together these are why no diagnostic can currently
-   diagnose a broken config.
-2. **C2.1** — an empty extraction is recorded as success, so a directory of
-   scanned PDFs reports 100% indexed with every document unsearchable.
-3. **Supply chain / first run** — H1 (`config init` disables the checksum pin via
-   a `./models/…` string compare) and N10 (download failures as raw tracebacks;
-   shared temp path for concurrent downloads).
-4. **Failure visibility** — C2.5, C2.7, C2.8, N13 (healthy-looking wrong-model
-   daemon); then C2.4's 120s block, via the "busy vs dead" consolidation that is
-   *why* `status`, `--doctor` and `search` disagree about what healthy means.
-5. **N4** — `index.method` is unreachable on a built system; `collection reindex`
-   from TODO.md is the natural trigger.
-6. **Deferred deliberately:** `hnsw.iterative_scan` (the other half of C1.3).
-   It addresses post-filter recall on the shared vector table, but a pgvector
-   older than 0.8 rejects the parameter and would break *all* search, so it
-   needs verification against a live database first.
+One reviewer re-read the batch above adversarially; three re-verified the open
+findings against the changed code. The batch had **two real defects and CI was
+red** — fixed on `claude/review-round-two`, see that commit. The lesson is
+recorded under "Environment facts" above: the unit suite is not the CI gate.
 
-Also open: H5 (`~` unexpanded), H6 (`ignore_directories` replaces defaults), H7
-and N11 (watcher ignore/deletion edge cases), H10/N2-fingerprint (model identity
-by path string), H11/N10-status (`load_file_progress` predicates), H12, H13,
-N6, N12, N14, N16, and the dead-code and trim lists in both notes.
+Re-verification changed three findings materially, so the old descriptions
+should not be trusted:
+
+- `Path.exists()` does **not** swallow `PermissionError` on 3.12. The watcher's
+  mass-deletion trigger is an *unmounted* subdirectory (ENOENT); a permission
+  error instead kills the watcher with a traceback. Same fix, different symptom.
+- Mixed-model search does not break during any rebuild — a collection with an
+  active revision keeps working. It needs ≥2 collections with at least one never
+  promoted, and a `ready` revision poisons it indefinitely, not just mid-build.
+- The `pymupdf._get_layout` guard is **retracted**: the attribute is declared in
+  pymupdf 1.27.1, so the current code is correct.
+
+### Still open, in execution order
+
+Ordering is by (user impact × likelihood), with dependencies noted. Each item
+names the reviewer's minimal fix surface; detail is in the two notes.
+
+1. **Empty extractions are a silent success** (C2.1). Scanned PDFs with
+   `use_ocr` off extract to `""`, which becomes `done` with zero chunks; the
+   revision reaches `ready` and promotes with **zero failures reported** and no
+   vectors. The `documents > 0` guard does not catch it — the documents exist,
+   the chunks do not. Fix: a pure emptiness predicate plus a `raise` inside the
+   existing `try` in `_step_extract`, so the existing failure machinery reports
+   it and `promote` blocks. Name `extraction.use_ocr` in the message.
+2. **Config diagnosability, six steps** (C2.2, C2.3, H9, N7, N9). Land in the
+   reviewer's order: `config.py` foundations first (behaviour-neutral), then
+   catch-and-format plus the `url_override` validator *together* (the validator
+   turns an `ArgumentError` into a `ValidationError`, so it is only survivable
+   once the catch exists), then the provider validator, then the file/env
+   problem scan, then the three residual traceback sites, then doctor's
+   model-path confinement check last (largest test churn).
+   **Security constraint:** build messages from pydantic's `loc`/`msg`/`type`
+   only. `str(ValidationError)` and `err["input"]` both carry the offending
+   value, so a mistyped `[database] passwrd` currently prints the password —
+   into terminal scrollback *and* the worker log files the CLI points at. Ship a
+   redaction regression test with it.
+3. **Worker failures never reach `status`**, paired with the capability gate.
+   A retryable provider failure logs only and returns "no work", so the worker
+   re-claims the same chunks forever while status reads healthy — the opposite
+   of what README promises. Fix by releasing and **re-raising** into the existing
+   loop handler. Do *not* write `last_error` directly: `reported_error` would
+   stay unset and the recovery path would never clear it, which an existing test
+   was written to prevent. Then swap the worker's startup gate from
+   `health_check()` (identity only) to `describe()` (a real embed round-trip),
+   so a daemon that 500s on every embed fails at startup instead of looping.
+4. **Path handling** (H5). No `expanduser` anywhere in `src/`, and a relative
+   `artifacts_path` makes `safe_remove_artifact` a silent no-op from any other
+   CWD. Single normalisation point already exists in `Config.__init__`; use
+   `expanduser` + `Path.cwd() / p`, not `.resolve()`, or the log-path tests
+   break on symlinked tmp dirs. **Do this before pruning** — pruning cannot
+   reclaim disk while artifact deletion silently fails.
+5. **The "busy vs dead" triplicate** (C2.4, C2.8, N13). Three probes with three
+   budgets is why `status`, `--doctor` and `search` disagree. `status` can block
+   ~129s and then discard the answer; a wrong-model daemon is reported healthy.
+   Fix: expose a tri-state probe (`healthy` / `wrong model` / `no response`),
+   one helper with an explicit time budget, and let each call site pick. Deletes
+   `client_is_healthy_or_busy` and `doctor._daemon_reachable`, and takes the
+   redundant per-search probe with it for free.
+6. **Watcher bundle** (H7, N11, plus uncounted skips and `os.walk`). Ancestor
+   matching is the damaging one: watch a directory under any ignored name and
+   the initial scan indexes everything, then every live event is dropped
+   forever. Needs the event handler constructed *after* `_watched_roots`.
+7. **`load_file_progress` contradicts its own summary** (H11). Reuse the ORM
+   scope builders — but take only the two `ChunkedDocument` predicates, not
+   `chunked_scope` wholesale, or failed extractions vanish from the outer join.
+8. **Vector-dimension pre-flight** (N14). pgvector's HNSW caps at 2000
+   dimensions while we allow 8192, so a 2560/4096-dim model embeds the whole
+   corpus and *then* loops forever failing index creation. Add
+   `max_indexable_dim(method)` beside the index registry and check it before
+   embedding starts.
+9. **Record the task-prefix policy in the embedding profile** (README:284).
+   Renaming the GGUF silently switches to `plain` — and because the policy is
+   not in the payload, prefixed and unprefixed corpora share one profile and one
+   vector table, mixing incompatible vector spaces. Own commit: it invalidates
+   stored fingerprints and forces a rebuild.
+10. **Pruning leaks** (N16) — orphaned vector tables and stale
+    `chunk_embeddings` after a model swap. Two footguns: embedding profiles are
+    shared across collections (re-query globally, as `collection remove` does),
+    and `DROP TABLE` must run after `session.commit()`.
+11. Opportunistic, small: mixed-model search message naming the culprit
+    collections; `embedding stop` reporting success after a failed kill;
+    redirecting pymupdf4llm's OCR notice off stdout (it lands in the
+    `extract | chunk` pipe); `[extraction.backends]` key normalisation and a
+    "no such extractor" message.
+
+**`hnsw.iterative_scan` is now more urgent, not less.** The freshness predicates
+added in the last batch post-filter *more* rows, so a scan yielding `ef_search`
+candidates discards more of them and can return fewer than `top_k`. It still
+needs verification against the live database first — a pgvector older than 0.8
+rejects the parameter and would break all search.
 
 ### Deliberately not done
 
@@ -290,6 +361,36 @@ evidence, and are worth reopening rather than re-closing: the `check_health`
 tradeoff also makes `cementic status` block for 120s to return an answer it
 already had (C2.4), and the filename heuristic silently disables Nomic task
 prefixes while `models/nomic-embed-text-v1.5.f16.gguf` sits in the repo.
+
+Closed again by the round-two review, with reasons — each of these looks like a
+bug and is one, but the fix costs more than the defect:
+
+- **`verbose` in the embedding profile fingerprint.** Removing it re-fingerprints
+  every existing profile and re-embeds every corpus — exactly the harm it is
+  accused of causing — to protect against a debug flag almost nobody toggles.
+  Only worth doing batched with a model-identity change, so users pay once. It
+  correctly stays in the *runtime* fingerprint, where it is a launch argument.
+- **Naive `TIMESTAMP` columns.** Zero readers today (one write, no comparison,
+  no display). The fix is a column-type change in a project whose only schema
+  mechanism is `create_all`, so old and new databases would diverge with nothing
+  to reconcile them. Revisit if anything ever reads these columns.
+- **`connect_args` / `gssencmode` on non-psycopg URLs.** `DatabaseConfig` can
+  only produce `postgresql://`, and sqlite never reaches `get_engine` outside
+  tests that patch around it. Worth the `make_url` cleanup only if `db.py` is
+  open for another reason.
+- **`ignore_directories` replacing the defaults.** Working as documented,
+  including the "empty list indexes everything" escape hatch a union would
+  break. If discoverability is the concern, add a separate
+  `additional_ignore_directories` — a feature decision, not a defect fix.
+- **The advisory-lock leak and the `RUNNING` state-write ordering.** Every path
+  that leaks the lock is immediately followed by process exit, which releases
+  it; the stale state file is corrected by `start`'s liveness check and cleared
+  by `stop`. Two-line fixes if those functions are open anyway, not worth a slot.
+- **`index.method` being unreachable on a built system.** A dead knob with no
+  correctness consequence, because search deliberately tunes for the index that
+  exists. The actionable part is that `TODO.md` asserts "the build path already
+  reconciles a changed method", which is false — correct that sentence and leave
+  `collection reindex` on the roadmap.
 
 ## Deferred
 
