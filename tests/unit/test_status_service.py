@@ -678,6 +678,7 @@ class TestLoadFileProgress:
                     document_id=doc.id,
                     extractor_profile_id=revision.extractor_profile_id,
                     status="failed",
+                    source_file_hash="h1",
                     error_message="extraction broke",
                 )
             )
@@ -699,9 +700,13 @@ class TestLoadFileProgress:
             doc = SourceDocument(collection="col", source_path="/test/a.pdf", file_hash="h1")
             session.add(doc)
             session.flush()
+            # Both hashes are written by the worker on the failure path too, so
+            # a realistic failed row still carries them.
             extracted = ExtractedDocument(
                 document_id=doc.id,
                 extractor_profile_id=revision.extractor_profile_id,
+                source_file_hash="h1",
+                content_hash="c1",
                 status="done",
             )
             session.add(extracted)
@@ -710,6 +715,7 @@ class TestLoadFileProgress:
                 ChunkedDocument(
                     extracted_document_id=extracted.id,
                     chunk_profile_id=revision.chunk_profile_id,
+                    source_content_hash="c1",
                     status="failed",
                     error_message="chunker crashed",
                 )
@@ -736,6 +742,8 @@ class TestLoadFileProgress:
             extracted = ExtractedDocument(
                 document_id=doc.id,
                 extractor_profile_id=revision.extractor_profile_id,
+                source_file_hash="h1",
+                content_hash="c1",
                 status="done",
             )
             session.add(extracted)
@@ -743,6 +751,7 @@ class TestLoadFileProgress:
             chunked = ChunkedDocument(
                 extracted_document_id=extracted.id,
                 chunk_profile_id=revision.chunk_profile_id,
+                source_content_hash="c1",
                 status="done",
             )
             session.add(chunked)
@@ -849,3 +858,43 @@ class TestLoadPipelineStatusLabels:
 
         assert result.active_revision_label is None
         assert result.building_revision_label is None
+
+
+class TestPerFileViewAgreesWithTheSummary:
+    """`status -c X -v` prints the summary and the per-file list together.
+
+    The list matched on profile ids only, so after a file changed on disk the
+    summary said "extracted 9/10" while every row below it read "extract=done" --
+    one command contradicting itself, with no way to tell which file was stuck.
+    """
+
+    def _session_factory(self):
+        engine = create_engine("sqlite:///:memory:")
+        Base.metadata.create_all(engine)
+        return engine, sessionmaker(bind=engine, expire_on_commit=False)
+
+    def test_a_changed_file_is_pending_in_both_views(self) -> None:
+        engine, session_factory = self._session_factory()
+        with session_factory() as session:
+            _seed_collection_with_documents(session, "col", 2)
+            # The watcher saw /col/0.pdf change: its hash moves on, so the
+            # existing extraction is work still owed, not work done.
+            changed = (
+                session.query(SourceDocument).filter_by(source_path="/col/0.pdf").one()
+            )
+            changed.file_hash = "h0-changed"
+            session.commit()
+
+        with (
+            patch("cementic.status_service.get_engine", return_value=engine),
+            patch("cementic.status_service.get_session_factory", return_value=session_factory),
+        ):
+            summary = load_pipeline_status_bulk(Config(), ["col"])["col"]
+            files = load_file_progress(Config(), "col")
+
+        by_path = {f.source_path: f for f in files}
+        assert summary.extracted_done == 1
+        assert by_path["/col/0.pdf"].extraction_status == "pending"
+        assert by_path["/col/1.pdf"].extraction_status == "done"
+        done_rows = sum(1 for f in files if f.extraction_status == "done")
+        assert done_rows == summary.extracted_done

@@ -5,6 +5,8 @@ import pytest
 from cementic.index_strategies import (
     IndexParams,
     build_index_ddl,
+    index_dimension_error,
+    max_indexable_dim,
     supported_index_methods,
 )
 
@@ -64,3 +66,28 @@ def test_unknown_metric_raises() -> None:
 
 def test_supported_methods() -> None:
     assert set(supported_index_methods()) == {"hnsw", "diskann"}
+
+
+class TestDimensionLimits:
+    """pgvector's HNSW index stops at 2000 dimensions while the column holds far
+    more, so an oversized model used to embed the entire corpus and only then
+    fail at CREATE INDEX -- looping on that failure with the work already done."""
+
+    def test_hnsw_refuses_a_dimension_it_cannot_index(self):
+        message = index_dimension_error("hnsw", 2560)
+
+        assert message is not None
+        assert "2000" in message and "2560" in message
+        assert "diskann" in message
+
+    def test_hnsw_accepts_a_dimension_at_the_limit(self):
+        assert index_dimension_error("hnsw", 2000) is None
+
+    def test_diskann_has_no_dimension_limit(self):
+        assert index_dimension_error("diskann", 4096) is None
+        assert max_indexable_dim("diskann") is None
+
+    def test_common_models_are_accepted(self):
+        """768 (nomic) and 1024 (bge-m3) must keep working."""
+        assert index_dimension_error("hnsw", 768) is None
+        assert index_dimension_error("hnsw", 1024) is None

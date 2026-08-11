@@ -43,9 +43,11 @@ class TestPipelineWorker:
         daemon._run_processing_loop = MagicMock(side_effect=StopLoopError)
 
         mock_embedding_client = MagicMock()
-        mock_embedding_client.health_check.return_value = True
         daemon._create_embedding_client = MagicMock(return_value=mock_embedding_client)
         mock_session_factory.return_value = MagicMock()
+        # A real dimension: startup now refuses one the configured ANN index
+        # cannot handle, and a MagicMock is not comparable to the limit.
+        mock_get_target.return_value.embedding_profile.embedding_dim = 768
 
         try:
             daemon.start(collection="research")
@@ -69,7 +71,9 @@ class TestPipelineWorker:
         daemon.Session = MagicMock(return_value=mock_session)
 
         with patch(
-            "cementic.pipeline_worker.get_target_revision", return_value=SimpleNamespace(id=7)
+            "cementic.pipeline_worker.get_target_revision", return_value=SimpleNamespace(
+                id=7, embedding_profile=SimpleNamespace(embedding_dim=768)
+            )
         ) as mock_get_target:
             revision_id = daemon._ensure_target_revision()
 

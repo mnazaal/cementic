@@ -33,6 +33,7 @@ from cementic.db import (
 from cementic.embedding_provider import EmbeddingProvider
 from cementic.embedding_runtime import create_provider, runtime_spec_from_config
 from cementic.extract import extract_document
+from cementic.index_strategies import index_dimension_error
 from cementic.revisions import (
     chunk_scope,
     chunked_scope,
@@ -420,6 +421,14 @@ class PipelineWorker:
             revision = get_target_revision(
                 session, self.collection, self.config, self.embedding_client
             )
+            # Before any embedding: the ANN index is not built until the revision
+            # first completes, so an unindexable dimension otherwise costs the
+            # whole corpus and then loops on CREATE INDEX forever.
+            dimension_error = index_dimension_error(
+                self.config.index.method, revision.embedding_profile.embedding_dim
+            )
+            if dimension_error is not None:
+                raise RuntimeError(dimension_error)
             ensure_revision_vector_table(session, revision)
             session.commit()
             return revision.id

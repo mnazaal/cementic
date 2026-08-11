@@ -455,11 +455,21 @@ def load_file_progress(config: Config, collection: str) -> list[FileProgress]:
 
         rows = (
             session.query(SourceDocument, ExtractedDocument, ChunkedDocument)
+            # Matching on profile ids alone made this view disagree with the
+            # summary directly above it: after a file changed on disk the counts
+            # said "extracted 9/10" while every row here still read
+            # "extract=done". The hash equalities are what the counts mean by
+            # current, so the per-file view has to apply them too, and a
+            # superseded artifact then shows as pending -- which is what it is.
+            #
+            # Only the ChunkedDocument half of `chunked_scope` is taken: it also
+            # requires the extraction to be done, and forcing that into an outer
+            # join would drop failed extractions from the listing entirely.
             .outerjoin(
                 ExtractedDocument,
                 and_(
                     ExtractedDocument.document_id == SourceDocument.id,
-                    ExtractedDocument.extractor_profile_id == target_revision.extractor_profile_id,
+                    *extracted_scope(target_revision),
                 ),
             )
             .outerjoin(
@@ -467,6 +477,7 @@ def load_file_progress(config: Config, collection: str) -> list[FileProgress]:
                 and_(
                     ChunkedDocument.extracted_document_id == ExtractedDocument.id,
                     ChunkedDocument.chunk_profile_id == target_revision.chunk_profile_id,
+                    ChunkedDocument.source_content_hash == ExtractedDocument.content_hash,
                 ),
             )
             .filter(SourceDocument.collection == collection, SourceDocument.status != "deleted")
