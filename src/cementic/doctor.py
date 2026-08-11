@@ -91,15 +91,22 @@ def collect_doctor_report(config: Config) -> dict[str, Any]:
     # falls back to defaults. Reporting "ok" here -- while pointing at the very
     # file that is not being used -- was the one check that could never fail.
     config_error = config_file_error()
+
+    def _config_message(path: Any, error: str | None) -> str:
+        """Say which of the three states this is, rather than always "loaded"."""
+        if error is not None:
+            return f"{error}; this file is being ignored and defaults are in use"
+        if path is None:
+            return "no config file; built-in defaults in use (`cementic config init` writes one)"
+        return "loaded"
+
     checks: dict[str, Any] = {
         "config": {
             "status": "ok" if config_error is None else "fail",
             "path": str(config_path) if config_path is not None else None,
             "database_url": config.database.url.render_as_string(hide_password=True),
             "message": (
-                "loaded"
-                if config_error is None
-                else f"{config_error}; this file is being ignored and defaults are in use"
+                _config_message(config_path, config_error)
             ),
         }
     }

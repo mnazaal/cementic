@@ -455,6 +455,23 @@ class PipelineConfig(_SectionSettings):
         description="Embedding provider to use (currently llama-cpp)",
     )
 
+    @field_validator("embedding_provider")
+    @classmethod
+    def _validate_provider(cls, value: str) -> str:
+        """Check the name against the registry, as `index.method` already does.
+
+        Unvalidated, a near-miss like "llama_cpp" loaded fine and `status
+        --doctor` reported ok, because doctor runs the llama.cpp checks
+        regardless; the first `cementic start` then died on it.
+        """
+        # Imported here, not at module scope: embedding_runtime imports config.
+        from cementic.embedding_runtime import supported_embedding_providers
+
+        supported = supported_embedding_providers()
+        if value not in supported:
+            raise ValueError(f"must be one of {', '.join(sorted(supported))}")
+        return value
+
     @model_validator(mode="after")
     def _validate_chunk_window(self) -> "PipelineConfig":
         if self.chunk_overlap >= self.chunk_size:

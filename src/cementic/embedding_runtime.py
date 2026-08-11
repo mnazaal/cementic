@@ -414,6 +414,11 @@ _PROVIDER_FACTORIES: dict[
 }
 
 
+def supported_embedding_providers() -> tuple[str, ...]:
+    """Return the registered embedding provider names."""
+    return tuple(_PROVIDER_FACTORIES)
+
+
 def create_provider(
     spec: EmbeddingRuntimeSpec,
     config: Config,
