@@ -267,11 +267,19 @@ should not be trusted:
 
 ### Fixed on `claude/review-round-three`
 
-Items 1-4, 7 and 8 of the list below, each with regression tests: empty
-extractions, the config diagnosability cluster (including the value-leak in
-error messages), provider failures reaching `status` together with a capability
-startup gate, `~`/relative path handling, the per-file view's freshness
-predicates, and the unindexable-dimension pre-flight.
+**All of items 1-9 below, plus the config leftovers and the opportunistic
+group**, each with regression tests. In order: empty extractions; the config
+diagnosability cluster (including the value-leak in error messages); provider
+failures reaching `status` with a capability startup gate; `~`/relative path
+handling; the daemon-probe consolidation; the watcher bundle; the per-file
+view's freshness predicates; the unindexable-dimension pre-flight; the
+task-prefix policy in the profile; doctor's model-path confinement; and
+`embedding stop`, OCR and page-chunk handling.
+
+**One of these forces a rebuild.** Recording the task-prefix policy changes
+every existing embedding-profile fingerprint, so the next `cementic start`
+builds a fresh revision and re-embeds once. That is the price of not silently
+mixing prefixed and unprefixed vectors in one table, and it is on its own commit.
 
 Two notes for whoever picks this up:
 
@@ -285,78 +293,31 @@ Two notes for whoever picks this up:
   cannot make a relative path mean the same thing from two directories. A real
   mismatch is now refused rather than quietly succeeding.
 
-### Still open, in execution order
+### Still open
 
-Ordering is by (user impact × likelihood), with dependencies noted. Each item
-names the reviewer's minimal fix surface; detail is in the two notes.
+Everything above is done. What is left, smallest list yet:
 
-1. **Empty extractions are a silent success** (C2.1). Scanned PDFs with
-   `use_ocr` off extract to `""`, which becomes `done` with zero chunks; the
-   revision reaches `ready` and promotes with **zero failures reported** and no
-   vectors. The `documents > 0` guard does not catch it — the documents exist,
-   the chunks do not. Fix: a pure emptiness predicate plus a `raise` inside the
-   existing `try` in `_step_extract`, so the existing failure machinery reports
-   it and `promote` blocks. Name `extraction.use_ocr` in the message.
-2. **Config diagnosability, six steps** (C2.2, C2.3, H9, N7, N9). Land in the
-   reviewer's order: `config.py` foundations first (behaviour-neutral), then
-   catch-and-format plus the `url_override` validator *together* (the validator
-   turns an `ArgumentError` into a `ValidationError`, so it is only survivable
-   once the catch exists), then the provider validator, then the file/env
-   problem scan, then the three residual traceback sites, then doctor's
-   model-path confinement check last (largest test churn).
-   **Security constraint:** build messages from pydantic's `loc`/`msg`/`type`
-   only. `str(ValidationError)` and `err["input"]` both carry the offending
-   value, so a mistyped `[database] passwrd` currently prints the password —
-   into terminal scrollback *and* the worker log files the CLI points at. Ship a
-   redaction regression test with it.
-3. **Worker failures never reach `status`**, paired with the capability gate.
-   A retryable provider failure logs only and returns "no work", so the worker
-   re-claims the same chunks forever while status reads healthy — the opposite
-   of what README promises. Fix by releasing and **re-raising** into the existing
-   loop handler. Do *not* write `last_error` directly: `reported_error` would
-   stay unset and the recovery path would never clear it, which an existing test
-   was written to prevent. Then swap the worker's startup gate from
-   `health_check()` (identity only) to `describe()` (a real embed round-trip),
-   so a daemon that 500s on every embed fails at startup instead of looping.
-4. **Path handling** (H5). No `expanduser` anywhere in `src/`, and a relative
-   `artifacts_path` makes `safe_remove_artifact` a silent no-op from any other
-   CWD. Single normalisation point already exists in `Config.__init__`; use
-   `expanduser` + `Path.cwd() / p`, not `.resolve()`, or the log-path tests
-   break on symlinked tmp dirs. **Do this before pruning** — pruning cannot
-   reclaim disk while artifact deletion silently fails.
-5. **The "busy vs dead" triplicate** (C2.4, C2.8, N13). Three probes with three
-   budgets is why `status`, `--doctor` and `search` disagree. `status` can block
-   ~129s and then discard the answer; a wrong-model daemon is reported healthy.
-   Fix: expose a tri-state probe (`healthy` / `wrong model` / `no response`),
-   one helper with an explicit time budget, and let each call site pick. Deletes
-   `client_is_healthy_or_busy` and `doctor._daemon_reachable`, and takes the
-   redundant per-search probe with it for free.
-6. **Watcher bundle** (H7, N11, plus uncounted skips and `os.walk`). Ancestor
-   matching is the damaging one: watch a directory under any ignored name and
-   the initial scan indexes everything, then every live event is dropped
-   forever. Needs the event handler constructed *after* `_watched_roots`.
-7. **`load_file_progress` contradicts its own summary** (H11). Reuse the ORM
-   scope builders — but take only the two `ChunkedDocument` predicates, not
-   `chunked_scope` wholesale, or failed extractions vanish from the outer join.
-8. **Vector-dimension pre-flight** (N14). pgvector's HNSW caps at 2000
-   dimensions while we allow 8192, so a 2560/4096-dim model embeds the whole
-   corpus and *then* loops forever failing index creation. Add
-   `max_indexable_dim(method)` beside the index registry and check it before
-   embedding starts.
-9. **Record the task-prefix policy in the embedding profile** (README:284).
-   Renaming the GGUF silently switches to `plain` — and because the policy is
-   not in the payload, prefixed and unprefixed corpora share one profile and one
-   vector table, mixing incompatible vector spaces. Own commit: it invalidates
-   stored fingerprints and forces a rebuild.
-10. **Pruning leaks** (N16) — orphaned vector tables and stale
-    `chunk_embeddings` after a model swap. Two footguns: embedding profiles are
-    shared across collections (re-query globally, as `collection remove` does),
-    and `DROP TABLE` must run after `session.commit()`.
-11. Opportunistic, small: mixed-model search message naming the culprit
-    collections; `embedding stop` reporting success after a failed kill;
-    redirecting pymupdf4llm's OCR notice off stdout (it lands in the
-    `extract | chunk` pipe); `[extraction.backends]` key normalisation and a
-    "no such extractor" message.
+1. **Pruning leaks** (N16) — after a model swap, the old embedding profile's
+   vector table and ANN index are never dropped, and its `chunk_embeddings`
+   rows survive because the delete is scoped to *removed chunk profiles*. Two
+   footguns make this a careful change rather than a quick one: embedding
+   profiles are shared across collections, so the keep-set must be re-queried
+   globally the way `collection remove` already does; and `DROP TABLE` must run
+   after `session.commit()`, since `drop_vector_table` opens its own
+   transaction and would block on the uncommitted session's locks.
+2. **Mixed-model search message** — naming the culprit collections and their
+   statuses instead of "different active embedding models", which names nothing
+   and says "active" about a `building` or `ready` revision. The behaviour
+   question (drop the odd collection and continue vs. refuse) is a design call:
+   refuse is right for an explicit `-c A B`, dropping is arguably right for the
+   unfiltered path.
+3. **`[extraction.backends]` key handling** — keys are looked up bare and
+   lowercase with no validation, so `PDF` or `.pdf` is silently ignored, and an
+   unknown backend name reports "does not handle '.pdf'" as though the
+   extractor existed. Mirror `index.method`'s registry validator.
+4. **`collection reindex`** — the only trigger that would make `index.method`
+   mean anything on a built collection (see the roadmap note in `TODO.md`). No
+   correctness consequence, since search tunes for the index that exists.
 
 **`hnsw.iterative_scan` is now more urgent, not less.** The freshness predicates
 added in the last batch post-filter *more* rows, so a scan yielding `ef_search`
