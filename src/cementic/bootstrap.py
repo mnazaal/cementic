@@ -34,6 +34,24 @@ _COMPOSE_HINT = (
 )
 
 
+def llama_model_download_allowed(model_path: Path) -> bool:
+    """Whether cementic may auto-download to this path (pure w.r.t. the filesystem).
+
+    Auto-downloads are confined to the cementic data directory. Shared with the
+    doctor so the two agree: doctor used to report a missing model as "cementic
+    will download it automatically" for *any* path, including ones this refuses,
+    so `status --doctor` passed a config that `cementic start` then died on.
+
+    Deliberately does not create the data directory -- the doctor is read-only.
+    """
+    allowed_root = cementic_data_dir(ensure_exists=False).resolve()
+    try:
+        model_path.resolve().relative_to(allowed_root)
+    except ValueError:
+        return False
+    return True
+
+
 def _sha256_file(path: Path) -> str:
     """Return the SHA-256 hex digest of a file."""
     digest = hashlib.sha256()
@@ -121,9 +139,7 @@ class Bootstrapper:
 
         # Restrict auto-downloads to the cementic data directory.
         allowed_root = cementic_data_dir(ensure_exists=True).resolve()
-        try:
-            model_path.resolve().relative_to(allowed_root)
-        except ValueError:
+        if not llama_model_download_allowed(model_path):
             raise RuntimeError(
                 f"llama.cpp model path {model_path} is outside the "
                 f"cementic data directory {allowed_root}"

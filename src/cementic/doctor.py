@@ -6,6 +6,7 @@ from typing import Any
 
 from sqlalchemy import text
 
+from cementic.bootstrap import llama_model_download_allowed
 from cementic.config import (
     Config,
     config_file_error,
@@ -131,10 +132,16 @@ def collect_doctor_report(config: Config) -> dict[str, Any]:
         checks["extensions"] = {}
 
     model_exists = model_path.is_file()
+    # Promising a download this path forbids is worse than reporting nothing:
+    # `status --doctor` said ok and `cementic start` then died on it. The
+    # confinement rule is the bootstrapper's own, shared rather than restated.
+    model_downloadable = config.bootstrap.auto_download_llama_model and (
+        llama_model_download_allowed(model_path)
+    )
     model_auto_download = config.bootstrap.auto_download_llama_model
-    model_ok = model_exists or model_auto_download
+    model_ok = model_exists or model_downloadable
     checks["model"] = {
-        "status": "ok" if model_exists else "warning" if model_auto_download else "fail",
+        "status": "ok" if model_exists else "warning" if model_downloadable else "fail",
         "path": str(model_path),
         "exists": model_exists,
         "auto_download": model_auto_download,
@@ -144,6 +151,9 @@ def collect_doctor_report(config: Config) -> dict[str, Any]:
             "present"
             if model_exists
             else "missing; cementic will download it automatically when needed"
+            if model_downloadable
+            else "missing, and auto-download is refused: the path is outside the "
+            "cementic data directory, so cementic cannot write it there"
             if model_auto_download
             else "missing and auto_download_llama_model is disabled"
         ),

@@ -114,10 +114,33 @@ class TestModelCheck:
         config = _config_with_model_path(tmp_path, exists=False)
         config.bootstrap.auto_download_llama_model = True
 
-        report = collect_doctor_report(config)
+        # The path has to be one auto-download would actually accept: downloads
+        # are confined to the data directory, so make tmp_path be it.
+        with patch("cementic.config.user_data_dir", return_value=str(tmp_path)):
+            report = collect_doctor_report(config)
 
         assert report["checks"]["model"]["status"] == "warning"
         assert report["checks"]["model"]["exists"] is False
+
+    @patch("cementic.doctor.probe_daemon", return_value=DaemonHealth.HEALTHY)
+    @patch("cementic.doctor.get_engine")
+    def test_undownloadable_path_is_not_reported_as_a_pending_download(
+        self, mock_get_engine, mock_daemon, tmp_path
+    ) -> None:
+        """Auto-download is confined to the data directory, so promising one for
+        a path outside it passed a config that `cementic start` then died on."""
+        mock_get_engine.side_effect = Exception("no db in this test")
+        config = _config_with_model_path(tmp_path, exists=False)
+        config.bootstrap.auto_download_llama_model = True
+
+        with patch(
+            "cementic.config.user_data_dir", return_value=str(tmp_path / "elsewhere")
+        ):
+            report = collect_doctor_report(config)
+
+        assert report["checks"]["model"]["status"] == "fail"
+        assert "outside" in report["checks"]["model"]["message"]
+        assert report["ok"] is False
 
     @patch("cementic.doctor.probe_daemon", return_value=DaemonHealth.HEALTHY)
     @patch("cementic.doctor.get_engine")
@@ -158,7 +181,10 @@ class TestModelCheck:
         mock_engine = MagicMock()
         mock_engine.connect.return_value.__enter__.return_value = mock_conn
 
-        with patch("cementic.doctor.get_engine", return_value=mock_engine):
+        with (
+            patch("cementic.doctor.get_engine", return_value=mock_engine),
+            patch("cementic.config.user_data_dir", return_value=str(tmp_path)),
+        ):
             report = collect_doctor_report(config)
 
         assert report["checks"]["model"]["status"] == "warning"
