@@ -32,9 +32,21 @@ services:
       POSTGRES_DB: ${CEMENTIC_DB_NAME:-cementic}
     ports:
       - "127.0.0.1:${CEMENTIC_DB_PORT:-5432}:5432"
+    volumes:
+      # Postgres 18's image manages its own major-version subdirectory under
+      # /var/lib/postgresql -- mounting a volume at .../data directly conflicts
+      # with that scheme, so the volume must cover the parent dir.
+      #
+      # Without this named volume the whole database lives in the container's
+      # writable layer, and the `compose down` documented above would delete
+      # every indexed document, chunk and embedding.
+      - cementic-postgres-data:/var/lib/postgresql
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U cementic"]
+      test: ["CMD-SHELL", "pg_isready -U ${CEMENTIC_DB_USER:-cementic}"]
       interval: 2s
       timeout: 5s
       retries: 10
       start_period: 10s
+
+volumes:
+  cementic-postgres-data:

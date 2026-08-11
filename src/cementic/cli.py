@@ -280,21 +280,37 @@ def config_show() -> None:
 @init_app.command("postgres", short_help="Write a local Postgres setup directory")
 def init_postgres(
     directory: Path = typer.Argument(..., help="Directory to write setup files into"),
-    force: bool = typer.Option(False, "--force", help="Replace an existing non-empty directory"),
+    force: bool = typer.Option(
+        False, "--force", help="Overwrite setup files in an existing non-empty directory"
+    ),
 ) -> None:
     """Copy static Docker/Podman Postgres setup files for cementic."""
-    if directory.exists() and any(directory.iterdir()) and not force:
-        console.print(f"{directory} already exists and is not empty (use --force to replace it)")
+    if directory.exists() and not directory.is_dir():
+        console.print(f"{directory} exists and is not a directory")
         raise typer.Exit(1)
-    if directory.exists() and force:
-        shutil.rmtree(directory)
+    try:
+        non_empty = directory.is_dir() and any(directory.iterdir())
+    except OSError as error:
+        console.print(f"cannot read {directory}: {error}")
+        raise typer.Exit(1)
+    if non_empty and not force:
+        console.print(f"{directory} already exists and is not empty (use --force to overwrite)")
+        raise typer.Exit(1)
 
     template_root = resources.files("cementic") / "templates" / "postgres"
     with resources.as_file(template_root) as source:
         if not source.is_dir():
             console.print("Postgres setup templates are missing from this installation")
             raise typer.Exit(1)
-        shutil.copytree(source, directory, dirs_exist_ok=True)
+        # Overwrite the template files in place rather than clearing the
+        # directory first: `--force` used to `rmtree` whatever it was pointed
+        # at, so `cementic init postgres ~ --force` deleted the user's home
+        # directory before writing five files into it.
+        try:
+            shutil.copytree(source, directory, dirs_exist_ok=True)
+        except OSError as error:
+            console.print(f"failed to write setup files to {directory}: {error}")
+            raise typer.Exit(1)
 
     console.print(f"Wrote Postgres setup to {directory}")
     console.print("")

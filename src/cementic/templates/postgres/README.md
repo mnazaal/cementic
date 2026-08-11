@@ -110,11 +110,20 @@ docker compose stop
 # or: podman compose stop
 ```
 
-Remove the Compose container/network:
+Remove the Compose container/network (your indexed data lives in the
+`cementic-postgres-data` named volume and survives this):
 
 ```bash
 docker compose down
 # or: podman compose down
+```
+
+To delete the indexed data as well — every document, chunk and embedding, with
+no undo — add `-v`/`--volumes`:
+
+```bash
+docker compose down -v
+# or: podman compose down -v
 ```
 
 ## Troubleshooting

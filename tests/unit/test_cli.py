@@ -102,6 +102,19 @@ class TestInitPostgresCommand:
         assert (target / "quadlet" / "cementic-postgres.container").is_file()
         assert "cementic status --doctor" in result.output
 
+    def test_init_postgres_compose_persists_data_in_a_named_volume(self, tmp_path) -> None:
+        """Without a named volume the database lives in the container's writable
+        layer, so the `compose down` this directory's README documents would
+        delete every indexed document, chunk and embedding."""
+        target = tmp_path / "cementic-postgres"
+
+        result = runner.invoke(app, ["init", "postgres", str(target)])
+
+        assert result.exit_code == 0
+        compose = (target / "compose.yml").read_text()
+        assert "cementic-postgres-data:/var/lib/postgresql" in compose
+        assert "\nvolumes:\n  cementic-postgres-data:" in compose
+
     def test_init_postgres_refuses_non_empty_directory(self, tmp_path) -> None:
         target = tmp_path / "cementic-postgres"
         target.mkdir()
@@ -113,16 +126,41 @@ class TestInitPostgresCommand:
         assert "already exists and is not empty" in result.output
         assert (target / "keep.txt").read_text() == "do not clobber"
 
-    def test_init_postgres_force_replaces_non_empty_directory(self, tmp_path) -> None:
+    def test_init_postgres_force_overwrites_setup_files(self, tmp_path) -> None:
         target = tmp_path / "cementic-postgres"
         target.mkdir()
-        (target / "old.txt").write_text("old")
+        (target / "compose.yml").write_text("stale template")
 
         result = runner.invoke(app, ["init", "postgres", str(target), "--force"])
 
         assert result.exit_code == 0
-        assert not (target / "old.txt").exists()
+        assert (target / "compose.yml").read_text() != "stale template"
+
+    def test_init_postgres_force_leaves_unrelated_files_alone(self, tmp_path) -> None:
+        """`--force` must not be a recursive delete of whatever it is pointed at.
+
+        It used to `rmtree` the target, so `cementic init postgres ~ --force`
+        destroyed the user's home directory before writing five files into it.
+        """
+        target = tmp_path / "cementic-postgres"
+        target.mkdir()
+        (target / "irreplaceable.txt").write_text("keep me")
+
+        result = runner.invoke(app, ["init", "postgres", str(target), "--force"])
+
+        assert result.exit_code == 0
+        assert (target / "irreplaceable.txt").read_text() == "keep me"
         assert (target / "compose.yml").is_file()
+
+    def test_init_postgres_rejects_an_existing_file_target(self, tmp_path) -> None:
+        target = tmp_path / "not-a-directory"
+        target.write_text("i am a file")
+
+        result = runner.invoke(app, ["init", "postgres", str(target)])
+
+        assert result.exit_code == 1
+        assert "is not a directory" in result.output
+        assert target.read_text() == "i am a file"
 
 
 class TestRootHelp:
