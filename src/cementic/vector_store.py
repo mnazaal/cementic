@@ -55,6 +55,23 @@ def drop_table_sql(profile_id: int) -> str:
     return f"DROP TABLE IF EXISTS {vector_table_name(profile_id)}"
 
 
+def delete_vectors_for_collection_sql(profile_id: int) -> str:
+    """Parameterised delete of one collection's vectors from a profile's table.
+
+    For pruning a retired model whose profile another collection still uses: the
+    table has to stay, but this collection's vectors in it are dead weight. The
+    ``ON DELETE CASCADE`` from ``chunks_v2`` does not cover it, because a model
+    swap leaves the chunks themselves untouched.
+    """
+    table = vector_table_name(profile_id)
+    return (
+        f"DELETE FROM {table} WHERE chunk_id IN ("
+        "SELECT c.id FROM chunks_v2 c "
+        "JOIN source_documents sd ON c.document_id = sd.id "
+        "WHERE sd.collection = :collection)"
+    )
+
+
 def upsert_sql(profile_id: int) -> str:
     """Parameterised upsert of one vector row (``:chunk_id``, ``:embedding``)."""
     table = vector_table_name(profile_id)

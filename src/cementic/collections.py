@@ -19,6 +19,7 @@ from cementic.pipeline_worker import (
 )
 from cementic.revisions import (
     drain_pending_artifact_removals,
+    drain_pending_vector_table_drops,
     promote_revision,
 )
 from cementic.storage import safe_remove_artifact
@@ -255,8 +256,11 @@ def promote_ready_revision(
     promote_revision(session, collection, revision, config=config)
     session.commit()
     # Only now that the promotion is durable are the superseded revisions'
-    # artifact files safe to unlink.
+    # artifact files safe to unlink, and their vector tables safe to drop --
+    # the latter also because DROP TABLE takes its own transaction, which would
+    # have blocked on the locks the session held until this commit.
     remove_artifacts(drain_pending_artifact_removals(session), config=config)
+    drop_orphan_vector_tables(session.get_bind(), drain_pending_vector_table_drops(session))
     return PromotionOutcome("promoted", revision=revision)
 
 

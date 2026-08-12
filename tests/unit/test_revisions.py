@@ -10,19 +10,26 @@ from sqlalchemy.orm import sessionmaker
 from cementic.config import Config
 from cementic.db import (
     Base,
+    Chunk,
+    ChunkedDocument,
+    ChunkEmbedding,
     ChunkProfile,
     EmbeddingProfile,
+    ExtractedDocument,
     ExtractorProfile,
     PipelineRevision,
+    SourceDocument,
 )
 from cementic.revisions import (
     _default_revision_label,
     _revision_prune_plan,
+    drain_pending_vector_table_drops,
     get_active_revision,
     get_target_revision,
     mark_revision_ready,
     promote_revision,
     prune_collection_history,
+    unreferenced_profile_ids,
 )
 
 
@@ -59,6 +66,13 @@ class TestGetActiveRevision:
 
         result = get_active_revision(session, "col")
         assert result is None
+
+
+def _sqlite_session():
+    """A real session against an empty in-memory schema."""
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    return sessionmaker(bind=engine)()
 
 
 def _sqlite_session_with_profiles():
@@ -383,6 +397,151 @@ class TestPruneCollectionHistory:
 
         assert pending == [str(tmp_path / "artifact.pdf")]
         mock_unlink.assert_not_called()
+
+
+class TestUnreferencedProfileIds:
+    """Only a globally unreferenced embedding profile may lose its table."""
+
+    def test_profile_still_used_elsewhere_is_kept(self) -> None:
+        assert unreferenced_profile_ids([1, 2, 3], {1: 2, 3: 0}) == [2, 3]
+
+    def test_no_candidates_is_empty(self) -> None:
+        assert unreferenced_profile_ids([], {1: 0}) == []
+
+
+def _seed_model_swap_history(session, collection: str = "c1"):
+    """One document chunked once, embedded by three successive models.
+
+    The scenario the pruning leak lived in: extractor and chunking never change,
+    so every revision shares those profiles and only the embedding profile moves.
+    """
+    extractor = ExtractorProfile(name="x", fingerprint="ext", config_json="{}")
+    chunk_profile = ChunkProfile(fingerprint="chunk", config_json="{}")
+    embeddings = [
+        EmbeddingProfile(
+            fingerprint=f"embed-{suffix}",
+            provider="test",
+            model_identifier=f"model-{suffix}",
+            embedding_dim=2,
+            distance_metric="cosine",
+            config_json="{}",
+        )
+        for suffix in ("a", "b", "c")
+    ]
+    session.add_all([extractor, chunk_profile, *embeddings])
+    session.flush()
+
+    document = SourceDocument(
+        collection=collection, source_path="/doc.pdf", file_hash="h", status="indexed"
+    )
+    session.add(document)
+    session.flush()
+    extracted = ExtractedDocument(
+        document_id=document.id,
+        extractor_profile_id=extractor.id,
+        source_file_hash="h",
+        content_hash="ch",
+        status="done",
+    )
+    session.add(extracted)
+    session.flush()
+    chunked = ChunkedDocument(
+        extracted_document_id=extracted.id,
+        chunk_profile_id=chunk_profile.id,
+        source_content_hash="ch",
+        status="done",
+        total_chunks=1,
+    )
+    session.add(chunked)
+    session.flush()
+    chunk = Chunk(
+        document_id=document.id, chunked_document_id=chunked.id, chunk_index=0, content="text"
+    )
+    session.add(chunk)
+    session.flush()
+
+    # Older retired, newest retired, active -- so only the first is removable.
+    for embedding, status in zip(embeddings, ("retired", "retired", "active")):
+        session.add(
+            PipelineRevision(
+                collection=collection,
+                status=status,
+                extractor_profile_id=extractor.id,
+                chunk_profile_id=chunk_profile.id,
+                embedding_profile_id=embedding.id,
+            )
+        )
+        session.add(
+            ChunkEmbedding(chunk_id=chunk.id, embedding_profile_id=embedding.id, status="done")
+        )
+    session.commit()
+    return embeddings, chunk
+
+
+class TestPruningAfterAModelSwap:
+    """A retired model must not keep a full copy of the corpus's vectors.
+
+    Regression: the embedding delete was scoped through the *chunk* profiles
+    being removed, so a plain model swap -- same extractor, same chunking, new
+    model -- matched nothing. Every `chunk_embeddings` row for the retired model
+    survived, as did its whole `embedding_vectors_p{id}` table: one full copy of
+    the corpus per swap, forever.
+    """
+
+    def test_dropped_model_loses_its_rows_and_its_table(self) -> None:
+        session = _sqlite_session()
+        embeddings, _chunk = _seed_model_swap_history(session)
+        config = Config()
+
+        prune_collection_history(session, "c1", config=config)
+        session.commit()
+
+        surviving = {
+            row.embedding_profile_id for row in session.query(ChunkEmbedding).all()
+        }
+        assert surviving == {embeddings[1].id, embeddings[2].id}
+        assert drain_pending_vector_table_drops(session) == [embeddings[0].id]
+
+    def test_the_chunks_themselves_are_untouched(self) -> None:
+        """Only the model changed, so the extraction and chunking still stand."""
+        session = _sqlite_session()
+        _seed_model_swap_history(session)
+
+        prune_collection_history(session, "c1", config=Config())
+        session.commit()
+
+        assert session.query(Chunk).count() == 1
+        assert session.query(ChunkedDocument).count() == 1
+        assert session.query(ExtractedDocument).count() == 1
+
+    def test_a_profile_another_collection_still_uses_keeps_its_table(self) -> None:
+        """The vector table is global, so "this collection is done with it" is
+        not the question -- dropping it would blank the other collection."""
+        session = _sqlite_session()
+        embeddings, _chunk = _seed_model_swap_history(session)
+        session.add(
+            PipelineRevision(
+                collection="other",
+                status="active",
+                extractor_profile_id=1,
+                chunk_profile_id=1,
+                embedding_profile_id=embeddings[0].id,
+            )
+        )
+        session.commit()
+
+        prune_collection_history(session, "c1", config=Config())
+        session.commit()
+
+        assert drain_pending_vector_table_drops(session) == []
+        # This collection's rows for it still go: the table stays for the other
+        # collection's sake, not this one's.
+        assert (
+            session.query(ChunkEmbedding)
+            .filter_by(embedding_profile_id=embeddings[0].id)
+            .count()
+            == 0
+        )
 
 
 class TestRemoveArtifacts:

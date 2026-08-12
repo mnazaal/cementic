@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, cast
 
-from sqlalchemy import select, text
+from sqlalchemy import func, select, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
@@ -28,7 +28,11 @@ from cementic.profiles import (
     get_or_create_embedding_profile,
     get_or_create_extractor_profile,
 )
-from cementic.vector_store import create_table_sql
+from cementic.vector_store import (
+    create_table_sql,
+    delete_vectors_for_collection_sql,
+    vector_table_exists,
+)
 
 #: Revision statuses that represent an in-flight (not yet promoted) build.
 BUILDING_STATUSES = ("building", "ready")
@@ -360,6 +364,12 @@ def ensure_revision_ann_index(
 #: must not be removed until the deleting transaction has actually committed.
 _PENDING_ARTIFACT_REMOVALS = "cementic_pending_artifact_removals"
 
+#: Session key holding embedding-profile ids whose vector table should be
+#: dropped once the transaction commits. Same reasoning as the artifact list,
+#: plus one of its own: ``drop_vector_table`` opens its *own* transaction, so
+#: running it inline would wait on the locks this session is still holding.
+_PENDING_VECTOR_TABLE_DROPS = "cementic_pending_vector_table_drops"
+
 
 def _defer_artifact_removal(session: Session, paths: list[str]) -> None:
     """Record artifact files to unlink once the transaction commits."""
@@ -373,6 +383,86 @@ def drain_pending_artifact_removals(session: Session) -> list[str]:
     """Take and clear the artifact files awaiting removal for this session."""
     pending = session.info.pop(_PENDING_ARTIFACT_REMOVALS, [])
     return list(pending) if isinstance(pending, list) else []
+
+
+def _defer_vector_table_drops(session: Session, profile_ids: list[int]) -> None:
+    """Record vector tables to drop once the transaction commits."""
+    if not profile_ids:
+        return
+    pending = session.info.setdefault(_PENDING_VECTOR_TABLE_DROPS, [])
+    pending.extend(profile_ids)
+
+
+def drain_pending_vector_table_drops(session: Session) -> list[int]:
+    """Take and clear the vector tables awaiting a drop for this session."""
+    pending = session.info.pop(_PENDING_VECTOR_TABLE_DROPS, [])
+    return list(pending) if isinstance(pending, list) else []
+
+
+def unreferenced_profile_ids(
+    candidates: Sequence[int], remaining_counts: dict[int, int]
+) -> list[int]:
+    """Candidates with no revision left pointing at them anywhere (pure).
+
+    Embedding profiles are shared across collections, so "this collection no
+    longer needs it" is not the question -- the vector table is global. Only a
+    profile no revision references at all is safe to drop.
+    """
+    return sorted(
+        profile_id for profile_id in set(candidates) if remaining_counts.get(profile_id, 0) == 0
+    )
+
+
+def _purge_dropped_embeddings(
+    session: Session, collection: str, profile_ids: list[int]
+) -> list[int]:
+    """Delete one collection's embeddings for ``profile_ids``; return droppable tables.
+
+    Two distinct leaks, both invisible until disk filled up. The embedding delete
+    in ``prune_collection_history`` is scoped through the *chunk* profiles being
+    removed, so a plain model swap -- same extractor, same chunking, new model --
+    matched nothing: the retired model's ``chunk_embeddings`` rows and its entire
+    ``embedding_vectors_p{id}`` table survived, one full copy of the corpus per
+    swap.
+
+    Rows are deleted from surviving vector tables too, because a profile shared
+    with another collection keeps its table; only the vectors this collection
+    contributed go. The table itself is dropped by the caller, after commit.
+    """
+    if not profile_ids:
+        return []
+
+    chunk_ids = select(Chunk.id).join(
+        SourceDocument, Chunk.document_id == SourceDocument.id
+    ).where(SourceDocument.collection == collection)
+
+    session.query(ChunkEmbedding).filter(
+        ChunkEmbedding.chunk_id.in_(chunk_ids),
+        ChunkEmbedding.embedding_profile_id.in_(profile_ids),
+    ).delete(synchronize_session=False)
+
+    bind = session.get_bind()
+    if bind is not None and bind.dialect.name == "postgresql":
+        connection = session.connection()
+        for profile_id in profile_ids:
+            if not vector_table_exists(connection, profile_id):
+                continue
+            session.execute(
+                text(delete_vectors_for_collection_sql(profile_id)),
+                {"collection": collection},
+            )
+
+    session.flush()
+    remaining_counts = {
+        int(profile_id): int(count)
+        for profile_id, count in session.query(
+            PipelineRevision.embedding_profile_id, func.count(PipelineRevision.id)
+        )
+        .filter(PipelineRevision.embedding_profile_id.in_(profile_ids))
+        .group_by(PipelineRevision.embedding_profile_id)
+        .all()
+    }
+    return unreferenced_profile_ids(profile_ids, remaining_counts)
 
 
 def prune_collection_history(
@@ -390,6 +480,17 @@ def prune_collection_history(
     plan = _revision_prune_plan(revisions)
     if not plan.removable_revision_ids:
         return []
+
+    # Captured before the revision rows go: afterwards there is nothing left to
+    # say which embedding profiles the removed revisions were using.
+    dropped_embedding_profile_ids = sorted(
+        {
+            revision.embedding_profile_id
+            for revision in revisions
+            if revision.id in plan.removable_revision_ids
+        }
+        - plan.keep_embedding_profile_ids
+    )
 
     extracted_to_remove = (
         session.query(ExtractedDocument.id, ExtractedDocument.artifact_path)
@@ -434,6 +535,12 @@ def prune_collection_history(
         synchronize_session=False
     )
     session.flush()
+
+    # After the revision delete, so the "is this profile still referenced
+    # anywhere?" count sees the post-prune truth.
+    _defer_vector_table_drops(
+        session, _purge_dropped_embeddings(session, collection, dropped_embedding_profile_ids)
+    )
 
     # Deliberately not unlinked here: the caller has not committed yet. Deleting
     # the files inline meant a failed or rolled-back commit left rows pointing at

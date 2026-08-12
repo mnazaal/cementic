@@ -1,14 +1,38 @@
-"""PostgreSQL integration tests for revision ANN indexes."""
+"""PostgreSQL integration tests for revision ANN indexes and pruning."""
 
 from __future__ import annotations
+
+import json
 
 import pytest
 from sqlalchemy import text
 
+from cementic.collections import promote_ready_revision
 from cementic.config import Config
+from cementic.db import (
+    Chunk,
+    ChunkedDocument,
+    ChunkEmbedding,
+    ChunkProfile,
+    EmbeddingProfile,
+    ExtractedDocument,
+    ExtractorProfile,
+    PipelineRevision,
+    SourceDocument,
+)
 from cementic.revisions import ensure_revision_ann_index, ensure_revision_vector_table
-from cementic.vector_store import vector_index_name, vector_table_exists, vector_table_name
-from tests.integration.test_pg_helpers import cleanup_pg_tables, seed_active_vector_collection
+from cementic.vector_store import (
+    create_table_sql,
+    upsert_vectors,
+    vector_index_name,
+    vector_table_exists,
+    vector_table_name,
+)
+from tests.integration.test_pg_helpers import (
+    VECTOR_DIM,
+    cleanup_pg_tables,
+    seed_active_vector_collection,
+)
 
 
 @pytest.mark.pg
@@ -104,4 +128,106 @@ def test_ensure_revision_ann_index_rejects_bad_metric(pg_session) -> None:
     with pytest.raises(ValueError, match="Unsupported distance metric"):
         ensure_revision_ann_index(pg_session, revision, Config())
 
+    cleanup_pg_tables(pg_session)
+
+
+def _seed_model_swap_with_vectors(session, collection: str) -> list[int]:
+    """One document embedded by three models in turn; returns their profile ids.
+
+    The extractor and chunk profiles never change -- only the model does, which
+    is what a `model_path` edit produces. Each model gets a real vector table
+    holding a real vector, so a leaked table is observable rather than inferred.
+    """
+    extractor = ExtractorProfile(name="x", config_json="{}", fingerprint=f"ex-{collection}")
+    chunk_profile = ChunkProfile(config_json="{}", fingerprint=f"cp-{collection}")
+    source = SourceDocument(
+        collection=collection, source_path=f"/{collection}.pdf", file_hash="h", status="done"
+    )
+    embeddings = [
+        EmbeddingProfile(
+            provider="llama-cpp",
+            model_identifier=f"model-{suffix}",
+            embedding_dim=VECTOR_DIM,
+            distance_metric="cosine",
+            config_json=json.dumps({"provider": "llama-cpp", "embedding_dim": VECTOR_DIM}),
+            fingerprint=f"ep-{collection}-{suffix}",
+        )
+        for suffix in ("a", "b", "c")
+    ]
+    session.add_all([extractor, chunk_profile, source, *embeddings])
+    session.flush()
+
+    extracted = ExtractedDocument(
+        document_id=source.id,
+        extractor_profile_id=extractor.id,
+        source_file_hash="h",
+        content_hash="ch",
+        status="done",
+    )
+    session.add(extracted)
+    session.flush()
+    chunked = ChunkedDocument(
+        extracted_document_id=extracted.id,
+        chunk_profile_id=chunk_profile.id,
+        source_content_hash="ch",
+        status="done",
+        total_chunks=1,
+    )
+    session.add(chunked)
+    session.flush()
+    chunk = Chunk(
+        document_id=source.id, chunked_document_id=chunked.id, chunk_index=0, content="text"
+    )
+    session.add(chunk)
+    session.flush()
+
+    connection = session.connection()
+    # Oldest retired, newest retired, then the ready one about to be promoted:
+    # promotion retires the middle revision, leaving the oldest prunable.
+    for embedding, status in zip(embeddings, ("retired", "active", "ready")):
+        session.add(
+            ChunkEmbedding(
+                chunk_id=chunk.id, embedding_profile_id=embedding.id, status="done"
+            )
+        )
+        session.add(
+            PipelineRevision(
+                collection=collection,
+                label=f"rev-{embedding.model_identifier}",
+                extractor_profile_id=extractor.id,
+                chunk_profile_id=chunk_profile.id,
+                embedding_profile_id=embedding.id,
+                status=status,
+            )
+        )
+        connection.execute(text(create_table_sql(embedding.id, VECTOR_DIM)))
+        upsert_vectors(connection, embedding.id, [(chunk.id, [1.0, 0.0, 0.0, 0.0])])
+    session.commit()
+    return [embedding.id for embedding in embeddings]
+
+
+@pytest.mark.pg
+def test_promotion_drops_the_retired_model_vector_table(pg_engine, pg_session, pg_config) -> None:
+    """A model swap must not leave a full copy of the corpus's vectors behind.
+
+    Regression: pruning scoped its embedding delete through the *chunk* profiles
+    being removed, so a swap that changed only the model matched nothing. The
+    retired model kept its `chunk_embeddings` rows and its entire
+    `embedding_vectors_p{id}` table -- one whole copy of the corpus per swap.
+    """
+    cleanup_pg_tables(pg_session)
+    dropped, kept_retired, promoted = _seed_model_swap_with_vectors(pg_session, "swap")
+
+    outcome = promote_ready_revision(pg_session, "swap", config=pg_config)
+
+    assert outcome.status == "promoted"
+    with pg_engine.connect() as conn:
+        assert not vector_table_exists(conn, dropped)
+        # The rollback step and the newly promoted model both stay searchable.
+        assert vector_table_exists(conn, kept_retired)
+        assert vector_table_exists(conn, promoted)
+    surviving = {
+        row.embedding_profile_id for row in pg_session.query(ChunkEmbedding).all()
+    }
+    assert surviving == {kept_retired, promoted}
     cleanup_pg_tables(pg_session)
