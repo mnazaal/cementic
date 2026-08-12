@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import pytest
+from sqlalchemy import text
 
+from cementic.revisions import CURRENT_CONTENT_SQL
 from cementic.search import Searcher
 from tests.integration.test_pg_helpers import (
     cleanup_pg_tables,
@@ -129,4 +131,43 @@ def test_pg_search_excludes_a_retired_extractor_profile(
     contents = [result["content"] for result in results]
     assert contents == ["current extraction text"]
     assert revision.status == "active"
+    cleanup_pg_tables(pg_session)
+
+
+@pytest.mark.pg
+def test_the_seed_helper_produces_rows_the_pipeline_could_produce(pg_session) -> None:
+    """The fixture must satisfy the same freshness invariant the worker maintains.
+
+    Regression: the helper left `source_file_hash`, `content_hash` and
+    `source_content_hash` NULL. Once search began requiring
+    `ed.source_file_hash = sd.file_hash` -- NULL fails it, since NULL = NULL is
+    not true -- every seeded corpus became unfindable, and three PG tests went
+    red on main while the unit and non-PG jobs stayed green.
+
+    Asserted against the production predicate itself, so the fixture cannot
+    drift away from it again without this failing.
+    """
+    cleanup_pg_tables(pg_session)
+    seed_active_vector_collection(
+        pg_session,
+        collection="invariant",
+        source_path="/docs/invariant.pdf",
+        chunks=[("some text", [1.0, 0.0, 0.0, 0.0])],
+    )
+    pg_session.commit()
+
+    # `IS NOT TRUE`, not `NOT (...)`: with a NULL hash the predicate evaluates
+    # to NULL, and `NOT NULL` is NULL rather than true -- so the obvious spelling
+    # counts nothing and passes against exactly the fixture it exists to reject.
+    stale = pg_session.execute(
+        text(
+            "SELECT count(*) FROM extracted_documents ed "
+            "JOIN source_documents sd ON ed.document_id = sd.id "
+            "JOIN chunked_documents cd ON cd.extracted_document_id = ed.id "
+            "WHERE sd.collection = 'invariant' "
+            "AND (" + CURRENT_CONTENT_SQL + ") IS NOT TRUE"
+        )
+    ).scalar()
+
+    assert stale == 0, "seeded rows do not satisfy the freshness predicate search requires"
     cleanup_pg_tables(pg_session)

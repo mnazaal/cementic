@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 
 from sqlalchemy import text
@@ -23,6 +24,11 @@ from cementic.vector_store import create_table_sql, upsert_vectors
 VECTOR_DIM = 4
 
 
+def _fake_hash(seed: str) -> str:
+    """A realistic 64-char hex digest, since the columns are sized for one."""
+    return hashlib.sha256(seed.encode("utf-8")).hexdigest()
+
+
 def seed_active_vector_collection(
     session: Session,
     *,
@@ -31,12 +37,21 @@ def seed_active_vector_collection(
     chunks: list[tuple[str, list[float]]],
     status: str = "active",
 ) -> PipelineRevision:
-    """Create one searchable collection with active revision and done embeddings."""
+    """Create one searchable collection with active revision and done embeddings.
+
+    The freshness hashes are chained the way the worker chains them, not filled
+    in with plausible-looking strings: search requires
+    ``ed.source_file_hash = sd.file_hash`` and
+    ``cd.source_content_hash = ed.content_hash``, and NULL fails both -- so a
+    fixture that omitted them seeded a corpus that could never be found.
+    """
     suffix = f"{collection}-{source_path}"
+    file_hash = _fake_hash(f"file-{suffix}")
+    content_hash = _fake_hash(f"content-{suffix}")
     source = SourceDocument(
         collection=collection,
         source_path=source_path,
-        file_hash=f"hash-{suffix}",
+        file_hash=file_hash,
         status="done",
     )
     extractor = ExtractorProfile(
@@ -69,6 +84,8 @@ def seed_active_vector_collection(
         document_id=source.id,
         extractor_profile_id=extractor.id,
         artifact_path=f"/tmp/{suffix}.json",
+        source_file_hash=file_hash,
+        content_hash=content_hash,
         status="done",
     )
     session.add(extracted)
@@ -77,6 +94,7 @@ def seed_active_vector_collection(
     chunked = ChunkedDocument(
         extracted_document_id=extracted.id,
         chunk_profile_id=chunk_profile.id,
+        source_content_hash=content_hash,
         status="done",
         total_chunks=len(chunks),
     )
