@@ -4,15 +4,18 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+from pydantic import ValidationError
 
 from cementic import extract as extract_mod
-from cementic.config import Config
+from cementic.config import Config, ExtractionConfig
 from cementic.extract import (
     ExtractorSpec,
+    backend_choice_error,
     extract_document,
     extraction_is_empty,
     extractor_for,
     extractor_registry_payload,
+    normalize_backend_file_type,
     supported_extensions,
 )
 from cementic.profiles import build_extractor_profile_payload
@@ -84,6 +87,59 @@ def test_misconfigured_backend_raises(config):
     config.extraction.backends = {"pdf": "plaintext"}  # plaintext can't read pdf
     with pytest.raises(ValueError, match="does not handle"):
         extract_document("/docs/a.pdf", config)
+
+
+class TestBackendKeyHandling:
+    """`[extraction.backends]` keys were taken bare, lowercase and unchecked.
+
+    A key like `PDF` or `.pdf` matched nothing at lookup time and was silently
+    ignored -- while still entering the extractor profile's fingerprint, so it
+    forced a re-extraction that produced exactly what the previous one did.
+    """
+
+    @pytest.mark.parametrize("written", ["pdf", ".pdf", "PDF", ".PDF", "  pdf  "])
+    def test_the_ways_a_file_type_can_be_written_all_normalise(self, written):
+        assert normalize_backend_file_type(written) == "pdf"
+
+    def test_an_unknown_name_is_not_reported_as_a_capability_problem(self):
+        problem = backend_choice_error("pdf", "pymypdf4llm")
+        assert problem is not None
+        assert "unknown extraction backend" in problem
+        # Naming the alternatives is the point: the mistake is a typo.
+        assert "pymupdf4llm" in problem
+
+    def test_a_real_extractor_for_the_wrong_type_says_what_it_handles(self):
+        problem = backend_choice_error("txt", "pymupdf4llm")
+        assert problem is not None
+        assert "does not handle '.txt'" in problem
+        assert ".pdf" in problem
+
+    def test_a_usable_pairing_has_no_complaint(self):
+        assert backend_choice_error("pdf", "pymupdf4llm") is None
+
+    def test_a_dotted_key_now_actually_selects_the_backend(self, config):
+        """Previously ignored in silence, falling back to the registry default.
+
+        Normalisation lives in the config validator, so the entry has to arrive
+        through it -- assigning the dict afterwards skips validation entirely.
+        """
+        validated = ExtractionConfig.model_validate({"backends": {".PDF": "pymupdf4llm"}})
+        config.extraction = validated
+
+        assert validated.backends == {"pdf": "pymupdf4llm"}
+        assert extractor_for("/docs/a.pdf", config)[0] == "pymupdf4llm"
+
+    def test_an_unusable_entry_is_refused_at_config_time(self):
+        """One error at load, rather than one failed document at a time."""
+        with pytest.raises(ValidationError, match="does not handle"):
+            ExtractionConfig.model_validate({"backends": {"txt": "pymupdf4llm"}})
+
+    def test_the_same_type_written_two_ways_is_a_conflict(self):
+        """`pdf` and `.pdf` used to be separate keys, so one silently won."""
+        with pytest.raises(ValidationError, match="configured twice"):
+            ExtractionConfig.model_validate(
+                {"backends": {"pdf": "pymupdf4llm", ".pdf": "plaintext"}}
+            )
 
 
 def test_adding_one_registry_entry_is_all_it_takes(monkeypatch, config):

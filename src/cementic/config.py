@@ -533,10 +533,43 @@ class ExtractionConfig(_SectionSettings):
     backends: dict[str, str] = Field(
         default_factory=dict,
         description="Per-file-type extractor choice, e.g. {'pdf': 'pymupdf4llm'}. "
-        "Keys are bare file types; values are registered extractor names. "
-        "Unset types fall back to the registry default.",
+        "Keys are file types, with or without a leading dot and in any case; "
+        "values are registered extractor names. Unset types fall back to the "
+        "registry default.",
     )
     use_ocr: bool = Field(default=False, description="Enable OCR when supported")
+
+    @field_validator("backends")
+    @classmethod
+    def _validate_backends(cls, value: dict[str, str]) -> dict[str, str]:
+        """Normalise keys and check each entry against the extractor registry.
+
+        Both halves were unvalidated. A key like `PDF` or `.pdf` matched nothing
+        at lookup time and was silently ignored -- while still entering the
+        extractor profile's fingerprint, so it forced a full re-extraction that
+        produced exactly what the previous one did. A misspelt extractor name
+        surfaced only when a matching file eventually arrived, one failed
+        document at a time, reported as a capability problem rather than a typo.
+
+        Imported here rather than at module scope: `extract` imports this module.
+        """
+        from cementic.extract import backend_choice_error, normalize_backend_file_type
+
+        normalized: dict[str, str] = {}
+        for file_type, extractor_name in value.items():
+            key = normalize_backend_file_type(file_type)
+            if not key:
+                raise ValueError(f"empty file type in extraction backends: {file_type!r}")
+            if key in normalized and normalized[key] != extractor_name:
+                raise ValueError(
+                    f"file type '{key}' is configured twice with different backends: "
+                    f"'{normalized[key]}' and '{extractor_name}'"
+                )
+            problem = backend_choice_error(key, extractor_name)
+            if problem is not None:
+                raise ValueError(problem)
+            normalized[key] = extractor_name
+        return normalized
 
 
 class StorageConfig(_SectionSettings):

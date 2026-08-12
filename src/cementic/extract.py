@@ -143,21 +143,60 @@ def supported_extensions() -> frozenset[str]:
     return frozenset(ext for spec, _ in _EXTRACTORS.values() for ext in spec.extensions)
 
 
+def extractor_names() -> tuple[str, ...]:
+    """Names of the registered extractors, in registration order."""
+    return tuple(_EXTRACTORS)
+
+
+def normalize_backend_file_type(file_type: str) -> str:
+    """Canonical form of a ``[extraction.backends]`` key (pure).
+
+    Keys are looked up as a bare lowercase suffix, so ``PDF`` and ``.pdf`` used
+    to match nothing and be silently ignored -- while still changing the
+    extractor profile's fingerprint, forcing a re-extraction that did exactly
+    what the old one did.
+    """
+    return file_type.strip().lstrip(".").lower()
+
+
+def backend_choice_error(file_type: str, extractor_name: str) -> str | None:
+    """Why ``extractor_name`` cannot serve ``file_type``, or None (pure).
+
+    Two separate mistakes, which used to share one message: naming an extractor
+    that does not exist reported that it "does not handle '.pdf'", as though a
+    typo'd name were a capability problem.
+    """
+    entry = _EXTRACTORS.get(extractor_name)
+    if entry is None:
+        return (
+            f"unknown extraction backend '{extractor_name}' for '{file_type}'. "
+            f"Available: {', '.join(sorted(_EXTRACTORS))}"
+        )
+    suffix = f".{normalize_backend_file_type(file_type)}"
+    if suffix not in entry[0].extensions:
+        return (
+            f"extraction backend '{extractor_name}' does not handle '{suffix}'. "
+            f"It handles: {', '.join(sorted(entry[0].extensions))}"
+        )
+    return None
+
+
 def extractor_for(path: str, config: Config) -> tuple[str, ExtractorFn] | None:
     """Resolve a path to its extractor; None when no extractor handles the type.
 
     A `[extraction.backends]` entry for the file type (e.g. ``pdf = "docling"``)
     selects a specific extractor; otherwise the first registered one that handles
-    the suffix is used. A configured backend that can't handle the type is a
-    misconfiguration and raises.
+    the suffix is used. Config validation rejects an unusable entry up front, so
+    the check here is a backstop for a Config assembled in code.
     """
     suffix = Path(path).suffix.lower()
-    chosen = config.extraction.backends.get(suffix.removeprefix("."))
+    file_type = normalize_backend_file_type(suffix)
+    chosen = config.extraction.backends.get(file_type)
     if chosen is not None:
-        entry = _EXTRACTORS.get(chosen)
-        if entry is None or suffix not in entry[0].extensions:
-            raise ValueError(f"extraction backend '{chosen}' does not handle '{suffix}'")
-        return chosen, entry[1]
+        problem = backend_choice_error(file_type, chosen)
+        if problem is not None:
+            raise ValueError(problem)
+        return chosen, _EXTRACTORS[chosen][1]
     for name, (spec, fn) in _EXTRACTORS.items():
         if suffix in spec.extensions:
             return name, fn

@@ -312,6 +312,31 @@ class TestConfigProblemsAreReported:
 
         assert get_config().extraction.backends["pdf"] == "pymupdf4llm"
 
+    def test_a_dotted_or_uppercase_file_type_is_honoured(self, tmp_path, monkeypatch):
+        """Written this way it used to be dropped in silence -- and still change
+        the extractor fingerprint, forcing a re-extraction that changed nothing."""
+        self._write(tmp_path, '[extraction.backends]\n".PDF" = "pymupdf4llm"\n', monkeypatch)
+
+        assert get_config().extraction.backends == {"pdf": "pymupdf4llm"}
+
+    def test_an_unknown_backend_name_fails_at_load(self, tmp_path, monkeypatch):
+        """It used to surface one failed document at a time, once a matching file
+        arrived, and blamed the extractor's capabilities rather than the typo.
+
+        Raised as a ValidationError, like every other value-level failure; the
+        CLI renders it through ``format_config_error``.
+        """
+        self._write(tmp_path, '[extraction.backends]\npdf = "pymypdf4llm"\n', monkeypatch)
+
+        with pytest.raises(ValidationError) as excinfo:
+            get_config()
+
+        rendered = format_config_error(excinfo.value, tmp_path / "cementic.toml")
+        assert "[extraction] backends: " in rendered
+        assert "unknown extraction backend" in rendered
+        # The message must not carry the offending value in raw pydantic form.
+        assert "input_value" not in rendered
+
 
 class TestExplicitConfigPathIsHonoured:
     def test_missing_file_is_an_error_not_a_fallback(self, tmp_path, monkeypatch):
