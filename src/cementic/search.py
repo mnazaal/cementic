@@ -90,6 +90,37 @@ def _score_from_distance(metric: str, distance: float) -> tuple[float, str]:
     raise ValueError(f"Unsupported distance metric: {metric}")
 
 
+def _mixed_model_message(revisions: list[PipelineRevision]) -> str:
+    """Name which collection uses which model, and how to proceed (pure).
+
+    The old message -- "different active embedding models; search them
+    separately" -- named no collection, so working out which one to drop meant
+    reading `collection list` and comparing revision labels by hand. It also
+    said "active" about revisions that may be `building` or `ready`, which is
+    how a half-built collection ended up blamed for a config change nobody had
+    made.
+
+    Refusing rather than dropping the odd collection is deliberate: distances
+    from different models are not comparable, so a merged ranking would be
+    silently meaningless -- worse than an error, which is at least visible.
+    """
+    by_model: dict[str, list[str]] = {}
+    for revision in sorted(revisions, key=lambda item: item.collection):
+        model = revision.embedding_profile.model_identifier
+        by_model.setdefault(model, []).append(f"{revision.collection} ({revision.status})")
+
+    groups = "; ".join(
+        f"{model}: {', '.join(collections)}" for model, collections in sorted(by_model.items())
+    )
+    largest = max(by_model.values(), key=len)
+    example = " ".join(entry.split(" ")[0] for entry in largest)
+    return (
+        f"cannot search these collections together -- they are indexed by different "
+        f"embedding models, and scores from different models are not comparable. "
+        f"{groups}. Search one model's collections at a time, e.g. -c {example}"
+    )
+
+
 def _searchable_revisions(revisions: list[PipelineRevision]) -> list[PipelineRevision]:
     """Select one searchable revision per collection, preferring active."""
     status_rank = {"active": 3, "ready": 2, "building": 1}
@@ -132,10 +163,7 @@ class Searcher:
 
             embedding_profile_ids = {revision.embedding_profile_id for revision in revisions}
             if len(embedding_profile_ids) != 1:
-                raise RuntimeError(
-                    "Selected collections use different active embedding models; "
-                    "search them separately"
-                )
+                raise RuntimeError(_mixed_model_message(revisions))
 
             embedding_profile = revisions[0].embedding_profile
             # Bound the query against the window of the profile the daemon will

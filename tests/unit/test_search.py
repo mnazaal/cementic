@@ -159,10 +159,27 @@ class TestSearcher:
     @patch("cementic.search.get_engine")
     @patch("cementic.search.get_session_factory")
     def test_search_rejects_mixed_active_models(self, mock_session_factory, mock_get_engine):
+        """The refusal must name the collections, their models and their statuses.
+
+        It used to say only "different active embedding models; search them
+        separately" -- naming no collection, so finding the odd one out meant
+        reading `collection list` and comparing revision labels by hand. It also
+        said "active" about revisions that were merely `building` or `ready`.
+        """
         revision_query = self.RevisionQuery(
             [
-                SimpleNamespace(collection="a", embedding_profile_id=1),
-                SimpleNamespace(collection="b", embedding_profile_id=2),
+                SimpleNamespace(
+                    collection="a",
+                    status="active",
+                    embedding_profile_id=1,
+                    embedding_profile=SimpleNamespace(model_identifier="nomic-v1.5"),
+                ),
+                SimpleNamespace(
+                    collection="b",
+                    status="building",
+                    embedding_profile_id=2,
+                    embedding_profile=SimpleNamespace(model_identifier="minilm"),
+                ),
             ]
         )
         mock_session = MagicMock()
@@ -173,12 +190,13 @@ class TestSearcher:
 
         searcher = Searcher()
         with patch("cementic.search._create_embedding_provider"):
-            try:
+            with pytest.raises(RuntimeError) as excinfo:
                 searcher.search("test")
-            except RuntimeError as error:
-                assert "different active embedding models" in str(error)
-            else:
-                raise AssertionError("Expected RuntimeError")
+
+        message = str(excinfo.value)
+        assert "nomic-v1.5: a (active)" in message
+        assert "minilm: b (building)" in message
+        assert "-c " in message
 
     @patch("cementic.search.get_engine")
     @patch("cementic.search.get_session_factory")
