@@ -10,16 +10,28 @@ from pathlib import Path
 from typing import Any
 
 # mypy: disable-error-code=import-untyped
-import pymupdf
-
 from cementic.config import Config
 
-try:
-    import pymupdf.layout  # noqa: F401
-except ImportError:
-    pass
 
-import pymupdf4llm
+def _get_pymupdf() -> tuple[Any, Any]:
+    """Import the PDF stack on first use, returning ``(pymupdf, pymupdf4llm)``.
+
+    Deliberately not at module scope. ``pymupdf.layout`` loads an ONNX layout
+    model and networkx, which costs about half a second warm and over a second
+    cold -- and `cli.py` imports this module, so `cementic --version` paid it too.
+    The runtime-budget tests could not see it: they time dispatch after the test
+    module has already imported the CLI.
+    """
+    import pymupdf
+
+    try:
+        import pymupdf.layout  # noqa: F401
+    except ImportError:
+        pass
+
+    import pymupdf4llm
+
+    return pymupdf, pymupdf4llm
 
 
 def _get_rapidocr_api() -> Any | None:
@@ -50,6 +62,7 @@ def extract_pdf_markdown(pdf_path: str, use_ocr: bool = True) -> str:
     if not path.exists():
         raise FileNotFoundError(f"PDF not found: {pdf_path}")
 
+    pymupdf, pymupdf4llm = _get_pymupdf()
     if pymupdf._get_layout is None:
         raise RuntimeError(
             "pymupdf_layout is required for improved page layout analysis. "

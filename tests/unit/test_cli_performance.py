@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import subprocess
+import sys
 import time
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -21,6 +23,28 @@ def _assert_fast(args: list[str], budget_seconds: float) -> str:
     assert result.exit_code == 0, result.output
     assert elapsed < budget_seconds, f"{args} took {elapsed:.3f}s > {budget_seconds:.3f}s"
     return result.output
+
+
+def test_cli_import_does_not_pull_in_the_pdf_stack() -> None:
+    """Importing the CLI must not load the PDF layout model.
+
+    `cli` imports `extract`, which used to import `pymupdf.layout` at module
+    scope -- an ONNX layout analyser plus networkx, about 0.5s warm and over a
+    second cold, paid by `cementic --version` and every other command. The other
+    budgets in this file cannot catch it: they time dispatch, by which point the
+    test module has already imported the CLI. Asserted structurally rather than
+    by clock, so it does not depend on machine load.
+    """
+    probe = (
+        "import sys; import cementic.cli; "
+        "print(','.join(m for m in ('pymupdf.layout', 'pymupdf4llm', 'networkx') "
+        "if m in sys.modules))"
+    )
+    loaded = subprocess.run(
+        [sys.executable, "-c", probe], capture_output=True, text=True, check=True
+    ).stdout.strip()
+
+    assert loaded == "", f"cementic.cli eagerly imported: {loaded}"
 
 
 def test_namespace_help_commands_stay_fast() -> None:

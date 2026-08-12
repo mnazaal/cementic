@@ -1,11 +1,29 @@
 """Integration tests for PDF extraction module."""
 
 import sys
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from cementic.extract import extract_pdf_markdown
+
+
+def _fake_pdf_stack(*, layout: object = object(), to_markdown: object = "markdown"):
+    """Stand-ins for the modules ``_get_pymupdf`` resolves.
+
+    Patched at that seam rather than on the real modules, because importing
+    ``pymupdf.layout`` runs an ``activate()`` that rebinds
+    ``pymupdf4llm.to_markdown`` -- so a patch applied before the first lazy
+    import was silently replaced by the real function mid-test.
+    """
+    pymupdf = SimpleNamespace(_get_layout=layout)
+    pymupdf4llm = SimpleNamespace(
+        to_markdown=to_markdown
+        if callable(to_markdown)
+        else MagicMock(return_value=to_markdown)
+    )
+    return pymupdf, pymupdf4llm
 
 
 class TestExtractErrorPaths:
@@ -16,67 +34,66 @@ class TestExtractErrorPaths:
             extract_pdf_markdown("/nonexistent/path/file.pdf")
 
     def test_missing_pymupdf_layout_raises(self) -> None:
-        """Simulate pymupdf._get_layout being None (layout not installed)."""
+        """Layout not installed must be reported, not worked around."""
+        stack = _fake_pdf_stack(layout=None)
         with patch("pathlib.Path.exists", return_value=True):
-            with patch("cementic.extract.pymupdf._get_layout", None):
+            with patch("cementic.extract._get_pymupdf", return_value=stack):
                 with pytest.raises(RuntimeError, match="pymupdf_layout is required"):
                     extract_pdf_markdown("any.pdf")
+        stack[1].to_markdown.assert_not_called()
 
-    @patch("cementic.extract.pymupdf4llm.to_markdown")
-    def test_non_string_return_type(self, mock_to_md: MagicMock) -> None:
+    def test_non_string_return_type(self) -> None:
         """Page chunks are refused, not stringified.
 
         Unreachable today (page_chunks is never requested), but if the upstream
         contract changes they arrive as dicts, and joining their str() would
         store and embed the reprs as though they were the document.
         """
-        mock_to_md.return_value = ["page 1 text", "page 2 text"]
+        stack = _fake_pdf_stack(to_markdown=["page 1 text", "page 2 text"])
 
         with patch("pathlib.Path.exists", return_value=True):
-            with pytest.raises(RuntimeError, match="page chunks"):
-                extract_pdf_markdown("/fake/path.pdf")
+            with patch("cementic.extract._get_pymupdf", return_value=stack):
+                with pytest.raises(RuntimeError, match="page chunks"):
+                    extract_pdf_markdown("/fake/path.pdf")
 
-    @patch("cementic.extract.pymupdf4llm.to_markdown")
     @patch("cementic.extract._get_rapidocr_api")
-    def test_ocr_disabled(self, mock_ocr: MagicMock, mock_to_md: MagicMock) -> None:
+    def test_ocr_disabled(self, mock_ocr: MagicMock) -> None:
         """use_ocr=False skips OCR function lookup."""
-        mock_to_md.return_value = "plain text"
+        stack = _fake_pdf_stack(to_markdown="plain text")
 
         with patch("pathlib.Path.exists", return_value=True):
-            result = extract_pdf_markdown("/fake/path.pdf", use_ocr=False)
+            with patch("cementic.extract._get_pymupdf", return_value=stack):
+                result = extract_pdf_markdown("/fake/path.pdf", use_ocr=False)
         assert result == "plain text"
         mock_ocr.assert_not_called()
 
-    @patch("cementic.extract.pymupdf4llm.to_markdown")
     @patch("cementic.extract._get_rapidocr_api")
-    def test_ocr_enabled_with_rapidocr(self, mock_ocr: MagicMock, mock_to_md: MagicMock) -> None:
+    def test_ocr_enabled_with_rapidocr(self, mock_ocr: MagicMock) -> None:
         """use_ocr=True with OCR available: passes ocr_function."""
         mock_ocr.return_value = MagicMock()
-        mock_to_md.return_value = "text with ocr"
+        stack = _fake_pdf_stack(to_markdown="text with ocr")
 
         with patch("pathlib.Path.exists", return_value=True):
-            result = extract_pdf_markdown("/fake/path.pdf", use_ocr=True)
+            with patch("cementic.extract._get_pymupdf", return_value=stack):
+                result = extract_pdf_markdown("/fake/path.pdf", use_ocr=True)
         assert result == "text with ocr"
-        call_kwargs = mock_to_md.call_args.kwargs
-        assert "ocr_function" in call_kwargs
+        assert "ocr_function" in stack[1].to_markdown.call_args.kwargs
 
-    @patch("cementic.extract.pymupdf4llm.to_markdown")
     @patch("cementic.extract._get_rapidocr_api", return_value=None)
-    def test_ocr_enabled_without_rapidocr(
-        self, mock_ocr: MagicMock, mock_to_md: MagicMock
-    ) -> None:
+    def test_ocr_enabled_without_rapidocr(self, mock_ocr: MagicMock) -> None:
         """Configured OCR with no rapidocr is refused rather than degraded.
 
         It used to proceed without OCR, and the un-OCR'd text went into an
         immutable artifact -- so the corpus carried the degradation while the
         config still said OCR was on.
         """
-        mock_to_md.return_value = "text"
+        stack = _fake_pdf_stack(to_markdown="text")
 
         with patch("pathlib.Path.exists", return_value=True):
-            with pytest.raises(RuntimeError, match="rapidocr"):
-                extract_pdf_markdown("/fake/path.pdf", use_ocr=True)
-        mock_to_md.assert_not_called()
+            with patch("cementic.extract._get_pymupdf", return_value=stack):
+                with pytest.raises(RuntimeError, match="rapidocr"):
+                    extract_pdf_markdown("/fake/path.pdf", use_ocr=True)
+        stack[1].to_markdown.assert_not_called()
 
 
 class TestImportFailures:
@@ -97,10 +114,3 @@ class TestImportFailures:
         finally:
             if saved is not None:
                 sys.modules["pymupdf4llm.ocr"] = saved
-
-    def test_pymupdf_layout_import_handled(self) -> None:
-        """Verify pymupdf.layout import failure is silently handled."""
-        # The module already imported pymupdf.layout (or caught the error)
-        # Just verify extract_pdf_markdown still works
-        import cementic.extract
-        assert hasattr(cementic.extract, "pymupdf")

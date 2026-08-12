@@ -1,18 +1,35 @@
-"""Tests for PDF conversion helpers."""
+"""Tests for PDF conversion helpers.
+
+The PDF stack is imported on first use rather than at module scope, and that
+first import runs an ``activate()`` which rebinds ``pymupdf4llm.to_markdown``.
+Patching the real modules is therefore unstable -- the patch survives or not
+depending on whether some earlier test already triggered the import. These patch
+``_get_pymupdf``, the seam the lazy import goes through.
+"""
 
 import builtins
-import importlib
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-import cementic.extract as extract_module
-from cementic.extract import extract_pdf_markdown
+from cementic.extract import _get_pymupdf, extract_pdf_markdown
 
 
-def test_extract_module_tolerates_missing_layout_import() -> None:
-    """Import-time layout hook is optional; runtime check reports missing layout."""
+def _fake_pdf_stack(*, layout: object = object(), to_markdown: object = "markdown"):
+    """Stand-ins for the modules ``_get_pymupdf`` resolves."""
+    pymupdf = SimpleNamespace(_get_layout=layout)
+    pymupdf4llm = SimpleNamespace(
+        to_markdown=to_markdown
+        if callable(to_markdown)
+        else MagicMock(return_value=to_markdown)
+    )
+    return pymupdf, pymupdf4llm
+
+
+def test_layout_import_stays_optional() -> None:
+    """The layout hook is optional; the runtime check reports it missing."""
     original_import = builtins.__import__
 
     def guarded_import(name, *args, **kwargs):
@@ -21,10 +38,10 @@ def test_extract_module_tolerates_missing_layout_import() -> None:
         return original_import(name, *args, **kwargs)
 
     with patch("builtins.__import__", side_effect=guarded_import):
-        reloaded = importlib.reload(extract_module)
+        pymupdf, pymupdf4llm = _get_pymupdf()
 
-    assert reloaded.extract_pdf_markdown is not None
-    importlib.reload(extract_module)
+    assert pymupdf is not None
+    assert pymupdf4llm is not None
 
 
 def test_convert_uses_layout_and_disables_header_footer(temp_dir: Path) -> None:
@@ -33,15 +50,13 @@ def test_convert_uses_layout_and_disables_header_footer(temp_dir: Path) -> None:
     pdf_path.write_bytes(b"%PDF-1.4\n")
 
     rapidocr = MagicMock()
-    with patch("cementic.extract.pymupdf._get_layout", object()):
+    stack = _fake_pdf_stack()
+    with patch("cementic.extract._get_pymupdf", return_value=stack):
         with patch("cementic.extract._get_rapidocr_api", return_value=rapidocr):
-            with patch(
-                "cementic.extract.pymupdf4llm.to_markdown", return_value="markdown"
-            ) as mock_md:
-                result = extract_pdf_markdown(str(pdf_path))
+            result = extract_pdf_markdown(str(pdf_path))
 
     assert result == "markdown"
-    mock_md.assert_called_once_with(
+    stack[1].to_markdown.assert_called_once_with(
         str(pdf_path),
         header=False,
         footer=False,
@@ -57,7 +72,7 @@ def test_configured_ocr_without_rapidocr_is_refused(temp_dir: Path) -> None:
     pdf_path = temp_dir / "sample.pdf"
     pdf_path.write_bytes(b"%PDF-1.4\n")
 
-    with patch("cementic.extract.pymupdf._get_layout", object()):
+    with patch("cementic.extract._get_pymupdf", return_value=_fake_pdf_stack()):
         with patch("cementic.extract._get_rapidocr_api", return_value=None):
             with pytest.raises(RuntimeError, match="rapidocr"):
                 extract_pdf_markdown(str(pdf_path), use_ocr=True)
@@ -68,7 +83,7 @@ def test_convert_requires_pymupdf_layout(temp_dir: Path) -> None:
     pdf_path = temp_dir / "sample.pdf"
     pdf_path.write_bytes(b"%PDF-1.4\n")
 
-    with patch("cementic.extract.pymupdf._get_layout", None):
+    with patch("cementic.extract._get_pymupdf", return_value=_fake_pdf_stack(layout=None)):
         with pytest.raises(RuntimeError, match="pymupdf_layout"):
             extract_pdf_markdown(str(pdf_path))
 
@@ -80,7 +95,7 @@ def test_page_chunks_are_refused_rather_than_stringified(temp_dir: Path) -> None
     pdf_path = temp_dir / "sample.pdf"
     pdf_path.write_bytes(b"%PDF-1.4\n")
 
-    with patch("cementic.extract.pymupdf._get_layout", object()):
-        with patch("cementic.extract.pymupdf4llm.to_markdown", return_value=["one", "two"]):
-            with pytest.raises(RuntimeError, match="page chunks"):
-                extract_pdf_markdown(str(pdf_path), use_ocr=False)
+    stack = _fake_pdf_stack(to_markdown=["one", "two"])
+    with patch("cementic.extract._get_pymupdf", return_value=stack):
+        with pytest.raises(RuntimeError, match="page chunks"):
+            extract_pdf_markdown(str(pdf_path), use_ocr=False)
