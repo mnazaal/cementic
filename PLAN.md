@@ -293,37 +293,55 @@ Two notes for whoever picks this up:
   cannot make a relative path mean the same thing from two directories. A real
   mismatch is now refused rather than quietly succeeding.
 
+### Fixed on `claude/review-round-four`
+
+All four remaining items, plus one found while sizing them.
+
+1. **Pruning leaks** — the embedding delete was scoped through the *chunk*
+   profiles being removed, so a swap that changed only the model matched
+   nothing: the retired model kept every `chunk_embeddings` row and its whole
+   `embedding_vectors_p{id}` table, one full copy of the corpus per swap. Both
+   anticipated footguns were real and are handled — the droppable set is
+   re-queried globally, and the `DROP TABLE` is deferred past `commit()`
+   alongside the artifact removals. A third turned up: a profile another
+   collection still uses keeps its table, but this collection's vectors in it
+   have to go explicitly, because the `chunks_v2` cascade does not reach them
+   when the chunks themselves are untouched.
+2. **Every command paid ~0.5s warm / ~1.3s cold for a PDF layout model.** Not
+   on the list; found while checking whether a config validator could afford to
+   import the extractor registry. `cli` imports `extract`, which imported
+   `pymupdf.layout` (ONNX analyser + networkx) at module scope. Importing
+   `cementic.cli`: 1.9–3.4s before, 0.36s after. The existing runtime budgets
+   could not see it — they time dispatch, after the test module has already
+   imported the CLI — so the guard is structural instead.
+3. **`[extraction.backends]` validation**, mirroring `index.method`. Unknown
+   name and wrong file type are now separate messages.
+4. **Mixed-model search message** names each collection, its model and its
+   status. Kept as a refusal for both paths: scores from different models are
+   not comparable, so dropping the odd collection would produce a silently
+   meaningless ranking rather than a visible error.
+5. **`cementic collection reindex`**, with `--force` for the build-time knobs
+   (`hnsw_m`, `ef_construction`) that `CREATE INDEX IF NOT EXISTS` would
+   otherwise leave at their old values while reporting success.
+
+Two notes for whoever picks this up:
+
+- **Deferring the pymupdf import moved it inside test patch contexts.** The
+  first `import pymupdf.layout` runs an `activate()` that rebinds
+  `pymupdf4llm.to_markdown`, so a patch applied beforehand was silently
+  replaced mid-test — and only when no earlier test had already triggered the
+  import, making it look like flakiness. The extraction tests patch
+  `_get_pymupdf` now; do not go back to patching the real modules.
+- **Three PG search tests fail on `main` too** (`test_search_pg.py` ×2,
+  `test_cli_pg.py` ×1) — they return zero results, and predate this branch.
+  Not investigated here; check them against `main` before blaming a change.
+
 ### Still open
 
-Everything above is done. What is left, smallest list yet:
-
-1. **Pruning leaks** (N16) — after a model swap, the old embedding profile's
-   vector table and ANN index are never dropped, and its `chunk_embeddings`
-   rows survive because the delete is scoped to *removed chunk profiles*. Two
-   footguns make this a careful change rather than a quick one: embedding
-   profiles are shared across collections, so the keep-set must be re-queried
-   globally the way `collection remove` already does; and `DROP TABLE` must run
-   after `session.commit()`, since `drop_vector_table` opens its own
-   transaction and would block on the uncommitted session's locks.
-2. **Mixed-model search message** — naming the culprit collections and their
-   statuses instead of "different active embedding models", which names nothing
-   and says "active" about a `building` or `ready` revision. The behaviour
-   question (drop the odd collection and continue vs. refuse) is a design call:
-   refuse is right for an explicit `-c A B`, dropping is arguably right for the
-   unfiltered path.
-3. **`[extraction.backends]` key handling** — keys are looked up bare and
-   lowercase with no validation, so `PDF` or `.pdf` is silently ignored, and an
-   unknown backend name reports "does not handle '.pdf'" as though the
-   extractor existed. Mirror `index.method`'s registry validator.
-4. **`collection reindex`** — the only trigger that would make `index.method`
-   mean anything on a built collection (see the roadmap note in `TODO.md`). No
-   correctness consequence, since search tunes for the index that exists.
-
-**`hnsw.iterative_scan` is now more urgent, not less.** The freshness predicates
-added in the last batch post-filter *more* rows, so a scan yielding `ef_search`
-candidates discards more of them and can return fewer than `top_k`. It still
-needs verification against the live database first — a pgvector older than 0.8
-rejects the parameter and would break all search.
+**`hnsw.iterative_scan`.** The freshness predicates post-filter *more* rows, so
+a scan yielding `ef_search` candidates discards more of them and can return
+fewer than `top_k`. Needs verification against the live database first — a
+pgvector older than 0.8 rejects the parameter and would break all search.
 
 ### Deliberately not done
 
