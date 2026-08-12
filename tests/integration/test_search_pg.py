@@ -10,6 +10,7 @@ from cementic.pipeline_worker import _purge_superseded_chunks
 from cementic.revisions import CURRENT_CONTENT_SQL
 from cementic.search import Searcher
 from cementic.source_watcher import _purge_document_chunks
+from cementic.vector_store import FILTER_COLUMNS, vector_table_name
 from tests.integration.test_pg_helpers import (
     cleanup_pg_tables,
     seed_active_vector_collection,
@@ -240,4 +241,38 @@ def test_search_does_not_return_superseded_content(
     pg_session.commit()
 
     assert Searcher(pg_config).search("neural", top_k=5, collections=["superseded"]) == []
+    cleanup_pg_tables(pg_session)
+
+
+@pytest.mark.pg
+def test_search_works_against_a_pre_migration_vector_table(
+    pg_engine, pg_session, pg_config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Upgrading must not break reading until someone happens to write.
+
+    The KNN query names the filter columns, so on a database written by an
+    older cementic search would fail with UndefinedColumn until the worker next
+    ran and migrated the table. Search migrates it too.
+    """
+    cleanup_pg_tables(pg_session)
+    revision = seed_active_vector_collection(
+        pg_session,
+        collection="premigration",
+        source_path="/docs/old.pdf",
+        chunks=[("still findable", [1.0, 0.0, 0.0, 0.0])],
+    )
+    pg_session.commit()
+    table = vector_table_name(revision.embedding_profile_id)
+    with pg_engine.begin() as conn:
+        for column in FILTER_COLUMNS:
+            conn.execute(text(f"ALTER TABLE {table} DROP COLUMN {column}"))
+
+    monkeypatch.setattr(
+        "cementic.search._create_embedding_provider",
+        lambda config_json, config=None: FakeSearchEmbeddingClient(),
+    )
+
+    results = Searcher(pg_config).search("neural", top_k=5, collections=["premigration"])
+
+    assert [result["content"] for result in results] == ["still findable"]
     cleanup_pg_tables(pg_session)

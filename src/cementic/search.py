@@ -17,6 +17,7 @@ from cementic.embedding_runtime import (
 )
 from cementic.revisions import BUILDING_STATUSES, get_active_revision
 from cementic.vector_store import (
+    ensure_vector_table_schema,
     index_access_method,
     knn_sql,
     pgvector_version,
@@ -215,6 +216,16 @@ class Searcher:
             for revision in revisions:
                 if not vector_table_exists(session.connection(), revision.embedding_profile_id):
                     continue
+                # Migrate here too, not only in the embed step. The query below
+                # names the filter columns, so on a database written by an older
+                # cementic search would fail with UndefinedColumn until someone
+                # happened to run the worker -- an upgrade that breaks reading
+                # until you write. Idempotent, and a catalog lookup once done.
+                ensure_vector_table_schema(
+                    session.connection(),
+                    revision.embedding_profile_id,
+                    embedding_profile.embedding_dim,
+                )
                 # Tune for the index that actually exists rather than the
                 # configured method, which can drift until the index is rebuilt.
                 actual_method = (
