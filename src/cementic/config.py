@@ -502,6 +502,14 @@ class IndexConfig(_SectionSettings):
         default=64, ge=1, description="HNSW build-time candidate list size"
     )
     hnsw_ef_search: int = Field(default=40, ge=1, description="HNSW query-time candidate list size")
+    hnsw_iterative_scan: str = Field(
+        default="relaxed_order",
+        description="HNSW iterative scan mode: relaxed_order (default), "
+        "strict_order, or off. Search filters candidates during the index scan, "
+        "so without this a query over a collection holding a small share of a "
+        "shared vector table can return fewer rows than asked for, or none. "
+        "Needs pgvector 0.8+; ignored on older servers.",
+    )
     # pgvectorscale DiskANN
     diskann_num_neighbors: int = Field(default=50, ge=1, description="DiskANN graph degree (build)")
     diskann_search_list_size: int = Field(
@@ -510,6 +518,19 @@ class IndexConfig(_SectionSettings):
     diskann_query_rescore: int = Field(
         default=50, ge=1, description="DiskANN query-time rescore count"
     )
+
+    @field_validator("hnsw_iterative_scan")
+    @classmethod
+    def _validate_iterative_scan(cls, value: str) -> str:
+        # Refused here rather than at the server: an invalid value aborts the
+        # SET LOCAL, and with it the search query it was tuning.
+        from cementic.vector_store import HNSW_ITERATIVE_SCAN_MODES
+
+        if value not in HNSW_ITERATIVE_SCAN_MODES:
+            raise ValueError(
+                f"hnsw_iterative_scan must be one of: {', '.join(HNSW_ITERATIVE_SCAN_MODES)}"
+            )
+        return value
 
     @field_validator("method")
     @classmethod

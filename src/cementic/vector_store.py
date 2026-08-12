@@ -38,6 +38,18 @@ def to_vector_literal(vector: Sequence[float]) -> str:
     return "[" + ",".join(repr(float(value)) for value in vector) + "]"
 
 
+#: Columns carried on the vector row purely so search can filter without
+#: joining. Each is immutable for a given chunk: a chunk belongs to exactly one
+#: chunked document (hence one chunk profile), which belongs to one extracted
+#: document (one extractor profile), under one source document (one collection).
+#:
+#: They exist because the planner cannot drive an ANN index scan from a filter
+#: that lives on a joined table. With the filters here it can: measured at 100k
+#: rows and 768 dimensions, the joined form took 407ms and never touched the
+#: index, while this form takes about 1ms and does.
+FILTER_COLUMNS = ("collection", "extractor_profile_id", "chunk_profile_id")
+
+
 def create_table_sql(profile_id: int, dim: int) -> str:
     """DDL to create one profile's fixed-dimension vector table."""
     if not isinstance(dim, int) or isinstance(dim, bool) or dim <= 0 or dim > _MAX_EMBEDDING_DIM:
@@ -46,8 +58,64 @@ def create_table_sql(profile_id: int, dim: int) -> str:
     return (
         f"CREATE TABLE IF NOT EXISTS {table} ("
         "chunk_id INTEGER PRIMARY KEY REFERENCES chunks_v2(id) ON DELETE CASCADE, "
-        f"embedding vector({dim}) NOT NULL)"
+        f"embedding vector({dim}) NOT NULL, "
+        "collection TEXT NOT NULL, "
+        "extractor_profile_id INTEGER NOT NULL, "
+        "chunk_profile_id INTEGER NOT NULL)"
     )
+
+
+def add_filter_columns_sql(profile_id: int) -> list[str]:
+    """DDL adding the filter columns to a table created before they existed.
+
+    Nullable at first: the table already has rows, and NOT NULL without a
+    default would be rejected. ``backfill_filter_columns_sql`` fills them and
+    ``enforce_filter_columns_sql`` then tightens the constraint, so a row that
+    could not be resolved never becomes silently unsearchable.
+    """
+    table = vector_table_name(profile_id)
+    return [
+        f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS collection TEXT",
+        f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS extractor_profile_id INTEGER",
+        f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS chunk_profile_id INTEGER",
+    ]
+
+
+def backfill_filter_columns_sql(profile_id: int) -> str:
+    """Populate the filter columns from the joins they replace.
+
+    Derived from the existing rows, so an upgrade costs one UPDATE rather than
+    re-embedding the corpus -- which at a few hundred thousand chunks is the
+    difference between a minute and a day.
+    """
+    table = vector_table_name(profile_id)
+    return (
+        f"UPDATE {table} ev SET collection = sd.collection, "
+        "extractor_profile_id = ed.extractor_profile_id, "
+        "chunk_profile_id = cd.chunk_profile_id "
+        "FROM chunks_v2 c "
+        "JOIN chunked_documents cd ON c.chunked_document_id = cd.id "
+        "JOIN extracted_documents ed ON cd.extracted_document_id = ed.id "
+        "JOIN source_documents sd ON c.document_id = sd.id "
+        "WHERE ev.chunk_id = c.id AND ev.collection IS NULL"
+    )
+
+
+def enforce_filter_columns_sql(profile_id: int) -> list[str]:
+    """Drop any row the backfill could not resolve, then require the columns.
+
+    A leftover NULL row is unreachable by search anyway; leaving it nullable
+    would let it sit there looking indexed. There should be none -- the vector
+    table's foreign key cascades from ``chunks_v2`` -- so this is a guard, not a
+    routine step.
+    """
+    table = vector_table_name(profile_id)
+    return [
+        f"DELETE FROM {table} WHERE collection IS NULL",
+        f"ALTER TABLE {table} ALTER COLUMN collection SET NOT NULL",
+        f"ALTER TABLE {table} ALTER COLUMN extractor_profile_id SET NOT NULL",
+        f"ALTER TABLE {table} ALTER COLUMN chunk_profile_id SET NOT NULL",
+    ]
 
 
 def drop_table_sql(profile_id: int) -> str:
@@ -73,29 +141,115 @@ def delete_vectors_for_collection_sql(profile_id: int) -> str:
 
 
 def upsert_sql(profile_id: int) -> str:
-    """Parameterised upsert of one vector row (``:chunk_id``, ``:embedding``)."""
+    """Parameterised upsert of one vector row.
+
+    Binds ``:chunk_id``, ``:embedding`` and the three filter columns. They are
+    updated on conflict as well as inserted: re-embedding an existing chunk
+    under a corrected profile should not leave the old routing behind.
+    """
     table = vector_table_name(profile_id)
     return (
-        f"INSERT INTO {table} (chunk_id, embedding) "
-        "VALUES (:chunk_id, (:embedding)::vector) "
-        "ON CONFLICT (chunk_id) DO UPDATE SET embedding = EXCLUDED.embedding"
+        f"INSERT INTO {table} "
+        "(chunk_id, embedding, collection, extractor_profile_id, chunk_profile_id) "
+        "VALUES (:chunk_id, (:embedding)::vector, :collection, "
+        ":extractor_profile_id, :chunk_profile_id) "
+        "ON CONFLICT (chunk_id) DO UPDATE SET embedding = EXCLUDED.embedding, "
+        "collection = EXCLUDED.collection, "
+        "extractor_profile_id = EXCLUDED.extractor_profile_id, "
+        "chunk_profile_id = EXCLUDED.chunk_profile_id"
     )
 
 
-def query_tuning_sql(
-    method: str, *, hnsw_ef_search: int, diskann_query_rescore: int, top_k: int = 1
-) -> str | None:
-    """``SET LOCAL`` statement for the method's query-time knob, or None.
+def knn_sql(profile_id: int, *, distance_operator: str) -> str:
+    """The filtered KNN query, with every filter on the vector table itself.
+
+    The joins that remain are projections -- the chunk's text and the document's
+    path -- reached by primary key, which a nested loop can satisfy while
+    preserving the index scan's ordering. It is the *filters* that had to move:
+    while they sat on joined tables the planner drove from ``chunked_documents``
+    and probed this table by primary key, reading every row.
+    """
+    table = vector_table_name(profile_id)
+    return (
+        "SELECT sd.collection AS collection, sd.source_path AS source_path, "
+        "c.content AS content, "
+        f"ev.embedding {distance_operator} (:query)::vector AS distance "
+        f"FROM {table} ev "
+        "JOIN chunks_v2 c ON c.id = ev.chunk_id "
+        "JOIN source_documents sd ON c.document_id = sd.id "
+        "WHERE ev.collection = :collection "
+        "AND ev.chunk_profile_id = :chunk_profile_id "
+        "AND ev.extractor_profile_id = :extractor_profile_id "
+        f"ORDER BY ev.embedding {distance_operator} (:query)::vector "
+        "LIMIT :k"
+    )
+
+
+#: pgvector release that introduced ``hnsw.iterative_scan``.
+_ITERATIVE_SCAN_SINCE = (0, 8, 0)
+
+#: Accepted values for ``hnsw.iterative_scan``. Anything else is refused before
+#: it reaches the server, where an invalid value aborts the whole query.
+HNSW_ITERATIVE_SCAN_MODES = ("off", "relaxed_order", "strict_order")
+
+
+def parse_extension_version(raw: str | None) -> tuple[int, ...] | None:
+    """Parse ``pg_extension.extversion`` into comparable integers (pure).
+
+    Returns None for anything non-numeric rather than guessing, so an unusual
+    build is treated as "cannot confirm support" instead of assumed capable.
+    """
+    if not raw:
+        return None
+    numbers: list[int] = []
+    for part in raw.split("."):
+        if not part.isdigit():
+            break
+        numbers.append(int(part))
+    return tuple(numbers) if numbers else None
+
+
+def supports_hnsw_iterative_scan(version: tuple[int, ...] | None) -> bool:
+    """Whether this pgvector can be told to scan iteratively (pure)."""
+    if version is None:
+        return False
+    return version >= _ITERATIVE_SCAN_SINCE
+
+
+def query_tuning_statements(
+    method: str,
+    *,
+    hnsw_ef_search: int,
+    diskann_query_rescore: int,
+    top_k: int = 1,
+    hnsw_iterative_scan: str | None = None,
+) -> list[str]:
+    """``SET LOCAL`` statements for the method's query-time knobs (pure).
 
     An HNSW scan yields at most ``ef_search`` candidates, so a configured value
     below the requested ``top_k`` caps the result count with no indication: the
     default 40 is under the documented maximum of 50 results.
+
+    Iterative scanning matters because the filters are applied *during* the
+    index scan: without it the scan stops after ``ef_search`` candidates
+    regardless of how many passed the filter, which for a collection holding a
+    small share of a shared vector table measured 0 results out of 10 requested.
+
+    ``hnsw_iterative_scan`` is passed only when the server is known to support
+    it. That gate is not optional: PostgreSQL accepts an unknown qualified
+    setting as a placeholder *until* the defining module loads on that
+    connection, then rejects it with InvalidName. Behind a connection pool,
+    whether pgvector had already loaded decides whether the statement succeeds,
+    so an ungated SET breaks search intermittently rather than honestly.
     """
     if method == "hnsw":
-        return f"SET LOCAL hnsw.ef_search = {max(int(hnsw_ef_search), int(top_k))}"
+        statements = [f"SET LOCAL hnsw.ef_search = {max(int(hnsw_ef_search), int(top_k))}"]
+        if hnsw_iterative_scan in HNSW_ITERATIVE_SCAN_MODES:
+            statements.append(f"SET LOCAL hnsw.iterative_scan = {hnsw_iterative_scan}")
+        return statements
     if method == "diskann":
-        return f"SET LOCAL diskann.query_rescore = {int(diskann_query_rescore)}"
-    return None
+        return [f"SET LOCAL diskann.query_rescore = {int(diskann_query_rescore)}"]
+    return []
 
 
 # --- imperative shells -------------------------------------------------------
@@ -112,6 +266,14 @@ def vector_table_exists(conn: Connection, profile_id: int) -> bool:
         text("SELECT to_regclass(:name)"), {"name": vector_table_name(profile_id)}
     ).scalar()
     return result is not None
+
+
+def pgvector_version(conn: Connection) -> tuple[int, ...] | None:
+    """Installed pgvector version, or None when it cannot be determined."""
+    raw = conn.execute(
+        text("SELECT extversion FROM pg_extension WHERE extname = 'vector'")
+    ).scalar()
+    return parse_extension_version(str(raw) if raw is not None else None)
 
 
 def index_access_method(conn: Connection, index_name: str) -> str | None:
@@ -143,13 +305,63 @@ def drop_vector_table(engine: Engine, profile_id: int) -> None:
 
 
 def upsert_vectors(
-    conn: Connection, profile_id: int, rows: Sequence[tuple[int, Sequence[float]]]
+    conn: Connection,
+    profile_id: int,
+    rows: Sequence[tuple[int, Sequence[float]]],
+    *,
+    collection: str,
+    extractor_profile_id: int,
+    chunk_profile_id: int,
 ) -> None:
-    """Insert/replace completed vectors for one profile."""
+    """Insert/replace completed vectors for one profile.
+
+    The routing columns are keyword-only and required: a vector written without
+    them is one search can never return, and defaulting them would make that
+    failure silent.
+    """
     if not rows:
         return
     params = [
-        {"chunk_id": chunk_id, "embedding": to_vector_literal(vector)}
+        {
+            "chunk_id": chunk_id,
+            "embedding": to_vector_literal(vector),
+            "collection": collection,
+            "extractor_profile_id": extractor_profile_id,
+            "chunk_profile_id": chunk_profile_id,
+        }
         for chunk_id, vector in rows
     ]
     conn.execute(text(upsert_sql(profile_id)), params)
+
+
+def vector_table_columns(conn: Connection, profile_id: int) -> set[str]:
+    """Column names present on a profile's vector table (empty if absent)."""
+    rows = conn.execute(
+        text(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_name = :name AND table_schema = ANY (current_schemas(false))"
+        ),
+        {"name": vector_table_name(profile_id)},
+    ).all()
+    return {str(row[0]) for row in rows}
+
+
+def ensure_vector_table_schema(conn: Connection, profile_id: int, dim: int) -> None:
+    """Create the vector table, or bring an older one up to the current shape.
+
+    cementic has no migration framework -- ``create_all`` cannot alter an
+    existing table, and these per-profile tables are not part of its metadata
+    at all -- so the upgrade lives here, next to the DDL it mirrors. It is
+    idempotent and, once migrated, costs one catalog lookup.
+    """
+    existing = vector_table_columns(conn, profile_id)
+    if not existing:
+        conn.execute(text(create_table_sql(profile_id, dim)))
+        return
+    if set(FILTER_COLUMNS) <= existing:
+        return
+    for statement in add_filter_columns_sql(profile_id):
+        conn.execute(text(statement))
+    conn.execute(text(backfill_filter_columns_sql(profile_id)))
+    for statement in enforce_filter_columns_sql(profile_id):
+        conn.execute(text(statement))

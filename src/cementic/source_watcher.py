@@ -14,11 +14,12 @@ from pathlib import Path
 from typing import Any
 
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session
 from watchdog.events import DirMovedEvent, FileMovedEvent, FileSystemEvent, FileSystemEventHandler
 from watchdog.observers import Observer
 
 from cementic.config import Config, get_config
-from cementic.db import SourceDocument, create_tables, get_engine, get_session_factory
+from cementic.db import Chunk, SourceDocument, create_tables, get_engine, get_session_factory
 from cementic.extract import supported_extensions
 from cementic.state import DaemonState, StateManager
 from cementic.supervisor import is_managed_process_alive, process_start_token
@@ -46,6 +47,28 @@ def _is_missing(source_path: str) -> bool:
     except OSError:
         return False
     return False
+
+
+def _purge_document_chunks(session: Session, document_ids: list[int]) -> None:
+    """Delete the chunks of removed documents, and with them their vectors.
+
+    Marking a document ``deleted`` used to be the whole story: its chunks,
+    embeddings and vectors stayed. That was tolerable while search filtered
+    ``sd.status <> 'deleted'`` at query time, but that filter lived on a joined
+    table and was one of the reasons the planner could never use the ANN index.
+    Search now filters on the vector row alone, so a deleted document's vectors
+    have to actually go -- otherwise they would be returned.
+
+    Deleting the chunks is enough: ``chunk_embeddings`` and every per-profile
+    ``embedding_vectors_p*`` table carry ``ON DELETE CASCADE`` from
+    ``chunks_v2``, so one statement clears all of them for every profile at
+    once, including profiles this collection no longer uses.
+    """
+    if not document_ids:
+        return
+    session.query(Chunk).filter(Chunk.document_id.in_(document_ids)).delete(
+        synchronize_session=False
+    )
 
 
 class DocumentEventHandler(FileSystemEventHandler):
@@ -334,6 +357,7 @@ class SourceWatcher:
                 document.status = "deleted"
                 document.file_hash = None
             if missing:
+                _purge_document_chunks(session, [document.id for document in missing])
                 session.commit()
         for source_path in missing_paths:
             self._logger.info(
@@ -509,6 +533,7 @@ class SourceWatcher:
                 return
             document.status = "deleted"
             document.file_hash = None
+            _purge_document_chunks(session, [document.id])
             session.commit()
         self._logger.info(
             "Marked document deleted: %s (collection=%s)", normalized_path, self.collection

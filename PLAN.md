@@ -352,10 +352,73 @@ zero NULL hashes on `done` rows across 172 chunks.
 `scripts/check.sh` now runs all five gates in one command and reports a missing
 PostgreSQL as SKIPPED rather than passed.
 
+### Fixed on `claude/ann-filterable-vectors`
+
+**The ANN index is now reachable.** The filter columns (`collection`,
+`extractor_profile_id`, `chunk_profile_id`) live on `embedding_vectors_p*`, so
+the `WHERE` clause applies to the vector row and the planner can drive from the
+index scan. Same data, same index, 100k rows at 768 dimensions:
+
+| query shape | ANN used | results | time |
+|---|---|---|---|
+| filters on joined tables (before) | no | 10/10 | 407.6 ms |
+| filters on the vector row | yes | 10/10 | 1.0 ms |
+| filters on the vector row, 2% slice, `iterative_scan=off` | yes | **0/10** | 1.3 ms |
+| filters on the vector row, 2% slice, `relaxed_order` | yes | 10/10 | 15.3 ms |
+
+`hnsw.iterative_scan` landed with it, defaulting to `relaxed_order` and gated on
+pgvector ≥ 0.8 — row 3 is why. The gate is not optional: PostgreSQL accepts an
+unknown *qualified* setting as a placeholder until the defining module loads on
+that connection and rejects it with `InvalidName` afterwards, so behind a
+connection pool an ungated `SET` fails only on connections that had already run
+a vector query. (`SET LOCAL diskann.query_rescore` being accepted where
+pgvectorscale is absent is the same effect — not evidence it took effect.)
+
+**What the three columns cost.** They replace query-time freshness filtering
+with an invariant: stale vectors are deleted when they go stale. Re-chunking
+already did this via the `chunks_v2` cascade; two paths did not and now do —
+document deletion (`_purge_document_chunks`) and re-extraction that changes the
+content (`_purge_superseded_chunks`). The visible behaviour change: a document
+whose re-extraction succeeded but whose re-chunking has not run returns nothing
+rather than its previous contents.
+
+Existing vector tables are migrated in place by `ensure_vector_table_schema` —
+`ADD COLUMN`, backfill from the joins, then `SET NOT NULL`. No re-embedding.
+
+**No test reproduces the thin-slice recall failure**, deliberately. It needs
+~100k rows: below that the planner picks an exact sequential scan for a
+selective filter, which returns the right answer and would make the test pass
+for the wrong reason. Verified that trap directly — at 4k rows the `slice`
+query plans as a seq scan even with `enable_seqscan = off`. What CI does pin is
+that the ANN index *is* in the plan, which is the thing that regressed.
+
 ### Still open
 
-**The ANN index is never used by cementic's search query.** Measured, not
-inferred, with `EXPLAIN (ANALYZE)` against a real corpus:
+**HNSW index builds are slow and block the worker.** `ensure_revision_ann_index`
+runs synchronously in `_mark_revision_ready_if_complete`, at the
+`building → ready` transition — not at promotion. Plain `CREATE INDEX` takes a
+`SHARE` lock, so reads (search) continue but inserts block, stalling any other
+collection sharing that embedding profile. An interrupted build loses all its
+work.
+
+Measured at 100k rows × 768 dimensions, and dominated by `maintenance_work_mem`:
+
+| `maintenance_work_mem` | build |
+|---|---|
+| 64MB (Postgres default; container ships this) | 1454 s |
+| 2GB | 345 s |
+
+293 MiB of raw vector data against a 64MB buffer, so the build spills. Raising
+it 4.2×'d the build; a `SET LOCAL maintenance_work_mem` before `CREATE INDEX`,
+and a larger value in `containers/`, are the obvious next steps. At ~700k chunks
+even the fast path is tens of minutes, so making the build non-blocking (or
+reporting progress) is worth considering separately.
+
+### Superseded
+
+**The ANN index is never used by cementic's search query.** *(Fixed above; kept
+because the measurements are the justification for the schema change.)* Measured
+with `EXPLAIN (ANALYZE)` against a real corpus:
 
 | query | plan | time |
 |---|---|---|
@@ -378,28 +441,10 @@ Consequences, in order of importance:
 - `index.method`, `hnsw_m`, `ef_construction`, `hnsw_ef_search`, the DiskANN
   knobs and `collection reindex` all maintain an index nothing reads.
 
-**`hnsw.iterative_scan` was investigated and deliberately not landed.** The
-premise — that post-filtering an ANN scan under-returns — is true in principle
-and measurable on a single-table query (0 of 10 results with the index forced),
-but it cannot occur here while the planner never chooses the index. It becomes
-required the moment the query is restructured, and should land with that change
-rather than as a knob that does nothing. Two findings from that work are worth
-keeping:
-
-- pgvector here is 0.8.3, which supports it; the parameter needs a version gate
-  regardless. PostgreSQL accepts an unknown *qualified* setting as a
-  placeholder until the defining module loads on that connection and rejects it
-  with `InvalidName` afterwards — so behind a connection pool an ungated `SET`
-  fails only on connections that had already run a vector query.
-- `SET LOCAL diskann.query_rescore` is accepted even where pgvectorscale is
-  absent, for the same placeholder reason. It is not evidence the setting took
-  effect.
-
-The fix, if taken: denormalise the filter columns onto the vector table
-(collection, chunk/extractor profile ids, a currency flag) so the WHERE clause
-applies to `embedding_vectors_p*` directly and the planner can drive from the
-ANN index — landing `hnsw.iterative_scan` at the same time, since post-filtering
-then becomes real. That is a schema change and a design decision, not a bug fix.
+A no-schema-change alternative was considered and rejected: a materialised CTE
+doing the bare KNN first, then filtering. It takes the global top-N and filters
+afterwards, which is arithmetically the same as `iterative_scan=off` — it
+degrades to zero results in exactly the case that motivates it.
 
 ### Deliberately not done
 

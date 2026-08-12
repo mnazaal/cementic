@@ -255,6 +255,10 @@ chunk_overlap = 128
 [index]
 # ANN index: "hnsw" (lower latency, more RAM) or "diskann" (disk-resident, low RAM)
 method = "hnsw"
+# Keep scanning until top_k rows survive the filter, rather than stopping after
+# ef_search candidates. Leave on unless you are on pgvector older than 0.8,
+# where it is ignored anyway.
+hnsw_iterative_scan = "relaxed_order"
 
 [llama_cpp]
 model_path = "./models/nomic-embed-text-v2-moe.Q8_0.gguf"

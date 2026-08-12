@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any, NoReturn
 
 import requests
-from sqlalchemy import and_, or_, text
+from sqlalchemy import and_, or_, select, text
 from sqlalchemy.orm import Session
 
 from cementic.chunk import chunk_text
@@ -48,7 +48,7 @@ from cementic.revisions import (
 from cementic.state import DaemonState, StateManager
 from cementic.storage import extracted_document_path, read_extracted_text, write_extracted_text
 from cementic.supervisor import is_managed_process_alive, process_start_token
-from cementic.vector_store import create_table_sql, upsert_vectors
+from cementic.vector_store import ensure_vector_table_schema, upsert_vectors
 
 PIPELINE_WORKER_LOCK_NAMESPACE = 0xC3E17C
 
@@ -176,6 +176,36 @@ def compute_revision_counts(
 ) -> PipelineCounts:
     """Public accessor for a revision's current progress counts."""
     return _compute_revision_counts(session, collection, revision)
+
+
+def _purge_superseded_chunks(
+    session: Session, extracted_document_id: int, content_hash: str
+) -> None:
+    """Drop chunks produced from an older version of a re-extracted document.
+
+    The file changed on disk, so those chunks describe text that is no longer
+    there. ``_step_chunk`` would delete them anyway when it re-chunks, but the
+    gap between the two steps is not bounded: if the worker stops, or chunking
+    fails, they persist. That used to be covered by search's freshness join,
+    which is exactly the filter that had to move off a joined table for the ANN
+    index to be usable -- so the stale rows are now removed at the moment they
+    become stale rather than filtered out later.
+
+    Deleting the chunks also removes their embeddings and vectors through the
+    ``ON DELETE CASCADE`` on ``chunks_v2``. The visible consequence is that a
+    document whose re-extraction succeeded but whose re-chunking has not run
+    yet returns nothing rather than its previous contents.
+    """
+    stale_chunked_ids = select(ChunkedDocument.id).where(
+        ChunkedDocument.extracted_document_id == extracted_document_id,
+        or_(
+            ChunkedDocument.source_content_hash.is_(None),
+            ChunkedDocument.source_content_hash != content_hash,
+        ),
+    )
+    session.query(Chunk).filter(Chunk.chunked_document_id.in_(stale_chunked_ids)).delete(
+        synchronize_session=False
+    )
 
 
 def _compute_revision_counts(
@@ -506,6 +536,7 @@ class PipelineWorker:
             # would resurrect a document the watcher marked "deleted" while the
             # extraction was running.
             if extracted is not None:
+                previous_content_hash = extracted.content_hash
                 extracted.source_file_hash = file_hash
                 extracted.artifact_path = (
                     str(artifact_path) if content_hash is not None else extracted.artifact_path
@@ -513,6 +544,8 @@ class PipelineWorker:
                 extracted.content_hash = content_hash
                 extracted.status = status
                 extracted.error_message = error_message
+                if content_hash is not None and previous_content_hash != content_hash:
+                    _purge_superseded_chunks(session, extracted.id, content_hash)
             session.commit()
 
         self.state_manager.update(current_file=None)
@@ -639,6 +672,10 @@ class PipelineWorker:
 
             profile_id = revision.embedding_profile_id
             embedding_dim = revision.embedding_profile.embedding_dim
+            # Read while the session is open: these are written onto every
+            # vector row so search can filter without joining back.
+            extractor_profile_id = revision.extractor_profile_id
+            chunk_profile_id = revision.chunk_profile_id
 
             candidates = (
                 session.query(Chunk, ChunkEmbedding)
@@ -744,8 +781,15 @@ class PipelineWorker:
             with self.Session() as session:
                 if successes:
                     conn = session.connection()
-                    conn.execute(text(create_table_sql(profile_id, embedding_dim)))
-                    upsert_vectors(conn, profile_id, successes)
+                    ensure_vector_table_schema(conn, profile_id, embedding_dim)
+                    upsert_vectors(
+                        conn,
+                        profile_id,
+                        successes,
+                        collection=self.collection,
+                        extractor_profile_id=extractor_profile_id,
+                        chunk_profile_id=chunk_profile_id,
+                    )
                 for (chunk_id, _), embedding in zip(claimed, embeddings):
                     row = (
                         session.query(ChunkEmbedding)

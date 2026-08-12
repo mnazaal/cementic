@@ -5,8 +5,11 @@ from __future__ import annotations
 import pytest
 from sqlalchemy import text
 
+from cementic.db import ExtractedDocument, SourceDocument
+from cementic.pipeline_worker import _purge_superseded_chunks
 from cementic.revisions import CURRENT_CONTENT_SQL
 from cementic.search import Searcher
+from cementic.source_watcher import _purge_document_chunks
 from tests.integration.test_pg_helpers import (
     cleanup_pg_tables,
     seed_active_vector_collection,
@@ -170,4 +173,71 @@ def test_the_seed_helper_produces_rows_the_pipeline_could_produce(pg_session) ->
     ).scalar()
 
     assert stale == 0, "seeded rows do not satisfy the freshness predicate search requires"
+    cleanup_pg_tables(pg_session)
+
+
+@pytest.mark.pg
+def test_search_does_not_return_a_deleted_document(
+    pg_engine, pg_session, pg_config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The guarantee that used to come from `sd.status <> 'deleted'` in the query.
+
+    That filter lived on a joined table, which is why the planner could never
+    use the ANN index. It is now enforced by deleting the document's chunks,
+    whose cascade clears the vectors -- so this test pins the behaviour rather
+    than the mechanism, and would fail if the purge were dropped.
+    """
+    cleanup_pg_tables(pg_session)
+    seed_active_vector_collection(
+        pg_session,
+        collection="deleted",
+        source_path="/docs/gone.pdf",
+        chunks=[("content that should vanish", [1.0, 0.0, 0.0, 0.0])],
+    )
+    pg_session.commit()
+    monkeypatch.setattr(
+        "cementic.search._create_embedding_provider",
+        lambda config_json, config=None: FakeSearchEmbeddingClient(),
+    )
+    assert Searcher(pg_config).search("neural", top_k=5, collections=["deleted"])
+
+    document = pg_session.query(SourceDocument).filter_by(collection="deleted").one()
+    document.status = "deleted"
+    document.file_hash = None
+    _purge_document_chunks(pg_session, [document.id])
+    pg_session.commit()
+
+    assert Searcher(pg_config).search("neural", top_k=5, collections=["deleted"]) == []
+    cleanup_pg_tables(pg_session)
+
+
+@pytest.mark.pg
+def test_search_does_not_return_superseded_content(
+    pg_engine, pg_session, pg_config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The guarantee that used to come from the freshness join.
+
+    A file whose re-extraction produced different text must stop returning its
+    previous contents even before re-chunking runs -- otherwise a stopped worker
+    or a failed chunking serves stale text indefinitely.
+    """
+    cleanup_pg_tables(pg_session)
+    seed_active_vector_collection(
+        pg_session,
+        collection="superseded",
+        source_path="/docs/edited.pdf",
+        chunks=[("the old text", [1.0, 0.0, 0.0, 0.0])],
+    )
+    pg_session.commit()
+    monkeypatch.setattr(
+        "cementic.search._create_embedding_provider",
+        lambda config_json, config=None: FakeSearchEmbeddingClient(),
+    )
+    assert Searcher(pg_config).search("neural", top_k=5, collections=["superseded"])
+
+    extracted = pg_session.query(ExtractedDocument).one()
+    _purge_superseded_chunks(pg_session, extracted.id, "a-different-content-hash")
+    pg_session.commit()
+
+    assert Searcher(pg_config).search("neural", top_k=5, collections=["superseded"]) == []
     cleanup_pg_tables(pg_session)

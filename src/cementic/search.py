@@ -15,14 +15,16 @@ from cementic.embedding_runtime import (
     create_provider,
     runtime_spec_from_profile_json,
 )
-from cementic.revisions import BUILDING_STATUSES, CURRENT_CONTENT_SQL, get_active_revision
+from cementic.revisions import BUILDING_STATUSES, get_active_revision
 from cementic.vector_store import (
     index_access_method,
-    query_tuning_sql,
+    knn_sql,
+    pgvector_version,
+    query_tuning_statements,
+    supports_hnsw_iterative_scan,
     to_vector_literal,
     vector_index_name,
     vector_table_exists,
-    vector_table_name,
 )
 
 MAX_SEARCH_RESULTS = 50
@@ -144,6 +146,26 @@ class Searcher:
         self.config = config or get_config()
         engine = get_engine(self.config.database.url)
         self.Session = get_session_factory(engine)
+        self._supports_iterative_scan: bool | None = None
+
+    def _iterative_scan_mode(self, session: Any) -> str | None:
+        """The configured iterative-scan mode, if this server understands it.
+
+        Cached per Searcher and gated on the pgvector version rather than
+        attempted-and-caught: an unknown qualified setting is accepted as a
+        placeholder until pgvector's module loads on that connection and
+        rejected afterwards, so an ungated SET fails only on pooled connections
+        that had already run a vector query.
+        """
+        if self.config.index.hnsw_iterative_scan == "off":
+            return None
+        if self._supports_iterative_scan is None:
+            self._supports_iterative_scan = supports_hnsw_iterative_scan(
+                pgvector_version(session.connection())
+            )
+        if not self._supports_iterative_scan:
+            return None
+        return self.config.index.hnsw_iterative_scan
 
     def search(
         self,
@@ -191,7 +213,6 @@ class Searcher:
 
             combined: list[SearchResult] = []
             for revision in revisions:
-                table = vector_table_name(revision.embedding_profile_id)
                 if not vector_table_exists(session.connection(), revision.embedding_profile_id):
                     continue
                 # Tune for the index that actually exists rather than the
@@ -203,38 +224,28 @@ class Searcher:
                     )
                     or self.config.index.method
                 )
-                tuning = query_tuning_sql(
+                for tuning in query_tuning_statements(
                     actual_method,
                     hnsw_ef_search=self.config.index.hnsw_ef_search,
                     diskann_query_rescore=self.config.index.diskann_query_rescore,
                     top_k=top_k,
-                )
-                if tuning is not None:
+                    hnsw_iterative_scan=self._iterative_scan_mode(session),
+                ):
                     session.execute(text(tuning))
-                # The vector table is per *embedding* profile, so it also holds
-                # vectors from other revisions that share that model. Restricting
-                # to the revision's chunk profile is not enough: a revision whose
-                # extractor changed reuses the same chunk and embedding profiles,
-                # and pruning deliberately keeps the most recent retired revision.
-                # Without the extractor condition, search returned every document
-                # twice -- once from the retired extraction and once from the
-                # active one -- spending half of top_k on superseded text.
+                # Every filter is on the vector row itself. The vector table is
+                # per *embedding* profile, so it also holds vectors from other
+                # collections and from other revisions sharing that model --
+                # restricting to the chunk profile alone is not enough, since a
+                # revision whose extractor changed reuses the same chunk and
+                # embedding profiles and pruning keeps the newest retired
+                # revision. What is *not* here is the freshness join: stale rows
+                # are deleted when content is superseded or a document removed,
+                # rather than filtered out at query time, because a filter on a
+                # joined table stops the planner using the ANN index at all.
                 statement = text(
-                    "SELECT sd.collection AS collection, sd.source_path AS source_path, "
-                    "c.content AS content, "
-                    f"ev.embedding {distance_operator} (:query)::vector AS distance "
-                    f"FROM {table} ev "
-                    "JOIN chunks_v2 c ON c.id = ev.chunk_id "
-                    "JOIN chunked_documents cd ON c.chunked_document_id = cd.id "
-                    "JOIN extracted_documents ed ON cd.extracted_document_id = ed.id "
-                    "JOIN source_documents sd ON c.document_id = sd.id "
-                    "WHERE sd.collection = :collection "
-                    "AND sd.status <> 'deleted' "
-                    "AND cd.chunk_profile_id = :chunk_profile_id "
-                    "AND ed.extractor_profile_id = :extractor_profile_id "
-                    f"AND {CURRENT_CONTENT_SQL} "
-                    f"ORDER BY ev.embedding {distance_operator} (:query)::vector "
-                    "LIMIT :k"
+                    knn_sql(
+                        revision.embedding_profile_id, distance_operator=distance_operator
+                    )
                 )
                 rows = session.execute(
                     statement,

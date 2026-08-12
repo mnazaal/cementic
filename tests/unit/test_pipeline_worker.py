@@ -25,6 +25,7 @@ from cementic.pipeline_worker import (
     PipelineCounts,
     PipelineWorker,
     _pipeline_worker_lock_key,
+    _purge_superseded_chunks,
     _try_acquire_pipeline_worker_lock,
     is_retryable_embed_error,
     revision_is_complete,
@@ -912,3 +913,88 @@ class TestStartupGateChecksEmbedding:
         assert worker.fatal_reason is not None
         assert "cannot embed" in worker.fatal_reason
         client.describe.assert_called_once()
+
+
+class TestSupersededChunksArePurged:
+    """Re-extraction must remove the chunks describing the old text.
+
+    Search no longer carries the freshness join -- that filter lived on a joined
+    table and was one reason the planner could never use the ANN index -- so
+    stale rows have to be deleted when they go stale rather than filtered out at
+    query time. `_step_chunk` would delete them when it re-chunks, but the gap
+    between the two steps is unbounded: a stopped worker or a failed chunking
+    leaves them indefinitely.
+    """
+
+    @staticmethod
+    def _seed(session, *, content_hash):
+        source = SourceDocument(
+            collection="c", source_path="/a.pdf", file_hash="fh", status="done"
+        )
+        extractor = ExtractorProfile(name="x", fingerprint="ex", config_json="{}")
+        chunk_profile = ChunkProfile(fingerprint="cp", config_json="{}")
+        session.add_all([source, extractor, chunk_profile])
+        session.flush()
+        extracted = ExtractedDocument(
+            document_id=source.id,
+            extractor_profile_id=extractor.id,
+            source_file_hash="fh",
+            content_hash=content_hash,
+            status="done",
+        )
+        session.add(extracted)
+        session.flush()
+        chunked = ChunkedDocument(
+            extracted_document_id=extracted.id,
+            chunk_profile_id=chunk_profile.id,
+            source_content_hash=content_hash,
+            status="done",
+            total_chunks=1,
+        )
+        session.add(chunked)
+        session.flush()
+        session.add(
+            Chunk(
+                document_id=source.id,
+                chunked_document_id=chunked.id,
+                chunk_index=0,
+                content="old text",
+            )
+        )
+        session.commit()
+        return extracted
+
+    def test_chunks_from_the_previous_content_are_deleted(self):
+        engine = create_engine("sqlite://")
+        Base.metadata.create_all(engine)
+        session = sessionmaker(bind=engine, expire_on_commit=False)()
+        extracted = self._seed(session, content_hash="old-hash")
+
+        _purge_superseded_chunks(session, extracted.id, "new-hash")
+        session.commit()
+
+        assert session.query(Chunk).count() == 0
+
+    def test_chunks_matching_the_current_content_are_kept(self):
+        """A re-extraction that produced identical bytes must not throw work away."""
+        engine = create_engine("sqlite://")
+        Base.metadata.create_all(engine)
+        session = sessionmaker(bind=engine, expire_on_commit=False)()
+        extracted = self._seed(session, content_hash="same-hash")
+
+        _purge_superseded_chunks(session, extracted.id, "same-hash")
+        session.commit()
+
+        assert session.query(Chunk).count() == 1
+
+    def test_a_chunking_that_never_recorded_a_hash_is_treated_as_stale(self):
+        """NULL is not evidence the chunking matches; it is evidence it is unknown."""
+        engine = create_engine("sqlite://")
+        Base.metadata.create_all(engine)
+        session = sessionmaker(bind=engine, expire_on_commit=False)()
+        extracted = self._seed(session, content_hash=None)
+
+        _purge_superseded_chunks(session, extracted.id, "new-hash")
+        session.commit()
+
+        assert session.query(Chunk).count() == 0

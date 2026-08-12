@@ -123,7 +123,14 @@ def seed_active_vector_collection(
     # Vectors live in the per-profile table, not on ChunkEmbedding.
     conn = session.connection()
     conn.execute(text(create_table_sql(embedding_profile.id, VECTOR_DIM)))
-    upsert_vectors(conn, embedding_profile.id, vector_rows)
+    upsert_vectors(
+        conn,
+        embedding_profile.id,
+        vector_rows,
+        collection=collection,
+        extractor_profile_id=extractor.id,
+        chunk_profile_id=chunk_profile.id,
+    )
 
     revision = PipelineRevision(
         collection=collection,
@@ -223,7 +230,14 @@ def seed_two_extractor_profiles_sharing_a_vector_table(
         session.flush()
         conn = session.connection()
         conn.execute(text(create_table_sql(embedding_profile.id, VECTOR_DIM)))
-        upsert_vectors(conn, embedding_profile.id, [(chunk.id, vector)])
+        upsert_vectors(
+            conn,
+            embedding_profile.id,
+            [(chunk.id, vector)],
+            collection=collection,
+            extractor_profile_id=extractor.id,
+            chunk_profile_id=chunk_profile.id,
+        )
 
     revision = PipelineRevision(
         collection=collection,

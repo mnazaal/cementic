@@ -230,6 +230,12 @@ model_path = "./models/nomic-embed-text-v2-moe.Q8_0.gguf"
 - **`diskann`** (pgvectorscale) — disk-resident, compressed index. Much lower RAM
   use at scale; trades some latency. Best when the index is large relative to RAM.
 
+Search filters candidates (by collection and pipeline profile) *during* the index
+scan, so `index.hnsw_iterative_scan` — `relaxed_order` by default — keeps scanning
+until it has a full page rather than stopping after `hnsw_ef_search` candidates.
+Without it, a collection that holds a small share of a shared vector table can come
+back short, or empty. It needs pgvector 0.8 or newer and is ignored on older servers.
+
 Both ship in the generated or provisioned Postgres image. The method is a *serving* choice:
 it is applied when a collection's vector index is built, and it never re-embeds. To
 change it on a collection that is already built, run:

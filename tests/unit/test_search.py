@@ -400,15 +400,19 @@ class TestSearcher:
 class TestSearchOnlyServesCurrentContent:
     """Search must apply the same definition of "current" as the rest of cementic.
 
-    Filtering on profile ids alone serves the *old* content of a file whose
-    re-extraction failed: the superseded rows keep ``status='done'`` and match
-    the profile ids, so stale text ranks normally and indefinitely.
+    That definition used to live in the query, as a join against the source and
+    extraction hashes. It now lives in the *data*: superseded and deleted chunks
+    are removed when they become stale, so the query filters on the vector row
+    alone. The behavioural guarantee is unchanged and is pinned end-to-end in
+    tests/integration/test_search_pg.py; what this class pins is the query
+    shape, because a filter on a joined table stops the planner from using the
+    ANN index at all -- measured at 407ms versus 1ms on 100k rows.
     """
 
     @patch("cementic.search.get_engine")
     @patch("cementic.search.get_session_factory")
     @patch("cementic.search._create_embedding_provider")
-    def test_knn_query_requires_hashes_to_match_the_source(
+    def test_knn_query_filters_on_the_vector_row_alone(
         self, mock_create_embedding_provider, mock_session_factory, mock_get_engine
     ):
         revision = SimpleNamespace(
@@ -444,13 +448,17 @@ class TestSearchOnlyServesCurrentContent:
 
         Searcher().search("hello")
 
-        knn_sql = " ".join(
+        executed = " ".join(
             str(call.args[0]) for call in mock_session.execute.call_args_list if call.args
         )
-        assert "ed.source_file_hash = sd.file_hash" in knn_sql
-        assert "cd.source_content_hash = ed.content_hash" in knn_sql
-        assert "ed.status = 'done'" in knn_sql
-        assert "cd.status = 'done'" in knn_sql
+        # Every filter is on `ev`, the vector table itself.
+        assert "ev.collection = :collection" in executed
+        assert "ev.chunk_profile_id = :chunk_profile_id" in executed
+        assert "ev.extractor_profile_id = :extractor_profile_id" in executed
+        # The tables that no longer appear are the ones that only ever carried
+        # filters; chunks_v2 and source_documents remain, for content and path.
+        assert "chunked_documents" not in executed
+        assert "extracted_documents" not in executed
 
 
 class TestQueryContextBound:

@@ -1,5 +1,7 @@
 """PostgreSQL integration tests for db.py: vector extensions and ANN indexes."""
 
+from typing import NamedTuple
+
 import pytest
 from sqlalchemy import text
 from sqlalchemy.orm import sessionmaker
@@ -19,11 +21,18 @@ from cementic.db import (
 from cementic.index_strategies import IndexParams
 
 
-def _create_minimal_pipeline(session, *, embedding_dim: int = 4) -> tuple[int, int]:
-    """Create minimal DB state: SourceDoc → ExtractedDoc → ChunkedDoc → Chunk.
+class _MinimalPipeline(NamedTuple):
+    """Ids a vector row needs: its chunk, its profile, and its routing."""
 
-    Returns (chunk_id, embedding_profile_id) for use in ChunkEmbedding.
-    """
+    chunk_id: int
+    embedding_profile_id: int
+    collection: str
+    extractor_profile_id: int
+    chunk_profile_id: int
+
+
+def _create_minimal_pipeline(session, *, embedding_dim: int = 4) -> "_MinimalPipeline":
+    """Create minimal DB state: SourceDoc → ExtractedDoc → ChunkedDoc → Chunk."""
     src = SourceDocument(
         source_path="/test/minimal.pdf",
         file_hash="minimal-hash",
@@ -68,7 +77,13 @@ def _create_minimal_pipeline(session, *, embedding_dim: int = 4) -> tuple[int, i
     session.add(chunk)
     session.flush()
 
-    return chunk.id, emb_prof.id
+    return _MinimalPipeline(
+        chunk_id=chunk.id,
+        embedding_profile_id=emb_prof.id,
+        collection=src.collection,
+        extractor_profile_id=ext_prof.id,
+        chunk_profile_id=chunk_prof.id,
+    )
 
 
 @pytest.mark.pg
@@ -120,13 +135,21 @@ class TestAnnIndex:
     def test_build_index_and_search(self, pg_engine, method):
         session_factory = sessionmaker(bind=pg_engine)
         with session_factory() as session:
-            chunk_id, emb_prof_id = _create_minimal_pipeline(session, embedding_dim=4)
+            pipeline = _create_minimal_pipeline(session, embedding_dim=4)
+            chunk_id, emb_prof_id = pipeline.chunk_id, pipeline.embedding_profile_id
             session.commit()
 
         try:
             _create_vector_table(pg_engine, emb_prof_id, 4)
             with pg_engine.begin() as conn:
-                vector_store.upsert_vectors(conn, emb_prof_id, [(chunk_id, [0.1, 0.2, 0.3, 0.4])])
+                vector_store.upsert_vectors(
+                    conn,
+                    emb_prof_id,
+                    [(chunk_id, [0.1, 0.2, 0.3, 0.4])],
+                    collection=pipeline.collection,
+                    extractor_profile_id=pipeline.extractor_profile_id,
+                    chunk_profile_id=pipeline.chunk_profile_id,
+                )
 
             ensure_embedding_ann_index(
                 pg_engine, profile_id=emb_prof_id, method=method, params=IndexParams()
@@ -159,13 +182,21 @@ class TestAnnIndex:
     def test_idempotent_ann_index(self, pg_engine):
         session_factory = sessionmaker(bind=pg_engine)
         with session_factory() as session:
-            chunk_id, emb_prof_id = _create_minimal_pipeline(session, embedding_dim=4)
+            pipeline = _create_minimal_pipeline(session, embedding_dim=4)
+            chunk_id, emb_prof_id = pipeline.chunk_id, pipeline.embedding_profile_id
             session.commit()
 
         try:
             _create_vector_table(pg_engine, emb_prof_id, 4)
             with pg_engine.begin() as conn:
-                vector_store.upsert_vectors(conn, emb_prof_id, [(chunk_id, [0.5, 0.6, 0.7, 0.8])])
+                vector_store.upsert_vectors(
+                    conn,
+                    emb_prof_id,
+                    [(chunk_id, [0.5, 0.6, 0.7, 0.8])],
+                    collection=pipeline.collection,
+                    extractor_profile_id=pipeline.extractor_profile_id,
+                    chunk_profile_id=pipeline.chunk_profile_id,
+                )
             ensure_embedding_ann_index(
                 pg_engine, profile_id=emb_prof_id, method="hnsw", params=IndexParams()
             )
@@ -179,14 +210,22 @@ class TestAnnIndex:
         """Switching index.method must rebuild the index, not silently keep the old one."""
         session_factory = sessionmaker(bind=pg_engine)
         with session_factory() as session:
-            chunk_id, emb_prof_id = _create_minimal_pipeline(session, embedding_dim=4)
+            pipeline = _create_minimal_pipeline(session, embedding_dim=4)
+            chunk_id, emb_prof_id = pipeline.chunk_id, pipeline.embedding_profile_id
             session.commit()
 
         index_name = vector_store.vector_index_name(emb_prof_id)
         try:
             _create_vector_table(pg_engine, emb_prof_id, 4)
             with pg_engine.begin() as conn:
-                vector_store.upsert_vectors(conn, emb_prof_id, [(chunk_id, [0.1, 0.2, 0.3, 0.4])])
+                vector_store.upsert_vectors(
+                    conn,
+                    emb_prof_id,
+                    [(chunk_id, [0.1, 0.2, 0.3, 0.4])],
+                    collection=pipeline.collection,
+                    extractor_profile_id=pipeline.extractor_profile_id,
+                    chunk_profile_id=pipeline.chunk_profile_id,
+                )
 
             ensure_embedding_ann_index(
                 pg_engine, profile_id=emb_prof_id, method="hnsw", params=IndexParams()

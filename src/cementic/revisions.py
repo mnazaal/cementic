@@ -29,8 +29,8 @@ from cementic.profiles import (
     get_or_create_extractor_profile,
 )
 from cementic.vector_store import (
-    create_table_sql,
     delete_vectors_for_collection_sql,
+    ensure_vector_table_schema,
     vector_table_exists,
 )
 
@@ -329,12 +329,10 @@ def ensure_revision_vector_table(session: Session, revision: PipelineRevision) -
         raise RuntimeError("Session is not bound to an engine")
     if bind.dialect.name != "postgresql":
         return
-    session.execute(
-        text(
-            create_table_sql(
-                revision.embedding_profile_id, revision.embedding_profile.embedding_dim
-            )
-        )
+    ensure_vector_table_schema(
+        session.connection(),
+        revision.embedding_profile_id,
+        revision.embedding_profile.embedding_dim,
     )
 
 

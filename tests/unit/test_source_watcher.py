@@ -4,8 +4,37 @@ import hashlib
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+
+from cementic.db import (
+    Base,
+    Chunk,
+    ChunkedDocument,
+    ChunkProfile,
+    ExtractedDocument,
+    ExtractorProfile,
+    SourceDocument,
+)
 from cementic.source_watcher import DocumentEventHandler, SourceWatcher
 from cementic.state import DaemonState
+
+
+class _NonClosingSession:
+    """Hand the same session to code that uses `with self.Session() as s`.
+
+    The context manager would otherwise close the session and detach the rows
+    the test still needs to inspect.
+    """
+
+    def __init__(self, session):
+        self._session = session
+
+    def __enter__(self):
+        return self._session
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
 
 
 class TestDocumentEventHandler:
@@ -111,44 +140,59 @@ class TestSourceWatcher:
         assert document.status == "pending"
 
     def test_mark_document_deleted_updates_existing_source_document(self, temp_dir):
+        """Deleting a document must take its chunks with it, not just flag the row.
+
+        Search filters on the vector row alone now -- the freshness and
+        `status <> 'deleted'` joins were what stopped the planner using the ANN
+        index -- so a deleted document whose chunks survive is a deleted
+        document that still comes back in results.
+        """
         pdf_path = temp_dir / "test.pdf"
-        document = SimpleNamespace(
-            source_path=str(pdf_path),
+        engine = create_engine("sqlite://")
+        Base.metadata.create_all(engine)
+        session = sessionmaker(bind=engine, expire_on_commit=False)()
+
+        document = SourceDocument(
+            source_path=str(pdf_path.resolve()),
             collection="default",
             file_hash="hash",
             status="pending",
-            error_message="old",
         )
-
-        class QueryMock:
-            def filter_by(self, **kwargs):
-                assert kwargs == {"source_path": str(pdf_path.resolve()), "collection": "default"}
-                return self
-
-            def first(self):
-                return document
-
-        class SessionMock:
-            def __enter__(self):
-                return self
-
-            def __exit__(self, exc_type, exc, tb):
-                return False
-
-            def query(self, model):
-                return QueryMock()
-
-            def commit(self):
-                return None
+        session.add(document)
+        session.flush()
+        extractor = ExtractorProfile(name="x", fingerprint="ex", config_json="{}")
+        chunk_profile = ChunkProfile(fingerprint="cp", config_json="{}")
+        session.add_all([extractor, chunk_profile])
+        session.flush()
+        extracted = ExtractedDocument(
+            document_id=document.id, extractor_profile_id=extractor.id, status="done"
+        )
+        session.add(extracted)
+        session.flush()
+        chunked = ChunkedDocument(
+            extracted_document_id=extracted.id, chunk_profile_id=chunk_profile.id, status="done"
+        )
+        session.add(chunked)
+        session.flush()
+        session.add(
+            Chunk(
+                document_id=document.id,
+                chunked_document_id=chunked.id,
+                chunk_index=0,
+                content="text",
+            )
+        )
+        session.commit()
 
         daemon = SourceWatcher()
-        daemon.Session = MagicMock(return_value=SessionMock())
+        daemon.Session = MagicMock(return_value=_NonClosingSession(session))
         daemon._watched_roots = [temp_dir.resolve()]
 
         daemon._mark_document_deleted(str(pdf_path))
 
         assert document.status == "deleted"
         assert document.file_hash is None
+        assert session.query(Chunk).count() == 0
 
     def test_setup_logging_reuses_existing_file_handler(self, temp_dir):
         """Repeated construction should not duplicate file handlers."""
