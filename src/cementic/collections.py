@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
-from sqlalchemy import func
+from sqlalchemy import func, text
+from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
 from cementic.config import Config
@@ -20,10 +21,17 @@ from cementic.pipeline_worker import (
 from cementic.revisions import (
     drain_pending_artifact_removals,
     drain_pending_vector_table_drops,
+    ensure_revision_ann_index,
+    get_active_revision,
     promote_revision,
 )
 from cementic.storage import safe_remove_artifact
-from cementic.vector_store import drop_vector_table
+from cementic.vector_store import (
+    drop_vector_table,
+    index_access_method,
+    vector_index_name,
+    vector_table_exists,
+)
 
 logger = logging.getLogger("cementic.collections")
 
@@ -262,6 +270,58 @@ def promote_ready_revision(
     remove_artifacts(drain_pending_artifact_removals(session), config=config)
     drop_orphan_vector_tables(session.get_bind(), drain_pending_vector_table_drops(session))
     return PromotionOutcome("promoted", revision=revision)
+
+
+@dataclass(frozen=True)
+class ReindexOutcome:
+    """Result of reconciling a collection's ANN index with current config.
+
+    ``status`` is one of ``"reindexed"``, ``"no_active"`` (nothing promoted yet)
+    or ``"no_vectors"`` (the active revision embedded nothing, so there is no
+    table to index).
+    """
+
+    status: str
+    method: str | None = None
+    previous_method: str | None = None
+
+
+def reindex_collection(
+    session: Session, collection: str, *, config: Config, force: bool = False
+) -> ReindexOutcome:
+    """Rebuild the active revision's ANN index against current ``index`` config.
+
+    Nothing else triggers this. The index is built once, when a revision first
+    completes, so editing ``index.method`` or the build-time knobs afterwards had
+    no effect on an already-built collection and no way to ask for one -- config
+    said one thing and the database did another, indefinitely.
+
+    Plain runs only rebuild when the *method* changed, which is what
+    ``ensure_embedding_ann_index`` already reconciles. ``force`` drops the index
+    first, so a changed ``hnsw_m``/``ef_construction`` is picked up too: those
+    are baked in at build time and ``CREATE INDEX IF NOT EXISTS`` would silently
+    keep the old graph.
+    """
+    revision = get_active_revision(session, collection)
+    if revision is None:
+        return ReindexOutcome("no_active")
+
+    profile_id = revision.embedding_profile_id
+    engine = cast(Engine, session.get_bind())
+    with engine.connect() as conn:
+        if not vector_table_exists(conn, profile_id):
+            return ReindexOutcome("no_vectors")
+        previous_method = index_access_method(conn, vector_index_name(profile_id))
+
+    if force and previous_method is not None:
+        with engine.begin() as conn:
+            conn.execute(text(f"DROP INDEX IF EXISTS {vector_index_name(profile_id)}"))
+
+    ensure_revision_ann_index(session, revision, config)
+    session.commit()
+    return ReindexOutcome(
+        "reindexed", method=config.index.method, previous_method=previous_method
+    )
 
 
 def list_collection_revisions(session: Session, collection: str) -> list[PipelineRevision]:

@@ -7,7 +7,7 @@ import json
 import pytest
 from sqlalchemy import text
 
-from cementic.collections import promote_ready_revision
+from cementic.collections import promote_ready_revision, reindex_collection
 from cementic.config import Config
 from cementic.db import (
     Chunk,
@@ -23,6 +23,7 @@ from cementic.db import (
 from cementic.revisions import ensure_revision_ann_index, ensure_revision_vector_table
 from cementic.vector_store import (
     create_table_sql,
+    index_access_method,
     upsert_vectors,
     vector_index_name,
     vector_table_exists,
@@ -230,4 +231,117 @@ def test_promotion_drops_the_retired_model_vector_table(pg_engine, pg_session, p
         row.embedding_profile_id for row in pg_session.query(ChunkEmbedding).all()
     }
     assert surviving == {kept_retired, promoted}
+    cleanup_pg_tables(pg_session)
+
+
+@pytest.mark.pg
+def test_reindex_switches_the_index_method(pg_engine, pg_session, pg_config) -> None:
+    """`index.method` was inert once a collection had been built.
+
+    The ANN index is created when a revision first completes, so editing the
+    method afterwards changed config and nothing else -- with no command to ask
+    for reconciliation. Search compensated by tuning for the index that actually
+    existed, which kept results correct but left the setting permanently unmet.
+    """
+    cleanup_pg_tables(pg_session)
+    revision = seed_active_vector_collection(
+        pg_session,
+        collection="reindexed",
+        source_path="/docs/reindexed.pdf",
+        chunks=[("a vector", [1.0, 0.0, 0.0, 0.0])],
+    )
+    pg_session.commit()
+    profile_id = revision.embedding_profile_id
+
+    pg_config.index.method = "hnsw"
+    first = reindex_collection(pg_session, "reindexed", config=pg_config)
+    assert first.status == "reindexed"
+    with pg_engine.connect() as conn:
+        assert index_access_method(conn, vector_index_name(profile_id)) == "hnsw"
+
+    pg_config.index.method = "diskann"
+    second = reindex_collection(pg_session, "reindexed", config=pg_config)
+
+    assert second.previous_method == "hnsw"
+    assert second.method == "diskann"
+    with pg_engine.connect() as conn:
+        assert index_access_method(conn, vector_index_name(profile_id)) == "diskann"
+    cleanup_pg_tables(pg_session)
+
+
+@pytest.mark.pg
+def test_reindex_reports_a_collection_with_nothing_promoted(pg_session, pg_config) -> None:
+    """Distinguishable from a successful no-op, which is what silence would look like."""
+    cleanup_pg_tables(pg_session)
+
+    outcome = reindex_collection(pg_session, "never-built", config=pg_config)
+
+    assert outcome.status == "no_active"
+    cleanup_pg_tables(pg_session)
+
+
+@pytest.mark.pg
+def test_reindex_reports_an_active_revision_with_no_vectors(
+    pg_engine, pg_session, pg_config
+) -> None:
+    """A revision can legitimately complete having embedded nothing."""
+    cleanup_pg_tables(pg_session)
+    revision = seed_active_vector_collection(
+        pg_session,
+        collection="novecs",
+        source_path="/docs/novecs.pdf",
+        chunks=[("unused", [1.0, 0.0, 0.0, 0.0])],
+    )
+    pg_session.commit()
+    with pg_engine.connect() as conn:
+        conn.execute(
+            text(f"DROP TABLE IF EXISTS {vector_table_name(revision.embedding_profile_id)}")
+        )
+        conn.commit()
+
+    outcome = reindex_collection(pg_session, "novecs", config=pg_config)
+
+    assert outcome.status == "no_vectors"
+    cleanup_pg_tables(pg_session)
+
+
+@pytest.mark.pg
+def test_force_rebuilds_even_when_the_method_is_unchanged(
+    pg_engine, pg_session, pg_config
+) -> None:
+    """hnsw_m and ef_construction are fixed when the index is built.
+
+    `CREATE INDEX IF NOT EXISTS` keeps the existing graph, so without a drop a
+    changed build parameter would report success and alter nothing. Proven by
+    relfilenode: a rebuilt index occupies new storage.
+    """
+    cleanup_pg_tables(pg_session)
+    revision = seed_active_vector_collection(
+        pg_session,
+        collection="forced",
+        source_path="/docs/forced.pdf",
+        chunks=[("a vector", [1.0, 0.0, 0.0, 0.0])],
+    )
+    pg_session.commit()
+    index_name = vector_index_name(revision.embedding_profile_id)
+    pg_config.index.method = "hnsw"
+    reindex_collection(pg_session, "forced", config=pg_config)
+
+    def _relfilenode() -> int:
+        with pg_engine.connect() as conn:
+            return conn.execute(
+                text("SELECT relfilenode FROM pg_class WHERE relname = :name"),
+                {"name": index_name},
+            ).scalar()
+
+    before = _relfilenode()
+    pg_config.index.hnsw_m = pg_config.index.hnsw_m + 4
+
+    unforced = reindex_collection(pg_session, "forced", config=pg_config)
+    assert unforced.previous_method == "hnsw"
+    assert _relfilenode() == before, "an unforced run must not rebuild"
+
+    reindex_collection(pg_session, "forced", config=pg_config, force=True)
+
+    assert _relfilenode() != before
     cleanup_pg_tables(pg_session)

@@ -126,6 +126,9 @@ cementic collection promote research
 # Inspect revision history for one collection
 cementic collection revisions research
 
+# Rebuild the active revision's ANN index after changing [index] settings
+cementic collection reindex research
+
 # Stop cementic's background workers (Postgres is left running)
 cementic stop
 
@@ -227,13 +230,19 @@ model_path = "./models/nomic-embed-text-v2-moe.Q8_0.gguf"
 - **`diskann`** (pgvectorscale) — disk-resident, compressed index. Much lower RAM
   use at scale; trades some latency. Best when the index is large relative to RAM.
 
-Both ship in the generated or provisioned Postgres image. The method is a *serving* choice: it is
-applied when a collection's vector index is built, and it never re-embeds — so set
-it before you first index a collection. Changing it afterwards takes effect the next
-time that collection's index is rebuilt, which swaps the index in place (HNSW ↔
-DiskANN) without touching the embeddings; a one-command reindex of an existing
-collection is on the roadmap. At a few-million-vector scale HNSW usually wins latency
-and DiskANN wins memory.
+Both ship in the generated or provisioned Postgres image. The method is a *serving* choice:
+it is applied when a collection's vector index is built, and it never re-embeds. To
+change it on a collection that is already built, run:
+
+```bash
+cementic collection reindex research
+```
+
+That swaps the index in place (HNSW ↔ DiskANN) without touching the embeddings. The
+build-time knobs `hnsw_m` and `hnsw_ef_construction` are fixed into the index when it
+is created, so changing those needs `cementic collection reindex research --force`.
+Either way it can take several minutes on a large corpus. At a few-million-vector
+scale HNSW usually wins latency and DiskANN wins memory.
 
 ### Environment variables
 

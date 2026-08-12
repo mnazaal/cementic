@@ -28,6 +28,7 @@ from cementic.collections import (
     list_collection_revisions,
     list_collections,
     promote_ready_revision,
+    reindex_collection,
     remove_artifacts,
 )
 from cementic.config import (
@@ -1431,6 +1432,63 @@ def promote_collection(
         raise typer.Exit(1)
     console.print("status: promoted")
     console.print(f"revision: {revision_label}")
+
+
+@collection_app.command(
+    "reindex",
+    short_help="Rebuild a collection's ANN index from current index config",
+    no_args_is_help=True,
+)
+def reindex_collection_command(
+    collection: str = typer.Argument(..., help="Collection name to reindex"),
+    force: bool = typer.Option(
+        False,
+        "-f",
+        "--force",
+        help="Rebuild even if the index method is unchanged (picks up hnsw_m and "
+        "ef_construction, which are fixed at build time)",
+    ),
+) -> None:
+    """Reconcile the active revision's ANN index with the current `[index]` config.
+
+    The index is built once, when a revision first completes, so editing
+    `index.method` afterwards otherwise had no effect and no way to ask for one.
+    """
+    try:
+        collection = validate_collection_name(collection)
+    except ValueError as e:
+        console.print(f"[red]Error: {e}[/red]")
+        raise typer.Exit(1)
+
+    console.print(f"collection: {collection}")
+    console.print("building the index — this can take several minutes on a large corpus")
+    try:
+        engine = get_engine(_get_config().database.url)
+        session_factory = get_session_factory(engine)
+        with session_factory() as session:
+            outcome = reindex_collection(
+                session, collection, config=_get_config(), force=force
+            )
+    except Exception as error:
+        _report_db_error(error, "collection reindex")
+        raise typer.Exit(1)
+
+    if outcome.status == "no_active":
+        console.print("status: no active revision — nothing has been promoted yet")
+        raise typer.Exit(1)
+    if outcome.status == "no_vectors":
+        console.print("status: no vectors to index")
+        return
+    if outcome.previous_method is None:
+        console.print(f"status: built ({outcome.method})")
+    elif outcome.previous_method == outcome.method:
+        console.print(f"status: rebuilt ({outcome.method})" if force else "status: unchanged")
+        if not force:
+            console.print(
+                f"the index is already {outcome.method}; --force rebuilds it anyway"
+            )
+    else:
+        console.print(f"status: rebuilt ({outcome.previous_method} -> {outcome.method})")
 
 
 @collection_app.command(

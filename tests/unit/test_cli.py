@@ -19,7 +19,7 @@ from cementic.cli import (
     app,
     collection_callback,
 )
-from cementic.collections import PromotionOutcome
+from cementic.collections import PromotionOutcome, ReindexOutcome
 from cementic.config import Config, default_config_path
 from cementic.pipeline_worker import PipelineCounts
 from cementic.state import StateManager
@@ -1081,6 +1081,63 @@ class TestBackgroundCommands:
         assert args == (mock_session, "research")
         assert isinstance(kwargs["config"], Config)
         assert kwargs["force"] is False
+
+    @patch("cementic.cli.get_session_factory")
+    @patch("cementic.cli.get_engine")
+    def test_collection_reindex_reports_the_method_change(
+        self, mock_get_engine, mock_get_session_factory
+    ):
+        mock_session = MagicMock()
+        mock_session.__enter__.return_value = mock_session
+        mock_session.__exit__.return_value = False
+        mock_get_session_factory.return_value = lambda: mock_session
+
+        outcome = ReindexOutcome("reindexed", method="diskann", previous_method="hnsw")
+        with patch("cementic.cli.reindex_collection", return_value=outcome) as mock_reindex:
+            result = runner.invoke(app, ["collection", "reindex", "research"])
+
+        assert result.exit_code == 0
+        assert "hnsw -> diskann" in result.output
+        # The rebuild can run for minutes; saying so beforehand is the point.
+        assert "several minutes" in result.output
+        assert mock_reindex.call_args.kwargs["force"] is False
+
+    @patch("cementic.cli.get_session_factory")
+    @patch("cementic.cli.get_engine")
+    def test_collection_reindex_without_an_active_revision_fails(
+        self, mock_get_engine, mock_get_session_factory
+    ):
+        """Nothing promoted is a different answer from nothing to do."""
+        mock_session = MagicMock()
+        mock_session.__enter__.return_value = mock_session
+        mock_session.__exit__.return_value = False
+        mock_get_session_factory.return_value = lambda: mock_session
+
+        with patch("cementic.cli.reindex_collection", return_value=ReindexOutcome("no_active")):
+            result = runner.invoke(app, ["collection", "reindex", "research"])
+
+        assert result.exit_code == 1
+        assert "no active revision" in result.output
+
+    @patch("cementic.cli.get_session_factory")
+    @patch("cementic.cli.get_engine")
+    def test_collection_reindex_says_how_to_rebuild_an_unchanged_method(
+        self, mock_get_engine, mock_get_session_factory
+    ):
+        """hnsw_m and ef_construction only take effect on a forced rebuild, so an
+        unchanged method must point at --force rather than just reporting nothing."""
+        mock_session = MagicMock()
+        mock_session.__enter__.return_value = mock_session
+        mock_session.__exit__.return_value = False
+        mock_get_session_factory.return_value = lambda: mock_session
+
+        outcome = ReindexOutcome("reindexed", method="hnsw", previous_method="hnsw")
+        with patch("cementic.cli.reindex_collection", return_value=outcome):
+            result = runner.invoke(app, ["collection", "reindex", "research"])
+
+        assert result.exit_code == 0
+        assert "status: unchanged" in result.output
+        assert "--force" in result.output
 
     @patch("cementic.cli.get_session_factory")
     @patch("cementic.cli.get_engine")
