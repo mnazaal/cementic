@@ -333,15 +333,73 @@ Two notes for whoever picks this up:
   import, making it look like flakiness. The extraction tests patch
   `_get_pymupdf` now; do not go back to patching the real modules.
 - **Three PG search tests fail on `main` too** (`test_search_pg.py` ×2,
-  `test_cli_pg.py` ×1) — they return zero results, and predate this branch.
-  Not investigated here; check them against `main` before blaming a change.
+  `test_cli_pg.py` ×1) — diagnosed and fixed since; see below.
+
+### Fixed on `claude/pg-correctness`
+
+**The three red PG tests were a regression of ours, not inherited.** `74942b4`
+added `CURRENT_CONTENT_SQL` to search's WHERE clause;
+`seed_active_vector_collection` had never set `source_file_hash`,
+`content_hash` or `source_content_hash`, so every seeded chunk failed
+`ed.source_file_hash = sd.file_hash` — `NULL = NULL` is not true — and search
+returned nothing. It merged because the unit and non-PG jobs were green and the
+PG job was not run locally.
+
+The production code was never implicated: `write_extracted_text` returns a hash
+or raises, so a `done` extraction always has one, and the live database has
+zero NULL hashes on `done` rows across 172 chunks.
+
+`scripts/check.sh` now runs all five gates in one command and reports a missing
+PostgreSQL as SKIPPED rather than passed.
 
 ### Still open
 
-**`hnsw.iterative_scan`.** The freshness predicates post-filter *more* rows, so
-a scan yielding `ef_search` candidates discards more of them and can return
-fewer than `top_k`. Needs verification against the live database first — a
-pgvector older than 0.8 rejects the parameter and would break all search.
+**The ANN index is never used by cementic's search query.** Measured, not
+inferred, with `EXPLAIN (ANALYZE)` against a real corpus:
+
+| query | plan | time |
+|---|---|---|
+| bare KNN, 768-dim, 20k rows | `Index Scan using ...ann` | 2–6 ms |
+| cementic's search query, same data | top-N heapsort over a full nested loop | 25 ms |
+| cementic's search query, 8-dim, 60k rows | same, 60k per-row PK lookups | 83–90 ms |
+
+Confirmed across 5k/20k/60k/100k rows, 8 and 768 dimensions, filters matching
+40 rows or every row, and with `enable_seqscan` both on and off. The planner
+always drives from `chunked_documents` and probes `embedding_vectors_p*` by
+primary key, because every filter (`collection`, the profile ids, the freshness
+predicates) lives on *joined* tables rather than on the vector table.
+
+Consequences, in order of importance:
+
+- Search is exact — so this is a scaling defect, not a correctness one. Results
+  are right, and were right before the freshness predicates too.
+- Search costs O(rows in the profile's vector table) per query, growing
+  linearly. Fine at the current 172 chunks; ~25 ms at 20k, ~90 ms at 60k.
+- `index.method`, `hnsw_m`, `ef_construction`, `hnsw_ef_search`, the DiskANN
+  knobs and `collection reindex` all maintain an index nothing reads.
+
+**`hnsw.iterative_scan` was investigated and deliberately not landed.** The
+premise — that post-filtering an ANN scan under-returns — is true in principle
+and measurable on a single-table query (0 of 10 results with the index forced),
+but it cannot occur here while the planner never chooses the index. It becomes
+required the moment the query is restructured, and should land with that change
+rather than as a knob that does nothing. Two findings from that work are worth
+keeping:
+
+- pgvector here is 0.8.3, which supports it; the parameter needs a version gate
+  regardless. PostgreSQL accepts an unknown *qualified* setting as a
+  placeholder until the defining module loads on that connection and rejects it
+  with `InvalidName` afterwards — so behind a connection pool an ungated `SET`
+  fails only on connections that had already run a vector query.
+- `SET LOCAL diskann.query_rescore` is accepted even where pgvectorscale is
+  absent, for the same placeholder reason. It is not evidence the setting took
+  effect.
+
+The fix, if taken: denormalise the filter columns onto the vector table
+(collection, chunk/extractor profile ids, a currency flag) so the WHERE clause
+applies to `embedding_vectors_p*` directly and the planner can drive from the
+ANN index — landing `hnsw.iterative_scan` at the same time, since post-filtering
+then becomes real. That is a schema change and a design decision, not a bug fix.
 
 ### Deliberately not done
 
