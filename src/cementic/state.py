@@ -38,6 +38,11 @@ class WorkerState:
     #: indistinguishable from a healthy idle one in `cementic status`.
     last_error: str | None = None
     last_error_at: str | None = None
+    #: What the worker is doing when it is not working through files -- today
+    #: only the ANN index build, which occupies the loop for minutes at a time
+    #: while writing nothing else. Without it `cementic status` shows a running
+    #: worker, a building revision and no current file: identical to an idle one.
+    current_activity: str | None = None
 
     def to_dict(self) -> dict[str, object]:
         """Convert to dictionary."""
@@ -88,6 +93,11 @@ class WorkerState:
         raw_last_error_at = normalized.get("last_error_at")
         last_error_at = str(raw_last_error_at) if raw_last_error_at is not None else None
 
+        raw_current_activity = normalized.get("current_activity")
+        current_activity = (
+            str(raw_current_activity) if raw_current_activity is not None else None
+        )
+
         return cls(
             daemon_state=daemon_state_value,
             watched_directories=watched_directories,
@@ -99,6 +109,7 @@ class WorkerState:
             start_token=start_token,
             last_error=last_error,
             last_error_at=last_error_at,
+            current_activity=current_activity,
         )
 
 
@@ -157,6 +168,7 @@ class StateManager:
         start_token: Any = UNSET,
         last_error: Any = UNSET,
         last_error_at: Any = UNSET,
+        current_activity: Any = UNSET,
     ) -> WorkerState:
         """Update specific fields and save."""
         with self._lock:
@@ -180,6 +192,8 @@ class StateManager:
                 state.last_error = last_error
             if last_error_at is not UNSET:
                 state.last_error_at = last_error_at
+            if current_activity is not UNSET:
+                state.current_activity = current_activity
 
             self.save(state)
             return state

@@ -381,6 +381,7 @@ def ensure_embedding_ann_index(
     method: str,
     params: IndexParams,
     distance_metric: str = "cosine",
+    build_memory: str | None = None,
 ) -> None:
     """Ensure the chosen ANN index exists on the profile's vector table.
 
@@ -408,6 +409,14 @@ def ensure_embedding_ann_index(
         if not vector_table_exists(conn, profile_id):
             return
         _ensure_ann_access_method(conn, method)
+        if build_memory is not None:
+            # An HNSW graph that does not fit in maintenance_work_mem spills and
+            # the build slows sharply -- measured 1454s at the 64MB default
+            # versus 345s at 2GB for 100k 768-dim vectors. Set on the connection
+            # rather than the server so it applies wherever cementic runs, and
+            # only for the build; the connection is discarded afterwards. The
+            # value's grammar is validated in config, not here.
+            conn.execute(text(f"SET maintenance_work_mem = '{build_memory}'"))
         # If an index already exists under a different method, drop it first so a
         # method switch actually takes effect (CREATE INDEX IF NOT EXISTS alone
         # would silently keep the old one).

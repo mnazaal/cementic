@@ -2053,3 +2053,48 @@ class TestFilterCommands:
         lines = [json.loads(line) for line in result.output.splitlines() if line.strip()]
         assert len(lines) == 5
         assert [line["index"] for line in lines] == [0, 1, 2, 3, 4]
+
+
+class TestStopExplainsAnIndexBuild:
+    """A stop that times out mid-index-build must say why.
+
+    The worker cannot answer SIGTERM from inside CREATE INDEX, so the grace
+    period always expires and the message read as a hung process. It is not
+    hung, and the difference matters: the statement is not resumable, so
+    --force throws away however many minutes it had accumulated.
+    """
+
+    @patch("cementic.cli._pipeline_worker_activity", return_value="building hnsw index")
+    @patch("cementic.cli.wait_for_exit", return_value=[4242])
+    @patch("cementic.cli._is_managed_proc_alive", return_value=True)
+    @patch("cementic.cli.os.kill")
+    @patch("cementic.cli._save_supervisor_state")
+    @patch(
+        "cementic.cli._load_supervisor_state",
+        return_value={"processes": [{"name": "pipeline-worker", "pid": 4242}]},
+    )
+    def test_timeout_names_the_build_and_its_cost(
+        self, mock_state, mock_save, mock_kill, mock_alive, mock_wait, mock_activity
+    ):
+        result = runner.invoke(app, ["stop"])
+
+        assert result.exit_code == 1
+        assert "building hnsw index" in result.output
+        assert "discard" in result.output
+
+    @patch("cementic.cli._pipeline_worker_activity", return_value=None)
+    @patch("cementic.cli.wait_for_exit", return_value=[4242])
+    @patch("cementic.cli._is_managed_proc_alive", return_value=True)
+    @patch("cementic.cli.os.kill")
+    @patch("cementic.cli._save_supervisor_state")
+    @patch(
+        "cementic.cli._load_supervisor_state",
+        return_value={"processes": [{"name": "pipeline-worker", "pid": 4242}]},
+    )
+    def test_ordinary_timeout_keeps_the_plain_advice(
+        self, mock_state, mock_save, mock_kill, mock_alive, mock_wait, mock_activity
+    ):
+        result = runner.invoke(app, ["stop"])
+
+        assert result.exit_code == 1
+        assert "use --force" in result.output

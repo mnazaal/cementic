@@ -1,6 +1,7 @@
 """Tests for pipeline worker constructor, client creation, and lifecycle."""
 
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, Mock, patch
 
 import pytest
@@ -998,3 +999,68 @@ class TestSupersededChunksArePurged:
         session.commit()
 
         assert session.query(Chunk).count() == 0
+
+
+class TestIndexBuildIsVisible:
+    """A build occupies the loop for minutes while writing nothing else.
+
+    Without an announcement `cementic status` shows a running worker, a
+    `building` revision and no current file -- indistinguishable from an idle
+    one, for tens of minutes on a large corpus. Nothing can be published from
+    inside the build, so it is published on both sides of it.
+    """
+
+    def _worker(self):
+        worker = PipelineWorker()
+        worker.collection = "research"
+        worker.state_manager = MagicMock()
+        revision = SimpleNamespace(status="building")
+        session = MagicMock()
+        session.__enter__.return_value = session
+        session.__exit__.return_value = False
+        session.get.return_value = revision
+        worker.Session = MagicMock(return_value=session)
+        return worker
+
+    def test_activity_is_published_and_then_cleared(self):
+        worker = self._worker()
+        with patch.object(worker, "_revision_complete", return_value=True):
+            with patch("cementic.pipeline_worker.ensure_revision_ann_index"):
+                with patch("cementic.pipeline_worker.mark_revision_ready"):
+                    worker._mark_revision_ready_if_complete(1)
+
+        published = [
+            call.kwargs["current_activity"]
+            for call in worker.state_manager.update.call_args_list
+            if "current_activity" in call.kwargs
+        ]
+        assert published == ["building hnsw index", None]
+
+    def test_activity_is_cleared_even_when_the_build_fails(self):
+        """Otherwise a failed build leaves status claiming it is still running."""
+        worker = self._worker()
+        with patch.object(worker, "_revision_complete", return_value=True):
+            with patch(
+                "cementic.pipeline_worker.ensure_revision_ann_index",
+                side_effect=RuntimeError("no disk"),
+            ):
+                with pytest.raises(RuntimeError):
+                    worker._mark_revision_ready_if_complete(1)
+
+        published = [
+            call.kwargs["current_activity"]
+            for call in worker.state_manager.update.call_args_list
+            if "current_activity" in call.kwargs
+        ]
+        assert published[-1] is None
+
+    def test_nothing_is_published_when_the_revision_is_not_complete(self):
+        worker = self._worker()
+        with patch.object(worker, "_revision_complete", return_value=False):
+            worker._mark_revision_ready_if_complete(1)
+
+        assert not [
+            call
+            for call in worker.state_manager.update.call_args_list
+            if "current_activity" in call.kwargs
+        ]

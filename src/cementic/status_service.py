@@ -46,6 +46,9 @@ class WorkerStatus:
     failed_count: int
     last_error: str | None = None
     last_error_at: str | None = None
+    #: Long-running work that is not a file, so a worker mid-index-build is not
+    #: reported as idle.
+    current_activity: str | None = None
 
 
 @dataclass(frozen=True)
@@ -141,6 +144,7 @@ def build_worker_status(state: WorkerState) -> WorkerStatus:
         failed_count=state.failed_count,
         last_error=state.last_error,
         last_error_at=state.last_error_at,
+        current_activity=state.current_activity,
     )
 
 

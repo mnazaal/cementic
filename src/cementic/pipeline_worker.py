@@ -878,7 +878,24 @@ class PipelineWorker:
                 return
             if not self._revision_complete(session, revision):
                 return
-            ensure_revision_ann_index(session, revision, self.config)
+            # The build occupies this loop for minutes at a time -- tens of
+            # minutes on a large corpus -- while writing nothing else, so
+            # `cementic status` would otherwise show a running worker with no
+            # current file: indistinguishable from an idle one. Announced before
+            # it starts, because nothing can be published from inside it.
+            self._logger.info(
+                "Building the %s index for collection=%s; the worker does no "
+                "other work until it finishes, and stopping now discards it",
+                self.config.index.method,
+                self.collection,
+            )
+            self.state_manager.update(
+                current_activity=f"building {self.config.index.method} index"
+            )
+            try:
+                ensure_revision_ann_index(session, revision, self.config)
+            finally:
+                self.state_manager.update(current_activity=None)
             mark_revision_ready(session, revision)
             session.commit()
 

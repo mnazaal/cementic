@@ -236,6 +236,13 @@ until it has a full page rather than stopping after `hnsw_ef_search` candidates.
 Without it, a collection that holds a small share of a shared vector table can come
 back short, or empty. It needs pgvector 0.8 or newer and is ignored on older servers.
 
+The index is built once, when a collection's first revision finishes building. That
+build occupies the pipeline worker — `cementic status` reports it under `activity:`
+— and is not resumable, so stopping partway through starts it over. `index.build_memory`
+(default `2GB`) raises `maintenance_work_mem` for the build only: PostgreSQL's 64MB
+default makes the graph spill to disk, which cost 1454s against 345s for 100k
+768-dimensional vectors. Lower it on a memory-constrained server.
+
 Both ship in the generated or provisioned Postgres image. The method is a *serving* choice:
 it is applied when a collection's vector index is built, and it never re-embeds. To
 change it on a collection that is already built, run:

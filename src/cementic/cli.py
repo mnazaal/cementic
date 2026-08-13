@@ -259,6 +259,9 @@ method = "hnsw"
 # ef_search candidates. Leave on unless you are on pgvector older than 0.8,
 # where it is ignored anyway.
 hnsw_iterative_scan = "relaxed_order"
+# maintenance_work_mem for index builds only. PostgreSQL's 64MB default makes an
+# HNSW build spill to disk and slow sharply; lower this on a small server.
+build_memory = "2GB"
 
 [llama_cpp]
 model_path = "./models/nomic-embed-text-v2-moe.Q8_0.gguf"
@@ -369,6 +372,20 @@ def _is_managed_proc_alive(process: dict[str, object]) -> bool:
 
 
 _STARTUP_GRACE_SECONDS = 2.0
+
+
+def _pipeline_worker_activity() -> str | None:
+    """What the pipeline worker is busy with, if it published anything.
+
+    Read from its state file rather than inferred, and tolerant of every way
+    that can fail -- this only ever adds an explanation to a stop message, so it
+    must never be the reason a stop fails.
+    """
+    try:
+        state = StateManager(_get_config().pipeline_worker.state_path).load()
+    except Exception:
+        return None
+    return state.current_activity or None
 
 
 def _worker_processes_from_state_files() -> list[dict[str, object]]:
@@ -649,6 +666,9 @@ def _print_status_summary(
     )
     if pipeline_worker_status.current_file != "None":
         console.print(f"  current file: {pipeline_worker_status.current_file}")
+    if pipeline_worker_status.current_activity:
+        console.print(f"  activity: {pipeline_worker_status.current_activity}")
+        console.print("  (no other work happens until this finishes)")
     if health is not None and health.llama_daemon != "N/A":
         console.print(f"embedding daemon: {health.llama_daemon}")
 
@@ -764,6 +784,7 @@ def _print_status_json(
             "pid": pipeline_worker_status.pid,
             "last_error": pipeline_worker_status.last_error,
             "last_error_at": pipeline_worker_status.last_error_at,
+            "current_activity": pipeline_worker_status.current_activity,
         },
     }
 
@@ -1181,6 +1202,9 @@ def stop_background(
         return
 
     if force:
+        activity = _pipeline_worker_activity()
+        if activity is not None:
+            console.print(f"discarding in-progress work: {activity}")
         killed = force_kill(remaining)
         time.sleep(0.5)
         still_alive = [pid for pid in killed if is_pid_running(pid)]
@@ -1211,7 +1235,15 @@ def stop_background(
         f"stop timed out after {timeout_seconds}s; "
         f"still running PID(s): {', '.join(str(pid) for pid in remaining)}"
     )
-    console.print("use --force to kill stubborn processes")
+    activity = _pipeline_worker_activity()
+    if activity is not None:
+        # Otherwise this reads as a hung worker. It is not: the worker cannot
+        # answer SIGTERM from inside CREATE INDEX, and the statement is not
+        # resumable, so forcing now throws the whole build away.
+        console.print(f"the pipeline worker is {activity}, which does not stop on request")
+        console.print("--force will discard that work; it restarts from scratch next run")
+    else:
+        console.print("use --force to kill stubborn processes")
     # Same reason as the force path above: nothing was stopped, so a caller
     # chaining on success must not proceed.
     raise typer.Exit(1)

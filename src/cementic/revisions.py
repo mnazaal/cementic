@@ -355,6 +355,7 @@ def ensure_revision_ann_index(
         method=config.index.method,
         params=params,
         distance_metric=revision.embedding_profile.distance_metric,
+        build_memory=config.index.build_memory,
     )
 
 

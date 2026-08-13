@@ -12,6 +12,7 @@ from cementic.config import (
     Config,
     ConfigError,
     DatabaseConfig,
+    IndexConfig,
     LlamaCppConfig,
     format_config_error,
     get_config,
@@ -476,3 +477,23 @@ class TestPathsAreExpandedAndAnchored:
         dumped = Config().model_dump(mode="json")
 
         assert "~" not in json.dumps(dumped)
+
+
+class TestBuildMemoryIsValidated:
+    """The value is interpolated into a SET statement, so its grammar is closed.
+
+    A config file is not a trusted source of SQL, and PostgreSQL would happily
+    report a syntax error only once an index build was already attempted --
+    after a full corpus had been embedded.
+    """
+
+    @pytest.mark.parametrize("value", ["64MB", "2GB", "512 MB", "1048576", "8gb"])
+    def test_accepted_sizes(self, value):
+        assert IndexConfig(build_memory=value).build_memory == value.strip()
+
+    @pytest.mark.parametrize(
+        "value", ["2GB; DROP TABLE chunks_v2", "lots", "-1GB", "", "2 gigabytes"]
+    )
+    def test_rejected_values(self, value):
+        with pytest.raises(ValidationError, match="memory size"):
+            IndexConfig(build_memory=value)

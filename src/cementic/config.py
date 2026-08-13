@@ -2,6 +2,7 @@
 
 import difflib
 import os
+import re
 import sys
 from pathlib import Path
 from typing import Any, ClassVar
@@ -518,6 +519,27 @@ class IndexConfig(_SectionSettings):
     diskann_query_rescore: int = Field(
         default=50, ge=1, description="DiskANN query-time rescore count"
     )
+    build_memory: str = Field(
+        default="2GB",
+        description="maintenance_work_mem for the session that builds an ANN "
+        "index. PostgreSQL defaults to 64MB; an HNSW graph that does not fit "
+        "spills to disk and the build slows sharply — 100k 768-dim vectors took "
+        "1454s at 64MB and 345s at 2GB. Applies only while an index is being "
+        "built, one at a time. Lower it on a memory-constrained server.",
+    )
+
+    @field_validator("build_memory")
+    @classmethod
+    def _validate_build_memory(cls, value: str) -> str:
+        # This goes into a SET statement as a literal, so the grammar is closed
+        # deliberately rather than passed through to the server to judge: a
+        # config file is not a trusted source of SQL.
+        if not re.fullmatch(r"\d+\s*(kB|MB|GB|TB)?", value.strip(), flags=re.IGNORECASE):
+            raise ValueError(
+                "build_memory must be a PostgreSQL memory size such as "
+                "'512MB' or '2GB' (a bare number is kilobytes)"
+            )
+        return value.strip()
 
     @field_validator("hnsw_iterative_scan")
     @classmethod
