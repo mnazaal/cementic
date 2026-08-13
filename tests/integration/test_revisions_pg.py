@@ -20,7 +20,11 @@ from cementic.db import (
     PipelineRevision,
     SourceDocument,
 )
-from cementic.revisions import ensure_revision_ann_index, ensure_revision_vector_table
+from cementic.revisions import (
+    ensure_revision_ann_index,
+    ensure_revision_ann_index_up_front,
+    ensure_revision_vector_table,
+)
 from cementic.vector_store import (
     FILTER_COLUMNS,
     create_table_sql,
@@ -114,6 +118,91 @@ def test_ensure_revision_vector_table_creates_table_up_front(pg_engine, pg_sessi
 
     with pg_engine.connect() as conn:
         assert vector_table_exists(conn, profile_id)
+    cleanup_pg_tables(pg_session)
+
+
+@pytest.mark.pg
+def test_ann_index_is_created_up_front_on_an_empty_table(pg_engine, pg_session) -> None:
+    """HNSW has no training step, so the index is created before any inserts.
+
+    Every insert then maintains the graph incrementally: no build stall at the
+    ready transition, per-batch resumability, and a searchable index during
+    ingestion (measured equal recall/latency to the build-after-load order).
+    """
+    cleanup_pg_tables(pg_session)
+    revision = seed_active_vector_collection(
+        pg_session,
+        collection="upfront",
+        source_path="/docs/upfront.pdf",
+        chunks=[("seed", [1.0, 0.0, 0.0, 0.0])],
+    )
+    pg_session.commit()
+    profile_id = revision.embedding_profile_id
+    with pg_engine.connect() as conn:
+        conn.execute(text(f"DELETE FROM {vector_table_name(profile_id)}"))
+        conn.execute(text(f"DROP INDEX IF EXISTS {vector_index_name(profile_id)}"))
+        conn.commit()
+
+    ensure_revision_ann_index_up_front(pg_session, revision, Config())
+
+    with pg_engine.connect() as conn:
+        assert index_access_method(conn, vector_index_name(profile_id)) == "hnsw"
+    cleanup_pg_tables(pg_session)
+
+
+@pytest.mark.pg
+def test_up_front_index_leaves_a_populated_table_to_the_ready_build(
+    pg_engine, pg_session
+) -> None:
+    """Rows but no index means a resumed build from an older version.
+
+    Creating the index here would run the bulk build synchronously at worker
+    startup -- the exact stall the up-front path exists to avoid -- so it is
+    left to the ready transition, where it is announced and expected.
+    """
+    cleanup_pg_tables(pg_session)
+    revision = seed_active_vector_collection(
+        pg_session,
+        collection="resumed",
+        source_path="/docs/resumed.pdf",
+        chunks=[("existing vector", [1.0, 0.0, 0.0, 0.0])],
+    )
+    pg_session.commit()
+    profile_id = revision.embedding_profile_id
+    with pg_engine.connect() as conn:
+        conn.execute(text(f"DROP INDEX IF EXISTS {vector_index_name(profile_id)}"))
+        conn.commit()
+
+    ensure_revision_ann_index_up_front(pg_session, revision, Config())
+
+    with pg_engine.connect() as conn:
+        assert index_access_method(conn, vector_index_name(profile_id)) is None
+    cleanup_pg_tables(pg_session)
+
+
+@pytest.mark.pg
+def test_up_front_index_only_applies_to_hnsw(pg_engine, pg_session) -> None:
+    """DiskANN keeps today's build-at-ready behavior; only HNSW was measured."""
+    cleanup_pg_tables(pg_session)
+    revision = seed_active_vector_collection(
+        pg_session,
+        collection="diskann-upfront",
+        source_path="/docs/diskann-upfront.pdf",
+        chunks=[("seed", [1.0, 0.0, 0.0, 0.0])],
+    )
+    pg_session.commit()
+    profile_id = revision.embedding_profile_id
+    with pg_engine.connect() as conn:
+        conn.execute(text(f"DELETE FROM {vector_table_name(profile_id)}"))
+        conn.execute(text(f"DROP INDEX IF EXISTS {vector_index_name(profile_id)}"))
+        conn.commit()
+
+    config = Config()
+    config.index.method = "diskann"
+    ensure_revision_ann_index_up_front(pg_session, revision, config)
+
+    with pg_engine.connect() as conn:
+        assert index_access_method(conn, vector_index_name(profile_id)) is None
     cleanup_pg_tables(pg_session)
 
 

@@ -39,6 +39,7 @@ from cementic.revisions import (
     chunked_scope,
     embedding_scope,
     ensure_revision_ann_index,
+    ensure_revision_ann_index_up_front,
     ensure_revision_vector_table,
     extracted_scope,
     get_target_revision,
@@ -461,6 +462,9 @@ class PipelineWorker:
                 raise RuntimeError(dimension_error)
             ensure_revision_vector_table(session, revision)
             session.commit()
+            # After the commit: the index DDL runs on its own connection, so the
+            # table must already be visible outside this session's transaction.
+            ensure_revision_ann_index_up_front(session, revision, self.config)
             return revision.id
 
     def _step_extract(self, revision_id: int) -> bool:

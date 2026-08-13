@@ -32,6 +32,7 @@ from cementic.vector_store import (
     delete_vectors_for_collection_sql,
     ensure_vector_table_schema,
     vector_table_exists,
+    vector_table_has_rows,
 )
 
 #: Revision statuses that represent an in-flight (not yet promoted) build.
@@ -357,6 +358,37 @@ def ensure_revision_ann_index(
         distance_metric=revision.embedding_profile.distance_metric,
         build_memory=config.index.build_memory,
     )
+
+
+def ensure_revision_ann_index_up_front(
+    session: Session, revision: PipelineRevision, config: Config
+) -> None:
+    """Create the ANN index on the still-empty vector table, before any inserts.
+
+    HNSW has no training step, so an index created up front is maintained
+    incrementally by every insert. Measured at 100k x 768: ~2.9x total indexing
+    time (~3.5 ms per chunk, small against tens of ms to embed one), and in
+    return no build stall at the ready transition, per-batch resumability
+    instead of one unresumable 80s+ build, a searchable index during ingestion,
+    and equal recall, latency and index size.
+
+    Guarded to HNSW (DiskANN is unmeasured, so it keeps its build-at-ready
+    behavior) and to the empty-table case: rows without an index mean a build
+    resumed from an older version, where creating the index here would run the
+    bulk build synchronously at worker startup -- the exact stall this path
+    exists to avoid. That build stays at the ready transition, announced.
+    """
+    if config.index.method != "hnsw":
+        return
+    bind = session.get_bind()
+    if bind is None or bind.dialect.name != "postgresql":
+        return
+    conn = session.connection()
+    if not vector_table_exists(conn, revision.embedding_profile_id):
+        return
+    if vector_table_has_rows(conn, revision.embedding_profile_id):
+        return
+    ensure_revision_ann_index(session, revision, config)
 
 
 #: Session key holding artifact files whose rows were deleted but whose bytes

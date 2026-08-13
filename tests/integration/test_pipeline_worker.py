@@ -34,6 +34,7 @@ from cementic.pipeline_worker import (
 )
 from cementic.revisions import promote_revision, requeue_interrupted_artifacts
 from cementic.source_watcher import SourceWatcher
+from cementic.vector_store import index_access_method, vector_index_name
 from tests.integration.test_pg_helpers import cleanup_pg_tables
 
 
@@ -823,6 +824,27 @@ class TestPipelineWorkerFullPipeline:
             done_embeddings = session.query(ChunkEmbedding).filter_by(status="done").count()
             assert chunks > 0
             assert done_embeddings == chunks
+
+    def test_ensure_target_revision_creates_the_ann_index_up_front(
+        self, pg_setup, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The HNSW index exists before any embedding, so inserts maintain it
+        incrementally and the ready transition has no bulk build to run."""
+        config, session_factory, _pdf_fixtures_dir = pg_setup
+        pipeline, _source_watcher = _setup_worker(
+            config, session_factory, "test_upfront_index", monkeypatch
+        )
+        pipeline.embedding_client = FakeEmbeddingClient()
+
+        revision_id = pipeline._ensure_target_revision()
+
+        with session_factory() as session:
+            revision = session.get(PipelineRevision, revision_id)
+            assert revision is not None
+            method = index_access_method(
+                session.connection(), vector_index_name(revision.embedding_profile_id)
+            )
+        assert method == "hnsw"
 
     def test_ensure_target_revision_returns_same_on_repeat(
         self, sqlite_setup, monkeypatch: pytest.MonkeyPatch

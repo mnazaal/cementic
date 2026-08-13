@@ -268,6 +268,18 @@ def vector_table_exists(conn: Connection, profile_id: int) -> bool:
     return result is not None
 
 
+def vector_table_has_rows(conn: Connection, profile_id: int) -> bool:
+    """Whether a profile's vector table holds any vectors at all.
+
+    Callers must check ``vector_table_exists`` first; probing a missing table
+    raises. An EXISTS probe rather than COUNT so the answer costs one row.
+    """
+    result = conn.execute(
+        text(f"SELECT EXISTS (SELECT 1 FROM {vector_table_name(profile_id)})")
+    ).scalar()
+    return bool(result)
+
+
 def pgvector_version(conn: Connection) -> tuple[int, ...] | None:
     """Installed pgvector version, or None when it cannot be determined."""
     raw = conn.execute(

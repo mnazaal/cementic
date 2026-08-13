@@ -7,18 +7,15 @@ Four rounds of code review are done and merged. The current thread is **search
 performance at scale**, driven by a corpus of ~20k PDFs (~700k chunks at the
 observed 34 chunks/document, 768 dimensions).
 
-**Entry point:** one decision, already measured, nothing blocking it — see
-"Still open — a decision, with the measurements taken" below. Build the ANN
-index up front on the empty table instead of in bulk at the `building → ready`
-transition. The recommendation is to take it. The change is small:
-`_ensure_target_revision` (`pipeline_worker.py`) already calls
-`ensure_revision_vector_table`, so the index is created beside it, guarded to
-the empty-table case so a *resumed* build does not trigger a bulk build at
-start-up; the existing call in `_mark_revision_ready_if_complete` stays for
-resumes and for `index.method` changes.
+**Entry point:** ~~one decision, already measured, nothing blocking it~~ —
+*taken and implemented 2026-08-13*; see "Decided — build the ANN index up
+front" below. Next candidates: the two open read-only reviews ("Open review
+findings" below), then the roadmap in `TODO.md`.
 
 **Branch:** `main`, at `46488f3` — everything before this handoff is merged, and
 no `claude/*` branches remain (this session's four were merged and deleted).
+*(Since superseded: the CI pg-startup fix and the up-front-index change landed
+after this was written — `git log` is current.)*
 Nothing is running in the background. Two items were uncommitted when this was
 written: this block and `scripts/measure_index_build_order.py`. If a commit
 accompanied the handoff they are its only contents, on a fresh `claude/*` branch
@@ -423,7 +420,14 @@ said.
 Verified that a killed build loses everything: on a 40k table whose build takes
 135 s, killing the builder at ~34 s leaves only the primary-key index.
 
-### Still open — a decision, with the measurements taken
+### Decided — build the ANN index up front (2026-08-13)
+
+**Taken.** `ensure_revision_ann_index_up_front` (`revisions.py`) creates the
+HNSW index beside the vector table in `_ensure_target_revision`, guarded to the
+empty-table case (rows without an index mean a resumed build — its bulk build
+stays at the ready transition) and to HNSW (DiskANN is unmeasured and keeps
+build-at-ready). The ready-transition and `collection reindex` calls stay for
+resumes and method changes. The measurements that justified it:
 
 **Should the ANN index be created up front, on the empty table?** HNSW has no
 training step, so it can be. Every insert then maintains the graph and the
@@ -451,11 +455,6 @@ The 2.9× is on the insert step, and cementic's pipeline is embedding-bound:
 +351 s per 100k vectors is ~3.5 ms of index maintenance per chunk, against tens
 of milliseconds to embed one. Proportionally small, and spread out instead of
 concentrated.
-
-If taken, the change is small — `_ensure_target_revision` already creates the
-vector table up front, so the index would be created beside it, guarded to the
-empty-table case so a resumed build does not trigger a bulk build at start-up.
-The ready-transition call stays for resumes and method changes.
 
 **Two earlier numbers here were wrong and are corrected above.** A first A/B run
 reported a 100× query-latency gap and a recall difference between the two build
