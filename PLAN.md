@@ -392,27 +392,69 @@ for the wrong reason. Verified that trap directly — at 4k rows the `slice`
 query plans as a seq scan even with `enable_seqscan = off`. What CI does pin is
 that the ANN index *is* in the plan, which is the thing that regressed.
 
-### Still open
+### Fixed on `claude/index-build-stage-1`
 
-**HNSW index builds are slow and block the worker.** `ensure_revision_ann_index`
+**The index build is faster, visible, and explicable.** `ensure_revision_ann_index`
 runs synchronously in `_mark_revision_ready_if_complete`, at the
-`building → ready` transition — not at promotion. Plain `CREATE INDEX` takes a
-`SHARE` lock, so reads (search) continue but inserts block, stalling any other
-collection sharing that embedding profile. An interrupted build loses all its
-work.
+`building → ready` transition — *not* at promotion, as an earlier note here
+said.
 
-Measured at 100k rows × 768 dimensions, and dominated by `maintenance_work_mem`:
+- `index.build_memory` (default 2GB) raises `maintenance_work_mem` on the
+  build's own connection. 100k × 768 is 293 MiB of graph against Postgres's
+  64MB default, so the build spilled: **1454 s at 64MB, 345 s at 2GB**.
+- The worker publishes `current_activity` around the build, because nothing can
+  be published from inside it. `cementic status` previously showed a running
+  worker, a `building` revision and no current file — identical to idle.
+- `cementic stop` waits 10 s and then *refuses* (it does not force-kill; the
+  5-second SIGKILL is `_terminate_managed`, used only on start-up rollback). The
+  worker cannot answer SIGTERM from inside `CREATE INDEX`, so that timeout was
+  guaranteed and read as a hang. Both the timeout and `--force` now say what is
+  running and that forcing discards it.
 
-| `maintenance_work_mem` | build |
-|---|---|
-| 64MB (Postgres default; container ships this) | 1454 s |
-| 2GB | 345 s |
+Verified that a killed build loses everything: on a 40k table whose build takes
+135 s, killing the builder at ~34 s leaves only the primary-key index.
 
-293 MiB of raw vector data against a 64MB buffer, so the build spills. Raising
-it 4.2×'d the build; a `SET LOCAL maintenance_work_mem` before `CREATE INDEX`,
-and a larger value in `containers/`, are the obvious next steps. At ~700k chunks
-even the fast path is tens of minutes, so making the build non-blocking (or
-reporting progress) is worth considering separately.
+### Still open — a decision, with the measurements taken
+
+**Should the ANN index be created up front, on the empty table?** HNSW has no
+training step, so it can be. Every insert then maintains the graph and the
+build stall disappears entirely. Measured at 100k × 768, `maintenance_work_mem`
+2GB for both, clustered vectors (uniform random ones sit at near-identical
+distances, which makes recall meaningless):
+
+| | insert then build (today) | build then insert |
+|---|---|---|
+| insert | 61.8 s | 413.1 s |
+| build | 81.5 s — worker blocked | 0.0 s |
+| **total** | **143.3 s** | **413.1 s** |
+| longest unresumable step | 81.5 s | none |
+| recall@10 mean / worst | 0.996 / 0.900 | 1.000 / 1.000 |
+| query latency | ~0.74 ms | ~0.74 ms |
+| index size (30k) | 117 MB | 117 MB |
+
+So it costs ~2.9× total indexing time and buys: no stall, full resumability
+(inserts commit per batch, so a kill loses one batch instead of the whole
+build), a searchable index *during* ingestion rather than after, and recall and
+latency that are equal or better. pgvector's guidance that building after
+loading is faster holds; that it yields a better graph did not, here.
+
+The 2.9× is on the insert step, and cementic's pipeline is embedding-bound:
++351 s per 100k vectors is ~3.5 ms of index maintenance per chunk, against tens
+of milliseconds to embed one. Proportionally small, and spread out instead of
+concentrated.
+
+If taken, the change is small — `_ensure_target_revision` already creates the
+vector table up front, so the index would be created beside it, guarded to the
+empty-table case so a resumed build does not trigger a bulk build at start-up.
+The ready-transition call stays for resumes and method changes.
+
+**Two earlier numbers here were wrong and are corrected above.** A first A/B run
+reported a 100× query-latency gap and a recall difference between the two build
+orders. Both were artifacts: the run never checked which plan each query got,
+and the `enable_indexscan = off` used to force an exact baseline leaked onto
+pooled connections, so some "ANN" queries were sequential scans. Re-measured
+with both plans asserted via `EXPLAIN` and a separate pool for the baseline, the
+two indexes are the same size and the same speed.
 
 ### Superseded
 
