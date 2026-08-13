@@ -1,65 +1,74 @@
 # cementic — architecture & design
 
-<!-- session-handoff:begin (2026-08-07) -->
+<!-- session-handoff:begin (2026-08-13) -->
 ## Where the work stands
 
-A second full code review of the CLI and every path it reaches (2026-08-07).
-**Nothing was fixed** — the review is read-only and complete. All findings, with
-file:line, user-visible symptom, and repro commands, are in
-[`notes/code-review-2026-08-07.html`](notes/code-review-2026-08-07.html).
-"Open review findings" below carries only the priority order.
+Four rounds of code review are done and merged. The current thread is **search
+performance at scale**, driven by a corpus of ~20k PDFs (~700k chunks at the
+observed 34 chunks/document, 768 dimensions).
 
-**Entry point:** ~~run `uv lock`~~ — done on 2026-08-11 along with the named
-volume in both `compose.yml` files, on `claude/review-fixes-2026-08-11`
-(unmerged). `uv lock --check` now passes. The next entry point is the config
-diagnosability cluster; see "Still open" below.
+**Entry point:** one decision, already measured, nothing blocking it — see
+"Still open — a decision, with the measurements taken" below. Build the ANN
+index up front on the empty table instead of in bulk at the `building → ready`
+transition. The recommendation is to take it. The change is small:
+`_ensure_target_revision` (`pipeline_worker.py`) already calls
+`ensure_revision_vector_table`, so the index is created beside it, guarded to
+the empty-table case so a *resumed* build does not trigger a bulk build at
+start-up; the existing call in `_mark_revision_ready_if_complete` stays for
+resumes and for `index.method` changes.
 
-**Branch:** `claude/code-review-2026-08-07`, **two commits ahead of `main`, not
-merged and not pushed** — `b39f6f6` (the review note) and the commit carrying
-this block and the section below. Working tree clean; `git merge-tree` reports
-no conflicts against `main`, so it fast-forwards.
+**Branch:** `main`, at `46488f3` — everything before this handoff is merged, and
+no `claude/*` branches remain (this session's four were merged and deleted).
+Nothing is running in the background. Two items were uncommitted when this was
+written: this block and `scripts/measure_index_build_order.py`. If a commit
+accompanied the handoff they are its only contents, on a fresh `claude/*` branch
+— the hook refuses commits on `main`. If not, they are still in the working
+tree. `git status` settles it in one command.
 
-`claude/hygiene-fixes` still exists but is **fully merged** — the previous
-handoff block claimed 5 unmerged commits (`27e5ab0`, `6d56d9a`, `e93d79c`,
-`9d50d48`, `cb5cace`); `git merge-base --is-ancestor` confirms all five are on
-`main`. That branch can be deleted.
+**Verification:** `./scripts/check.sh` runs all five CI gates in one command and
+reports a missing PostgreSQL as SKIPPED rather than passed. It was green on
+`main` at `46488f3`. Use it — the reason three PG tests reached `main` red is
+that "I ran the tests" meant unit + non-PG only.
 
-**Verification state:** ruff clean, mypy clean, **610 unit tests pass in 16s**
-locally. Every finding in the note is something the suite does not cover. CI has
-never been green on this state (see entry point).
-
-**Live database state:** the real `cementic` DB holds collection `test`, 5
-documents, 172/172 chunks embedded, revision 1 in `ready` with **no active
-revision**. Both worker state files read `process=stopped, state=running`; that
-is the known state-file bug (the pipeline worker writes `RUNNING` outside the
-`try/finally` that would clear it), not a live process. No cleanup needed.
+**Live database:** collection `test`, 5 documents, 172/172 chunks, revision 1
+`ready`, no active revision. Healthy: zero NULL freshness hashes, all 172 chunks
+satisfy `CURRENT_CONTENT_SQL`. Its vector table predates the filter columns and
+will migrate in place on first use — `ensure_vector_table_schema` adds the
+columns and backfills from the joins, with no re-embedding.
 
 ### Environment facts that cost time to rediscover
 
-- **The venv is an editable install of this working tree.** Running `cementic`
-  executes whatever branch is checked out — not `main`. Check
-  `git branch --show-current` before interpreting CLI behaviour.
+- **The venv is an editable install of this working tree.** `cementic` runs
+  whatever branch is checked out; check `git branch --show-current` first.
+- **The user merges branches into `main` between turns.** Twice this session a
+  commit failed because the branch had been merged and deleted underneath.
+  Re-check the branch before committing; the guard requires `claude/*`.
 - **Integration tests use a separate `<name>_test` database** and refuse to run
-  otherwise (`tests/integration/conftest.py`). Before that guard existed they
-  dropped every table in the user's real database; `pytest tests/unit` never
-  touches Postgres.
-- Postgres answers on `localhost:5432`; the container engine is *not* reachable
-  from an agent sandbox, and the sandbox is in its own PID namespace, so `ps`
-  cannot see the user's worker processes. Ask the user to run process checks.
-- The embedding daemon was up and healthy during the review, so DB-backed and
-  embedding-backed commands are exercisable directly.
-- Commits must be on a `claude/*` branch (`AGENT_BRANCH_PREFIX`), and commit
-  messages containing dependency-directory names can trip a path guard — write
-  the message to a file and use `git commit -F`.
-- Shell cwd resets to the repo root between tool calls; redirect probe output to
-  an absolute scratch path or it lands in the repo.
+  otherwise. `pytest tests/unit` never touches Postgres.
+- Postgres answers on `localhost:5432` (pgvector 0.8.3, vectorscale 0.9.0,
+  server 18.3). **`podman` is not usable from the agent sandbox** and **`psql`
+  is not installed** — inspect the database through SQLAlchemy from Python.
+- The container ships stock Postgres tuning: `maintenance_work_mem=64MB`,
+  `shared_buffers=128MB`. cementic now sets the former per-build itself.
+- Commit messages containing dependency-directory names trip a path guard —
+  write the message to a file and use `git commit -F`.
+- Long probes exceed the 2-minute foreground cap; background them and poll for a
+  completion marker, not for first output.
 
-**Not carried forward:** the previous entry point (`cementic collection promote
-test` then `search -c test`) is still unexercised. Running it now would only
-demonstrate two known bugs rather than confirm health — `collection list` labels
-that `ready` revision `building`, and promoting a `ready` revision that has since
-absorbed new work publishes it without re-checking completeness. Do it once both
-have landed.
+### Measurement traps that produced wrong numbers this session
+
+Both are documented at the point of use in
+`scripts/measure_index_build_order.py`, promoted from the scratchpad:
+
+- Uniformly random 768-dim vectors sit at near-identical distances, so recall
+  against them measures noise. Cluster the corpus.
+- Assert the plan of every timed query. Without `ANALYZE` the planner declines
+  the index it just built, and forcing an exact baseline with
+  `enable_indexscan = off` leaks onto pooled connections — together these
+  reported a spurious 100× latency gap between the two build orders.
+
+**Not carried forward:** `cementic collection promote test` then `search -c test`
+against the live database is still unexercised end to end.
 <!-- session-handoff:end -->
 
 Design rationale and roadmap for cementic: a CLI that watches directories of
