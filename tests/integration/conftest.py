@@ -18,7 +18,11 @@ from cementic.config import Config
 from cementic.db import Base, create_tables
 
 _COMPOSE_FILE = Path(__file__).resolve().parents[2] / "compose.yml"
-_STARTUP_TIMEOUT = 600  # first run builds the pgvector + vectorscale image
+#: Covers container startup only -- `compose up -d` builds the pgvector +
+#: vectorscale image before it returns, so the (long) first-run build is not on
+#: this clock. Kept short enough that a container which fails to start says so
+#: in minutes instead of stalling the CI job for ten.
+_STARTUP_TIMEOUT = 180
 
 
 #: These fixtures call Base.metadata.drop_all(), so they must never target a
@@ -98,11 +102,6 @@ def _ensure_test_database() -> None:
         admin.dispose()
 
 
-def _pg_reachable() -> bool:
-    """Check whether the dedicated test database is reachable."""
-    return _url_reachable(_pg_url())
-
-
 def _detect_compose_engine() -> list[str] | None:
     """Return a working ``<engine> compose`` base command, or None.
 
@@ -125,13 +124,36 @@ def _detect_compose_engine() -> list[str] | None:
     return None
 
 
-def _wait_pg_reachable(timeout: int) -> bool:
+def _wait_server_reachable(timeout: int) -> bool:
+    """Wait for the *server*, not for the test database.
+
+    Waiting on ``_pg_url()`` here cannot ever succeed on a cold machine: that
+    database is created by ``_ensure_test_database()``, which runs in
+    ``pg_engine`` -- i.e. only after this fixture has yielded. Compose came up
+    fine and the suite still sat out the whole timeout and failed, which is how
+    CI's pg job burned 19 minutes per run.
+    """
     deadline = time.time() + timeout
     while time.time() < deadline:
-        if _pg_reachable():
+        if _server_reachable():
             return True
         time.sleep(2)
     return False
+
+
+def _compose_diagnostics(compose: list[str]) -> str:
+    """Container status and recent logs, for a startup failure to explain itself."""
+    parts = []
+    for label, args in (("ps", ["ps", "-a"]), ("logs", ["logs", "--tail", "50"])):
+        try:
+            result = subprocess.run(
+                [*compose, *args], capture_output=True, text=True, timeout=30
+            )
+        except (OSError, subprocess.SubprocessError) as error:
+            parts.append(f"--- compose {label} unavailable: {error}")
+            continue
+        parts.append(f"--- compose {label} ---\n{result.stdout}{result.stderr}")
+    return "\n".join(parts)
 
 
 @pytest.fixture(scope="session")
@@ -150,8 +172,12 @@ def _compose_postgres():
     compose = [*engine, "-f", str(_COMPOSE_FILE)]
     subprocess.run([*compose, "up", "-d"], check=True)
     try:
-        if not _wait_pg_reachable(_STARTUP_TIMEOUT):
-            raise RuntimeError("compose Postgres did not become reachable in time")
+        if not _wait_server_reachable(_STARTUP_TIMEOUT):
+            raise RuntimeError(
+                f"compose Postgres did not become reachable within "
+                f"{_STARTUP_TIMEOUT}s at {_pg_url().set(database='postgres')}\n"
+                f"{_compose_diagnostics(compose)}"
+            )
         yield
     finally:
         subprocess.run([*compose, "down"], check=False)

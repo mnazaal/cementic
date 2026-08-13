@@ -10,6 +10,7 @@ from __future__ import annotations
 import pytest
 
 from cementic.config import Config
+from tests.integration import conftest
 from tests.integration.conftest import _TEST_DB_SUFFIX, _configured_url, _pg_url
 
 
@@ -29,6 +30,28 @@ def test_server_and_credentials_still_come_from_the_real_config() -> None:
         configured.port,
         configured.username,
     )
+
+
+def test_compose_startup_waits_for_the_server_not_the_test_database(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A freshly composed server has no ``*_test`` database yet.
+
+    ``_ensure_test_database()`` creates it, and that runs in ``pg_engine`` --
+    after the compose fixture has already waited. Polling the test database
+    here can therefore never succeed on a cold machine: it waits out the full
+    timeout and fails the whole pg suite while Postgres is up and healthy.
+    """
+    probed: list[str | None] = []
+
+    def fake_url_reachable(url) -> bool:
+        probed.append(url.database)
+        return url.database == "postgres"
+
+    monkeypatch.setattr(conftest, "_url_reachable", fake_url_reachable)
+
+    assert conftest._wait_server_reachable(5) is True
+    assert probed == ["postgres"]
 
 
 @pytest.mark.pg
