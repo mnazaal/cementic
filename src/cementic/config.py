@@ -450,7 +450,7 @@ class PipelineConfig(_SectionSettings):
     _toml_section = "pipeline"
 
     chunk_size: int = Field(
-        default=352,
+        default=320,
         ge=1,
         description="Tokens per chunk, counted with the tiktoken encoding named "
         "in chunk.TOKENIZER -- not the embedding model's own tokenizer, which "
@@ -459,7 +459,10 @@ class PipelineConfig(_SectionSettings):
         "over real indexed chunks, one cl100k token is a median of 1.14 model "
         "tokens, p95 1.24, max 1.33. At the old default of 512 that put 96% of "
         "full-size chunks (160 of 167) over the window, and the server drops "
-        "the overflow silently. 352 leaves headroom to a ratio of 1.45. "
+        "the overflow silently. 320 leaves headroom to a ratio of 1.45 -- "
+        "counting the task prefix the embedding client prepends, which is what "
+        "is actually measured, so the runtime guard's cheap path still applies "
+        "and a full chunk costs no extra round trip. "
         "Raising n_ctx is not an alternative: the model architecture caps at "
         "512 (nomic-bert-moe.context_length in the GGUF metadata). "
         "This is now enforced at runtime rather than assumed -- the embedding "
@@ -467,7 +470,7 @@ class PipelineConfig(_SectionSettings):
         "chunk instead of truncating it. Re-measure with "
         "scripts/measure_chunk_context_fit.py before raising this.",
     )
-    chunk_overlap: int = Field(default=88, ge=0, description="Token overlap between chunks")
+    chunk_overlap: int = Field(default=80, ge=0, description="Token overlap between chunks")
     embedding_provider: str = Field(
         default="llama-cpp",
         description="Embedding provider to use (currently llama-cpp)",

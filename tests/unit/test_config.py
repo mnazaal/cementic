@@ -6,8 +6,10 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+import tiktoken
 from pydantic import ValidationError
 
+from cementic.chunk import TOKENIZER, chunk_text
 from cementic.config import (
     Config,
     ConfigError,
@@ -22,6 +24,7 @@ from cementic.config import (
     resolve_llama_model_path,
 )
 from cementic.embedding_runtime import _TOKEN_RATIO_UPPER_BOUND
+from cementic.embedding_text import format_document_text_for_model
 from cementic.index_strategies import supported_index_methods
 from cementic.storage import extracted_document_path
 
@@ -65,7 +68,7 @@ class TestConfigFile:
         monkeypatch.delenv("CEMENTIC_DB_HOST", raising=False)
         config = Config()
         assert config.database.host == "localhost"
-        assert config.pipeline.chunk_size == 352
+        assert config.pipeline.chunk_size == 320
 
     def test_resolve_path_prefers_explicit_env(self, tmp_path, monkeypatch) -> None:
         path = tmp_path / "explicit.toml"
@@ -268,8 +271,8 @@ class TestConfig:
         """Test embedding provider configuration."""
         config = Config()
         assert config.pipeline.embedding_provider == "llama-cpp"
-        assert config.pipeline.chunk_size == 352
-        assert config.pipeline.chunk_overlap == 88
+        assert config.pipeline.chunk_size == 320
+        assert config.pipeline.chunk_overlap == 80
 
     def test_chunk_overlap_must_be_smaller_than_size(self):
         """Pipeline config rejects an overlap that cannot make progress."""
@@ -290,13 +293,32 @@ class TestConfig:
         with no error anywhere -- measured on a real corpus, and invisible to the
         whole test suite. This pins the invariant so it cannot drift silently
         again; scripts/measure_chunk_context_fit.py is the empirical counterpart.
+
+        Measured on the *formatted* text, because that is what gets embedded and
+        what the runtime guard counts. An earlier version of this test checked
+        the bare chunk_size and so passed at 352, where the task prefix pushed
+        every real chunk 3 tokens over and made the guard's cheap path fire on
+        every single chunk -- adding a round trip per chunk against a model the
+        daemon serialises, which stalled a live re-index.
         """
         config = Config()
-        worst_case_model_tokens = config.pipeline.chunk_size * _TOKEN_RATIO_UPPER_BOUND
+        encoding = tiktoken.get_encoding(TOKENIZER)
+        # A full chunk of the densest text we measure, plus its task prefix.
+        body = "The quick brown fox jumps over the lazy dog near the riverbank. " * 200
+        chunk = chunk_text(
+            body,
+            chunk_size=config.pipeline.chunk_size,
+            chunk_overlap=config.pipeline.chunk_overlap,
+        )[0].content
+        formatted = format_document_text_for_model(chunk, config.llama_cpp.model_path)
+        counted = len(encoding.encode(formatted))
+
+        worst_case_model_tokens = counted * _TOKEN_RATIO_UPPER_BOUND
         assert worst_case_model_tokens <= config.llama_cpp.n_ctx, (
-            f"chunk_size={config.pipeline.chunk_size} can reach "
-            f"{worst_case_model_tokens:.0f} model tokens, over n_ctx="
-            f"{config.llama_cpp.n_ctx}; chunks would embed truncated"
+            f"a full chunk formats to {counted} {TOKENIZER} tokens, which can reach "
+            f"{worst_case_model_tokens:.0f} model tokens against n_ctx="
+            f"{config.llama_cpp.n_ctx}. Either chunks embed truncated, or the "
+            "runtime guard pays an exact-count round trip on every chunk."
         )
 
     def test_index_method_must_be_supported(self):

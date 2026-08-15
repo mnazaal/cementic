@@ -36,7 +36,17 @@ from cementic.supervisor import (
 #: provably fits and no round trip is needed. Measured over real indexed chunks
 #: against the default Nomic model (median 1.14, p95 1.24, max 1.33); 1.45
 #: leaves headroom. Over-estimating only costs an extra exact count, so err high.
+#:
+#: ``pipeline.chunk_size`` must be small enough that a full chunk *plus its task
+#: prefix* clears this bound, or the pre-filter fires on every chunk and the
+#: exact check stops being the rare path it is designed to be. The invariant is
+#: pinned by a test; see config.PipelineConfig.chunk_size.
 _TOKEN_RATIO_UPPER_BOUND = 1.45
+
+#: Budget for a tokenize round trip. Tokenizing is trivial once the model is
+#: loaded, so a long timeout here buys nothing and costs the embedding request
+#: that follows its own budget when the daemon is cold.
+_TOKENIZE_TIMEOUT_SECONDS = 30.0
 
 #: Attempts (and the gap between them) when probing the model's true embedding
 #: dimension. Short: the daemon is already known reachable by this point, so
@@ -273,31 +283,34 @@ class RemoteEmbeddingClient(EmbeddingProvider):
         return self.matches_expected_runtime()
 
     def count_model_tokens(self, text: str) -> int | None:
-        """Tokens in ``text`` per the *model's own* tokenizer, or None if unavailable.
+        """Tokens in ``text`` per the *model's own* tokenizer, or None if unsupported.
 
         ``llama_cpp.server`` exposes the loaded model's tokenizer over
         ``/extras/tokenize/count``. That is the only way to answer the budget
         question exactly: ``chunk.TOKENIZER`` is a different tokenizer and
         disagrees by up to a third on ordinary English and source code.
 
-        None means the server does not offer the endpoint, not that the text
-        fits -- callers must decide what to do with that.
+        None means this server does not offer the endpoint -- a permanent,
+        structural fact, cached after the first 404. A *transient* failure
+        (daemon down, cold, mid-restart) is not swallowed: it propagates, so the
+        caller's existing retry path treats it as the temporary problem it is
+        rather than recording chunks as permanently unembeddable.
         """
         if self._tokenize_endpoint_available is False:
             return None
-        try:
-            response = requests.post(
-                f"{self.base_url}/extras/tokenize/count",
-                json={"input": text},
-                timeout=self.timeout,
-            )
-            if response.status_code == 404:
-                self._tokenize_endpoint_available = False
-                return None
-            response.raise_for_status()
-            count = int(response.json()["count"])
-        except (requests.RequestException, ValueError, KeyError, TypeError):
+        response = requests.post(
+            f"{self.base_url}/extras/tokenize/count",
+            json={"input": text},
+            # Deliberately not self.timeout: tokenizing is trivial work, and a
+            # long budget here would be spent waiting out a cold model load and
+            # then leave nothing for the embedding request it precedes.
+            timeout=min(self.timeout, _TOKENIZE_TIMEOUT_SECONDS),
+        )
+        if response.status_code == 404:
+            self._tokenize_endpoint_available = False
             return None
+        response.raise_for_status()
+        count = int(response.json()["count"])
         self._tokenize_endpoint_available = True
         return count
 

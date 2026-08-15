@@ -236,7 +236,7 @@ port = 5432
 
 [pipeline]
 embedding_provider = "llama-cpp"
-chunk_size = 352
+chunk_size = 320
 
 [index]
 method = "hnsw"   # or "diskann"
@@ -259,8 +259,8 @@ matching `CEMENTIC_*` variable (see [Environment variables](#environment-variabl
 | `database` | `host`, `port`, `name`, `user`, `password` | `localhost`, `5432`, `cementic`, `cementic`, `cementic` | Connection parts |
 | | `url_override` | unset | Whole connection URL, bypassing the parts above (`CEMENTIC_DB_URL`) |
 | `pipeline` | `embedding_provider` | `llama-cpp` | Only provider currently registered |
-| | `chunk_size` | `352` | Tokens per chunk, counted with tiktoken — **not** the model's tokenizer. Must stay well under `llama_cpp.n_ctx`; see below |
-| | `chunk_overlap` | `88` | Token overlap between neighbouring chunks |
+| | `chunk_size` | `320` | Tokens per chunk, counted with tiktoken — **not** the model's tokenizer. Must stay well under `llama_cpp.n_ctx`; see below |
+| | `chunk_overlap` | `80` | Token overlap between neighbouring chunks |
 | `index` | `method` | `hnsw` | `hnsw` or `diskann` |
 | | `hnsw_m`, `hnsw_ef_construction` | `16`, `64` | Build-time graph knobs; fixed into the index, so changing them needs `collection reindex --force` |
 | | `hnsw_ef_search` | `40` | Query-time candidate list; raised automatically to at least `top_k` |

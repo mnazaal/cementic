@@ -268,8 +268,8 @@ embedding_provider = "llama-cpp"
 # tokens -- for the default model one of these is up to 1.33 of the other, so
 # chunk_size must stay well under n_ctx or chunks embed truncated. Re-measure
 # with scripts/measure_chunk_context_fit.py before raising it.
-chunk_size = 352
-chunk_overlap = 88
+chunk_size = 320
+chunk_overlap = 80
 
 [index]
 # ANN index: "hnsw" (lower latency, more RAM) or "diskann" (disk-resident, low RAM)
