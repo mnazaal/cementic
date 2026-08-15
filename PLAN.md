@@ -93,11 +93,21 @@ contributors.
 
 ## Scale context
 
-The target is a large personal corpus (~40k papers and textbooks). The machinery
-is justified rather than over-engineered:
+The target is a large personal corpus (~40k papers and textbooks). At the
+measured **50 chunks per paper** that is ~2M vectors. The machinery is justified
+rather than over-engineered:
 
 - "Indexed" and "fast" are not in tension — indexing is the amortized one-time
   cost; an ANN index keeps *queries* sub-second over millions of vectors.
+  Measured 2026-08-15: a warm search is **214 ms end to end, 197 ms of which is
+  embedding the query string** — a constant that does not grow with the corpus.
+  A bare KNN over 10k vectors is 5.6 ms. Query latency is not the scaling risk.
+- The scaling risks are the other two axes, and both bind earlier. **Embedding
+  throughput** measured 1.4 s/chunk on CPU, so 2M vectors is ~780 hours of
+  continuous embedding — "amortized one-time" is measured in weeks, not hours,
+  without a GPU. **Memory** binds before latency does: an HNSW index over 1M
+  768-dim vectors needs ~3 GB resident, against a dev machine with ~3 GB free,
+  which is the point of the `diskann` seam below.
 - Postgres + `pgvector` + `vectorscale`, with a per-embedding-profile vector
   table and ANN index.
 - Versioned pipeline revisions: swap a model / chunking policy / extractor, build
