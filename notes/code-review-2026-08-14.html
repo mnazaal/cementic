@@ -54,6 +54,29 @@ six parallel reviewers over disjoint subsystems, plus direct black-box exercise 
 Postgres and a live embedding daemon. Every finding promoted here was spot-verified in the parent session;
 findings I could not verify are marked <span class="tag">unverified</span>.</p>
 
+<div class="f v">
+<p class="hd">Resolution — acted on 2026-08-15, branch <code>claude/chunk-truncation-review-2026-08-14</code></p>
+<p>Everything in §1–§8 below was fixed in four commits, plus the carried-forward items in §9.
+Suite went 864 → 893 tests, all green, with ruff and mypy clean throughout.</p>
+<table>
+<tr><th>Commit</th><th>Covers</th></tr>
+<tr><td><code>fix: stop silently truncating chunks at the context window</code></td><td>§1 — <code>chunk_size</code> 512 → 352, corrected measurement script, exact model-tokenizer guard on the shared embedding client, <code>CHUNKING_VERSION</code> v3, <code>embed</code> content validation</td></tr>
+<tr><td><code>fix: surface the silent failures found in the fourth review</code></td><td>§2.2–2.8, §3.1–3.4, §5 — EPERM, unknown-collection guard, purge on failed re-extraction, atomic <code>reindex --force</code>, the uncommitted <code>search</code> migration, config leniency and the two traceback paths, empty query, chunk-index contiguity</td></tr>
+<tr><td><code>refactor: give an unknown collection one answer, and drop dead code</code></td><td>§5, §6, §7 — one unknown-collection contract across five commands, <code>known_collection_names</code>, the three dead symbols, both false architecture claims, all 21 undocumented config keys and 8 flags</td></tr>
+<tr><td><code>fix: report the work cementic silently dropped</code></td><td>§2.1 and the §9 carry-forwards — watcher-skipped paths recorded and surfaced, <code>safe_remove_artifact</code> no longer swallows OSError, the status completeness rule, whitespace-only chunks</td></tr>
+</table>
+<p><strong>The headline fix is verified on the real corpus, not asserted:</strong> re-chunking the same
+documents went from <strong>160 of 172 chunks over the model's window (93%, max 680 tokens against a
+512 limit)</strong> to <strong>0 of 249 over</strong>, worst case 476 with 36 tokens to spare. The corrected
+<code>measure_chunk_context_fit.py</code> passes all four cases where it previously failed two.</p>
+<p><strong>Still open, deliberately:</strong> the model-identity and <code>verbose</code> fingerprint items
+PLAN.md defers pending a batched re-fingerprint (§4), and the other entries in that
+"Deliberately not done" list. The <code>./models/</code> template mismatch <em>was</em> fixed, since it
+forked a profile for a path spelling. <strong>Action required:</strong> the chunk-size change alters the
+chunk profile fingerprint, so existing collections must be re-indexed (stop, start, promote) before
+the fix reaches their vectors.</p>
+</div>
+
 <p><strong>Baseline.</strong> <code>ruff check src/ tests/</code> clean, <code>mypy src/</code> clean,
 <code>pytest</code> 864 passed in 31.3s (744 unit + 49 <code>pg</code>-marked + the rest), no warnings.
 The tree is healthy by every check it runs on itself. Everything below sits in the gap between
