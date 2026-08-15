@@ -143,7 +143,7 @@ class TestE2EPipeline:
         with session_factory() as session:
             revision = session.get(PipelineRevision, revision_id)
             assert revision is not None
-            promote_revision(session, collection, revision, config=config)
+            promote_revision(session, collection, revision)
             session.commit()
 
         # Verify active revision
@@ -183,7 +183,7 @@ class TestE2EPipeline:
             with session_factory() as session:
                 revision = session.get(PipelineRevision, revision_id)
                 assert revision is not None
-                promote_revision(session, name, revision, config=config)
+                promote_revision(session, name, revision)
                 session.commit()
             return revision_id
 
@@ -237,7 +237,7 @@ class TestE2EPipeline:
         with session_factory() as session:
             rev1 = session.get(PipelineRevision, rev1_id)
             assert rev1 is not None
-            promote_revision(session, collection, rev1, config=config)
+            promote_revision(session, collection, rev1)
             session.commit()
 
         # Change model config (new model identity -> new revision)

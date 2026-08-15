@@ -7,11 +7,11 @@ from sqlalchemy import text
 
 from cementic.db import ExtractedDocument, SourceDocument
 from cementic.pipeline_worker import _purge_superseded_chunks
-from cementic.revisions import CURRENT_CONTENT_SQL
 from cementic.search import Searcher
 from cementic.source_watcher import _purge_document_chunks
 from cementic.vector_store import FILTER_COLUMNS, vector_table_name
 from tests.integration.test_pg_helpers import (
+    CURRENT_CONTENT_SQL,
     cleanup_pg_tables,
     seed_active_vector_collection,
     seed_two_extractor_profiles_sharing_a_vector_table,

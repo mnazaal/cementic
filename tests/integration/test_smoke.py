@@ -140,7 +140,7 @@ def test_postgres_smoke_build_search_and_promote(
             revision = session.get(PipelineRevision, revision_id)
             assert revision is not None
             assert revision.status == "ready"
-            promote_revision(session, collection, revision, config=config)
+            promote_revision(session, collection, revision)
             session.commit()
 
         with session_factory() as session:

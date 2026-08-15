@@ -127,24 +127,6 @@ def chunk_scope(revision: PipelineRevision) -> tuple[Any, ...]:
     )
 
 
-#: The freshness half of the scope builders, as a SQL fragment for the one
-#: consumer that cannot use them: ``search.py``'s KNN query runs against a
-#: per-embedding-profile vector table whose name is computed, so it is raw SQL
-#: rather than ORM. Keeping the definition here means "what counts as current
-#: content" still has one home; the aliases are fixed by contract --
-#: ``sd`` source_documents, ``ed`` extracted_documents, ``cd`` chunked_documents.
-#:
-#: Omitting these, as search did, serves the *old* content of a file whose
-#: re-extraction failed: the superseded rows keep ``status='done'`` and match on
-#: profile ids alone, so stale text ranks normally and indefinitely.
-CURRENT_CONTENT_SQL = (
-    "ed.status = 'done' "
-    "AND ed.source_file_hash = sd.file_hash "
-    "AND cd.status = 'done' "
-    "AND cd.source_content_hash = ed.content_hash"
-)
-
-
 def embedding_scope(revision: PipelineRevision) -> tuple[Any, ...]:
     """Conditions selecting the embeddings that count toward ``revision``.
 
@@ -298,7 +280,7 @@ def requeue_interrupted_artifacts(
 
 
 def promote_revision(
-    session: Session, collection: str, revision: PipelineRevision, *, config: Config
+    session: Session, collection: str, revision: PipelineRevision
 ) -> PipelineRevision:
     """Promote a ready revision to active for one collection."""
     if revision.collection != collection:
@@ -314,7 +296,7 @@ def promote_revision(
     revision.status = "active"
     revision.promoted_at = datetime.now(timezone.utc)
     session.flush()
-    prune_collection_history(session, collection, config=config)
+    prune_collection_history(session, collection)
     return revision
 
 
@@ -497,9 +479,7 @@ def _purge_dropped_embeddings(
     return unreferenced_profile_ids(profile_ids, remaining_counts)
 
 
-def prune_collection_history(
-    session: Session, collection: str, *, config: Config
-) -> list[str]:
+def prune_collection_history(session: Session, collection: str) -> list[str]:
     """Keep only active and most recent retired history for one collection."""
     session.flush()
     session.expire_all()

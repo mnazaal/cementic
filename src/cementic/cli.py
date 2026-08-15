@@ -24,6 +24,7 @@ from typer.core import TyperCommand, TyperGroup
 from cementic.bootstrap import Bootstrapper
 from cementic.chunk import chunk_text
 from cementic.collections import (
+    collection_exists,
     delete_collection_records,
     drop_orphan_vector_tables,
     list_collection_revisions,
@@ -568,6 +569,21 @@ def _is_schema_missing(error: Exception) -> bool:
 
 
 _NO_SCHEMA_HINT = "nothing indexed yet — run `cementic start DIRECTORY -c COLLECTION` first"
+
+
+def _require_known_collection(session: Any, collection: str) -> None:
+    """Exit 1 with a clear message when a named collection does not exist.
+
+    "Does not exist" and "exists but has nothing to show" used to be
+    indistinguishable -- a zero-filled status report, an empty revision list, or
+    "no ready revision", each at exit 0 -- so a typo'd collection name read as a
+    real but idle one, and no script could tell the difference.
+    """
+    if collection_exists(session, collection):
+        return
+    console.print(f"collection: {collection}")
+    console.print("status: unknown collection (check `cementic collection list`)")
+    raise typer.Exit(1)
 
 
 def _report_db_error(error: Exception, action: str) -> None:
@@ -1149,10 +1165,17 @@ def status(
                         f"{frac:>{frac_w}} embedded ({ps.embedding_pct}%)"
                     )
                 return
+            # This session used to be opened and then discarded on the
+            # named-collection path. It now earns its connection: a typo'd name
+            # otherwise produced a full zero-filled report at exit 0, which
+            # reads as a real collection that has not started yet.
+            console.print()
+            _require_known_collection(session, collection)
 
-        console.print()
         pipeline_status = load_pipeline_status(_get_config(), collection)
         _print_collection_detail(collection, pipeline_status, verbose)
+    except typer.Exit:
+        raise
     except Exception as error:
         _report_db_error(error, "status")
         raise typer.Exit(1)
@@ -1431,6 +1454,7 @@ def promote_collection(
         engine = get_engine(_get_config().database.url)
         session_factory = get_session_factory(engine)
         with session_factory() as session:
+            _require_known_collection(session, collection)
             outcome = promote_ready_revision(
                 session, collection, config=_get_config(), force=force
             )
@@ -1443,6 +1467,11 @@ def promote_collection(
                 if outcome.revision is not None
                 else None
             )
+    except typer.Exit:
+        # typer.Exit subclasses RuntimeError, so the broad handler below
+        # would otherwise swallow a deliberate exit and re-report it as
+        # "failed: 1".
+        raise
     except Exception as error:
         _report_db_error(error, "collection promote")
         raise typer.Exit(1)
@@ -1517,15 +1546,25 @@ def reindex_collection_command(
         console.print(f"[red]Error: {e}[/red]")
         raise typer.Exit(1)
 
-    console.print(f"collection: {collection}")
-    console.print("building the index — this can take several minutes on a large corpus")
     try:
         engine = get_engine(_get_config().database.url)
         session_factory = get_session_factory(engine)
         with session_factory() as session:
+            # Before the "this can take several minutes" line, so an unknown
+            # collection does not first announce work that will never start.
+            _require_known_collection(session, collection)
+            console.print(f"collection: {collection}")
+            console.print(
+                "building the index — this can take several minutes on a large corpus"
+            )
             outcome = reindex_collection(
                 session, collection, config=_get_config(), force=force
             )
+    except typer.Exit:
+        # typer.Exit subclasses RuntimeError, so the broad handler below
+        # would otherwise swallow a deliberate exit and re-report it as
+        # "failed: 1".
+        raise
     except Exception as error:
         _report_db_error(error, "collection reindex")
         raise typer.Exit(1)
@@ -1567,6 +1606,7 @@ def list_collection_revision_command(
         engine = get_engine(_get_config().database.url)
         session_factory = get_session_factory(engine)
         with session_factory() as session:
+            _require_known_collection(session, collection)
             rows = list_collection_revisions(session, collection)
             console.print(f"{'collection':<11} {collection}")
             console.print("revisions")
@@ -1585,6 +1625,11 @@ def list_collection_revision_command(
                     f"chunk={row.chunk_profile.fingerprint[:8]} "
                     f"embed={row.embedding_profile.provider}:{row.embedding_profile.fingerprint[:8]}"
                 )
+    except typer.Exit:
+        # typer.Exit subclasses RuntimeError, so the broad handler below
+        # would otherwise swallow a deliberate exit and re-report it as
+        # "failed: 1".
+        raise
     except Exception as error:
         _report_db_error(error, "collection revisions")
         raise typer.Exit(1)

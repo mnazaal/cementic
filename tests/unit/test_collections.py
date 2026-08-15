@@ -9,6 +9,7 @@ from sqlalchemy.orm import sessionmaker
 
 from cementic.collections import (
     DeleteCollectionResult,
+    collection_exists,
     delete_collection_records,
     drop_orphan_vector_tables,
     list_collection_revisions,
@@ -93,6 +94,34 @@ class TestListCollections:
     def test_empty(self) -> None:
         _, session = _new_session()
         assert list_collections(session) == []
+
+    def test_a_collection_with_revisions_but_no_documents_is_still_listed(self) -> None:
+        """`cementic start` on a directory with no supported files makes exactly this.
+
+        The name list came from SourceDocument alone, so such a collection was
+        invisible to `collection list` while `collection remove` -- which
+        already counted revisions too -- could still delete it.
+        """
+        _, session = _new_session()
+        extractor, chunk_profile, embedding_profile = _seed_profiles(session)
+        session.add(
+            PipelineRevision(
+                collection="empty-so-far",
+                extractor_profile_id=extractor.id,
+                chunk_profile_id=chunk_profile.id,
+                embedding_profile_id=embedding_profile.id,
+                status="building",
+                label="rev-1",
+            )
+        )
+        session.commit()
+
+        result = list_collections(session)
+
+        assert [row.name for row in result] == ["empty-so-far"]
+        assert result[0].documents == 0
+        assert collection_exists(session, "empty-so-far")
+        assert not collection_exists(session, "never-heard-of-it")
 
     def test_single_collection(self) -> None:
         _, session = _new_session()
@@ -503,7 +532,7 @@ class TestPromoteReadyRevision:
         outcome = promote_ready_revision(session, "c1", config=_config)
         assert outcome.status == "promoted"
         assert outcome.revision is revision
-        mock_promote.assert_called_once_with(session, "c1", revision, config=_config)
+        mock_promote.assert_called_once_with(session, "c1", revision)
         assert session.commit.called
 
     @patch("cementic.collections.compute_revision_counts", return_value=_counts(extracted_failed=2))
@@ -535,7 +564,7 @@ class TestPromoteReadyRevision:
 
         outcome = promote_ready_revision(session, "c1", config=_config, force=True)
         assert outcome.status == "promoted"
-        mock_promote.assert_called_once_with(session, "c1", revision, config=_config)
+        mock_promote.assert_called_once_with(session, "c1", revision)
         assert session.commit.called
 
     @patch(
@@ -581,7 +610,7 @@ class TestPromoteReadyRevision:
 
         outcome = promote_ready_revision(session, "c1", config=_config, force=True)
         assert outcome.status == "promoted"
-        mock_promote.assert_called_once_with(session, "c1", revision, config=_config)
+        mock_promote.assert_called_once_with(session, "c1", revision)
 
     @patch(
         "cementic.collections.compute_revision_counts",

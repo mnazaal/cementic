@@ -23,6 +23,23 @@ from cementic.vector_store import create_table_sql, upsert_vectors
 
 VECTOR_DIM = 4
 
+#: What "current content" means, as a SQL fragment, for asserting that the
+#: seeding helpers below produce rows a real pipeline would have produced. The
+#: aliases are fixed by contract -- ``sd`` source_documents, ``ed``
+#: extracted_documents, ``cd`` chunked_documents.
+#:
+#: This is a *fixture* invariant, not a production one. Search deliberately
+#: carries no freshness join: that filter lived on a joined table and stopped
+#: the planner using the ANN index, so staleness is prevented by deleting rows
+#: the moment they go stale (see pipeline_worker's purge helpers) rather than
+#: filtered out at query time. It lived in src/ until nothing there consulted it.
+CURRENT_CONTENT_SQL = (
+    "ed.status = 'done' "
+    "AND ed.source_file_hash = sd.file_hash "
+    "AND cd.status = 'done' "
+    "AND cd.source_content_hash = ed.content_hash"
+)
+
 
 def _fake_hash(seed: str) -> str:
     """A realistic 64-char hex digest, since the columns are sized for one."""

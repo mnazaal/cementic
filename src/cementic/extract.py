@@ -143,11 +143,6 @@ def supported_extensions() -> frozenset[str]:
     return frozenset(ext for spec, _ in _EXTRACTORS.values() for ext in spec.extensions)
 
 
-def extractor_names() -> tuple[str, ...]:
-    """Names of the registered extractors, in registration order."""
-    return tuple(_EXTRACTORS)
-
-
 def normalize_backend_file_type(file_type: str) -> str:
     """Canonical form of a ``[extraction.backends]`` key (pure).
 

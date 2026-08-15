@@ -212,7 +212,7 @@ class TestPromoteRevision:
         revision.collection = "other"
 
         with pytest.raises(ValueError, match="does not belong"):
-            promote_revision(session, "col", revision, config=_config)
+            promote_revision(session, "col", revision)
 
     def test_raises_when_not_ready(self, _config: Config) -> None:
         session = MagicMock()
@@ -221,7 +221,7 @@ class TestPromoteRevision:
         revision.status = "building"
 
         with pytest.raises(ValueError, match="Only ready"):
-            promote_revision(session, "col", revision, config=_config)
+            promote_revision(session, "col", revision)
 
     @patch("cementic.revisions.prune_collection_history")
     def test_promotes_ready_revision(self, mock_prune: MagicMock, _config: Config) -> None:
@@ -230,10 +230,10 @@ class TestPromoteRevision:
         revision.collection = "col"
         revision.status = "ready"
 
-        result = promote_revision(session, "col", revision, config=_config)
+        result = promote_revision(session, "col", revision)
         assert result.status == "active"
         assert result.promoted_at is not None
-        mock_prune.assert_called_once_with(session, "col", config=_config)
+        mock_prune.assert_called_once_with(session, "col")
 
 
 class TestEnsureRevisionAnnIndex:
@@ -393,7 +393,7 @@ class TestPruneCollectionHistory:
 
         config = Config()
         config.storage.artifacts_path = tmp_path
-        pending = prune_collection_history(session, "test-collection", config=config)
+        pending = prune_collection_history(session, "test-collection")
 
         assert pending == [str(tmp_path / "artifact.pdf")]
         mock_unlink.assert_not_called()
@@ -491,9 +491,8 @@ class TestPruningAfterAModelSwap:
     def test_dropped_model_loses_its_rows_and_its_table(self) -> None:
         session = _sqlite_session()
         embeddings, _chunk = _seed_model_swap_history(session)
-        config = Config()
 
-        prune_collection_history(session, "c1", config=config)
+        prune_collection_history(session, "c1")
         session.commit()
 
         surviving = {
@@ -507,7 +506,7 @@ class TestPruningAfterAModelSwap:
         session = _sqlite_session()
         _seed_model_swap_history(session)
 
-        prune_collection_history(session, "c1", config=Config())
+        prune_collection_history(session, "c1")
         session.commit()
 
         assert session.query(Chunk).count() == 1
@@ -530,7 +529,7 @@ class TestPruningAfterAModelSwap:
         )
         session.commit()
 
-        prune_collection_history(session, "c1", config=Config())
+        prune_collection_history(session, "c1")
         session.commit()
 
         assert drain_pending_vector_table_drops(session) == []

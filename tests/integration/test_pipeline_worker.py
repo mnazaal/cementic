@@ -660,7 +660,7 @@ class TestRevisionCompletionScoping:
             assert first is not None and first.status == "ready"
             # Promote so the old revision stays active (its chunks/embeddings
             # are kept rather than pruned) -- the situation that triggers this.
-            promote_revision(session, collection, first, config=config)
+            promote_revision(session, collection, first)
             session.commit()
 
         # Same embedding model, different chunking.
@@ -727,7 +727,7 @@ class TestRevisionCompletionScoping:
         _run_pipeline_until_idle(pipeline, first_id)
         with session_factory() as session:
             first = session.get(PipelineRevision, first_id)
-            promote_revision(session, collection, first, config=config)
+            promote_revision(session, collection, first)
             session.commit()
 
         config.pipeline.chunk_size = 32
@@ -767,7 +767,7 @@ class TestRevisionRollback:
         _run_pipeline_until_idle(pipeline, first_id)
         with session_factory() as session:
             first = session.get(PipelineRevision, first_id)
-            promote_revision(session, collection, first, config=config)
+            promote_revision(session, collection, first)
             session.commit()
 
         # Move forward, then promote, retiring the first revision.
@@ -777,7 +777,7 @@ class TestRevisionRollback:
         _run_pipeline_until_idle(pipeline, second_id)
         with session_factory() as session:
             second = session.get(PipelineRevision, second_id)
-            promote_revision(session, collection, second, config=config)
+            promote_revision(session, collection, second)
             session.commit()
             first = session.get(PipelineRevision, first_id)
             assert first is not None and first.status == "retired"

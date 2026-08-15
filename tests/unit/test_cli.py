@@ -29,6 +29,18 @@ from cementic.supervisor import ManagedProcess
 runner = CliRunner()
 
 
+@pytest.fixture(autouse=True)
+def _collection_exists_by_default():
+    """Assume a named collection exists unless a test says otherwise.
+
+    Most tests here drive the CLI against a mocked session whose `.query()` is
+    stubbed for one specific call, so the real existence check cannot run
+    against it. Tests covering the unknown-collection path patch this to False.
+    """
+    with patch("cementic.cli.collection_exists", return_value=True):
+        yield
+
+
 class TestConfigCommands:
     """Tests for the `cementic config` command group."""
 
@@ -513,6 +525,38 @@ class TestSearchCommand:
 
         assert "no indexed revision for persnal" in result.output
         assert result.exit_code == 1
+
+    @pytest.mark.parametrize(
+        "argv",
+        [
+            ["status", "-c", "nosuch"],
+            ["collection", "revisions", "nosuch"],
+            ["collection", "promote", "nosuch"],
+            ["collection", "reindex", "nosuch"],
+        ],
+    )
+    @patch("cementic.cli.get_session_factory")
+    @patch("cementic.cli.get_engine")
+    def test_unknown_collection_is_an_error_not_an_empty_result(
+        self, mock_get_engine, mock_get_session_factory, argv
+    ):
+        """A typo must not read as a real collection that has nothing yet.
+
+        These each reported success for a name cementic had never heard of: a
+        zero-filled status report, an empty revision list, "no ready revision"
+        -- all at exit 0, so no script could tell a typo from an idle
+        collection.
+        """
+        mock_session = MagicMock()
+        mock_session.__enter__.return_value = mock_session
+        mock_session.__exit__.return_value = False
+        mock_get_session_factory.return_value = lambda: mock_session
+
+        with patch("cementic.cli.collection_exists", return_value=False):
+            result = runner.invoke(app, argv)
+
+        assert result.exit_code == 1
+        assert "unknown collection" in result.output
 
     @patch("cementic.cli.Searcher")
     def test_human_and_json_modes_agree_on_the_unknown_collection_exit_code(

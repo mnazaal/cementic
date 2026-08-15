@@ -57,19 +57,40 @@ class CollectionSummary:
     building_revision_label: str | None
 
 
+def known_collection_names(session: Session) -> list[str]:
+    """Every collection cementic knows about, sorted.
+
+    A collection is anything that owns documents *or* revisions. Deriving the
+    list from documents alone hid a collection whose revisions exist but whose
+    documents do not -- `cementic start` on a directory with no supported files
+    produces exactly that -- so `collection list` showed nothing while
+    `collection remove` (which already checks both) could still delete it.
+    """
+    document_names = session.query(SourceDocument.collection).distinct()
+    revision_names = session.query(PipelineRevision.collection).distinct()
+    return sorted(
+        {str(name) for (name,) in document_names} | {str(name) for (name,) in revision_names}
+    )
+
+
+def collection_exists(session: Session, collection: str) -> bool:
+    """Whether cementic knows this collection at all.
+
+    Lets commands tell "this collection does not exist" apart from "it exists
+    and has nothing to show", which otherwise looked identical: a zero-filled
+    status report, an empty revision list, or "no ready revision", each at
+    exit 0, for a name that was simply a typo.
+    """
+    return collection in set(known_collection_names(session))
+
+
 def list_collections(session: Session) -> list[CollectionSummary]:
     """Return collection summaries ordered by collection name.
 
     Uses a fixed number of grouped queries regardless of collection count,
     instead of 3 queries per collection.
     """
-    collection_names = [
-        str(name)
-        for (name,) in session.query(SourceDocument.collection)
-        .group_by(SourceDocument.collection)
-        .order_by(SourceDocument.collection)
-        .all()
-    ]
+    collection_names = known_collection_names(session)
 
     documents_by_collection: dict[str, int] = {
         str(name): int(count)
@@ -261,7 +282,7 @@ def promote_ready_revision(
     if not force and revision_failure_total(counts) > 0:
         return PromotionOutcome("blocked_by_failures", revision=revision, counts=counts)
 
-    promote_revision(session, collection, revision, config=config)
+    promote_revision(session, collection, revision)
     session.commit()
     # Only now that the promotion is durable are the superseded revisions'
     # artifact files safe to unlink, and their vector tables safe to drop --

@@ -108,7 +108,8 @@ cementic status
 # Show known collections
 cementic collection list
 
-# Search the active revision only (1-50 results; default 10)
+# Search the active revision, falling back to an in-progress build if a
+# collection has never been promoted (1-50 results; default 10)
 cementic search "vector database design" -c research
 
 # Run one document through the pipeline with no database — stdin/stdout filters,
@@ -135,6 +136,29 @@ cementic stop
 # Delete one collection and its stored artifacts
 cementic collection remove research --force
 ```
+
+Useful flags beyond the above:
+
+| Flag | Applies to | What it does |
+| --- | --- | --- |
+| `-V`, `--version` | root | Print the version and exit |
+| `-v`, `--verbose` | `status` | Per-file pipeline progress, watched directories, worker PIDs |
+| `--json` | `status`, `search` | Machine-readable output (`search` emits JSONL, one object per line) |
+| `--doctor` | `status` | Read-only readiness diagnostics: config, database, extensions, model, daemon |
+| `-c`, `--collection` | `start`, `status`, `search` | Which collection to act on |
+| `-n`, `--top-k`, `--limit` | `search` | Number of results, 1–50 |
+| `--force` | `stop` | SIGKILL workers that ignored the graceful stop, discarding in-progress work |
+| `-f`, `--force` | `collection promote` | Promote despite failed documents or chunks |
+| `-f`, `--force` | `collection reindex` | Rebuild even when the method is unchanged, to pick up `hnsw_m` / `hnsw_ef_construction` |
+| `--force` | `collection remove` | Skip the confirmation prompt |
+| `--force` | `config init`, `init postgres` | Overwrite existing files |
+| `--chunk-size`, `--chunk-overlap` | `chunk` | Override the configured chunking for this run |
+
+Naming a collection that does not exist is an error, not an empty result:
+`status -c`, `collection revisions`, `collection promote`, `collection reindex`
+and `search -c` each say so and exit non-zero. `collection remove` is the
+deliberate exception — removing something already gone reports `not found` and
+succeeds, so it stays safe to run twice.
 
 `cementic start` runs a single background session (one source watcher + one pipeline worker)
 at a time, tracked in one supervisor state file. Running `cementic start` again for a different
@@ -212,13 +236,71 @@ port = 5432
 
 [pipeline]
 embedding_provider = "llama-cpp"
-chunk_size = 512
+chunk_size = 352
 
 [index]
 method = "hnsw"   # or "diskann"
 
 [llama_cpp]
-model_path = "./models/nomic-embed-text-v2-moe.Q8_0.gguf"
+model_path = "models/nomic-embed-text-v2-moe.Q8_0.gguf"
+```
+
+Write `model_path` exactly as shown. The path string is part of the embedding
+profile fingerprint, so spelling it `./models/...` mints a second profile for
+the same file and re-embeds the whole corpus.
+
+#### Every setting
+
+Anything below can go in the config file under its section, or be set as the
+matching `CEMENTIC_*` variable (see [Environment variables](#environment-variables)).
+
+| Section | Key | Default | What it does |
+| --- | --- | --- | --- |
+| `database` | `host`, `port`, `name`, `user`, `password` | `localhost`, `5432`, `cementic`, `cementic`, `cementic` | Connection parts |
+| | `url_override` | unset | Whole connection URL, bypassing the parts above (`CEMENTIC_DB_URL`) |
+| `pipeline` | `embedding_provider` | `llama-cpp` | Only provider currently registered |
+| | `chunk_size` | `352` | Tokens per chunk, counted with tiktoken — **not** the model's tokenizer. Must stay well under `llama_cpp.n_ctx`; see below |
+| | `chunk_overlap` | `88` | Token overlap between neighbouring chunks |
+| `index` | `method` | `hnsw` | `hnsw` or `diskann` |
+| | `hnsw_m`, `hnsw_ef_construction` | `16`, `64` | Build-time graph knobs; fixed into the index, so changing them needs `collection reindex --force` |
+| | `hnsw_ef_search` | `40` | Query-time candidate list; raised automatically to at least `top_k` |
+| | `hnsw_iterative_scan` | `relaxed_order` | `off`, `relaxed_order`, or `strict_order`; needs pgvector 0.8+ |
+| | `diskann_num_neighbors`, `diskann_search_list_size` | `50`, `100` | DiskANN build knobs |
+| | `diskann_query_rescore` | `50` | DiskANN query-time rescoring depth |
+| | `build_memory` | `2GB` | `maintenance_work_mem` for index builds only |
+| `llama_cpp` | `model_path` | bundled Nomic model | GGUF to load |
+| | `n_ctx` | `512` | Model context window. The default model's architecture caps at 512; raising it past what the model supports has no effect |
+| | `n_gpu_layers` | `0` | Layers offloaded to GPU |
+| | `embedding_dim` | `768` | Fallback only; the live model is probed |
+| | `daemon_autostart` | `true` | Start the embedding server on demand |
+| | `daemon_host`, `daemon_port` | `127.0.0.1`, `11555` | Where the embedding server listens |
+| | `daemon_start_timeout_seconds` | `120` | How long to wait for a cold start |
+| | `llama_embed_timeout_seconds` | `120` | Per-request embedding timeout |
+| | `daemon_pid_file`, `daemon_log_file` | under the data dir | Daemon bookkeeping |
+| | `verbose` | `false` | Verbose llama.cpp logging |
+| `extraction` | `use_ocr` | `false` | OCR pages with no text layer (needs `rapidocr`) |
+| | `backends` | registry default | Per-file-type extractor choice, e.g. `pdf = "pymupdf4llm"` |
+| `source_watcher` | `ignore_directories` | 16 names incl. `.git`, `node_modules`, `build`, `dist`, `venv`, `target` | Directory names skipped anywhere under a watched root. **Replaces** the defaults rather than adding to them; set `[]` to index everything |
+| | `state_path`, `log_file` | under the data dir | Watcher bookkeeping |
+| `pipeline_worker` | `batch_size` | `32` | Chunks per embedding request (1–128) |
+| | `poll_interval` | `1.0` | Seconds between polls when idle |
+| | `state_path`, `log_file` | under the data dir | Worker bookkeeping |
+| `bootstrap` | `auto_download_llama_model` | `true` | Fetch the model when missing |
+| | `llama_model_url` | Nomic GGUF on Hugging Face | Where to fetch it from |
+| | `llama_model_sha256` | pinned digest | Integrity check; set `""` to disable for a custom model |
+| `storage` | `artifacts_path` | under the data dir | Where compressed extracted text lives |
+
+##### Chunk size and the context window
+
+`chunk_size` is counted with tiktoken while `n_ctx` is counted with the
+embedding model's own tokenizer, and the two disagree — for the default model
+one tiktoken token runs to 1.33 model tokens on English and source code. A
+chunk that exceeds the window is refused rather than embedded truncated, and
+shows up as a failed chunk in `cementic status`. If you change either value,
+re-measure first:
+
+```bash
+python scripts/measure_chunk_context_fit.py
 ```
 
 ### Choosing an ANN index (HNSW vs DiskANN)
@@ -323,7 +405,8 @@ When using Nomic v2 models, cementic automatically applies task prefixes:
 - `src/cementic/revisions.py`
   - manages target, ready, active, retired, and superseded revisions
 - `src/cementic/search.py`
-  - searches only the active revision for the requested collection(s)
+  - searches the active revision for the requested collection(s), falling back
+    to a ready or in-progress one where no revision has been promoted yet
 - `src/cementic/storage.py`
   - stores extracted text as compressed artifacts on disk
 

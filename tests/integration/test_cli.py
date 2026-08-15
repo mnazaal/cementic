@@ -188,10 +188,17 @@ class TestPromoteCommand:
 class TestListRevisionCommand:
     """Tests for the list-collection-revisions CLI command."""
 
-    def test_list_revisions_empty(self, runner, sqlite_engine):
+    def test_list_revisions_for_an_unknown_collection_is_an_error(self, runner, sqlite_engine):
+        """An unknown name is a mistake, not an empty history.
+
+        This used to print "revisions / (none)" at exit 0, which is exactly what
+        a real collection with no revisions yet looks like -- so a typo was
+        indistinguishable from an idle collection.
+        """
         with patch("cementic.cli.get_engine", return_value=sqlite_engine):
             result = runner.invoke(app, ["collection", "revisions", "nocol"])
-        assert result.exit_code == 0
+        assert result.exit_code == 1
+        assert "unknown collection" in result.stdout
 
     def test_list_revisions_with_data(self, runner, sqlite_engine, sqlite_session):
         config = get_config()
