@@ -27,10 +27,10 @@ revision serving throughout; then `cementic collection promote test`. Either let
 that happen, or pin `chunk_size = 352` in a config file to keep the present
 index. Nothing else is pending.
 
-**Branch:** `main`, clean, at `14f9f2a`; no `claude/*` branches remain. This
-block is the only uncommitted change — if a commit accompanied the handoff it is
-that commit's sole content, on a fresh `claude/*` branch (the hook refuses
-`main`). Nothing is running in the background.
+**Branch:** `claude/session-handoff-2026-08-15`, branched from `main` at
+`14f9f2a` and not yet merged — it carries this block, a correction to "Scale
+context" below, and a staleness sweep of the standing docs. Merge it and no
+`claude/*` branches remain. Nothing is running in the background.
 
 **Verification:** `./scripts/check.sh`. At `14f9f2a`: 893 tests passing, ruff and
 mypy clean.
@@ -256,15 +256,33 @@ it matters.
   scale). The method is applied when the index is built and takes effect on the
   next rebuild; it never re-embeds.
 
-## Open review findings
+## Review history and what is still open
 
-Two read-only reviews, both still open against an unchanged `src/`:
-[`notes/code-review-2026-08-07.html`](notes/code-review-2026-08-07.html) (first
-full pass) and
-[`notes/code-review-2026-08-11.html`](notes/code-review-2026-08-11.html) (third
-pass — five unprimed reviewers, so its overlaps are independent re-derivations,
-and it carries only what is *new* plus the re-confirmation map). File:line,
-symptom and repro live in the notes; this section carries only the fix order.
+**Everything found by the four reviews is fixed and merged**, except the items
+under "Deliberately not done" below. The notes are the record of what each found;
+this section keeps only the engineering *lessons and measurements* that have no
+other home, in the order they were learned.
+
+- [`notes/code-review-2026-08-07.html`](notes/code-review-2026-08-07.html) — first full pass.
+- [`notes/code-review-2026-08-11.html`](notes/code-review-2026-08-11.html) — third
+  pass, five unprimed reviewers, so its overlaps are independent re-derivations.
+- [`notes/code-review-2026-08-14.html`](notes/code-review-2026-08-14.html) — fourth
+  pass. Carries a resolution banner mapping every finding to the commit that
+  closed it, and a reconciliation of the two earlier notes, so a fifth review
+  starts from that rather than re-deriving.
+
+**Read the 2026-08-14 note before opening a new review.** Its most useful section
+is not the findings but the ledger of what the earlier passes found and never
+fixed — roughly fifteen items were re-derived independently three times before
+anyone acted on them.
+
+The 2026-08-11 pass re-confirmed ~20 findings independently (both blockers among
+them) and added: an unguarded `shutil.rmtree` in `init postgres --force`; a
+revision reaching `ready` with zero documents; failure counts laundered past the
+promote gate by a worker restart; `index.method` unreachable on a built system;
+`--n_batch` never passed, so raising `n_ctx` is a no-op; raw tracebacks on a
+malformed `CEMENTIC_DB_URL` in the three commands meant to explain it; and two
+CI marker holes that make a green run meaningless.
 
 The 2026-08-11 pass re-confirmed ~20 findings independently (both blockers among
 them) and added: an unguarded `shutil.rmtree` in `init postgres --force`; a
@@ -293,7 +311,10 @@ all clean, and `uv lock --check` passes.
 4. **Silently wrong search answers** — C1.4 (chunk boundaries now align to whole
    characters; concatenation of non-overlapping chunks became lossless),
    C1.2 (freshness predicates, with the definition centralised beside the scope
-   builders as `CURRENT_CONTENT_SQL`), C1.1 + N5 (query bounded in tokens
+   builders as `CURRENT_CONTENT_SQL` — *since removed from `src/`; the freshness
+   join was replaced by deleting stale rows eagerly, and the constant now lives
+   in `tests/integration/test_pg_helpers.py` as a fixture invariant*),
+   C1.1 + N5 (query bounded in tokens
    against the window; `--n_batch`/`--n_ubatch` now follow `n_ctx`), C1.3
    (`ef_search` never below the requested `top_k`).
 5. **H4** — a `ready` revision reports as ready, and `status` names the promote
@@ -341,9 +362,10 @@ Two notes for whoever picks this up:
 
 - **Test fixtures were unrealistic, not the code.** Three `load_file_progress`
   tests seeded artifact rows without the hashes the worker writes. Both step
-  functions set those on the *failure* path too (`pipeline_worker.py:494`,
-  `:606`), so the fixtures — not the new predicates — were wrong. Check that
-  before assuming a similar failure means a regression.
+  functions set those on the *failure* path too (in `_step_extract`'s and
+  `_step_chunk`'s write-back blocks — line numbers have drifted since), so the
+  fixtures, not the new predicates, were wrong. Check that before assuming a
+  similar failure means a regression.
 - **A relative `artifacts_path` is still relative** — to where cementic was
   started. Anchoring at load time removes the silent-no-op deletion, but it
   cannot make a relative path mean the same thing from two directories. A real
@@ -514,6 +536,28 @@ pooled connections, so some "ANN" queries were sequential scans. Re-measured
 with both plans asserted via `EXPLAIN` and a separate pool for the baseline, the
 two indexes are the same size and the same speed.
 
+### Fourth review (2026-08-14) — the lesson worth keeping
+
+What it found and what closed each is in the note. One lesson has no other home,
+because it is about how the fix itself went wrong:
+
+**A guard is only as good as the thing its test measures.** The headline finding
+was that `chunk_size` (tiktoken tokens) was pitted against `n_ctx` (the model's
+own tokens), silently truncating ~30% of every full chunk. The fix lowered
+`chunk_size` and added a runtime guard with a cheap pre-filter, pinned by a new
+invariant test. Both the chosen constant and the test were wrong in the same way:
+they measured the bare chunk, while the guard measures the *formatted* text, and
+the `search_document: ` prefix adds 3 tokens. That pushed every chunk 3 tokens
+past the skip threshold, so the "rare" exact-count path ran on every single
+chunk — which, against a daemon that serialises requests, stalled a live
+re-index for hours. The test now builds a real chunk and formats it exactly as
+the client does; set back to the old value, it fails.
+
+The same trap produced the original bug: `measure_chunk_context_fit.py` embedded
+`chunk[:len*0.75]` while printing the *full* chunk's token count beside an "ok"
+verdict, so the config comment citing it as proof of safety was citing a
+measurement that never tested the case it claimed.
+
 ### Superseded
 
 **The ANN index is never used by cementic's search query.** *(Fixed above; kept
@@ -537,7 +581,8 @@ Consequences, in order of importance:
 - Search is exact — so this is a scaling defect, not a correctness one. Results
   are right, and were right before the freshness predicates too.
 - Search costs O(rows in the profile's vector table) per query, growing
-  linearly. Fine at the current 172 chunks; ~25 ms at 20k, ~90 ms at 60k.
+  linearly. (Superseded: the filter columns below made the ANN index reachable,
+  so search no longer scales with table size.)
 - `index.method`, `hnsw_m`, `ef_construction`, `hnsw_ef_search`, the DiskANN
   knobs and `collection reindex` all maintain an index nothing reads.
 
@@ -558,11 +603,19 @@ while only cosine exists), and reading model identity from GGUF metadata instead
 of the filename (the filename heuristic is now at least *reported* by
 `cementic embedding start`).
 
-Two of those were re-derived independently by the second review with new
-evidence, and are worth reopening rather than re-closing: the `check_health`
-tradeoff also makes `cementic status` block for 120s to return an answer it
-already had (C2.4), and the filename heuristic silently disables Nomic task
-prefixes while `models/nomic-embed-text-v1.5.f16.gguf` sits in the repo.
+Of those, the `status` half of the `check_health` tradeoff **was** reopened and
+fixed — `status` no longer blocks 120 s to return an answer the pid file already
+had. Two remain open and are worth reopening rather than re-closing:
+
+- **`check_health` still calls a live-but-broken daemon healthy**, and this is no
+  longer theoretical. On 2026-08-15 a wedged daemon held the port for 21 hours
+  while `cementic status` reported `embedding healthy` and every request hung.
+  It only probes whether `/v1/models` lists the model.
+- **The filename heuristic silently disables Nomic task prefixes** while
+  `models/nomic-embed-text-v1.5.f16.gguf` sits in the repo — v1/v1.5 need the
+  same prefixes as v2 but do not match `_NOMIC_V2_MARKER`. Note the wrong
+  behaviour is currently *pinned by a test* (`test_embedding_text.py`), which
+  must be retired with the fix or it reads as intentional.
 
 Closed again by the round-two review, with reasons — each of these looks like a
 bug and is one, but the fix costs more than the defect:
@@ -579,7 +632,11 @@ bug and is one, but the fix costs more than the defect:
 - **`connect_args` / `gssencmode` on non-psycopg URLs.** `DatabaseConfig` can
   only produce `postgresql://`, and sqlite never reaches `get_engine` outside
   tests that patch around it. Worth the `make_url` cleanup only if `db.py` is
-  open for another reason.
+  open for another reason — *and it has been twice since* (`build_memory`, then
+  the atomic `force_rebuild` drop), so the stated precondition is now met.
+  Note the gap is wider than first recorded: the check is
+  `startswith("postgresql://")`, so it also misses driver-qualified URLs like
+  `postgresql+psycopg2://`, which a user setting `CEMENTIC_DB_URL` may well write.
 - **`ignore_directories` replacing the defaults.** Working as documented,
   including the "empty list indexes everything" escape hatch a union would
   break. If discoverability is the concern, add a separate
@@ -588,11 +645,29 @@ bug and is one, but the fix costs more than the defect:
   that leaks the lock is immediately followed by process exit, which releases
   it; the stale state file is corrected by `start`'s liveness check and cleared
   by `stop`. Two-line fixes if those functions are open anyway, not worth a slot.
-- **`index.method` being unreachable on a built system.** A dead knob with no
-  correctness consequence, because search deliberately tunes for the index that
-  exists. The actionable part is that `TODO.md` asserts "the build path already
-  reconciles a changed method", which is false — correct that sentence and leave
-  `collection reindex` on the roadmap.
+- **`index.method` being unreachable on a built system.** Closed by
+  `cementic collection reindex`, which reconciles the active revision's index
+  with the current `[index]` config. *(The instruction that used to sit here —
+  "correct the sentence in `TODO.md` claiming the build path already reconciles
+  a changed method" — was itself stale: no such sentence exists in `TODO.md`.)*
+
+**Also still open, from the fourth review** — full detail and file:line in
+`notes/code-review-2026-08-14.html`, listed here so they are not buried:
+
+- `cementic start` reports success after a 2 s grace period, while the startup
+  path can fail up to `daemon_start_timeout_seconds` (120 s) later. The failure
+  reason goes only to a background log whose path is printed in the *other*
+  branch and appears nowhere in `status` or `doctor`.
+- An orphaned embedding daemon cannot be reclaimed once its pid record is lost:
+  `embedding stop` reports "already stopped" while the process holds the port.
+  Observed live on 2026-08-15 — this is what stalled a re-index for hours.
+- Model identity is the *path string*, so `resolve_llama_model_path` trying cwd
+  first means indexing from two directories can silently mean two different
+  GGUF files under one fingerprint. Batch with the `verbose` change above, since
+  both force a re-embed.
+- `EXTRACTION_VERSION` is a hand-maintained integer, not the pymupdf/pymupdf4llm
+  versions that actually produce the Markdown, so a dependency bump changes
+  extraction output without moving the fingerprint.
 
 ## Deferred
 
@@ -605,8 +680,6 @@ bug and is one, but the fix costs more than the defect:
 - `cementic add <path>` for direct one-off ingestion.
 - Optional Markdown artifact mirrors alongside the compressed pipeline artifacts.
 - Richer search-result metadata (document id, collection, artifact path).
-- CI: unit tests always; PG integration tests when a container engine is
-  available (the integration suite already brings compose up/down itself).
 - Hybrid lexical + vector search (exact author names, acronyms, equation labels).
 - A multi-profile embedding daemon pool, if old-model search and new-model
   indexing must run concurrently.
