@@ -249,8 +249,12 @@ user = "cementic"
 
 [pipeline]
 embedding_provider = "llama-cpp"
-chunk_size = 512
-chunk_overlap = 128
+# Counted with tiktoken, while llama_cpp.n_ctx (512) counts the model's own
+# tokens -- for the default model one of these is up to 1.33 of the other, so
+# chunk_size must stay well under n_ctx or chunks embed truncated. Re-measure
+# with scripts/measure_chunk_context_fit.py before raising it.
+chunk_size = 352
+chunk_overlap = 88
 
 [index]
 # ANN index: "hnsw" (lower latency, more RAM) or "diskann" (disk-resident, low RAM)
@@ -264,7 +268,10 @@ hnsw_iterative_scan = "relaxed_order"
 build_memory = "2GB"
 
 [llama_cpp]
-model_path = "./models/nomic-embed-text-v2-moe.Q8_0.gguf"
+# Spelled exactly as the built-in default: the model path string is part of the
+# embedding profile fingerprint, so writing "./models/..." here instead would
+# mint a second profile for the same file and re-embed the whole corpus.
+model_path = "models/nomic-embed-text-v2-moe.Q8_0.gguf"
 
 [extraction]
 use_ocr = false
@@ -1749,15 +1756,54 @@ def embed() -> None:
         raise typer.Exit(1)
     if not records:
         return
+    # Validate the whole input before embedding any of it, so a malformed line
+    # is not reported only after some output has already been written.
+    contents: list[str] = []
+    for line_number, rec in enumerate(records, 1):
+        if not isinstance(rec, dict):
+            err_console.print(
+                f"embed failed: line {line_number} is a JSON {type(rec).__name__}, "
+                "not an object with a \"content\" field"
+            )
+            raise typer.Exit(1)
+        content = rec.get("content")
+        # str(rec.get("content", "")) used to turn a missing field into the
+        # empty string and a null into the literal "None" -- both of which
+        # embed happily into a plausible-looking vector for text that was never
+        # there.
+        if not isinstance(content, str):
+            missing = "is missing" if "content" not in rec else f"is {json.dumps(content)}"
+            err_console.print(
+                f"embed failed: line {line_number} has no text to embed: \"content\" {missing}"
+            )
+            raise typer.Exit(1)
+        contents.append(content)
+
     batch_size = cfg.pipeline_worker.batch_size
     try:
         provider = create_provider(runtime_spec_from_config(cfg), cfg)
         for start in range(0, len(records), batch_size):
             batch = records[start : start + batch_size]
-            texts = [provider.format_document(str(rec.get("content", ""))) for rec in batch]
+            texts = [
+                provider.format_document(content)
+                for content in contents[start : start + batch_size]
+            ]
             vectors = provider.embed_batch(texts)
-            for rec, vector in zip(batch, vectors):
+            for offset, (rec, vector) in enumerate(zip(batch, vectors)):
+                if vector is None:
+                    # embed_batch reports per-item failure as None. Emitting
+                    # "embedding": null would look like a successful record.
+                    reason = getattr(provider, "over_budget_reason", lambda _text: None)(
+                        texts[offset]
+                    )
+                    err_console.print(
+                        f"embed failed: line {start + offset + 1} could not be embedded"
+                        + (f": {reason}" if reason else "")
+                    )
+                    raise typer.Exit(1)
                 typer.echo(json.dumps({**rec, "embedding": vector}))
+    except typer.Exit:
+        raise
     except Exception as error:
         err_console.print(f"embed failed: {error}")
         raise typer.Exit(1)

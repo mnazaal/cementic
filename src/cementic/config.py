@@ -444,17 +444,24 @@ class PipelineConfig(_SectionSettings):
     _toml_section = "pipeline"
 
     chunk_size: int = Field(
-        default=512,
+        default=352,
         ge=1,
         description="Tokens per chunk, counted with the tiktoken encoding named "
-        "in chunk.TOKENIZER -- not the embedding model's own tokenizer. It "
-        "matching llama_cpp.n_ctx (also 512) looks like an overflow waiting to "
-        "happen, but was measured against the default Nomic model with English, "
-        "CJK, source code and diacritic-heavy text: full chunks embed without "
-        "error and remain tail-sensitive, so nothing is silently truncated. "
-        "Re-measure before raising this or lowering n_ctx.",
+        "in chunk.TOKENIZER -- not the embedding model's own tokenizer, which "
+        "is what llama_cpp.n_ctx (512) bounds. The two disagree, and for the "
+        "default Nomic model they disagree in the dangerous direction: measured "
+        "over real indexed chunks, one cl100k token is a median of 1.14 model "
+        "tokens, p95 1.24, max 1.33. At the old default of 512 that put 96% of "
+        "full-size chunks (160 of 167) over the window, and the server drops "
+        "the overflow silently. 352 leaves headroom to a ratio of 1.45. "
+        "Raising n_ctx is not an alternative: the model architecture caps at "
+        "512 (nomic-bert-moe.context_length in the GGUF metadata). "
+        "This is now enforced at runtime rather than assumed -- the embedding "
+        "client counts with the model's own tokenizer and fails an over-budget "
+        "chunk instead of truncating it. Re-measure with "
+        "scripts/measure_chunk_context_fit.py before raising this.",
     )
-    chunk_overlap: int = Field(default=128, ge=0, description="Token overlap between chunks")
+    chunk_overlap: int = Field(default=88, ge=0, description="Token overlap between chunks")
     embedding_provider: str = Field(
         default="llama-cpp",
         description="Embedding provider to use (currently llama-cpp)",

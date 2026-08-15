@@ -20,6 +20,7 @@ from cementic.config import (
     resolve_config_path,
     resolve_llama_model_path,
 )
+from cementic.embedding_runtime import _TOKEN_RATIO_UPPER_BOUND
 from cementic.index_strategies import supported_index_methods
 from cementic.storage import extracted_document_path
 
@@ -63,7 +64,7 @@ class TestConfigFile:
         monkeypatch.delenv("CEMENTIC_DB_HOST", raising=False)
         config = Config()
         assert config.database.host == "localhost"
-        assert config.pipeline.chunk_size == 512
+        assert config.pipeline.chunk_size == 352
 
     def test_resolve_path_prefers_explicit_env(self, tmp_path, monkeypatch) -> None:
         path = tmp_path / "explicit.toml"
@@ -227,8 +228,8 @@ class TestConfig:
         """Test embedding provider configuration."""
         config = Config()
         assert config.pipeline.embedding_provider == "llama-cpp"
-        assert config.pipeline.chunk_size == 512
-        assert config.pipeline.chunk_overlap == 128
+        assert config.pipeline.chunk_size == 352
+        assert config.pipeline.chunk_overlap == 88
 
     def test_chunk_overlap_must_be_smaller_than_size(self):
         """Pipeline config rejects an overlap that cannot make progress."""
@@ -239,6 +240,24 @@ class TestConfig:
         """Pipeline config rejects non-positive chunk sizes."""
         with pytest.raises(ValueError, match="greater than or equal to 1"):
             Config(pipeline={"chunk_size": 0})
+
+    def test_default_chunk_size_fits_the_default_context_window(self):
+        """The shipped defaults must not put a full chunk over the model's window.
+
+        chunk_size counts tiktoken tokens while n_ctx counts the model's own, and
+        the two differ by up to a third on English and source code. When these
+        defaults last drifted apart, 93% of full-size chunks embedded truncated
+        with no error anywhere -- measured on a real corpus, and invisible to the
+        whole test suite. This pins the invariant so it cannot drift silently
+        again; scripts/measure_chunk_context_fit.py is the empirical counterpart.
+        """
+        config = Config()
+        worst_case_model_tokens = config.pipeline.chunk_size * _TOKEN_RATIO_UPPER_BOUND
+        assert worst_case_model_tokens <= config.llama_cpp.n_ctx, (
+            f"chunk_size={config.pipeline.chunk_size} can reach "
+            f"{worst_case_model_tokens:.0f} model tokens, over n_ctx="
+            f"{config.llama_cpp.n_ctx}; chunks would embed truncated"
+        )
 
     def test_index_method_must_be_supported(self):
         """Index config rejects methods the strategy registry does not provide."""

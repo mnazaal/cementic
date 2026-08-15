@@ -167,6 +167,100 @@ class TestRemoteEmbeddingClient:
         assert client.describe().embedding_dim == 5
 
 
+class TestTokenBudgetGuard:
+    """The window is counted with the model's own tokenizer, not chunk.TOKENIZER.
+
+    The server truncates over-long input silently, so an unguarded over-budget
+    chunk embeds "successfully" into a vector representing only its head.
+    """
+
+    @staticmethod
+    def _client(n_ctx: int = 512) -> RemoteEmbeddingClient:
+        return RemoteEmbeddingClient(
+            host="localhost",
+            port=8081,
+            embedding_dim=768,
+            expected_fingerprint="abc",
+            n_ctx=n_ctx,
+        )
+
+    def test_short_text_never_pays_for_a_round_trip(self) -> None:
+        """The cheap local pre-filter must settle the common case on its own."""
+        with patch("cementic.embedding_runtime.requests.post") as mock_post:
+            assert self._client().over_budget_tokens("a short chunk of text") is None
+            mock_post.assert_not_called()
+
+    @patch("cementic.embedding_runtime.requests.post")
+    def test_long_text_is_measured_with_the_models_own_tokenizer(self, mock_post) -> None:
+        counted = MagicMock()
+        counted.status_code = 200
+        counted.json.return_value = {"count": 640}
+        mock_post.return_value = counted
+
+        over = self._client().over_budget_tokens("word " * 2000)
+
+        assert over == 640
+        assert mock_post.call_args.args[0].endswith("/extras/tokenize/count")
+
+    @patch("cementic.embedding_runtime.requests.post")
+    def test_long_text_that_actually_fits_is_allowed(self, mock_post) -> None:
+        """The pre-filter over-estimates on purpose; the exact count overrules it."""
+        counted = MagicMock()
+        counted.status_code = 200
+        counted.json.return_value = {"count": 500}
+        mock_post.return_value = counted
+
+        assert self._client().over_budget_tokens("word " * 2000) is None
+
+    @patch("cementic.embedding_runtime.requests.post")
+    def test_embed_batch_reports_per_item_failure_not_a_dead_batch(self, mock_post) -> None:
+        """One over-long chunk must not cost the whole batch its embeddings."""
+
+        def responses(url, **kwargs):
+            response = MagicMock()
+            response.status_code = 200
+            if url.endswith("/extras/tokenize/count"):
+                response.json.return_value = {"count": 900}
+                return response
+            response.json.return_value = {"data": [{"index": 0, "embedding": [0.5, 0.5]}]}
+            return response
+
+        mock_post.side_effect = responses
+        client = self._client()
+
+        vectors = client.embed_batch(["short one", "word " * 2000])
+
+        assert vectors[0] == [0.5, 0.5]
+        assert vectors[1] is None
+        assert "over its 512-token context window" in (
+            client.over_budget_reason("word " * 2000) or ""
+        )
+
+    @patch("cementic.embedding_runtime.requests.post")
+    def test_embed_refuses_rather_than_returning_a_truncated_vector(self, mock_post) -> None:
+        counted = MagicMock()
+        counted.status_code = 200
+        counted.json.return_value = {"count": 900}
+        mock_post.return_value = counted
+
+        with pytest.raises(ValueError, match="over its 512-token context window"):
+            self._client().embed("word " * 2000)
+
+    @patch("cementic.embedding_runtime.requests.post")
+    def test_a_server_without_the_endpoint_falls_back_to_the_estimate(self, mock_post) -> None:
+        """A missing tokenizer endpoint must not silently re-admit truncation."""
+        missing = MagicMock()
+        missing.status_code = 404
+        mock_post.return_value = missing
+
+        assert self._client().over_budget_tokens("word " * 2000) is not None
+
+    def test_the_guard_is_off_when_the_window_is_unknown(self) -> None:
+        with patch("cementic.embedding_runtime.requests.post") as mock_post:
+            assert self._client(n_ctx=0).over_budget_tokens("word " * 2000) is None
+            mock_post.assert_not_called()
+
+
 class TestDaemonLifecycle:
     """Tests for daemon lifecycle helpers."""
 

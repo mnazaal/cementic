@@ -14,7 +14,9 @@ from pathlib import Path
 from typing import Any, Callable
 
 import requests
+import tiktoken
 
+from cementic.chunk import TOKENIZER
 from cementic.config import Config, resolve_llama_model_path
 from cementic.embedding_provider import EmbeddingFacts, EmbeddingProvider
 from cementic.embedding_text import (
@@ -28,6 +30,13 @@ from cementic.supervisor import (
     spawn_detached,
     wait_for_exit,
 )
+
+#: Upper bound on how many of the model's own tokens one ``chunk.TOKENIZER``
+#: token can become, used only as a cheap pre-filter: below this, a text
+#: provably fits and no round trip is needed. Measured over real indexed chunks
+#: against the default Nomic model (median 1.14, p95 1.24, max 1.33); 1.45
+#: leaves headroom. Over-estimating only costs an extra exact count, so err high.
+_TOKEN_RATIO_UPPER_BOUND = 1.45
 
 #: Attempts (and the gap between them) when probing the model's true embedding
 #: dimension. Short: the daemon is already known reachable by this point, so
@@ -157,6 +166,7 @@ class RemoteEmbeddingClient(EmbeddingProvider):
         expected_fingerprint: str,
         model_identifier: str = "",
         timeout: float = 30.0,
+        n_ctx: int = 0,
     ) -> None:
         self.host = host
         self.port = port
@@ -165,6 +175,10 @@ class RemoteEmbeddingClient(EmbeddingProvider):
         self.expected_fingerprint = expected_fingerprint
         self.model_identifier = model_identifier
         self.timeout = timeout
+        # 0 disables the budget guard, for callers that genuinely do not know
+        # the window. Every production construction site passes the real value.
+        self.n_ctx = n_ctx
+        self._tokenize_endpoint_available: bool | None = None
 
     @property
     def base_url(self) -> str:
@@ -258,6 +272,67 @@ class RemoteEmbeddingClient(EmbeddingProvider):
     def health_check(self) -> bool:
         return self.matches_expected_runtime()
 
+    def count_model_tokens(self, text: str) -> int | None:
+        """Tokens in ``text`` per the *model's own* tokenizer, or None if unavailable.
+
+        ``llama_cpp.server`` exposes the loaded model's tokenizer over
+        ``/extras/tokenize/count``. That is the only way to answer the budget
+        question exactly: ``chunk.TOKENIZER`` is a different tokenizer and
+        disagrees by up to a third on ordinary English and source code.
+
+        None means the server does not offer the endpoint, not that the text
+        fits -- callers must decide what to do with that.
+        """
+        if self._tokenize_endpoint_available is False:
+            return None
+        try:
+            response = requests.post(
+                f"{self.base_url}/extras/tokenize/count",
+                json={"input": text},
+                timeout=self.timeout,
+            )
+            if response.status_code == 404:
+                self._tokenize_endpoint_available = False
+                return None
+            response.raise_for_status()
+            count = int(response.json()["count"])
+        except (requests.RequestException, ValueError, KeyError, TypeError):
+            return None
+        self._tokenize_endpoint_available = True
+        return count
+
+    def over_budget_tokens(self, text: str) -> int | None:
+        """Exact model-token count if ``text`` exceeds the window, else None.
+
+        The server truncates over-long input silently, so an over-budget text
+        embeds "successfully" into a vector that represents only its head. This
+        is the check that turns that into a visible failure.
+
+        Costs nothing in the common case: ``chunk.TOKENIZER`` counting is local,
+        and only a text near enough to the limit to be in doubt pays for the
+        exact round trip.
+        """
+        if self.n_ctx <= 0:
+            return None
+        approx = len(tiktoken.get_encoding(TOKENIZER).encode(text)) * _TOKEN_RATIO_UPPER_BOUND
+        if approx <= self.n_ctx:
+            return None
+        exact = self.count_model_tokens(text)
+        if exact is None:
+            # No exact tokenizer to appeal to. Report the estimate rather than
+            # letting the text through: a silently truncated vector is the
+            # failure this exists to prevent, and at the shipped chunk_size
+            # this branch is unreachable anyway.
+            return int(approx)
+        return exact if exact > self.n_ctx else None
+
+    def _over_budget_message(self, tokens: int) -> str:
+        return (
+            f"text is about {tokens} tokens in the embedding model's own tokenizer, "
+            f"over its {self.n_ctx}-token context window; the server would embed only "
+            "the head and drop the rest. Lower pipeline.chunk_size."
+        )
+
     def _embed_inputs(self, inputs: str | list[str]) -> list[list[float]]:
         response = requests.post(
             f"{self.base_url}/v1/embeddings",
@@ -270,20 +345,43 @@ class RemoteEmbeddingClient(EmbeddingProvider):
         return [[float(value) for value in row["embedding"]] for row in rows]
 
     def embed(self, text: str) -> list[float]:
+        over = self.over_budget_tokens(text)
+        if over is not None:
+            raise ValueError(self._over_budget_message(over))
         return self._embed_inputs(text)[0]
 
     def embed_batch(self, texts: list[str]) -> list[list[float] | None]:
+        """Embed a batch, reporting per-item None for anything over the window.
+
+        A single over-long chunk must not fail the whole batch: the caller
+        records it as a failed chunk and keeps going, which is how every other
+        per-document failure behaves.
+        """
         if not texts:
             return []
-        embeddings = self._embed_inputs(texts)
-        if len(embeddings) != len(texts):
+        results: list[list[float] | None] = [None] * len(texts)
+        sendable = [
+            (i, text) for i, text in enumerate(texts) if self.over_budget_tokens(text) is None
+        ]
+        if not sendable:
+            return results
+        embeddings = self._embed_inputs([text for _, text in sendable])
+        if len(embeddings) != len(sendable):
             raise ValueError(
-                f"embedding count {len(embeddings)} does not match input count {len(texts)}"
+                f"embedding count {len(embeddings)} does not match input count {len(sendable)}"
             )
-        # The optional element type is part of the EmbeddingProvider contract
-        # (a provider may report per-item failure); this one either returns a
-        # full batch or raises.
-        return list(embeddings)
+        for (index, _), embedding in zip(sendable, embeddings):
+            results[index] = embedding
+        return results
+
+    def over_budget_reason(self, text: str) -> str | None:
+        """Why ``text`` cannot be embedded, or None if it can.
+
+        Lets a caller that got a None back from ``embed_batch`` say *why* rather
+        than reporting a bare failure.
+        """
+        over = self.over_budget_tokens(text)
+        return None if over is None else self._over_budget_message(over)
 
     @property
     def embedding_dim(self) -> int:
@@ -323,6 +421,10 @@ def build_llama_cpp_client(
         ),
         model_identifier=runtime_spec.model_identifier,
         timeout=float(config.llama_cpp.llama_embed_timeout_seconds),
+        # The window the daemon is actually launched with (n_ctx above), not
+        # current config: they diverge once config changes after indexing, and
+        # the budget that matters is the one the served model enforces.
+        n_ctx=n_ctx,
     )
 
 

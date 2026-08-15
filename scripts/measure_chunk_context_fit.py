@@ -3,13 +3,26 @@
 
 ``pipeline.chunk_size`` counts tokens with a tiktoken encoding; the embedding
 server's ``llama_cpp.n_ctx`` counts them with the *model's own* tokenizer, and a
-task prefix is added on top. Both default to 512, so a full chunk could in
-principle overflow -- either failing to embed, or embedding with its tail
-silently dropped, which degrades retrieval with no error anywhere.
+task prefix is added on top. A full chunk can therefore overflow -- either
+failing to embed, or embedding with its tail silently dropped, which degrades
+retrieval with no error anywhere.
 
 This measures rather than assumes, across text where the two tokenizers diverge
-most. For each case it embeds two chunks differing only in their final words: if
-the tail is being truncated the vectors come back identical.
+most, using two independent signals:
+
+1. **Exact count.** The daemon's ``/extras/tokenize/count`` applies the model's
+   own tokenizer, so the budget question is answered directly rather than
+   inferred. This is the primary verdict.
+2. **Differential probe.** Two variants of the chunk differing only in their
+   final characters -- and identical in length -- are embedded. If the tail is
+   being truncated, the vectors come back identical. This catches a truncation
+   the count-based check would miss (for example a server-side cap below
+   ``n_ctx``).
+
+An earlier version of this script measured only ``chunk[:len(chunk) * 0.75]``
+while printing the *full* chunk's token count beside the verdict, so it reported
+"ok" for chunks whose last quarter -- exactly where overflow begins -- was never
+sent. Both signals below run against the whole chunk.
 
 Run with the daemon up (`cementic embedding start`), after changing chunk_size,
 n_ctx, or the embedding model:
@@ -35,6 +48,13 @@ CASES: dict[str, str] = {
     "diacritics": "Ωμέγα ñoño çedilla — Straße Ünïcödé тест δοκιμή " * 200,
 }
 
+#: Equal-length tails swapped in for the differential probe. Same length so the
+#: two variants are byte-for-byte the same size as each other and as the chunk:
+#: appending instead would make the probe test a *longer* text than the one the
+#: pipeline actually embeds.
+_TAIL_A = " ALPHA_MARKER alpha alpha "
+_TAIL_B = " OMEGA_MARKER omega omega "
+
 
 def main() -> int:
     config = Config()
@@ -47,49 +67,80 @@ def main() -> int:
         return 1
     alias = served[0]["id"]
     encoding = tiktoken.get_encoding(TOKENIZER)
+    budget = config.llama_cpp.n_ctx
 
     print(f"model      : {config.llama_cpp.model_path}")
     print(f"text policy: {describe_text_policy(config.llama_cpp.model_path)}")
     print(f"chunk_size : {config.pipeline.chunk_size} ({TOKENIZER} tokens)")
-    print(f"n_ctx      : {config.llama_cpp.n_ctx} (model tokens)")
+    print(f"n_ctx      : {budget} (model tokens)")
     print()
-    print(f"{'case':<12} {'tokens':>7} {'chars':>7}  verdict")
+
+    def formatted(text: str) -> str:
+        return format_document_text_for_model(text, config.llama_cpp.model_path)
+
+    def model_tokens(text: str) -> int:
+        response = requests.post(
+            f"{base_url}/extras/tokenize/count", json={"input": text}, timeout=60
+        )
+        response.raise_for_status()
+        return int(response.json()["count"])
 
     def embed(text: str) -> list[float]:
         response = requests.post(
             f"{base_url}/v1/embeddings",
-            json={
-                "model": alias,
-                "input": format_document_text_for_model(text, config.llama_cpp.model_path),
-            },
+            json={"model": alias, "input": text},
             timeout=180,
         )
         response.raise_for_status()
         return list(response.json()["data"][0]["embedding"])
 
+    print(f"{'case':<12} {'cl100k':>7} {'chars':>7} {'model':>7} {'ratio':>6}  verdict")
+
     failures = 0
+    worst_ratio = 0.0
     for name, body in CASES.items():
         chunk = chunk_text(
             body,
             chunk_size=config.pipeline.chunk_size,
             chunk_overlap=config.pipeline.chunk_overlap,
         )[0].content
-        token_count = len(encoding.encode(chunk))
-        head = chunk[: int(len(chunk) * 0.75)]
+        cl100k = len(encoding.encode(chunk))
+
         try:
-            first = embed(head + " ALPHA_MARKER alpha alpha")
-            second = embed(head + " OMEGA_MARKER omega omega")
+            exact = model_tokens(formatted(chunk))
+            # Equal-length tail swap: same size as the real chunk, different end.
+            variant_a = chunk[: -len(_TAIL_A)] + _TAIL_A
+            variant_b = chunk[: -len(_TAIL_B)] + _TAIL_B
+            tail_ignored = embed(formatted(variant_a)) == embed(formatted(variant_b))
         except Exception as error:
-            print(f"{name:<12} {token_count:>7} {len(chunk):>7}  EMBED FAILED: {error}")
+            print(f"{name:<12} {cl100k:>7} {len(chunk):>7} {'-':>7} {'-':>6}  PROBE FAILED: {error}")
             failures += 1
             continue
-        if first == second:
-            print(f"{name:<12} {token_count:>7} {len(chunk):>7}  TRUNCATED (tail ignored)")
+
+        ratio = exact / cl100k if cl100k else 0.0
+        worst_ratio = max(worst_ratio, ratio)
+        if exact > budget:
+            verdict = f"OVER BUDGET by {exact - budget} model tokens"
+            failures += 1
+        elif tail_ignored:
+            # Fits by count but the tail still does not move the vector: the
+            # server is capping input somewhere below n_ctx.
+            verdict = "TRUNCATED (fits by count, but tail ignored)"
             failures += 1
         else:
-            print(f"{name:<12} {token_count:>7} {len(chunk):>7}  ok (tail affects the vector)")
+            verdict = "ok (fits, tail affects the vector)"
+        print(
+            f"{name:<12} {cl100k:>7} {len(chunk):>7} {exact:>7} {ratio:>6.2f}  {verdict}"
+        )
 
     print()
+    if worst_ratio:
+        safe = int(budget / worst_ratio)
+        print(
+            f"worst observed ratio {worst_ratio:.2f} model tokens per {TOKENIZER} token "
+            f"(incl. task prefix)"
+        )
+        print(f"=> chunk_size must not exceed {safe} for these cases to fit in {budget}")
     if failures:
         print(f"{failures} case(s) failed: chunk_size and n_ctx are not compatible.")
         return 1

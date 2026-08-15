@@ -22,7 +22,12 @@ from cementic.embedding_text import describe_text_policy
 EMBEDDING_TEXT_FORMAT_VERSION = "v1"
 # v2: chunk_text no longer emits a duplicate tail chunk when a chunk ends exactly
 # at the end of the text, so chunk output changed for boundary-length documents.
-CHUNKING_VERSION = "v2"
+# v3: covers three later changes to chunk_text output that each shipped without a
+# bump, so collections built before them share a fingerprint with today's while
+# holding different text: chunk boundaries aligned to whole characters (chunks
+# that previously contained U+FFFD now hold correct text), empty slices skipped,
+# and chunk_index made contiguous.
+CHUNKING_VERSION = "v3"
 EXTRACTION_VERSION = "v1"
 
 

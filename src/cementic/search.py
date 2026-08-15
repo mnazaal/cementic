@@ -45,6 +45,12 @@ def _reject_query_over_context(query: str, n_ctx: int) -> None:
     simply stopped affecting the results: two queries sharing a long prefix and
     differing only in their final words returned bit-identical scores. Refusing
     is the honest answer -- a silently truncated query looks like a working one.
+
+    This is the cheap, local pre-check only. It is deliberately generous,
+    because ``TOKENIZER`` is not the model's own tokenizer and the ratio between
+    them runs to 1.33 on ordinary English: the exact check happens against the
+    served model in ``RemoteEmbeddingClient.embed``, which is the only place the
+    real count is available.
     """
     budget = max(1, int(n_ctx * _QUERY_CONTEXT_MARGIN))
     tokens = len(tiktoken.get_encoding(TOKENIZER).encode(query))
