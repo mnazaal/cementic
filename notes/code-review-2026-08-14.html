@@ -1,0 +1,667 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>cementic — CLI code review, 2026-08-14 (fourth pass)</title>
+<style>
+:root {
+  color-scheme: light dark;
+  --fg: #1a1a1a; --bg: #ffffff; --muted: #5c5c5c; --rule: #d8d8d8;
+  --code-bg: #f4f4f4; --accent: #7a1010; --ok: #1d6032;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --fg: #e6e6e6; --bg: #16181c; --muted: #9aa0a6; --rule: #33373d;
+    --code-bg: #22252b; --accent: #ff9b8a; --ok: #7bd196;
+  }
+}
+html { background: var(--bg); }
+body {
+  color: var(--fg); background: var(--bg);
+  font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+  max-width: 52rem; margin: 0 auto; padding: 2rem 1.25rem 6rem;
+}
+h1 { font-size: 1.6rem; margin: 0 0 .25rem; }
+h2 { font-size: 1.2rem; margin: 2.5rem 0 .75rem; padding-bottom: .3rem; border-bottom: 1px solid var(--rule); }
+h3 { font-size: 1rem; margin: 1.75rem 0 .4rem; }
+.sub { color: var(--muted); margin: 0 0 1.5rem; }
+code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: .875em; }
+code { background: var(--code-bg); padding: .1em .35em; border-radius: 3px; }
+pre { background: var(--code-bg); padding: .75rem 1rem; border-radius: 5px; overflow-x: auto; line-height: 1.45; }
+pre code { background: none; padding: 0; }
+table { border-collapse: collapse; width: 100%; margin: 1rem 0; }
+th, td { text-align: left; padding: .4rem .6rem; border-bottom: 1px solid var(--rule); vertical-align: top; }
+th { font-weight: 600; }
+.f { margin: 1.25rem 0; padding-left: .9rem; border-left: 3px solid var(--rule); }
+.f > .hd { font-weight: 600; }
+.f.v { border-left-color: var(--accent); }
+.loc { color: var(--muted); font-size: .875em; }
+.tag { display: inline-block; font-size: .72rem; letter-spacing: .04em; text-transform: uppercase;
+       padding: .1em .45em; border: 1px solid var(--rule); border-radius: 3px; color: var(--muted); margin-left: .4em; }
+.tag.emp { color: var(--accent); border-color: var(--accent); }
+.ok { color: var(--ok); }
+ul { padding-left: 1.2rem; }
+li { margin: .3rem 0; }
+.note { color: var(--muted); font-size: .9em; }
+</style>
+</head>
+<body>
+
+<h1>cementic — fourth comprehensive code review</h1>
+<p class="sub">2026-08-14 · CLI API first, then every path it reaches · read-only, <code>git status</code> clean throughout ·
+six parallel reviewers over disjoint subsystems, plus direct black-box exercise of the CLI against a live
+Postgres and a live embedding daemon. Every finding promoted here was spot-verified in the parent session;
+findings I could not verify are marked <span class="tag">unverified</span>.</p>
+
+<p><strong>Baseline.</strong> <code>ruff check src/ tests/</code> clean, <code>mypy src/</code> clean,
+<code>pytest</code> 864 passed in 31.3s (744 unit + 49 <code>pg</code>-marked + the rest), no warnings.
+The tree is healthy by every check it runs on itself. Everything below sits in the gap between
+"the checks pass" and "the behaviour is right" — which is why most of it is invisible to the suite.</p>
+
+<h2>1. Headline: 30% of every full-size chunk is silently discarded before embedding</h2>
+
+<div class="f v">
+<p class="hd">Documents are embedded past the model's context window and truncated without error.
+<span class="tag emp">correctness</span><span class="tag emp">silent</span></p>
+<p class="loc"><code>config.py:446-456</code> · <code>chunk.py:33</code> · <code>scripts/measure_chunk_context_fit.py:78</code></p>
+</div>
+
+<p>Shipped defaults are <code>pipeline.chunk_size = 512</code> (counted in <em>cl100k_base</em> tokens) against
+<code>llama_cpp.n_ctx = 512</code> (counted in the model's own XLM-RoBERTa tokenizer). The two tokenizers do not
+agree, and <code>chunk.py</code> has no context check of any kind. <code>search.py:41-56</code> guards <em>queries</em>
+against exactly this and explains why — "The server truncates over-long input silently" — but nothing guards documents,
+on either write path (<code>pipeline_worker.py:742</code>, <code>cli.py:1757</code>).</p>
+
+<p>Measured directly against the running daemon at shipped defaults, using the same tail-sensitivity test
+<code>search.py</code> describes — embed <code>chunk + " ZEBRA"</code> and <code>chunk + " QUANTUM"</code> and compare:</p>
+
+<pre><code>chunk length:        3675 chars (512 cl100k tokens)
+full-size chunk:     vectors identical? True    cosine = 1.000000000
+short control:       vectors identical? False   cosine = 0.843376816
+effective cutoff:    ~2568 chars (359 cl100k tokens)
+SILENTLY DISCARDED:  30% of each full-size chunk</code></pre>
+
+<p>A bit-identical vector regardless of the tail is proof the tail never reached the model. The last ~30% of every
+full-size chunk is unsearchable, and the stored chunk text disagrees with the vector that indexes it. No error, no log
+line, no counter.</p>
+
+<h3>Why the existing measurement says otherwise</h3>
+
+<p><code>config.py:449-455</code> asserts the opposite, and cites a measurement: <em>"full chunks embed without error and
+remain tail-sensitive, so nothing is silently truncated. Re-measure before raising this or lowering n_ctx."</em>
+That measurement never tested a full chunk. <code>scripts/measure_chunk_context_fit.py:78</code> does:</p>
+
+<pre><code>head = chunk[: int(len(chunk) * 0.75)]</code></pre>
+
+<p>…then embeds <code>head + marker</code> while <em>printing the full chunk's</em> <code>token_count</code> next to an
+"ok (tail affects the vector)" verdict. It tests 75% of a chunk and reports it as 100%. The untested last quarter is
+precisely where overflow begins. Changing that one literal to <code>1.0</code> and rerunning the script's own four cases:</p>
+
+<pre><code>case          tokens   chars  verdict                        case          tokens   chars  verdict
+english          512    2343  ok (tail affects the vector)   english          512    2343  TRUNCATED (tail ignored)
+cjk              512     432  ok (tail affects the vector)   cjk              512     432  ok (tail affects the vector)
+code             512    1356  ok (tail affects the vector)   code             512    1356  TRUNCATED (tail ignored)
+diacritics       512     795  ok (tail affects the vector)   diacritics       512     795  ok (tail affects the vector)
+
+All cases fit: full chunks embed intact.                     2 case(s) failed: chunk_size and n_ctx are not compatible.
+        ^ as shipped (0.75)                                          ^ same script at full length (1.0)</code></pre>
+
+<p>English and source code — the two content types this corpus is mostly made of — fail. CJK and diacritics pass
+because they produce far fewer characters per cl100k token, so their 512-token chunks are short enough to fit.
+The green result is an artifact of the harness, not of the configuration.</p>
+
+<p><strong>Consequence:</strong> every collection indexed to date has ~30% of each full-size English chunk missing from
+its vectors. Fixing the setting requires a full re-embed, so this is worth settling before the corpus grows further.
+The fix is a real measurement (drop the <code>0.75</code>), then either lower <code>chunk_size</code> to what actually
+fits or raise <code>n_ctx</code>, plus a hard check at the embed call so overflow can never again be silent.</p>
+
+<h2>2. Silent failures — the user sees success, something else happened</h2>
+
+<div class="f v">
+<p class="hd">2.1 Files the watcher drops never appear in any status the CLI points you at.
+<span class="tag emp">silent</span></p>
+<p class="loc"><code>source_watcher.py:459-480</code>, <code>:375-380</code> · <code>cli.py:723-731</code></p>
+</div>
+<p>Every rejection path in <code>_register_document</code> — symlink, path outside the watched roots, <code>stat</code>
+failure, file over 512&nbsp;MiB — and the <code>os.walk</code> <code>onerror</code> handler records the loss only as
+<code>increment(failed=1)</code> plus a line in a log file. Those files never become <code>SourceDocument</code> rows, so
+they are absent from every denominator downstream. <code>_print_collection_detail</code>'s <code>failures</code> line
+reads only the pipeline-stage counters (<code>extracted_failed</code>, <code>chunked_failed</code>,
+<code>failed_embeddings</code>) — never the watcher's.</p>
+<p>Watch 500 <code>.md</code> files of which 40 are symlinks: the watcher registers 460, and
+<code>cementic status -c</code> prints <code>extracted 460/460 (100.0%)</code> with no failures line at all.
+<code>collection promote</code> then succeeds, because <code>revision_failure_total</code> also counts only pipeline
+artifacts. The user gets a complete, promotable, 100% collection that is missing 40 documents, and the only trace is a
+number behind <code>--verbose</code> with no paths attached.</p>
+
+<div class="f v">
+<p class="hd">2.2 A typo'd collection name is invisible whenever any other collection returns a hit.
+<span class="tag emp">silent</span></p>
+<p class="loc"><code>cli.py:1613-1616</code></p>
+</div>
+<pre><code>unknown = searcher.unsearchable_collections(filters) if not results and filters else []</code></pre>
+<p>The "no indexed revision for X" diagnostic is computed only when the <em>entire</em> result set is empty.
+Verified against the live database:</p>
+<pre><code>$ cementic search hello -c nope            → "no results" + note about `nope`   [exit 0]
+$ cementic search hello -c test -c nope    → 2 results, no mention of `nope`     [exit 0]</code></pre>
+<p>Half the query was silently dropped. In <code>--json</code> mode this is worse: the JSONL stream is well-formed and
+the exit code is 0, so a script cannot detect it at all.</p>
+
+<div class="f v">
+<p class="hd">2.3 A failed re-extraction leaves the <em>old</em> content searchable indefinitely.
+<span class="tag emp">correctness</span><span class="tag emp">silent</span></p>
+<p class="loc"><code>pipeline_worker.py:551-552</code></p>
+</div>
+<pre><code>if content_hash is not None and previous_content_hash != content_hash:
+    _purge_superseded_chunks(session, extracted.id, content_hash)</code></pre>
+<p>On failure <code>content_hash</code> is <code>None</code> (<code>:532</code>), so the purge is skipped while
+<code>source_file_hash</code> <em>is</em> updated to the new file. Search applies no freshness filter — <code>knn_sql</code>
+filters on collection and profile ids only, and <code>search.py:246-255</code> documents the freshness join as
+deliberately removed. So replacing an indexed <code>report.pdf</code> with a corrupt or encrypted one leaves the v1 text
+being returned under the current path forever. <code>status -c</code> shows <code>failures extract=1</code> and nothing
+that suggests searches are serving replaced content.</p>
+
+<div class="f v">
+<p class="hd">2.4 A malformed config file is ignored with one stderr line, and cementic runs on defaults.
+<span class="tag emp">silent</span></p>
+<p class="loc"><code>config.py:275-284</code>, <code>:791-798</code></p>
+</div>
+<p><code>load_config_file()</code> swallows <code>TOMLDecodeError</code>/<code>OSError</code> and returns <code>{}</code>,
+so <code>config_file_problems()</code> finds nothing and <code>Config()</code> is built from defaults. Verified — a file
+whose first line is malformed but which then sets a valid <code>[database] name = "MYCUSTOMDB"</code>:</p>
+<pre><code>$ cementic config show          → warning: ignoring malformed config file …
+                                  "name": "cementic"     ← the user's setting is gone
+                                  [exit 0]</code></pre>
+<p>Every <em>other</em> config error class is a hard exit-1 error — bad value, unknown key, missing
+<code>$CEMENTIC_CONFIG</code>. The one that discards the whole file is the lenient one. Under
+<code>cementic start</code> that single warning scrolls past and the corpus is indexed against a different database
+with different chunk settings. <code>config_file_error()</code> (<code>config.py:109</code>) detects this correctly but is
+wired only into <code>status --doctor</code>.</p>
+
+<div class="f v">
+<p class="hd">2.5 <code>cementic stop</code> can report success while the workers keep running.
+<span class="tag emp">correctness</span></p>
+<p class="loc"><code>supervisor.py:73-76</code></p>
+</div>
+<pre><code>try:
+    os.kill(pid, 0)
+except OSError:
+    return False        # ← folds EPERM ("exists, not yours") into "not running"</code></pre>
+<p><code>force_kill</code> a hundred lines below gets this right — <code>except OSError: remaining.append(pid)
+# e.g. EPERM: alive but not ours to kill</code>. Where the two disagree, <code>is_pid_running</code> wins the stop path:
+workers started under another uid (sudo, a service account, a user namespace) are reported dead, <code>stop</code>
+prints "no running processes found; cleared stale state" and exits 0, and <code>status</code> agrees — while both
+workers keep indexing. One line: split <code>ProcessLookupError</code> (False) from <code>PermissionError</code> (True).</p>
+
+<div class="f v">
+<p class="hd">2.6 <code>cementic start</code> reports success ~60× earlier than startup can fail.</p>
+<p class="loc"><code>cli.py:374</code> (<code>_STARTUP_GRACE_SECONDS = 2.0</code>) · <code>config.py:415</code></p>
+</div>
+<p><code>PipelineWorker.start</code> calls <code>describe()</code>, which autostarts the llama.cpp daemon and waits out
+<code>daemon_start_timeout_seconds</code> — default <strong>120s</strong>. A corrupt GGUF, a bound port, or too high
+<code>n_gpu_layers</code> kills the worker around t=120s; <code>cementic start</code> printed "Started cementic in
+background" and both PIDs at t=2s and exited 0. The failure reason goes to stderr → the background log, whose path is
+printed only in the <em>other</em> branch (<code>cli.py:994</code>) and appears nowhere in <code>status</code> or
+<code>doctor</code>. The user sees <code>workers partial</code> in yellow with <code>last_error: None</code>.</p>
+
+<div class="f v">
+<p class="hd">2.7 <code>cementic embed</code> fabricates embeddings for absent or null content.
+<span class="tag emp">silent</span></p>
+<p class="loc"><code>cli.py:1757</code></p>
+</div>
+<pre><code>texts = [provider.format_document(str(rec.get("content", ""))) for rec in batch]</code></pre>
+<p>Verified end to end:</p>
+<table>
+<tr><th>stdin line</th><th>what gets embedded</th><th>output</th></tr>
+<tr><td><code>{"index":0,"text":"hello world"}</code> (no <code>content</code>)</td><td>the empty string</td><td>a plausible 768-dim vector, exit 0</td></tr>
+<tr><td><code>{"index":0,"content":null}</code></td><td>the literal string <code>"None"</code></td><td>a plausible 768-dim vector, exit 0</td></tr>
+<tr><td><code>{"index":0,"content":12345}</code></td><td><code>"12345"</code></td><td>vector, exit 0</td></tr>
+</table>
+<p><code>str(None)</code> → <code>"None"</code> is the sharp edge: a null content field is embedded as a four-letter
+English word. A missing/null <code>content</code> should be an error, not a vector.</p>
+
+<div class="f v">
+<p class="hd">2.8 An empty or whitespace-only query returns confident, meaningless results.
+<span class="tag emp">silent</span></p>
+<p class="loc"><code>search.py:177-180</code> · <code>cli.py:1577</code></p>
+</div>
+<p><code>search()</code> bounds <code>top_k</code> and the <em>maximum</em> query length, but never rejects an empty one:</p>
+<pre><code>$ cementic search "" -n 2      → 2 ranked results, exit 0
+$ cementic search "   " -n 2   → the same 2 results, exit 0</code></pre>
+<p>These are the nearest neighbours of the embedding of nothing. Ranked output with scores is exactly the wrong
+signal for that input.</p>
+
+<div class="f v">
+<p class="hd">2.9 <code>search</code> silently serves unpromoted revisions, and the docs contradict themselves about it.</p>
+<p class="loc"><code>search.py:301-334</code> · <code>README.md:5, 111, 157, 326</code> vs <code>:179-180</code></p>
+</div>
+<p>Observed on the live database: <code>collection list</code> reports <code>test</code> with
+<code>active=-</code> and only a <em>ready</em> revision, and <code>cementic search</code> nonetheless returns ranked
+results from it — with nothing in the output indicating the index has never been promoted. The fallback is intentional
+(<code>_load_searchable_revisions</code> falls back to <code>ready</code>/<code>building</code>) and README:179-180
+documents it, but README:5, :111, :157 and :326 all state the opposite ("searches only the active revision"), as do
+<code>search.py</code>'s own module and class docstrings.</p>
+<p>Two consequences beyond the doc drift. First, a <code>building</code> revision is searchable, so results can come from
+a 2%-complete index with no marker distinguishing them from a finished one. Second, it partly defeats
+<code>promote</code>: the gate that refuses to publish a revision with failed documents is bypassed, because search
+reads the unpromoted revision anyway.</p>
+
+<div class="f v">
+<p class="hd">2.10 The revision <code>search</code> picks depends on whether you named the collection.</p>
+<p class="loc"><code>search.py:315-323</code> vs <code>:127-140</code></p>
+</div>
+<p>The <code>-c</code> path takes <code>status.in_(BUILDING_STATUSES)</code> ordered by <code>id.desc()</code> — newest
+wins, so <code>building</code> beats <code>ready</code>. The no-filter path uses <code>_searchable_revisions</code>, whose
+<code>status_rank = {"active": 3, "ready": 2, "building": 1}</code> prefers <code>ready</code> over <code>building</code>
+regardless of id. With a fully-built <code>ready</code> revision 5 and a 2%-complete <code>building</code> revision 7,
+<code>cementic search "q" -c docs</code> reads revision 7 and <code>cementic search "q"</code> reads revision 5 — same
+database, same instant, different answers, no diagnostic either way.</p>
+
+<h2>3. Correctness bugs</h2>
+
+<div class="f v">
+<p class="hd">3.1 <code>reindex --force</code> commits the index drop in its own transaction.</p>
+<p class="loc"><code>collections.py:316-320</code></p>
+</div>
+<pre><code>if force and previous_method is not None:
+    with engine.begin() as conn:                      # ← commits the DROP
+        conn.execute(text(f"DROP INDEX IF EXISTS {vector_index_name(profile_id)}"))
+ensure_revision_ann_index(session, revision, config)  # ← separate connection</code></pre>
+<p><code>db.py:420-427</code> does the equivalent method-switch drop+create on one connection with a single commit, so a
+failed build rolls the drop back. The <code>--force</code> path breaks that. Any failure of the rebuild — Ctrl-C,
+statement timeout, disk full, or a &gt;2000-dim profile that HNSW rejects at execution time — leaves the collection
+with <strong>no ANN index at all, permanently</strong>. Searches still succeed via sequential scan and
+<code>search.py:231-237</code> falls back to the configured method for tuning, so nothing anywhere warns.</p>
+
+<div class="f v">
+<p class="hd">3.2 The schema migration inside <code>search()</code> is never committed.</p>
+<p class="loc"><code>search.py:224-228</code> — no <code>commit</code>/<code>rollback</code> anywhere in the file (verified by grep)</p>
+</div>
+<p><code>ensure_vector_table_schema</code> runs <code>ALTER TABLE ADD COLUMN</code> ×3, a full-table backfill
+<code>UPDATE</code>, a <code>DELETE</code> and three <code>SET NOT NULL</code> — inside a session whose context manager
+closes without committing, i.e. rolls back. On a database written by an older cementic, <em>every</em> search re-runs the
+whole backfill over every vector row, holds <code>ACCESS EXCLUSIVE</code> on the vector table for the duration, and
+throws the work away. It never converges. The worker path (<code>pipeline_worker.py:788</code>) does commit, so the
+comment justifying the call — "Idempotent, and a catalog lookup once done" — is true there and false here.
+<span class="tag">unverified</span> — the absence of the commit is verified by grep; the runtime cost is reasoned from
+SQLAlchemy <code>Session.close()</code> semantics, not executed against a pre-migration database.</p>
+
+<div class="f v">
+<p class="hd">3.3 Chunk indices are non-contiguous at small chunk sizes.</p>
+<p class="loc"><code>chunk.py:84-91</code> — <code>chunk_index += 1</code> runs every iteration; the append is conditional</p>
+</div>
+<pre><code>chunk_text("😀"*20, chunk_size=1, chunk_overlap=0)
+  → 20 chunks, indices [0, 2, 4, 6, 8, 10, …, 38]     (verified)</code></pre>
+<p><code>ChunkedDocument.total_chunks = len(chunk_items)</code> then bears no relation to <code>max(chunk_index)</code>,
+and <code>cementic chunk --chunk-size 2</code> emits JSONL whose <code>index</code> field skips values. Reachable from
+any <code>chunk_size ≤ ~3</code>, which both the config (<code>ge=1</code>) and the flag (<code>min=1</code>) accept.
+Existing tests assert contiguity on ASCII only, where the boundary-widening never empties a slice.</p>
+
+<div class="f v">
+<p class="hd">3.4 Two config file errors produce raw multi-screen tracebacks.</p>
+<p class="loc"><code>config.py:124</code>, <code>:276</code> (UnicodeDecodeError) · <code>config.py:576</code>, <code>:637</code> (SettingsError)</p>
+</div>
+<p>Both verified through the CLI:</p>
+<ul>
+<li>A non-UTF-8 config file → <code>UnicodeDecodeError</code>. Both <code>tomllib.load</code> sites catch
+<code>TOMLDecodeError</code> and <code>OSError</code> only; <code>UnicodeDecodeError</code> is a <code>ValueError</code>.
+<code>config_file_error()</code> has the same hole, so <code>status --doctor</code> — the command that exists to explain
+this — crashes too.</li>
+<li><code>CEMENTIC_EXTRACT_BACKENDS=pdf=pymupdf4llm</code> → <code>pydantic_settings.SettingsError</code>, whose MRO is
+<code>(SettingsError, ValueError, Exception)</code>, so <code>_get_config()</code>'s
+<code>except ValidationError</code> misses it. Complex-typed fields are JSON-parsed by the env source; only
+<code>{"pdf":"pymupdf4llm"}</code> works, and that is documented nowhere while README:262 promises "Every setting also
+has a <code>CEMENTIC_*</code> environment variable".</li>
+</ul>
+
+<div class="f">
+<p class="hd">3.5 Smaller correctness items</p>
+</div>
+<ul>
+<li><code>config.py:66</code> — <code>resolve_config_path()</code> does <code>Path(explicit)</code> with no
+<code>.expanduser()</code>, while <code>config_path_error()</code> (<code>:154</code>) <em>does</em>. So
+<code>CEMENTIC_CONFIG=~/cfg.toml</code> passes the guard and is then never found: the request is silently ignored and
+<code>config path</code> prints the fallback. With a <code>./cementic.toml</code> present, a different file is loaded.</li>
+<li><code>config.py:346-350</code> — <code>url_override</code> in the file <em>plus</em> <code>CEMENTIC_DB_URL</code> in the
+environment is an <code>extra_forbidden</code> error, not an override, violating documented precedence for that one
+setting. The message is self-contradicting: <em>"[database] url_override: Extra inputs are not permitted — did you mean
+'url_override'?"</em></li>
+<li><code>config.py:208-216</code> — a known section name whose value is not a table (<code>database = "myhost"</code>
+instead of <code>[database]</code>) is dropped with no problem reported at all.</li>
+<li><code>config.py:662-665</code> — <code>poll_interval</code> has no lower bound (its neighbour
+<code>batch_size</code> has <code>ge=1, le=128</code>). <code>0</code> or a negative value makes
+<code>Event.wait()</code> return immediately, so the worker busy-polls Postgres — indistinguishable from healthy idle.</li>
+<li><code>config.py:531-542</code> — <code>build_memory</code>'s grammar admits <code>"0"</code> and
+<code>"999999999999GB"</code>, which PostgreSQL rejects at index-build time, i.e. after the whole corpus is embedded.
+(Injection itself <em>is</em> genuinely prevented — only digits, whitespace and unit letters are admitted.)</li>
+<li><code>db.py:314-316</code> — <code>connect_args={"connect_timeout": 5}</code> is applied to any URL, so a non-Postgres
+<code>CEMENTIC_DB_URL</code> dies at connect with a raw <code>TypeError</code>; and the
+<code>gssencmode=disable</code> workaround is keyed on <code>startswith("postgresql://")</code>, so it silently does not
+apply to <code>postgresql+psycopg2://</code>.</li>
+<li><code>supervisor.py:144-154</code> — <code>spawn_detached</code> never redirects stdin, so
+<code>cementic start &lt; file</code> leaves the detached workers holding the pipe's read end open.
+<code>start_new_session=True</code> and the stdout/stderr redirection are otherwise correct.</li>
+<li><code>bootstrap.py:156-181</code> — the model download uses a fixed temp filename with no lock across its four call
+sites, so two concurrent first-runs truncate each other's file. The pinned SHA-256 usually catches it, but the
+mismatch message advises pinning the digest <em>of the corrupt file</em>; with verification disabled for a custom model
+the corrupt file is cached forever. No <code>Content-Length</code> check either, so a cleanly truncated download is
+promoted.</li>
+<li><code>storage.py:41</code> — <code>if path.exists() and path.is_symlink()</code>: <code>exists()</code> follows
+symlinks, so a dangling symlink passes the guard that claims to reject symlinks. Harmless today, but strictly weaker
+than <code>is_symlink()</code> alone.</li>
+</ul>
+
+<h2>4. Identity and fingerprinting — two builds can share one vector table</h2>
+
+<p>A profile fingerprint that misses something which changes output means incompatible vectors land in the same table.
+Four such gaps, all verified:</p>
+
+<ul>
+<li><strong>Model identity is a path string, never file content</strong> <span class="tag">partly deferred — see §9</span> (<code>profiles.py:86</code> ←
+<code>embedding_runtime.py:58</code>). <code>resolve_llama_model_path</code> tries the relative path against
+<em>cwd</em> first, then the data dir — so indexing from the repo and from <code>/tmp</code> resolves to two different
+GGUF files while producing an identical fingerprint <code>bea283a3f7ce</code>. The <em>runtime</em> fingerprint matches
+too, so the daemon is not even restarted.</li>
+<li><strong><code>./models/x.gguf</code> and <code>models/x.gguf</code> fork the profile</strong>
+(<code>cli.py:267</code> vs <code>config.py:399</code>): fingerprints <code>bea283a3f7ce</code> vs
+<code>d075b69d8f8a</code>. The template <code>cementic config init</code> writes uses the <code>./</code> spelling and
+the code default does not — so accepting the generated config triggers a full re-embed for a path spelling, and
+<code>bootstrap._model_path_is_default()</code> string-compares too, so the <code>./</code> form also silently disables
+the SHA-256 pin.</li>
+<li><strong><code>CHUNKING_VERSION</code> is stale</strong> (<code>profiles.py:25</code>). Two commits changed
+<code>chunk_text</code> output after the last bump (<code>c0c0979</code> multi-byte boundary fix,
+<code>910ae87</code> empty-slice skip). Collections chunked before <code>c0c0979</code> hold U+FFFD-corrupted CJK text
+under a fingerprint byte-identical to today's, and <code>_step_chunk</code> only re-chunks on a content-hash change, so
+they are never revisited.</li>
+<li><strong>Extractor identity is a hand-maintained integer</strong> (<code>extract.py:131,135</code>). The payload
+records <code>ExtractorSpec.version = 1</code>, not the pymupdf/pymupdf4llm versions that actually produce the Markdown,
+and <code>EXTRACTION_VERSION</code> has never been bumped. A dependency upgrade changes the output without moving the
+fingerprint.</li>
+</ul>
+
+<p>Related: <strong>the Nomic prefix marker misses v1/v1.5</strong> (<code>embedding_text.py:28</code>).
+<code>_NOMIC_V2_MARKER = "nomic-embed-text-v2"</code>, so
+<code>describe_text_policy("models/nomic-embed-text-v1.5.f16.gguf")</code> returns <code>"plain"</code> — but v1.5 needs
+the same <code>search_document:</code>/<code>search_query:</code> prefixes as v2, and that file is sitting in this
+repo's own <code>models/</code>. Retrieval quality degrades measurably and silently. The wrong behaviour is currently
+pinned by <code>tests/unit/test_embedding_text.py:24-26</code>, which asserts it, so it reads as intentional.</p>
+
+<h2>5. CLI contract inconsistencies</h2>
+
+<p>All verified by invocation. Individually small; together they make the CLI hard to script against.</p>
+
+<table>
+<tr><th>Case</th><th>Behaviour</th></tr>
+<tr><td>unknown collection, human mode</td><td><code>no results</code> + note, <strong>exit 0</strong></td></tr>
+<tr><td>unknown collection, <code>--json</code></td><td>stderr diagnostic, <strong>exit 1</strong></td></tr>
+<tr><td><code>status -c nosuch</code></td><td>full zero-filled report, exit 0</td></tr>
+<tr><td><code>collection revisions nosuch</code></td><td><code>(none)</code>, exit 0</td></tr>
+<tr><td><code>collection promote nosuch</code></td><td><code>no ready revision</code>, exit 0</td></tr>
+<tr><td><code>collection remove nosuch</code></td><td><code>status: not found</code>, exit 0</td></tr>
+<tr><td><code>collection reindex nosuch</code></td><td><code>no active revision</code>, <strong>exit 1</strong></td></tr>
+</table>
+
+<p>The same condition — a collection that does not exist — is a success for four subcommands and a failure for one,
+and the same condition in <code>search</code> changes exit code with <code>--json</code>. Nothing distinguishes
+"collection does not exist" from "exists but has nothing to show".</p>
+
+<ul>
+<li><code>status --doctor -c nosuch</code> and <code>status --doctor -v</code> silently ignore both options — no
+validation, no warning. (Verified: <code>--doctor</code> returns before <code>collection</code> is even validated.)</li>
+<li><code>cementic start ./file.txt</code> reports <em>"Directory does not exist: ./file.txt"</em> for a file that
+does exist.</li>
+<li><code>cementic embed</code> with a non-object JSONL line reports <code>'list' object has no attribute 'get'</code>
+— a Python internal, not a diagnostic.</li>
+<li><code>status</code> opens and discards a database session on the <code>collection is not None</code> path
+(<code>cli.py:1107-1130</code>): the <code>with session_factory() as session:</code> body does nothing unless
+<code>collection is None</code>.</li>
+</ul>
+
+<h2>6. Dead and stale code</h2>
+
+<p>An AST inventory of ~900 symbols across <code>src/cementic/</code>, reference-counted against <code>src/</code>,
+<code>tests/</code>, <code>scripts/</code>, <code>templates/</code> and all root Markdown, cross-checked with
+<code>ruff --select F401,F811,F841,ARG,ERA,RET</code>. The package is <em>very</em> clean: no unused imports, no unused
+locals, no commented-out code, no unreachable code after <code>raise</code>/<code>return</code>. The complete list of
+real findings:</p>
+
+<table>
+<tr><th>Symbol</th><th>Location</th><th>Status</th></tr>
+<tr><td><code>extractor_names()</code></td><td><code>extract.py:146</code></td><td><strong>Zero references anywhere.</strong> Delete. (Its sibling <code>supported_extensions()</code> has 3 src + 5 test refs, so this is not a symmetry requirement.)</td></tr>
+<tr><td><code>CURRENT_CONTENT_SQL</code></td><td><code>revisions.py:140-145</code></td><td>Zero <code>src/</code> consumers; only <code>tests/integration/test_search_pg.py:10,172</code>. <strong>Its docstring is now false</strong> — see below.</td></tr>
+<tr><td><code>config</code> parameter</td><td><code>revisions.py:499-501</code></td><td>Required keyword-only, never read in the 84-line body. Six call sites build or thread a <code>Config</code> for nothing; two tests construct a bare <code>Config()</code> purely to satisfy it.</td></tr>
+</table>
+
+<p><code>CURRENT_CONTENT_SQL</code> is the one worth acting on. Its docstring (<code>revisions.py:130-139</code>) says it
+exists "for the one consumer that cannot use them: <code>search.py</code>'s KNN query", and that omitting it "serves the
+<em>old</em> content of a file whose re-extraction failed". <code>search.py:246-255</code> now carries the opposite
+comment — the freshness join was deliberately removed because it stopped the planner using the ANN index. Two files
+document contradictory designs, and the abandoned one describes exactly the live bug in §2.3.</p>
+
+<p><strong>Duplication worth collapsing</strong> (not dead, but two implementations of one idea):</p>
+<ul>
+<li>Revision-status bucketing is implemented twice — <code>collections.py:82-108</code> and
+<code>status_service.py:211-229 + 384-388</code> — over the same query, into two dataclasses declaring the same three
+field names, with a near-verbatim explanatory comment in both. <code>cli.py</code> already renders both through one
+shared formatter (<code>_in_flight_revision_text</code>), so the formatting was unified and the producers were not.</li>
+<li>The collections table is rendered twice inside <code>cli.py</code> — <code>:1119-1129</code> (<code>status</code>)
+and <code>:1375-1382</code> (<code>collection list</code>) — same data source, no shared renderer.</li>
+<li><code>doctor.py:24 _status()</code> is called once and the identical ternary is inlined three times in the same
+file (<code>:102</code>, <code>:144</code>, <code>:166</code>).</li>
+<li><code>containers/postgres-vectorscale/Containerfile</code> is byte-identical to
+<code>src/cementic/templates/postgres/Containerfile</code> with no generation step linking them.</li>
+</ul>
+
+<p class="note">Called out so nobody deletes them: 34 symbols look unreferenced to a naive scan but are
+framework-dispatched — Typer commands, <code>@field_validator</code>s, watchdog callbacks, pydantic-settings and Click
+overrides, the <code>runner.py</code> subcommands, and the SQLAlchemy <code>back_populates</code> reverse attributes
+<code>ChunkedDocument.extracted_document</code> / <code>Chunk.chunked_document</code>.</p>
+
+<h2>7. Docs vs code</h2>
+
+<p>Good news first: <strong>every command and flag documented in README exists with the exact documented name</strong>,
+and every key in the <code>config init</code> template resolves to a real field. There is no documented-but-unimplemented
+surface at all.</p>
+
+<p>The drift is in the other direction — <strong>21 live config fields and 4 whole TOML sections are read by
+<code>config.py</code> but documented nowhere</strong>, in neither README nor the annotated template:</p>
+<ul>
+<li><code>[llama_cpp]</code> — 10 of 12 fields (<code>n_ctx</code>, <code>n_gpu_layers</code>,
+<code>embedding_dim</code>, <code>daemon_host</code>/<code>_port</code>, the two timeouts, pid/log files, …). Only
+<code>model_path</code> and <code>daemon_autostart</code> are documented — and <code>n_ctx</code> is half of §1.</li>
+<li><code>[index]</code> — the entire DiskANN tuning group, while README tells users to <em>choose</em> DiskANN and
+documents all three HNSW knobs.</li>
+<li><code>[source_watcher]</code> — the whole section, notably <code>ignore_directories</code>, whose default silently
+skips 16 directory names including <code>.git</code>, <code>node_modules</code>, <code>build</code>,
+<code>dist</code>, <code>venv</code>, <code>target</code>. That is user-visible indexing behaviour with an undocumented
+escape hatch.</li>
+<li><code>[pipeline_worker]</code> log/state paths, <code>[bootstrap]</code> model URL and SHA-256.</li>
+<li><code>[database] url_override</code> — README documents the env var <code>CEMENTIC_DB_URL</code>, which is the
+<em>alias</em>; the TOML key name appears nowhere.</li>
+</ul>
+
+<p>Eight CLI flags are also undocumented: <code>--version</code>/<code>-V</code>, <code>status --verbose</code>,
+<code>status -c</code>, <code>stop --force</code>, <code>chunk --chunk-size</code>/<code>--chunk-overlap</code>,
+<code>config init --force</code>, <code>init postgres --force</code>.</p>
+
+<p><strong>Two factually wrong architecture claims:</strong></p>
+<ul>
+<li><code>README.md:325-326</code> — "searches only the active revision for the requested collection(s)". False, and
+README contradicts itself at <code>:179-180</code>. Same overclaim at <code>:111</code>, <code>:157</code>,
+<code>:5</code>. See §2.9.</li>
+<li><code>AGENTS.md:126</code> — "the only raw SQL is the parameterized vector DDL/KNN in <code>vector_store.py</code>".
+Raw <code>text()</code> SQL also lives in <code>db.py</code>, <code>doctor.py</code>, <code>pipeline_worker.py</code>,
+<code>bootstrap.py</code>, <code>collections.py</code>, <code>status_service.py</code> and <code>search.py</code>; and
+<code>db.py:419</code>, <code>db.py:425</code> and <code>collections.py:318</code> interpolate by f-string rather than
+bind parameters. (Both inputs are validated upstream, so this is a doc defect, not a live injection.)</li>
+</ul>
+
+<p>Smaller: <code>AGENTS.md</code>'s file list omits <code>filelock.py</code> and the <code>templates/</code> tree, and
+its dependency list still names <code>pgvector</code> (removed per <code>CHANGELOG.md:100</code>) while omitting
+<code>watchdog</code>, <code>requests</code> and <code>click</code>. <code>PLAN.md:330,491</code> writes
+<code>ef_construction</code> for the real key <code>hnsw_ef_construction</code>. <code>TODO.md:33-34</code> asks for CI
+that already exists.</p>
+
+<h2>8. Test coverage</h2>
+
+<p>Every module has a test file and every one of the 19 CLI commands is invoked through <code>CliRunner</code>. The gaps
+are narrower and more specific:</p>
+
+<ul>
+<li><strong>Five flags are never passed on a command line.</strong> <code>collection reindex --force</code>/<code>-f</code>
+is the consequential one — README:256 calls it the only way to pick up changed <code>hnsw_m</code>/
+<code>hnsw_ef_construction</code>, and the sole assertion is the negative
+<code>assert mock_reindex.call_args.kwargs["force"] is False</code>. Also untested as CLI flags:
+<code>status -v</code>, <code>collection promote -f</code>, <code>search --collection</code> (long form),
+<code>start -c</code> (short form) — the last three matter because <code>AGENTS.md:118</code> makes providing both
+spellings an explicit project rule.</li>
+<li><strong>No test connects a pipeline failure to <code>status</code> output.</strong> The DB-row assertions and the
+status-rendering assertions never meet, which is why §2.1 is invisible to a green suite.</li>
+<li>All four <code>_register_document</code> rejection branches, the <code>os.walk</code> <code>onerror</code> handler,
+<code>processed_count</code>/<code>failed_count</code> arithmetic, second acquisition of the advisory lock, and nested
+watched roots have no coverage at all.</li>
+<li>Every config finding in §3.4/§3.5 sits in a coverage gap: no test covers <code>~</code> in
+<code>CEMENTIC_CONFIG</code>, file+env <code>url_override</code>, a non-UTF-8 config, <code>SettingsError</code> from a
+complex env var, or a scalar under a known section name.</li>
+<li><code>tests/unit/test_embedder.py</code> is misnamed — it tests <code>PipelineWorker</code>, and its own docstring
+says so.</li>
+</ul>
+
+<h2>9. Relationship to the previous three reviews</h2>
+
+<p>This is the fourth pass. I reconciled every finding from
+<a href="code-review-2026-08-07.html">2026-08-07</a> and <a href="code-review-2026-08-11.html">2026-08-11</a> against
+today's <code>src/</code>. The remediation record is genuinely strong — roughly 60 findings are <strong>fixed</strong>,
+including every one of the earlier "critical" items (query token bounds, empty extraction as failure, promote
+re-checking completeness, <code>last error</code> reaching status, per-file scope predicates, orphan vector-table
+drops, backend-key validation, the dimension pre-flight, <code>stop</code> exiting non-zero). That is why this pass had
+to go to behaviour rather than structure to find anything.</p>
+
+<p><strong>Genuinely new here</strong> (in no prior review): §1 chunk truncation and the flawed measurement behind it;
+§2.3 purge skipped on failed re-extraction; §2.5 the EPERM misread in <code>is_pid_running</code>; §2.6 the 2s startup
+grace vs the 120s daemon timeout; §2.8 empty query accepted; §2.10 the <code>-c</code> vs no-<code>-c</code> revision
+divergence; §3.1 the non-atomic <code>reindex --force</code> drop (a bug in code the third review asked for);
+§3.2 the uncommitted schema migration in <code>search()</code>; §3.3 non-contiguous chunk indices;
+§3.4 the two config traceback paths.</p>
+
+<p><strong>Re-derived independently, previously found, still unfixed.</strong> These were reported before and are
+unchanged in code, so they are now three-time findings — worth either fixing or moving to the explicit deferred list:
+§2.2 the <code>unknown</code> guard (prev. M3), §2.7 <code>embed</code> and absent content (prev. C2.6),
+§2.9 README:326 vs :179 (prev. docs), the <code>extractor_names</code>/<code>CURRENT_CONTENT_SQL</code>/
+<code>prune_collection_history(config=…)</code> dead code, <code>start ./file.txt</code>'s wrong message, and
+<code>status --doctor</code> ignoring <code>-c</code>/<code>-v</code>.</p>
+
+<p><strong>Previously reported, still unfixed, and NOT re-derived by this pass</strong> — carried forward so they do not
+fall off the list:</p>
+<ul>
+<li><code>cli.py:709</code> vs <code>pipeline_worker.py:165</code> — <code>status</code>'s completeness rule
+(<code>chunked_done + chunked_failed &gt;= documents</code>) disagrees with the worker's
+(<code>== extracted_done</code>), so a single extraction failure makes the "of chunks created so far" caveat
+permanent.</li>
+<li><code>collections.py:66-72</code> — <code>list_collections</code> derives names from <code>SourceDocument</code>
+only, so a collection with revisions but no documents is invisible to <code>collection list</code>.</li>
+<li><code>storage.py:76-79</code> + <code>cli.py:1349</code> — <code>safe_remove_artifact</code> still ends in
+<code>except OSError: pass</code>, so <code>collection remove</code> prints <code>status: deleted</code> with files
+still on disk. The refactor that made <code>remove_artifacts</code> <em>return</em> its failures did not change the
+observable silence, because both callers discard the list.</li>
+<li><code>chunk.py:84</code> — whitespace-only chunks are stored and embedded (<code>if content:</code> does not
+strip).</li>
+<li><code>bootstrap.py:156</code> — first-run download failures are raw tracebacks (<code>requests</code> exceptions
+escape; every call site catches only <code>RuntimeError</code>).</li>
+<li><code>revisions.py:304-316</code>, <code>db.py:292-302</code> — no unique partial index or <code>FOR UPDATE</code>
+enforcing one <code>active</code> revision per collection.</li>
+</ul>
+
+<p><strong>Explicitly deferred in <code>PLAN.md</code> §"Deliberately not done" — not re-reported as defects.</strong>
+Two of my sub-findings land inside deferred items and are flagged here rather than in §4: model identity by
+path/filename and <code>verbose</code> in the embedding fingerprint are recorded as deferred because removing them
+re-fingerprints every profile and re-embeds every corpus, so PLAN says to batch them with a model-identity change.
+The cwd-dependence and the <code>./models/</code> template mismatch are the parts I would still treat as live, since
+they fork a profile without any config change. Also deferred: <code>ignore_directories</code> replacing rather than
+extending the defaults; the advisory-lock leak and the <code>RUNNING</code> write outside <code>try/finally</code>;
+naive timestamp columns; the mixed-model search refusal.</p>
+
+<p>One deferral's stated precondition has since been met: <code>db.py</code>'s <code>connect_args</code>/
+<code>gssencmode</code> issue was deferred as worth doing "only if <code>db.py</code> is open for another reason" —
+<code>db.py</code> was subsequently reopened for <code>build_memory</code> (<code>a92af95</code>).</p>
+
+<h2>10. What I checked and found correct</h2>
+
+<p>Recorded so a future pass does not re-derive it.</p>
+
+<ul>
+<li><strong>Secrets.</strong> Verified, not trusted: <code>config show</code>, <code>status --json</code> and
+<code>status --doctor</code> all redact the password to <code>**********</code>;
+<code>format_config_error</code> builds from <code>loc</code>/<code>msg</code>/<code>type</code> only, while
+<code>str(error)</code> <em>does</em> contain it — so <code>cli.py:227-229</code> and <code>runner.py:40-42</code> are
+right never to print it. <code>doctor.py:104</code> uses <code>render_as_string(hide_password=True)</code>.</li>
+<li><strong>SQL injection.</strong> No path found from config or CLI input to unparameterized SQL.
+<code>_validate_profile_id</code> rejects non-int/bool/negative before any identifier is built; index method, distance
+metric and <code>hnsw_iterative_scan</code> are allowlisted; <code>build_memory</code>'s grammar admits no quote. Every
+user-supplied <em>value</em> is bound.</li>
+<li><strong>Distance metric ↔ operator ↔ score.</strong> All three metrics produce higher-is-better scores matching the
+descending sort and the CLI's print order; <code>ORDER BY ASC</code> is right for all three given pgvector's
+<code>&lt;#&gt;</code> sign convention.</li>
+<li><strong>Database-unavailable handling</strong> is uniformly good: <code>status</code>, <code>collection list</code>,
+<code>search</code> and <code>doctor</code> each give an actionable message and exit 1 (verified against a dead port).</li>
+<li><strong><code>extract</code> handles every hostile input tested</strong> — empty file, missing file, a directory
+named <code>*.md</code>, a symlink loop, an unknown extension, a binary file — each a one-line error and exit 1, never a
+traceback. <code>chunk</code> handles binary input the same way.</li>
+<li><strong>Chunk termination.</strong> <code>overlap &lt; size</code> guarantees step ≥ 1; empty text, sub-chunk text,
+exactly-N tokens, <code>size==1</code> and <code>overlap==size-1</code> all terminate. Multi-byte boundaries are
+lossless (no U+FFFD) for emoji, Devanagari and CJK.</li>
+<li><strong>Unknown extractor names never silently fall back</strong> — rejected at config load <em>and</em> again at
+dispatch. OCR requested without <code>rapidocr</code> raises rather than degrading.</li>
+<li><strong>Embed claim/release is airtight</strong> — every exit from <code>_step_embed</code> either writes a terminal
+status or returns rows to <code>pending</code>; vectors and statuses commit in one transaction, and
+<code>upsert_vectors</code> is a true upsert, so a crash cannot duplicate vectors.</li>
+<li><strong>Change detection uses full SHA-256</strong>, not mtime or size, so an edited file cannot be missed.
+Symlinks are rejected in both scan and registration paths.</li>
+<li><strong>Promotion is atomic and genuinely gated</strong> — retire+activate in one flush; refuses on zero documents,
+on incompleteness, and on any pipeline-stage failure without <code>--force</code>.</li>
+<li><strong>Percentages cannot exceed 100% or divide by zero</strong> — each numerator is bounded by its denominator
+via a unique index.</li>
+<li><strong>Start-token PID-reuse scheme is sound</strong> (<code>/proc</code> field 22 parsed correctly even for a comm
+containing spaces or parens), zombies are correctly treated as dead, <code>start_new_session=True</code> is a genuine
+setsid, and all state writes are atomic (tmp + <code>os.replace</code>).</li>
+<li><strong><code>StateManager.load()</code> never raises</strong> — truncated JSON, <code>null</code>, a list, a bare
+number and an empty file all return a default <code>WorkerState</code>. (I had suspected the unguarded call at
+<code>cli.py:409</code> could traceback <code>cementic stop</code>; it cannot.)</li>
+<li><strong>Packaging is correct</strong>, including the non-obvious case: hatchling honours <code>.gitignore</code>,
+and <code>.gitignore:6</code> matches the shipped <code>templates/postgres/.env</code> — which is exactly what the two
+<code>force-include</code> blocks in <code>pyproject.toml</code> cover, with the right path for each of the wheel and
+sdist layouts. <span class="tag">unverified</span> — reasoned from hatchling's documented file selection plus the
+confirmed <code>.gitignore</code> match; no wheel could be built offline to inspect.</li>
+<li><strong>Config precedence and file resolution</strong> hold as documented (defaults &lt; file &lt; env), and
+password/URL construction correctly percent-encodes specials, brackets IPv6 hosts and passes unix-socket paths
+through. <code>validation.py</code> is sound — no findings.</li>
+</ul>
+
+<h2>11. Suggested order of attack</h2>
+
+<ol>
+<li><strong>§1 chunk truncation.</strong> Fix the measurement script first (<code>0.75</code> → <code>1.0</code>), then
+re-derive a <code>chunk_size</code> that actually fits, and add a hard length check at the embed call so overflow can
+never be silent again. Everything else is downstream of the index being right, and the fix implies a re-embed.</li>
+<li><strong>§2.5 the EPERM one-liner</strong> and <strong>§2.2 the <code>unknown</code> guard</strong> — both are small,
+self-contained, and each removes a case where the CLI actively misreports.</li>
+<li><strong>§2.3 purge-on-failed-re-extraction</strong> and <strong>§3.1 the non-atomic reindex drop</strong> — the two
+places where a failure silently corrupts what search returns.</li>
+<li><strong>§2.1 surface watcher failures in <code>status</code></strong> — the largest gap between what the user is told
+and what happened, and it needs the counter plumbed into <code>_print_collection_detail</code> plus the dropped paths
+recorded somewhere addressable.</li>
+<li><strong>§2.4 config leniency</strong> — make a malformed file the same hard error every other config fault already
+is, and wrap the two traceback paths in §3.4.</li>
+<li><strong>§4 fingerprint gaps</strong> — resolve the model path before fingerprinting, bump
+<code>CHUNKING_VERSION</code>, and widen the Nomic marker (retiring the test that pins the wrong behaviour).</li>
+<li><strong>Cheap cleanups:</strong> delete <code>extractor_names()</code>; delete or fix
+<code>CURRENT_CONTENT_SQL</code> and its false docstring; drop the unused <code>config</code> parameter from
+<code>prune_collection_history</code>; correct <code>README.md:325-326</code> and <code>AGENTS.md:126</code>; add
+<code>filelock.py</code> to the file list.</li>
+<li><strong>Docs:</strong> the 21 undocumented config keys, starting with
+<code>source_watcher.ignore_directories</code> — silent, user-visible indexing behaviour.</li>
+</ol>
+
+</body>
+</html>
