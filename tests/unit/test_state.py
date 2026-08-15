@@ -6,7 +6,12 @@ from pathlib import Path
 
 import pytest
 
-from cementic.state import DaemonState, StateManager, WorkerState
+from cementic.state import (
+    MAX_RECORDED_SKIPPED_FILES,
+    DaemonState,
+    StateManager,
+    WorkerState,
+)
 
 
 class TestWorkerState:
@@ -142,6 +147,39 @@ class TestAtomicIncrement:
         state = manager.load()
         assert state.failed_count == 2
         assert state.processed_count == 0
+
+    def test_record_skipped_keeps_the_path_and_the_reason(self, temp_dir: Path) -> None:
+        """The count alone could not be acted on -- which files were dropped?
+
+        A skipped file never becomes a document, so it is absent from every
+        pipeline count; the paths used to exist only in a log file the user is
+        never pointed at.
+        """
+        manager = StateManager(temp_dir / "state.json")
+
+        manager.record_skipped("/docs/link.md", "symlink")
+        state = manager.record_skipped("/docs/huge.pdf", "too large (999 bytes, max 1)")
+
+        assert state.failed_count == 2
+        assert state.skipped_files == [
+            "/docs/link.md: symlink",
+            "/docs/huge.pdf: too large (999 bytes, max 1)",
+        ]
+        assert manager.load().skipped_files == state.skipped_files
+
+    def test_recorded_skips_are_bounded_but_the_count_is_not(self, temp_dir: Path) -> None:
+        """A directory of symlinks must not grow the state file without bound."""
+        manager = StateManager(temp_dir / "state.json")
+        total = MAX_RECORDED_SKIPPED_FILES + 10
+
+        for i in range(total):
+            manager.record_skipped(f"/docs/{i}.md", "symlink")
+
+        state = manager.load()
+        assert state.failed_count == total
+        assert len(state.skipped_files) == MAX_RECORDED_SKIPPED_FILES
+        # The most recent are the ones kept.
+        assert state.skipped_files[-1] == f"/docs/{total - 1}.md: symlink"
 
 
 class TestStateManager:

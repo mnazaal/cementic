@@ -680,6 +680,17 @@ def _print_status_summary(
                 f"{'last error':<11} [red]{escape(f'{label}: {worker.last_error}')}[/red]"
             )
 
+    # Headline, not --verbose detail: a skipped file never becomes a document,
+    # so it is absent from every pipeline count. Without this a collection whose
+    # watcher dropped a directory of symlinks still reported 100% complete and
+    # promoted cleanly, with the only evidence a number behind --verbose and a
+    # log file the user is never pointed at.
+    if source_watcher_status.failed_count:
+        console.print(
+            f"{'skipped':<11} [yellow]{source_watcher_status.failed_count} file(s) not "
+            "indexed[/yellow]" + ("" if verbose else " (run with --verbose for paths)")
+        )
+
     if not verbose:
         return
 
@@ -697,6 +708,16 @@ def _print_status_summary(
     )
     if source_watcher_status.current_file != "None":
         console.print(f"  current file: {source_watcher_status.current_file}")
+    if source_watcher_status.skipped_files:
+        console.print("  skipped files:")
+        for entry in source_watcher_status.skipped_files:
+            console.print(f"  - {escape(entry)}")
+        recorded = len(source_watcher_status.skipped_files)
+        if source_watcher_status.failed_count > recorded:
+            console.print(
+                f"  (showing the {recorded} most recent of "
+                f"{source_watcher_status.failed_count})"
+            )
     console.print(
         f"pipeline worker: {pipeline_worker_status.process}, "
         f"state={pipeline_worker_status.state}, pid={pipeline_worker_status.pid}"
@@ -743,7 +764,19 @@ def _print_collection_detail(
     # The denominator is chunks that exist *so far*, so mid-build this can read
     # 100% while most documents have not been chunked yet. Say so rather than
     # implying the collection is finished.
-    chunking_complete = ps.chunked_done + ps.chunked_failed >= ps.documents
+    #
+    # total_chunks is final only once extraction has finished *and* chunking has
+    # caught up with it -- the same two clauses as the worker's own completeness
+    # check (pipeline_worker.revision_is_complete), so status and the worker
+    # cannot disagree about whether a collection is done. Comparing chunking to
+    # `documents` instead meant one document that failed to extract could never
+    # be chunked, pinning the caveat on a collection that was in fact finished;
+    # comparing to extracted_done alone would drop the caveat mid-extraction,
+    # while more chunks were still on the way.
+    extraction_complete = ps.extracted_done + ps.extracted_failed >= ps.documents
+    chunking_complete = extraction_complete and (
+        ps.chunked_done + ps.chunked_failed >= ps.extracted_done
+    )
     embedded_suffix = "" if chunking_complete else " of chunks created so far"
     console.print(
         f"{'embedded':<11} {ps.done_embeddings:,}/{ps.total_chunks:,} "
@@ -812,6 +845,7 @@ def _print_status_json(
             "pid": source_watcher_status.pid,
             "processed": source_watcher_status.processed_count,
             "failed": source_watcher_status.failed_count,
+            "skipped_files": source_watcher_status.skipped_files,
             "last_error": source_watcher_status.last_error,
             "last_error_at": source_watcher_status.last_error_at,
         },
@@ -1390,7 +1424,7 @@ def remove_collection(
     console.print(f"documents: {result.deleted_docs}")
     console.print(f"chunks: {result.deleted_chunks}")
     try:
-        remove_artifacts(result.artifact_paths, config=_get_config())
+        unremoved = remove_artifacts(result.artifact_paths, config=_get_config())
         drop_orphan_vector_tables(engine, result.vector_profile_ids)
     except Exception as e:
         # The delete is already committed, so this is a warning about leftovers
@@ -1399,6 +1433,16 @@ def remove_collection(
         # collection had not been removed when it had.
         console.print(f"warning: collection deleted but cleanup failed: {e}")
         return
+    if unremoved:
+        # remove_artifacts has always returned the paths it could not remove;
+        # both callers threw the list away, so files left behind were reported
+        # only to a log file nobody is told about -- and the rows naming them
+        # are gone, so nothing can find them again.
+        console.print(f"warning: {len(unremoved)} artifact file(s) could not be removed:")
+        for path in unremoved[:5]:
+            console.print(f"  {path}")
+        if len(unremoved) > 5:
+            console.print(f"  ... and {len(unremoved) - 5} more")
     console.print(f"vector_tables_dropped: {len(result.vector_profile_ids)}")
 
 

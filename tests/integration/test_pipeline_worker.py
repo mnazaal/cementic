@@ -256,6 +256,38 @@ class TestPipelineWorkerErrorPaths:
             assert extracted.status == "failed"
             assert extracted.error_message is not None
 
+    def test_whitespace_only_chunks_are_not_stored(
+        self, sqlite_setup, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A chunk with no text embeds to a vector for nothing.
+
+        It competes for a result slot and renders as a blank preview. Filtered
+        at the point chunks are persisted rather than inside chunk_text, whose
+        non-overlapping output must still reassemble into the original document.
+        """
+        config, session_factory, pdf_fixtures_dir = sqlite_setup
+        collection = "test_blank_chunks"
+
+        pipeline, source_watcher = _setup_worker(config, session_factory, collection, monkeypatch)
+        pdf_path = str(pdf_fixtures_dir / "test_doc_a.pdf")
+        source_watcher._register_document(pdf_path)
+
+        # Real text, then a long run of whitespace that chunks on its own.
+        monkeypatch.setattr(
+            pipeline_worker_module,
+            "read_extracted_text",
+            lambda _path: "actual words here\n" + ("\n" * 5000),
+        )
+
+        revision = pipeline._ensure_target_revision()
+        _run_pipeline_until_idle(pipeline, revision)
+
+        with session_factory() as session:
+            contents = [c.content for c in session.query(Chunk).all()]
+
+        assert contents, "expected at least one real chunk"
+        assert all(content.strip() for content in contents)
+
     def test_failed_re_extraction_stops_serving_the_previous_content(
         self, sqlite_setup, monkeypatch: pytest.MonkeyPatch
     ) -> None:

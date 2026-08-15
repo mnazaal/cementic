@@ -58,7 +58,11 @@ def read_extracted_text(path: Path) -> str:
 def safe_remove_artifact(config: Config, artifact_path: str) -> None:
     """Remove an artifact file, rejecting paths outside the artifacts root.
 
-    This is a best-effort helper that swallows OSError for idempotent cleanup.
+    Idempotent: a file that is already gone is success. A file that is *there*
+    and cannot be removed raises, so the caller can report it -- swallowing
+    OSError here meant `collection remove` printed "status: deleted" with every
+    artifact still on disk and the database rows that named them gone, leaving
+    nothing that could ever find them again.
     """
     root = config.storage.artifacts_path
     if root is None:
@@ -73,7 +77,4 @@ def safe_remove_artifact(config: Config, artifact_path: str) -> None:
     path = Path(artifact_path)
     if path.is_symlink():
         raise ValueError(f"Refusing to remove symlink artifact: {path}")
-    try:
-        resolved.unlink(missing_ok=True)
-    except OSError:
-        pass
+    resolved.unlink(missing_ok=True)

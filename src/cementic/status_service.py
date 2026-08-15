@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from sqlalchemy import and_, func, or_, text
 
@@ -49,6 +49,9 @@ class WorkerStatus:
     #: Long-running work that is not a file, so a worker mid-index-build is not
     #: reported as idle.
     current_activity: str | None = None
+    #: Files the watcher refused to register, most recent last. They never
+    #: become documents, so no pipeline count can show them.
+    skipped_files: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -145,6 +148,7 @@ def build_worker_status(state: WorkerState) -> WorkerStatus:
         last_error=state.last_error,
         last_error_at=state.last_error_at,
         current_activity=state.current_activity,
+        skipped_files=list(state.skipped_files),
     )
 
 

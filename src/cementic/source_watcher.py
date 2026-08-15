@@ -457,11 +457,11 @@ class SourceWatcher:
         path = Path(file_path)
         if path.is_symlink():
             self._logger.error("Refusing symlinked file: %s", file_path)
-            self.state_manager.increment(failed=1)
+            self.state_manager.record_skipped(file_path, "symlink")
             return
         normalized_path = self._normalize_watched_path(file_path, must_exist=True)
         if normalized_path is None:
-            self.state_manager.increment(failed=1)
+            self.state_manager.record_skipped(file_path, "unreadable or outside watched roots")
             return
         file_path = normalized_path
         # Guard against exceedingly large files
@@ -470,13 +470,15 @@ class SourceWatcher:
             file_size = path.stat().st_size
         except OSError:
             self._logger.error("Cannot stat file: %s", file_path)
-            self.state_manager.increment(failed=1)
+            self.state_manager.record_skipped(file_path, "cannot stat")
             return
         if file_size > max_size_bytes:
             self._logger.error(
                 "File too large (%d bytes, max %d): %s", file_size, max_size_bytes, file_path
             )
-            self.state_manager.increment(failed=1)
+            self.state_manager.record_skipped(
+                file_path, f"too large ({file_size} bytes, max {max_size_bytes})"
+            )
             return
 
         sha256 = hashlib.sha256()

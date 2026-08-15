@@ -280,6 +280,11 @@ class TestRootHelp:
         assert "collections" in result.output
         assert "(none)" in result.output
         mock_list_collections.assert_called_once_with(mock_session)
+        # The watcher's failed_count is headline information, not --verbose
+        # detail: a skipped file never becomes a document, so no pipeline
+        # percentage can ever reveal it.
+        assert "skipped" in result.output
+        assert "1 file(s) not indexed" in result.output
 
     def test_collection_promote_shows_help_with_no_args(self):
         result = runner.invoke(app, ["collection", "promote"])

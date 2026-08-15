@@ -11,6 +11,10 @@ from typing import Any
 
 UNSET = object()
 
+#: How many skipped-file paths to keep in the state file. Enough to act on
+#: without letting a directory of symlinks grow the file without bound.
+MAX_RECORDED_SKIPPED_FILES = 50
+
 
 class DaemonState(str, Enum):
     """State of a background worker."""
@@ -43,6 +47,13 @@ class WorkerState:
     #: while writing nothing else. Without it `cementic status` shows a running
     #: worker, a building revision and no current file: identical to an idle one.
     current_activity: str | None = None
+    #: Recent files the watcher refused to register, as "path: reason". These
+    #: never become documents, so they are absent from every pipeline count --
+    #: a collection could report 100% complete having silently dropped a
+    #: directory's worth of symlinks. ``failed_count`` said how many, but the
+    #: paths existed only in a log file the user is never pointed at. Bounded so
+    #: the state file cannot grow without limit; the count remains exact.
+    skipped_files: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, object]:
         """Convert to dictionary."""
@@ -98,6 +109,11 @@ class WorkerState:
             str(raw_current_activity) if raw_current_activity is not None else None
         )
 
+        raw_skipped = normalized.get("skipped_files", [])
+        skipped_files = (
+            [str(entry) for entry in raw_skipped] if isinstance(raw_skipped, list) else []
+        )
+
         return cls(
             daemon_state=daemon_state_value,
             watched_directories=watched_directories,
@@ -110,6 +126,7 @@ class WorkerState:
             last_error=last_error,
             last_error_at=last_error_at,
             current_activity=current_activity,
+            skipped_files=skipped_files,
         )
 
 
@@ -214,5 +231,22 @@ class StateManager:
             state.failed_count += failed
             if current_file is not UNSET:
                 state.current_file = current_file
+            self.save(state)
+            return state
+
+    def record_skipped(self, path: str, reason: str) -> WorkerState:
+        """Count a file the watcher refused, and remember which one it was.
+
+        Same lock as ``increment`` and the same reason for it: the initial scan
+        and the debounce timers run on different threads.
+        """
+        with self._lock:
+            state = self.load()
+            state.failed_count += 1
+            state.skipped_files.append(f"{path}: {reason}")
+            # Keep only the most recent, so a directory of symlinks cannot grow
+            # the state file without bound. failed_count stays exact.
+            if len(state.skipped_files) > MAX_RECORDED_SKIPPED_FILES:
+                del state.skipped_files[:-MAX_RECORDED_SKIPPED_FILES]
             self.save(state)
             return state

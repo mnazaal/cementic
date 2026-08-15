@@ -661,6 +661,12 @@ class PipelineWorker:
                 chunk_size=self.config.pipeline.chunk_size,
                 chunk_overlap=self.config.pipeline.chunk_overlap,
             )
+            # Drop chunks that are only whitespace. They embed to a vector for
+            # no text, so they compete for result slots and render as a blank
+            # preview. Filtered here rather than in chunk_text, which is a pure
+            # function whose non-overlapping output must still reassemble into
+            # the original document exactly.
+            chunk_items = [item for item in chunk_items if item.content.strip()]
             status = "done"
             error_message = None
         except Exception as error:

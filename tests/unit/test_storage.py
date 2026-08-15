@@ -134,12 +134,27 @@ class TestSafeRemoveArtifact:
         config.storage.artifacts_path = temp_dir
         safe_remove_artifact(config, str(temp_dir / "nope.md.gz"))  # does not raise
 
-    def test_ignores_oserror(self, temp_dir: Path) -> None:
+    def test_a_file_that_cannot_be_removed_raises(
+        self, temp_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Only a *missing* file is success; an undeletable one must be reported.
+
+        Swallowing OSError here meant `collection remove` printed
+        "status: deleted" with every artifact still on disk, and the rows naming
+        those paths already gone -- so nothing could ever find them again.
+        """
         config = Config()
         config.storage.artifacts_path = temp_dir
-        with pytest.MonkeyPatch.context():  # noop call; any OSError is caught
-            pass
-        safe_remove_artifact(config, str(temp_dir / "non-existent.md.gz"))
+        target = temp_dir / "stuck.md.gz"
+        target.write_text("content")
+
+        def refuse(self, missing_ok=False):  # noqa: ANN001, ARG001
+            raise OSError(13, "Permission denied")
+
+        monkeypatch.setattr(Path, "unlink", refuse)
+
+        with pytest.raises(OSError):
+            safe_remove_artifact(config, str(target))
 
     def test_rejects_path_traversal_artifact(self, temp_dir: Path) -> None:
         config = Config()
