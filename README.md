@@ -293,8 +293,11 @@ matching `CEMENTIC_*` variable (see [Environment variables](#environment-variabl
 ##### Chunk size and the context window
 
 `chunk_size` is counted with tiktoken while `n_ctx` is counted with the
-embedding model's own tokenizer, and the two disagree — for the default model
-one tiktoken token runs to 1.33 model tokens on English and source code. A
+embedding model's own tokenizer, and the two disagree — for the default model one
+tiktoken token is a median of 1.14 model tokens, p95 1.24, and up to 1.33 on
+English and source code. The runtime guard assumes an upper bound of 1.45, and
+`320 × 1.45 = 464` fits inside the 512-token window, so a full-size chunk never
+needs an exact-count round trip to the model. A
 chunk that exceeds the window is refused rather than embedded truncated, and
 shows up as a failed chunk in `cementic status`. If you change either value,
 re-measure first:
@@ -318,9 +321,13 @@ until it has a full page rather than stopping after `hnsw_ef_search` candidates.
 Without it, a collection that holds a small share of a shared vector table can come
 back short, or empty. It needs pgvector 0.8 or newer and is ignored on older servers.
 
-The index is built once, when a collection's first revision finishes building. That
-build occupies the pipeline worker — `cementic status` reports it under `activity:`
-— and is not resumable, so stopping partway through starts it over. `index.build_memory`
+For a new HNSW collection — the default — the index is created up front on the
+still-empty vector table and maintained incrementally by every insert, so there is
+no build stall at the end and an interrupted run loses one batch rather than the
+whole build. DiskANN, and any build resumed over rows that already exist, instead
+build in bulk when the revision finishes. That bulk build occupies the pipeline
+worker — `cementic status` reports it under `activity:` — and is not resumable, so
+stopping partway through starts it over. `index.build_memory`
 (default `2GB`) raises `maintenance_work_mem` for the build only: PostgreSQL's 64MB
 default makes the graph spill to disk, which cost 1454s against 345s for 100k
 768-dimensional vectors. Lower it on a memory-constrained server.
@@ -362,14 +369,14 @@ export CEMENTIC_EXTRACT_USE_OCR=false
 export CEMENTIC_STORAGE_ARTIFACTS_PATH=~/.local/share/cementic/artifacts
 
 # Pipeline chunking
-export CEMENTIC_PIPELINE_CHUNK_SIZE=512
-export CEMENTIC_PIPELINE_CHUNK_OVERLAP=128
+export CEMENTIC_PIPELINE_CHUNK_SIZE=320
+export CEMENTIC_PIPELINE_CHUNK_OVERLAP=80
 
 # Embedding provider selection (default)
 export CEMENTIC_PIPELINE_EMBEDDING_PROVIDER=llama-cpp
 
 # llama.cpp defaults
-export CEMENTIC_LLAMA_MODEL_PATH=./models/nomic-embed-text-v2-moe.Q8_0.gguf
+export CEMENTIC_LLAMA_MODEL_PATH=models/nomic-embed-text-v2-moe.Q8_0.gguf
 export CEMENTIC_LLAMA_DAEMON_AUTOSTART=true
 
 # Background worker
@@ -414,8 +421,10 @@ When using Nomic v2 models, cementic automatically applies task prefixes:
 
 ```bash
 uv pip install -e ".[dev]"
-pytest
-pytest tests/integration/test_smoke.py -rs
-ruff check src/ tests/
-mypy src/
+
+./scripts/check.sh    # every gate CI runs: ruff, mypy, unit, integration, integration-pg
+pytest tests/unit     # fast inner loop
 ```
+
+`check.sh` is the gate to trust — it reports a missing PostgreSQL as SKIPPED
+rather than passed, which a bare `pytest` does not.

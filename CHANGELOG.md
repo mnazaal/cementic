@@ -2,7 +2,83 @@
 
 ## [Unreleased]
 
+### Added
+
+- **`cementic collection reindex COLLECTION`** — rebuilds the active revision's ANN index
+  in place, switching HNSW <-> DiskANN without re-embedding. `-f`/`--force` rebuilds even
+  when `index.method` is unchanged, to pick up new `hnsw_m` / `hnsw_ef_construction`,
+  which are fixed into the index at build time.
+- **`index.build_memory`** (default `2GB`) — `maintenance_work_mem` for ANN index builds
+  only. PostgreSQL's 64MB default spills the HNSW graph to disk: 1454s against 345s for
+  100k 768-dimensional vectors.
+- **`index.hnsw_iterative_scan`** (default `relaxed_order`) — search filters candidates
+  during the index scan, so without it a collection holding a small share of a shared
+  vector table could come back short or empty. Needs pgvector 0.8+; ignored on older
+  servers.
+- **`extraction.backends`** — per-file-type extractor choice, e.g. `pdf = "pymupdf4llm"`.
+  Both the file type and the extractor name are validated against the registry at config
+  load, with distinct messages for an unknown name and a wrong file type.
+- **`source_watcher.ignore_directories`** — 16 default names (`.git`, `node_modules`,
+  `build`, `dist`, `venv`, `target`, ...) never descended into. Replaces the defaults
+  rather than adding to them; set `[]` to index everything.
+- **`scripts/check.sh`** — runs all five CI gates in one command and reports a missing
+  PostgreSQL as SKIPPED rather than passed.
+- **`scripts/measure_chunk_context_fit.py`** — measures the tiktoken-to-model-token ratio
+  over full-size chunks against the running daemon. Run it before changing
+  `pipeline.chunk_size` or `llama_cpp.n_ctx`.
+
 ### Fixed
+
+- **Chunks are no longer embedded truncated.** `pipeline.chunk_size` counts tiktoken
+  tokens while `llama_cpp.n_ctx` counts the embedding model's own, and for the default
+  model one is up to 1.33 of the other — so at 512 against 512, **93% of full-size chunks
+  overflowed the context window and the server silently dropped the overflow**, measured
+  on a real corpus. The stored chunk text and the vector indexing it disagreed, and the
+  tail of each chunk was unsearchable. `chunk_size` now defaults to 320, and the embedding
+  client counts with the served model's own tokenizer and reports an over-budget chunk as
+  a failure instead of letting it truncate. **This changes the chunk profile: existing
+  collections re-index once on the next `cementic start`.**
+- **`cementic stop` no longer reports success while workers keep running.** A liveness
+  check treated `EPERM` — which proves a process exists — as "not running", so workers
+  started under another user were reported stopped, their state cleared, while they went
+  on indexing.
+- **A typo'd collection name is no longer swallowed.** `search -c work -c persnal`
+  reported nothing about the typo as long as `work` matched, at exit 0, in both output
+  modes — half the query silently dropped. Naming a collection that does not exist is now
+  an error in `search`, `status -c`, `collection revisions`, `collection promote` and
+  `collection reindex` alike; `collection remove` still succeeds on a missing name so it
+  stays safe to run twice.
+- **A failed re-extraction no longer keeps serving the old text.** The stale-chunk purge
+  only ran when re-extraction *succeeded*, so replacing an indexed file with a corrupt or
+  unreadable one left the previous version searchable under the current path indefinitely.
+- **`cementic collection reindex --force` can no longer leave a collection unindexed.**
+  The index drop was committed in its own transaction, so any failure of the rebuild —
+  interrupt, timeout, disk full — dropped the ANN index permanently and silently, since
+  search still works by sequential scan.
+- **`cementic search` no longer re-runs a schema migration on every query.** The
+  vector-table migration was executed and then rolled back with the session, so on a
+  database written by an older cementic every search repeated a full-table backfill and
+  discarded it.
+- **A config file that cannot be parsed is now an error.** It was discarded with one
+  stderr line and every setting in it silently replaced by built-in defaults — a different
+  database, a different chunk size. A non-UTF-8 config file, and a `CEMENTIC_*` variable
+  for a list- or table-valued setting given in non-JSON form, both reached the user as
+  tracebacks; they are one-line errors now.
+- **`cementic search ""` is refused** instead of returning a confidently ranked top-k of
+  the nearest neighbours of nothing.
+- **`cementic embed` no longer invents vectors.** A record with no `content` was embedded
+  as the empty string and a `null` one as the literal text `"None"`, each emitted as a
+  normal-looking embedding at exit 0.
+- **`cementic collection remove` reports artifacts it could not delete** rather than
+  printing `status: deleted` with the files still on disk and the rows naming them gone.
+- **Files the watcher refuses are visible in `cementic status`.** Symlinks, unreadable
+  paths and oversized files never become documents, so they were absent from every
+  progress percentage: a collection that dropped a directory of symlinks still reported
+  100% and promoted cleanly. The count is now shown alongside worker errors, and the paths
+  with their reasons under `--verbose` and in `--json`.
+- **`cementic collection list` shows collections that own revisions but no documents.**
+- Whitespace-only chunks are no longer stored and embedded, and `chunk_index` is
+  contiguous again when a chunk boundary lands mid-character at small chunk sizes.
 
 - **`cementic stop` no longer deadlocks a worker against its own SIGTERM.** The signal
   handler wrote to the state file, whose lock the main thread was often already holding —
@@ -42,7 +118,8 @@
   a path that no longer existed.
 - **`cementic collection remove` can remove a collection that has revisions but no
   documents** — what `cementic start` on a directory with no supported files creates.
-  Such collections were invisible to `collection list` and reported as "not found".
+  Such collections were reported as "not found". (`collection list` no longer hides
+  them either; see below.)
 - Watched directories are resolved before being handed to the background workers, so a
   relative path cannot mean something different in the worker's working directory.
 - A corrupt, unreadable, or non-object supervisor/worker state file no longer aborts
@@ -66,7 +143,8 @@
   and advising `--force` for a process that had already shut down cleanly.
 - **The chunker no longer emits a duplicate trailing chunk** when a chunk ends exactly at the
   end of the text; the final chunk was a pure suffix of its predecessor and was embedded and
-  searchable as a near-duplicate. Chunk profile version bumped to `v2`.
+  searchable as a near-duplicate. (Chunk profile version was bumped for this; see the
+  chunk-size change under Changed for the current `v3`.)
 - **Embedding-daemon outages no longer mark documents as permanently failed.** A connectivity
   error now releases the batch back to `pending` and retries, instead of stamping every chunk
   in the collection `failed`.
@@ -83,6 +161,18 @@
 
 ### Changed
 
+- **The HNSW index is created up front, on the still-empty vector table**, and maintained
+  incrementally by every insert. This removes the unresumable build stall at the end of a
+  revision, makes progress per-batch resumable, and leaves the index searchable during
+  ingestion — at ~2.9x total indexing time, which is ~3.5ms of index maintenance per chunk
+  against tens of milliseconds to embed one. DiskANN and resumed builds over existing rows
+  keep the bulk build at the ready transition.
+- Default `pipeline.chunk_size` 512 -> 320 and `chunk_overlap` 128 -> 80; chunk profile
+  version bumped to `v3`, which also covers three earlier changes to chunk output that
+  shipped without a bump.
+- Every configuration key is now documented in the README, including the 21 that were live
+  but unlisted — notably `source_watcher.ignore_directories`, which silently skips 16
+  directory names and replaces rather than extends its defaults.
 - `cementic start` verifies both workers survived startup and fails with the relevant log path
   instead of reporting success for a worker that exited immediately.
 - Commands run against a reachable database with no cementic schema now print
@@ -97,6 +187,11 @@
 
 ### Removed
 
+- `extractor_names()`, which had no callers, and `CURRENT_CONTENT_SQL`, whose freshness
+  join search no longer uses (it now lives beside the test fixtures whose shape it
+  describes).
+- An unused required `config` argument on `prune_collection_history` and
+  `promote_revision`, which six call sites were constructing a `Config` to satisfy.
 - Unused `pgvector` Python dependency (the extension is used through SQL, never imported).
 - Never-populated `page_start` / `page_end` fields on chunks, and the write-only
   `SourceDocument.error_message` column.

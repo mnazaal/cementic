@@ -1,7 +1,11 @@
 # Roadmap
 
-Baseline: unit tests, ruff, and mypy pass locally. PostgreSQL integration tests
-require a running Postgres with pgvector + vectorscale (generate one with
+Baseline: `./scripts/check.sh` runs all five gates — ruff, mypy, unit,
+integration, integration-pg — and reports a missing PostgreSQL as SKIPPED rather
+than passed. Use it rather than running the pieces by hand; the reason three PG
+tests once reached `main` red is that "I ran the tests" meant unit-only.
+
+The PG gate needs a Postgres with pgvector + vectorscale (generate one with
 `cementic init postgres ./cementic-postgres`, then `docker compose up -d` or
 `podman compose up -d`); the integration suite can bring the compose stack
 up/down itself when a container engine is available.
@@ -16,7 +20,9 @@ index, versioned revisions) are documented in [PLAN.md](PLAN.md).
 - Add a direct ingestion command: `cementic add <path> -c <collection>`.
 - Add optional Markdown mirrors for extracted artifacts, alongside the existing
   compressed pipeline artifacts.
-- Enrich search results with document id, collection, and optional artifact path.
+- Enrich search results with document id and optional artifact path. (`collection`
+  already ships — a result carries collection, source_path, content, score,
+  distance and score_kind.)
 
 ## Images / multimodal
 
@@ -28,10 +34,19 @@ index, versioned revisions) are documented in [PLAN.md](PLAN.md).
 
 ## Test coverage / CI
 
-- Keep `pytest tests/unit`, `ruff check src/ tests/`, and `mypy src/` clean.
-- Run the PostgreSQL integration tests before release checks.
-- Add CI that runs unit tests by default and the PG tests when a service
-  container is available.
+CI is done — `.github/workflows/ci.yml` runs unit, `integration -m "not pg"` and
+`integration -m pg` as separate jobs, the last against a service container. Keep
+it green with `./scripts/check.sh` before pushing. Remaining gaps, from the
+2026-08-14 review:
+
+- No test connects a pipeline failure to what `cementic status` prints. The
+  DB-row assertions and the status-rendering assertions never meet, which is how
+  a whole class of "reports success, dropped the work" defects stayed invisible
+  to a green suite.
+- `collection reindex --force` is never exercised through the CLI; only the
+  negative (`force is False`) is asserted, so the flag-to-kwarg wiring is
+  untested for the one flag README calls the only way to pick up changed
+  `hnsw_m` / `hnsw_ef_construction`.
 
 ## Later
 
