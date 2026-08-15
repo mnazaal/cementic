@@ -338,7 +338,7 @@ def ensure_revision_vector_table(session: Session, revision: PipelineRevision) -
 
 
 def ensure_revision_ann_index(
-    session: Session, revision: PipelineRevision, config: Config
+    session: Session, revision: PipelineRevision, config: Config, *, force_rebuild: bool = False
 ) -> None:
     """Ensure the configured ANN index exists for the revision's vector table."""
     bind = session.get_bind()
@@ -357,6 +357,7 @@ def ensure_revision_ann_index(
         params=params,
         distance_metric=revision.embedding_profile.distance_metric,
         build_memory=config.index.build_memory,
+        force_rebuild=force_rebuild,
     )
 
 

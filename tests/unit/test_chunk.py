@@ -48,6 +48,19 @@ class TestChunkText:
         chunks = chunk_text("", chunk_size=100, chunk_overlap=0)
         assert len(chunks) == 0
 
+    def test_chunk_index_stays_contiguous_when_slices_come_back_empty(self):
+        """Widening to character boundaries can empty a slice; the index must not skip.
+
+        At a small chunk_size over multi-byte text every token can belong to one
+        character, so the widened slice is empty and no chunk is emitted. The
+        counter used to advance anyway, numbering 20 emoji chunks 0, 2, 4 ... 38
+        -- so chunk_index disagreed with position, ChunkedDocument.total_chunks
+        agreed with neither, and `cementic chunk` emitted JSONL with gaps.
+        """
+        chunks = chunk_text("😀" * 20, chunk_size=1, chunk_overlap=0)
+
+        assert [chunk.chunk_index for chunk in chunks] == list(range(len(chunks)))
+
     def test_chunk_boundary_condition(self):
         """Test chunking at exact boundary."""
         # Create text that will produce known number of chunks

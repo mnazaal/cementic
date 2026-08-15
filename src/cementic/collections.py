@@ -6,7 +6,7 @@ import logging
 from dataclasses import dataclass
 from typing import Any, cast
 
-from sqlalchemy import func, text
+from sqlalchemy import func
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
@@ -313,11 +313,12 @@ def reindex_collection(
             return ReindexOutcome("no_vectors")
         previous_method = index_access_method(conn, vector_index_name(profile_id))
 
-    if force and previous_method is not None:
-        with engine.begin() as conn:
-            conn.execute(text(f"DROP INDEX IF EXISTS {vector_index_name(profile_id)}"))
-
-    ensure_revision_ann_index(session, revision, config)
+    # The drop rides along inside ensure_revision_ann_index's own connection and
+    # commit rather than happening here first. Committing it separately meant a
+    # rebuild that failed -- a >2000-dim profile HNSW rejects, a statement
+    # timeout, Ctrl-C, disk full -- left the collection with no ANN index at
+    # all, permanently and silently: search still succeeds by sequential scan.
+    ensure_revision_ann_index(session, revision, config, force_rebuild=force)
     session.commit()
     return ReindexOutcome(
         "reindexed", method=config.index.method, previous_method=previous_method

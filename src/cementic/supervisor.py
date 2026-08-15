@@ -72,6 +72,14 @@ def is_pid_running(pid: int) -> bool:
     """
     try:
         os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        # EPERM proves the process exists -- we just may not signal it. Folding
+        # this into "not running" made `cementic stop` report success while
+        # workers started under another uid (sudo, a service account, a user
+        # namespace) kept indexing. force_kill already reasons this way.
+        return True
     except OSError:
         return False
     fields = _proc_stat_fields(pid)

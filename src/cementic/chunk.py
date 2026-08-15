@@ -83,11 +83,16 @@ def chunk_text(
         # result slot on a blank preview.
         if content:
             chunks.append(TextChunk(content=content, chunk_index=chunk_index))
+            # Advance the index only when a chunk was actually emitted. Bumping
+            # it every iteration left gaps whenever a slice came back empty --
+            # `chunk_text("😀" * 20, chunk_size=1, chunk_overlap=0)` produced 20
+            # chunks numbered 0, 2, 4 ... 38 -- so chunk_index no longer agreed
+            # with position, and total_chunks agreed with neither.
+            chunk_index += 1
         # Stop once a chunk reaches the end of the text: stepping again would
         # emit a chunk that is purely a suffix of this one (duplicate content).
         if end == len(tokens):
             break
         start += chunk_size - chunk_overlap
-        chunk_index += 1
 
     return chunks

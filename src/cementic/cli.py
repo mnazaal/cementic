@@ -15,6 +15,7 @@ from typing import Any, TypeVar, cast
 import click
 import typer
 from pydantic import ValidationError
+from pydantic_settings import SettingsError
 from rich.console import Console
 from rich.markup import escape
 from sqlalchemy.exc import InterfaceError, OperationalError, ProgrammingError
@@ -227,6 +228,19 @@ def _get_config() -> Config:
         except ValidationError as error:
             detail = format_config_error(error, resolve_config_path())
             console.print(f"[red]config error: {escape(detail)}[/red]")
+            raise typer.Exit(1)
+        except SettingsError as error:
+            # pydantic-settings JSON-parses complex-typed fields from the
+            # environment and raises SettingsError -- a ValueError, *not* a
+            # ValidationError -- so a plausible spelling like
+            # CEMENTIC_EXTRACT_BACKENDS=pdf=pymupdf4llm reached the user as a
+            # multi-screen traceback from every command.
+            console.print(f"[red]config error: {escape(str(error))}[/red]")
+            console.print(
+                "hint: settings that take a list or table are read from the "
+                "environment as JSON, e.g. CEMENTIC_EXTRACT_BACKENDS='{\"pdf\": "
+                "\"pymupdf4llm\"}'"
+            )
             raise typer.Exit(1)
     return _config
 
@@ -1618,9 +1632,12 @@ def search(
 
         # Distinguish "no matches" from "that collection isn't indexed" — the two
         # are otherwise identical (empty output, exit 0), in both output modes.
-        unknown = (
-            searcher.unsearchable_collections(filters) if not results and filters else []
-        )
+        # Checked whenever collections were named, not only when nothing matched:
+        # gating on an empty result set meant `-c work -c persnal` said nothing
+        # about the typo as long as `work` returned a hit, so half the query was
+        # dropped invisibly — and in --json mode the stream was well-formed and
+        # the exit code 0, leaving a script no way to notice.
+        unknown = searcher.unsearchable_collections(filters) if filters else []
 
         if json_output:
             for result in results:
@@ -1637,21 +1654,26 @@ def search(
 
         if not results:
             console.print("no results")
-            if unknown:
+        else:
+            rank_w = len(str(len(results)))
+            for i, result in enumerate(results, 1):
+                preview = " ".join(result["content"].split())
                 console.print(
-                    f"note: no indexed revision for {', '.join(unknown)} "
-                    "(check `cementic collection list`)"
+                    f"{i:>{rank_w}}. {result['score']:.3f}  {escape(result['source_path'])}"
                 )
-            return
+                # Keep the preview to a single line (truncate to the terminal width).
+                console.print(f"   {escape(preview)}", no_wrap=True, overflow="ellipsis")
 
-        rank_w = len(str(len(results)))
-        for i, result in enumerate(results, 1):
-            preview = " ".join(result["content"].split())
+        if unknown:
+            # Same condition, same exit code as the --json branch above: the two
+            # modes used to disagree (0 here, 1 there) for identical input, so
+            # whether a script could detect a typo'd collection depended on the
+            # output format it happened to ask for.
             console.print(
-                f"{i:>{rank_w}}. {result['score']:.3f}  {escape(result['source_path'])}"
+                f"search failed: no indexed revision for {', '.join(unknown)} "
+                "(check `cementic collection list`)"
             )
-            # Keep the preview to a single line (truncate to the terminal width).
-            console.print(f"   {escape(preview)}", no_wrap=True, overflow="ellipsis")
+            raise typer.Exit(1)
 
     except typer.Exit:
         # typer.Exit subclasses RuntimeError, so the broad handler below would

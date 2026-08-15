@@ -125,6 +125,12 @@ def config_file_error() -> str | None:
             tomllib.load(handle)
     except tomllib.TOMLDecodeError as error:
         return f"malformed TOML: {error}"
+    except UnicodeDecodeError as error:
+        # tomllib decodes the bytes itself, and UnicodeDecodeError is a
+        # ValueError, not an OSError -- so a config saved in any non-UTF-8
+        # encoding escaped both handlers below and reached the user as a
+        # traceback, including from the command that exists to explain this.
+        return f"not valid UTF-8: {error}"
     except OSError as error:
         return f"unreadable: {error}"
     return None
@@ -275,7 +281,7 @@ def load_config_file() -> dict[str, Any]:
     try:
         with open(path, "rb") as handle:
             return tomllib.load(handle)
-    except tomllib.TOMLDecodeError:
+    except (tomllib.TOMLDecodeError, UnicodeDecodeError):
         _warn_once(path, "malformed")
         return {}
     except OSError:
@@ -798,6 +804,15 @@ def get_config() -> Config:
     path_problem = config_path_error()
     if path_problem is not None:
         raise ConfigError(path_problem)
+    # A file that cannot be parsed at all was the one config fault cementic
+    # tolerated: load_config_file() swallowed it, returned {}, and every setting
+    # in the file went with it, so a single stray character silently moved the
+    # whole run onto built-in defaults -- a different database, a different
+    # chunk_size -- behind one line of stderr that scrolls past under
+    # `cementic start`. Every other fault here already exits non-zero.
+    file_problem = config_file_error()
+    if file_problem is not None:
+        raise ConfigError(f"{resolve_config_path()}: {file_problem}")
     problems = config_file_problems()
     if problems:
         path = resolve_config_path()

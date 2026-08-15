@@ -14,6 +14,7 @@ from cementic.config import (
     DatabaseConfig,
     IndexConfig,
     LlamaCppConfig,
+    config_file_error,
     format_config_error,
     get_config,
     load_config_file,
@@ -84,6 +85,11 @@ class TestConfigFile:
         assert resolve_config_path() is None
 
     def test_invalid_toml_is_ignored(self, tmp_path, monkeypatch, capsys) -> None:
+        """The permissive layer stays permissive: Config() itself must not raise.
+
+        get_config() is the strict entry point every command goes through --
+        see test_malformed_config_is_a_hard_error_for_commands.
+        """
         bad = tmp_path / "bad.toml"
         bad.write_text("this is := not valid toml")
         monkeypatch.setenv("CEMENTIC_CONFIG", str(bad))
@@ -94,6 +100,40 @@ class TestConfigFile:
         stderr = capsys.readouterr().err
         assert str(bad) in stderr
         assert "malformed" in stderr.lower()
+
+    def test_malformed_config_is_a_hard_error_for_commands(self, tmp_path, monkeypatch) -> None:
+        """A file that cannot be parsed must stop the command, not vanish.
+
+        Every setting in the file went with the parse failure, so one stray
+        character silently moved the whole run onto built-in defaults -- a
+        different database, a different chunk_size -- behind a single stderr
+        line that scrolls past under `cementic start`. Every other config fault
+        already exits non-zero.
+        """
+        bad = tmp_path / "bad.toml"
+        bad.write_text('this is := not toml\n[database]\nname = "MYCUSTOMDB"\n')
+        monkeypatch.setenv("CEMENTIC_CONFIG", str(bad))
+
+        with pytest.raises(ConfigError, match="malformed TOML"):
+            get_config()
+
+    def test_non_utf8_config_is_a_stated_error_not_a_traceback(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """tomllib decodes the bytes itself, so this raises UnicodeDecodeError.
+
+        That is a ValueError, not an OSError, so it escaped both handlers and
+        reached the user as a traceback from every command -- including
+        `status --doctor`, which exists to explain exactly this.
+        """
+        bad = tmp_path / "latin1.toml"
+        bad.write_bytes(b'[database]\nhost = "caf\xe9"\n')
+        monkeypatch.setenv("CEMENTIC_CONFIG", str(bad))
+
+        assert config_file_error() is not None
+        assert "UTF-8" in (config_file_error() or "")
+        with pytest.raises(ConfigError, match="UTF-8"):
+            get_config()
 
     def test_index_section_defaults(self) -> None:
         config = Config()

@@ -486,3 +486,34 @@ class TestQueryContextBound:
         _reject_query_over_context(query, 4096)
         with pytest.raises(ValueError, match="context window"):
             _reject_query_over_context(query, 256)
+
+
+class TestEmptyQueryIsRejected:
+    """An empty query embeds to a real vector, so it produced real-looking results.
+
+    `cementic search ""` and `cementic search "   "` each returned a confidently
+    ranked top-k -- the nearest neighbours of nothing -- with exit 0 and no
+    indication that the query was empty.
+    """
+
+    @pytest.mark.parametrize("query", ["", "   ", "\n\t "])
+    @patch("cementic.search.get_engine")
+    @patch("cementic.search.get_session_factory")
+    def test_blank_queries_are_refused(self, mock_session_factory, mock_get_engine, query):
+        searcher = Searcher()
+
+        with pytest.raises(ValueError, match="query cannot be empty"):
+            searcher.search(query)
+
+    @patch("cementic.search.get_engine")
+    @patch("cementic.search.get_session_factory")
+    def test_rejection_happens_before_any_database_work(
+        self, mock_session_factory, mock_get_engine
+    ):
+        searcher = Searcher()
+        mock_session_factory.reset_mock()
+
+        with pytest.raises(ValueError, match="query cannot be empty"):
+            searcher.search("  ")
+
+        mock_session_factory.return_value.assert_not_called()

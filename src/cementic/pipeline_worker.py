@@ -179,6 +179,28 @@ def compute_revision_counts(
     return _compute_revision_counts(session, collection, revision)
 
 
+def _purge_all_chunks(session: Session, extracted_document_id: int) -> None:
+    """Drop every chunk of a document whose current content is unknown.
+
+    Used when re-extraction *failed*: the file on disk changed (its hash is what
+    selected it), so the chunks in hand describe a version that is gone, and
+    there is no new text to replace them with. Keeping them meant search went on
+    serving the old contents of a file that no longer extracts -- indefinitely,
+    since search applies no freshness filter and ``_step_chunk`` only revisits a
+    document once extraction succeeds.
+
+    Removing them makes the document return nothing until it extracts again,
+    which is the honest answer, and the failure is already visible as
+    ``failures extract=N`` in ``cementic status``.
+    """
+    chunked_ids = select(ChunkedDocument.id).where(
+        ChunkedDocument.extracted_document_id == extracted_document_id
+    )
+    session.query(Chunk).filter(Chunk.chunked_document_id.in_(chunked_ids)).delete(
+        synchronize_session=False
+    )
+
+
 def _purge_superseded_chunks(
     session: Session, extracted_document_id: int, content_hash: str
 ) -> None:
@@ -548,8 +570,16 @@ class PipelineWorker:
                 extracted.content_hash = content_hash
                 extracted.status = status
                 extracted.error_message = error_message
-                if content_hash is not None and previous_content_hash != content_hash:
-                    _purge_superseded_chunks(session, extracted.id, content_hash)
+                if content_hash is not None:
+                    if previous_content_hash != content_hash:
+                        _purge_superseded_chunks(session, extracted.id, content_hash)
+                elif previous_content_hash is not None:
+                    # Re-extraction failed after the file changed. There is no
+                    # new content_hash to compare against, so the superseded
+                    # purge above cannot fire -- and skipping it left the old
+                    # chunks and vectors serving the previous version of a file
+                    # that no longer extracts, forever.
+                    _purge_all_chunks(session, extracted.id)
             session.commit()
 
         self.state_manager.update(current_file=None)

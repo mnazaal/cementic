@@ -256,6 +256,51 @@ class TestPipelineWorkerErrorPaths:
             assert extracted.status == "failed"
             assert extracted.error_message is not None
 
+    def test_failed_re_extraction_stops_serving_the_previous_content(
+        self, sqlite_setup, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Replacing an indexed file with an unreadable one must retire its chunks.
+
+        The purge was gated on a new content_hash, which a failed extraction
+        never produces, so the chunks and vectors of the *previous* version
+        stayed queryable under the current path forever -- search applies no
+        freshness filter, and `_step_chunk` only revisits a document once
+        extraction succeeds.
+        """
+        config, session_factory, pdf_fixtures_dir = sqlite_setup
+        collection = "test_failed_reextract"
+
+        pipeline, source_watcher = _setup_worker(config, session_factory, collection, monkeypatch)
+        pdf_path = str(pdf_fixtures_dir / "test_doc_a.pdf")
+        source_watcher._register_document(pdf_path)
+
+        revision = pipeline._ensure_target_revision()
+        _run_pipeline_until_idle(pipeline, revision)
+
+        with session_factory() as session:
+            assert session.query(Chunk).count() > 0, "expected a first pass to produce chunks"
+
+        # The file changed on disk (new hash) but no longer extracts.
+        with session_factory() as session:
+            doc = session.query(SourceDocument).filter_by(collection=collection).first()
+            assert doc is not None
+            doc.source_path = "/nonexistent/replacement.pdf"
+            doc.file_hash = "a-different-hash"
+            session.commit()
+
+        _run_pipeline_until_idle(pipeline, revision)
+
+        with session_factory() as session:
+            extracted = (
+                session.query(ExtractedDocument)
+                .join(SourceDocument, ExtractedDocument.document_id == SourceDocument.id)
+                .filter(SourceDocument.collection == collection)
+                .first()
+            )
+            assert extracted is not None
+            assert extracted.status == "failed"
+            assert session.query(Chunk).count() == 0
+
     def test_step_chunk_error_yields_failed_status(
         self, sqlite_setup, monkeypatch: pytest.MonkeyPatch
     ) -> None:

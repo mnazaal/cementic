@@ -26,6 +26,7 @@ from cementic.pipeline_worker import (
     PipelineCounts,
     PipelineWorker,
     _pipeline_worker_lock_key,
+    _purge_all_chunks,
     _purge_superseded_chunks,
     _try_acquire_pipeline_worker_lock,
     is_retryable_embed_error,
@@ -996,6 +997,25 @@ class TestSupersededChunksArePurged:
         extracted = self._seed(session, content_hash=None)
 
         _purge_superseded_chunks(session, extracted.id, "new-hash")
+        session.commit()
+
+        assert session.query(Chunk).count() == 0
+
+    def test_a_failed_re_extraction_drops_the_old_chunks_too(self):
+        """A failed re-extraction must not leave the previous version searchable.
+
+        On failure there is no new content_hash, so the superseded purge cannot
+        fire -- and skipping it entirely meant replacing an indexed file with a
+        corrupt or encrypted one left search serving the *old* text under the
+        current path indefinitely: search applies no freshness filter, and
+        `_step_chunk` only revisits a document once extraction succeeds.
+        """
+        engine = create_engine("sqlite://")
+        Base.metadata.create_all(engine)
+        session = sessionmaker(bind=engine, expire_on_commit=False)()
+        extracted = self._seed(session, content_hash="old-hash")
+
+        _purge_all_chunks(session, extracted.id)
         session.commit()
 
         assert session.query(Chunk).count() == 0

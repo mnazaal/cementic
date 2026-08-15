@@ -482,6 +482,53 @@ class TestSearchCommand:
 
         assert result.exit_code == 0
 
+    @pytest.mark.parametrize("extra_args", [[], ["--json"]])
+    @patch("cementic.cli.Searcher")
+    def test_unknown_collection_is_reported_even_when_others_match(
+        self, mock_searcher_class, extra_args
+    ):
+        """A typo'd collection must not be hidden by a sibling that matched.
+
+        The check was gated on an empty result set, so `-c work -c persnal`
+        said nothing about the typo as long as `work` returned a hit: half the
+        query was dropped invisibly, at exit 0, in both output modes.
+        """
+        mock_searcher = MagicMock()
+        mock_searcher.search.return_value = [
+            {
+                "collection": "work",
+                "source_path": "/docs/a.md",
+                "content": "a match",
+                "score": 0.9,
+                "distance": 0.1,
+                "score_kind": "cosine_similarity",
+            }
+        ]
+        mock_searcher.unsearchable_collections.return_value = ["persnal"]
+        mock_searcher_class.return_value = mock_searcher
+
+        result = runner.invoke(
+            app, ["search", "q", "-c", "work", "-c", "persnal", *extra_args]
+        )
+
+        assert "no indexed revision for persnal" in result.output
+        assert result.exit_code == 1
+
+    @patch("cementic.cli.Searcher")
+    def test_human_and_json_modes_agree_on_the_unknown_collection_exit_code(
+        self, mock_searcher_class
+    ):
+        """Identical input must not change contract with the output format."""
+        mock_searcher = MagicMock()
+        mock_searcher.search.return_value = []
+        mock_searcher.unsearchable_collections.return_value = ["typo"]
+        mock_searcher_class.return_value = mock_searcher
+
+        human = runner.invoke(app, ["search", "q", "-c", "typo"])
+        json_mode = runner.invoke(app, ["search", "q", "-c", "typo", "--json"])
+
+        assert human.exit_code == json_mode.exit_code == 1
+
     @patch("cementic.cli.Searcher")
     def test_search_json_emits_one_json_object_per_line(self, mock_searcher_class):
         mock_searcher = MagicMock()

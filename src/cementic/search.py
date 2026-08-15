@@ -182,6 +182,11 @@ class Searcher:
     ) -> list[SearchResult]:
         if top_k < 1 or top_k > MAX_SEARCH_RESULTS:
             raise ValueError(f"top_k must be between 1 and {MAX_SEARCH_RESULTS}")
+        if not query.strip():
+            # An empty query embeds to a real vector, so this used to return a
+            # confidently ranked top-k -- the nearest neighbours of nothing --
+            # with no indication the query was empty.
+            raise ValueError("query cannot be empty")
         if len(query) > MAX_QUERY_CHARS:
             raise ValueError(f"query too long: {len(query)} characters (max {MAX_QUERY_CHARS})")
 
@@ -232,6 +237,14 @@ class Searcher:
                     revision.embedding_profile_id,
                     embedding_profile.embedding_dim,
                 )
+                # ...and commit it. Without this the session's context manager
+                # closes and rolls the DDL back, so "once done" never arrived:
+                # on a pre-migration database every search re-ran the full-table
+                # backfill, held ACCESS EXCLUSIVE on the vector table for the
+                # whole query, and threw the work away. Committing here also
+                # ends the transaction the tuning SETs below would otherwise
+                # join, which is why they are re-applied per revision anyway.
+                session.commit()
                 # Tune for the index that actually exists rather than the
                 # configured method, which can drift until the index is rebuilt.
                 actual_method = (

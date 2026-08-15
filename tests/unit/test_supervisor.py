@@ -35,6 +35,16 @@ class TestIsPidRunning:
     def test_os_error_pid(self, mock_kill) -> None:
         assert is_pid_running(1234) is False
 
+    @patch("os.kill", side_effect=PermissionError)
+    def test_permission_error_means_alive_not_gone(self, mock_kill) -> None:
+        """EPERM proves the process exists -- it is just not ours to signal.
+
+        Reporting it as gone made `cementic stop` print success and clear the
+        state files while workers started under another uid kept running, with
+        `cementic status` agreeing they were stopped.
+        """
+        assert is_pid_running(1234) is True
+
     def test_zombie_pid_is_not_running(self) -> None:
         """A detached worker that exited but wasn't reaped still answers
         kill(pid, 0); treating it as running makes `cementic stop` wait out its

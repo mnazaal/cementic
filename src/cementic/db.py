@@ -382,6 +382,7 @@ def ensure_embedding_ann_index(
     params: IndexParams,
     distance_metric: str = "cosine",
     build_memory: str | None = None,
+    force_rebuild: bool = False,
 ) -> None:
     """Ensure the chosen ANN index exists on the profile's vector table.
 
@@ -393,6 +394,13 @@ def ensure_embedding_ann_index(
     document failed to extract), and `CREATE INDEX ... IF NOT EXISTS` guards only
     the index name, not the table -- so indexing one unconditionally would raise
     and leave the revision stuck in `building` forever.
+
+    ``force_rebuild`` drops the existing index even when the method is unchanged,
+    which is the only way to pick up build-time parameters like ``hnsw_m`` and
+    ``ef_construction``. It belongs here, on the same connection as the create,
+    rather than in the caller: a drop committed separately leaves the collection
+    with no index at all if the rebuild then fails, and searches keep working
+    (via sequential scan) so nothing surfaces it.
     """
     if engine.dialect.name != "postgresql":
         return
@@ -421,7 +429,7 @@ def ensure_embedding_ann_index(
         # method switch actually takes effect (CREATE INDEX IF NOT EXISTS alone
         # would silently keep the old one).
         existing_method = index_access_method(conn, index_name)
-        if existing_method is not None and existing_method != method:
+        if existing_method is not None and (force_rebuild or existing_method != method):
             conn.execute(text(f"DROP INDEX IF EXISTS {index_name}"))
         conn.execute(text(ddl))
         conn.commit()
