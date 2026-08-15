@@ -1,71 +1,111 @@
 # cementic — architecture & design
 
-<!-- session-handoff:begin (2026-08-13) -->
+<!-- session-handoff:begin (2026-08-15) -->
 ## Where the work stands
 
-Four rounds of code review are done and merged. The current thread is **search
-performance at scale**, driven by a corpus of ~20k PDFs (~700k chunks at the
-observed 34 chunks/document, 768 dimensions).
+The **fourth code review is done, fixed, and merged** — seven commits, `main` at
+`14f9f2a`. Every finding, the commit that closed it, and what stays deliberately
+open are in `notes/code-review-2026-08-14.html`; that note is the record and this
+block does not repeat it.
 
-**Entry point:** ~~one decision, already measured, nothing blocking it~~ —
-*taken and implemented 2026-08-13*; see "Decided — build the ANN index up
-front" below. Next candidates: the two open read-only reviews ("Open review
-findings" below), then the roadmap in `TODO.md`.
+The live corpus is **indexed and searchable for the first time**: collection
+`test` (watching `~/bibs/papers`), 5 documents, 249/249 chunks embedded, 0
+failed, revision 2 `default-03033c91-llama-cpp-bea283a3` active. `collection
+promote` followed by `search` was exercised end to end against the live
+database, which closes the previous handoff's one "not carried forward" item.
 
-**Branch:** `main`, at `46488f3` — everything before this handoff is merged, and
-no `claude/*` branches remain (this session's four were merged and deleted).
-*(Since superseded: the CI pg-startup fix and the up-front-index change landed
-after this was written — `git log` is current.)*
-Nothing is running in the background. Two items were uncommitted when this was
-written: this block and `scripts/measure_index_build_order.py`. If a commit
-accompanied the handoff they are its only contents, on a fresh `claude/*` branch
-— the hook refuses commits on `main`. If not, they are still in the working
-tree. `git status` settles it in one command.
+**Entry point — one decision, already measured, nothing blocking it.** The
+active index was built at `chunk_size = 352`; the shipped default is now **320**.
+Both are correct (0 chunks over the model's 512-token window, measured on this
+corpus), but only 320 keeps the token-budget guard's cheap path — at 352 the
+task prefix pushes every chunk 3 tokens past the skip threshold and each one
+pays an extra tokenize round trip (the guard is
+`RemoteEmbeddingClient.over_budget_tokens` in `embedding_runtime.py`).
+Consequence: the next `cementic start ~/bibs/papers -c test` mints a new
+revision and re-embeds all 274 chunks, roughly 7 minutes, with the current
+revision serving throughout; then `cementic collection promote test`. Either let
+that happen, or pin `chunk_size = 352` in a config file to keep the present
+index. Nothing else is pending.
 
-**Verification:** `./scripts/check.sh` runs all five CI gates in one command and
-reports a missing PostgreSQL as SKIPPED rather than passed. It was green on
-`main` at `46488f3`. Use it — the reason three PG tests reached `main` red is
-that "I ran the tests" meant unit + non-PG only.
+**Branch:** `main`, clean, at `14f9f2a`; no `claude/*` branches remain. This
+block is the only uncommitted change — if a commit accompanied the handoff it is
+that commit's sole content, on a fresh `claude/*` branch (the hook refuses
+`main`). Nothing is running in the background.
 
-**Live database:** collection `test`, 5 documents, 172/172 chunks, revision 1
-`ready`, no active revision. Healthy: zero NULL freshness hashes, all 172 chunks
-satisfy `CURRENT_CONTENT_SQL`. Its vector table predates the filter columns and
-will migrate in place on first use — `ensure_vector_table_schema` adds the
-columns and backfills from the joins, with no re-embedding.
+**Verification:** `./scripts/check.sh`. At `14f9f2a`: 893 tests passing, ruff and
+mypy clean.
 
 ### Environment facts that cost time to rediscover
 
-- **The venv is an editable install of this working tree.** `cementic` runs
-  whatever branch is checked out; check `git branch --show-current` first.
-- **The user merges branches into `main` between turns.** Twice this session a
-  commit failed because the branch had been merged and deleted underneath.
-  Re-check the branch before committing; the guard requires `claude/*`.
-- **Integration tests use a separate `<name>_test` database** and refuse to run
-  otherwise. `pytest tests/unit` never touches Postgres.
-- Postgres answers on `localhost:5432` (pgvector 0.8.3, vectorscale 0.9.0,
-  server 18.3). **`podman` is not usable from the agent sandbox** and **`psql`
-  is not installed** — inspect the database through SQLAlchemy from Python.
-- The container ships stock Postgres tuning: `maintenance_work_mem=64MB`,
-  `shared_buffers=128MB`. cementic now sets the former per-build itself.
-- Commit messages containing dependency-directory names trip a path guard —
-  write the message to a file and use `git commit -F`.
-- Long probes exceed the 2-minute foreground cap; background them and poll for a
-  completion marker, not for first output.
+Carried forward and still true: the venv is an **editable install of this working
+tree** (`cementic` runs whatever branch is checked out); the user **merges
+branches into `main` between turns** (re-check the branch before committing — it
+happened twice more this session); integration tests need a separate `<name>_test`
+database; `podman` and `psql` are unusable from the sandbox, so inspect Postgres
+through SQLAlchemy. New this session:
 
-### Measurement traps that produced wrong numbers this session
+- **The sandbox does not mount `~/bibs`.** Twice I read "I cannot see it" as "it
+  does not exist" and said so — once concluding the user's whole PDF corpus had
+  been deleted. Never infer a path's absence from inside the sandbox.
+- **Timings measured in the sandbox are ~4x slower than the host.** In-sandbox
+  embedding measured 5.9 s/chunk; the host does 1.4 s/chunk. A "the shipped
+  defaults are incompatible" finding was built on the sandbox number and had to
+  be retracted. Timings for user-facing advice must come from host-side evidence
+  (e.g. polling `chunk_embeddings` while the real worker runs).
+- **SIGKILL on a wedged llama.cpp daemon leaves its listening socket bound** —
+  the port accepts connections and hangs forever, with no owning process, until
+  the zombie is reaped. SIGTERM releases it cleanly. Use SIGTERM; if a port is
+  stuck, `llama_cpp.daemon_port` is in neither the embedding-profile nor the
+  runtime fingerprint, so moving it costs no re-embed.
 
-Both are documented at the point of use in
-`scripts/measure_index_build_order.py`, promoted from the scratchpad:
+### Two predicted failures actually occurred, live
 
-- Uniformly random 768-dim vectors sit at near-identical distances, so recall
-  against them measures noise. Cluster the corpus.
-- Assert the plan of every timed query. Without `ANALYZE` the planner declines
-  the index it just built, and forcing an exact baseline with
-  `enable_indexscan = off` leaks onto pooled connections — together these
-  reported a spurious 100× latency gap between the two build orders.
+Both are already in the review as accepted/known, but they are no longer
+theoretical and are worth weighting accordingly:
 
-**Not carried forward:** `cementic collection promote test` then `search -c test`
-against the live database is still unexercised end to end.
+- An **orphaned embedding daemon** ran 21 hours holding the port while cementic
+  had lost its pid record, so `embedding stop` reported "already stopped" and
+  nothing could reclaim it. It was wedged, and it is what stalled the re-index.
+- **`check_health` called that wedged daemon "healthy"**, because it only asks
+  whether `/v1/models` lists the model. `cementic status` said `embedding
+  healthy` while every request hung.
+
+### Numbers measured this session
+
+- **50 chunks/PDF** at `chunk_size = 352` (the old figure of 34 was at 512), so
+  20k PDFs is ~**1M chunks**. "Scale context" below has been corrected to match.
+- **Embedding: 1.4 s/chunk** host-side, roughly linear in batch size. 1M chunks
+  is therefore ~387 hours of continuous embedding — the real ceiling at 20k PDFs
+  is indexing throughput, not query latency.
+- **Search: 214 ms warm end to end, of which 197 ms is embedding the query** — a
+  constant, independent of corpus size. Everything else is 17 ms; a bare KNN over
+  10k vectors is 5.6 ms median / 9.3 ms p90. Search at 20k PDFs should stay
+  ~0.2 s. What users perceive as a slow search is the daemon cold-starting.
+- **RAM is the binding constraint before latency is:** 15 GB total, ~3 GB
+  available, 6.2 GB swap already in use. A 1M-vector HNSW index needs ~3 GB
+  resident, so switch `index.method` to `diskann` well before that (vectorscale
+  0.9.0 and the `diskann` access method are installed and verified present).
+
+### Dead ends — do not repeat
+
+- **The ANN scaling benchmark was abandoned, and its design was the reason.** It
+  built the HNSW index at 10k and then inserted 90k more rows *into the indexed
+  table* (every row paying graph maintenance), while generating 768 Gaussians per
+  row in pure Python — Postgres sat `idle in transaction` waiting on the client.
+  A rewrite must bulk-load first, index once at the end, and generate vectors
+  with numpy. Only the 10k point survived; it is recorded above. The script was
+  discarded, not promoted.
+- **Retracted, do not act on:** the `batch_size`/`llama_embed_timeout_seconds`
+  defaults are fine (see the sandbox-timing note above), and the PDF corpus was
+  never missing.
+- A symbol inventory over the whole package found exactly **one** truly dead
+  symbol, since removed. The package is clean; a future dead-code pass should
+  expect a near-empty result rather than assume the tool is broken.
+
+**Not carried forward:** nothing from the scratchpad was promoted — the fixes,
+tests, review note and README changes are all committed, and the remaining
+artifacts were run logs and throwaway probes whose cases are now covered by
+regression tests.
 <!-- session-handoff:end -->
 
 Design rationale and roadmap for cementic: a CLI that watches directories of
