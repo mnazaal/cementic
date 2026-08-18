@@ -1,11 +1,13 @@
 """Tests for the container-free bootstrap: DB checks and model download."""
 
 import hashlib
+from contextlib import contextmanager
 from unittest.mock import Mock, patch
 
 import pytest
 from pydantic import SecretStr
 
+from cementic import bootstrap as bootstrap_module
 from cementic.bootstrap import Bootstrapper
 from cementic.config import Config
 
@@ -208,6 +210,38 @@ class TestEnsureLlamaModel:
             Bootstrapper(config)._ensure_llama_model()
 
         assert mock_get.call_count == 1
+
+    @patch("cementic.bootstrap.requests.get")
+    def test_the_re_check_inside_the_lock_is_the_one_that_stops_the_waiter(
+        self, mock_get, temp_dir
+    ) -> None:
+        """The second bootstrapper above returns at the *pre-lock* exists check,
+        so it never exercises the in-lock re-check it is named for: deleting that
+        re-check would leave a real waiter re-downloading over the winner's file
+        and the test still green. Here the file appears only while the lock is
+        held, which is exactly the waiter's situation."""
+        config = Config()
+        config.llama_cpp.model_path = "download.gguf"
+        config.bootstrap.auto_download_llama_model = True
+        config.bootstrap.llama_model_sha256 = None
+        model_path = temp_dir / "download.gguf"
+
+        real_file_lock = bootstrap_module.file_lock
+
+        @contextmanager
+        def _winner_finishes_while_we_wait(path, timeout):
+            with real_file_lock(path, timeout=timeout):
+                model_path.write_bytes(b"the winner's file")
+                yield
+
+        with (
+            patch("cementic.config.user_data_dir", return_value=str(temp_dir)),
+            patch.object(bootstrap_module, "file_lock", _winner_finishes_while_we_wait),
+        ):
+            Bootstrapper(config)._ensure_llama_model()
+
+        assert mock_get.call_count == 0
+        assert model_path.read_bytes() == b"the winner's file"
 
     @patch("cementic.bootstrap.requests.get")
     def test_download_rejects_checksum_mismatch_and_removes_temp(self, mock_get, temp_dir) -> None:

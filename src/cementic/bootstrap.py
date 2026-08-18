@@ -84,6 +84,18 @@ def _ensure_sha256(path: Path, expected: str | None) -> None:
         )
 
 
+def _reap_stale_downloads(model_path: Path, *, keep: Path) -> None:
+    """Delete leftover partial downloads for this model, except ``keep``."""
+    for stale in model_path.parent.glob(f".{model_path.name}.*.tmp"):
+        if stale == keep:
+            continue
+        try:
+            stale.unlink()
+        except OSError:
+            # Best effort: a file we cannot remove must not fail the download.
+            _logger.debug("Could not remove stale download %s", stale, exc_info=True)
+
+
 class Bootstrapper:
     """Verifies external runtime dependencies and fetches the embedding model."""
 
@@ -177,6 +189,12 @@ class Bootstrapper:
         # bypassed (say, by an older cementic running concurrently).
         temp_path = model_path.with_name(f".{model_path.name}.{os.getpid()}.tmp")
         temp_path.unlink(missing_ok=True)
+        # A download killed outright (SIGKILL, OOM, reboot) unlinks nothing, and
+        # the next attempt gets a different PID -- so without this sweep every
+        # killed attempt leaked another multi-hundred-MB partial file that
+        # nothing ever reclaimed. Safe under the lock: the only temp file in use
+        # is this one.
+        _reap_stale_downloads(model_path, keep=temp_path)
         max_download_bytes = 5 * 1024 * 1024 * 1024  # 5 GiB
         downloaded = 0
         try:
