@@ -292,3 +292,25 @@ class TestIsManagedProcessAlive:
     @patch("cementic.supervisor.is_pid_running", return_value=True)
     def test_false_on_token_mismatch_recycled_pid(self, _run, _tok) -> None:
         assert is_managed_process_alive(1234, "111") is False
+
+
+def test_unreadable_start_token_is_unknown_not_a_mismatch():
+    """Regression: a token that cannot be *read* -- /proc under hidepid, or a
+    process owned by another user -- is not evidence of PID recycling. Treating
+    it as one made `cementic stop` skip a live worker, so it never joined the
+    not-stopped set and the "nothing left running" branch deleted its state
+    files with "cleared stale state" while it kept indexing."""
+    with (
+        patch("cementic.supervisor.is_pid_running", return_value=True),
+        patch("cementic.supervisor.process_start_token", return_value=None),
+    ):
+        assert is_managed_process_alive(4321, "a-recorded-token") is True
+
+
+def test_a_genuinely_different_start_token_is_still_a_mismatch():
+    """The recycled-PID check must survive the fix above."""
+    with (
+        patch("cementic.supervisor.is_pid_running", return_value=True),
+        patch("cementic.supervisor.process_start_token", return_value="other"),
+    ):
+        assert is_managed_process_alive(4321, "a-recorded-token") is False

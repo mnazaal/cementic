@@ -108,8 +108,9 @@ def is_managed_process_alive(pid: int, start_token: str | None) -> bool:
 
     When ``start_token`` is known it must match the live process's current start
     token; a mismatch means the PID was recycled by an unrelated process, so this
-    returns False. When ``start_token`` is None (unknown), it falls back to a
-    bare PID check for backward compatibility.
+    returns False. When the token is unknown -- not recorded (state written by an
+    older version) or not readable -- it falls back to a bare PID check, because
+    "cannot tell" must not be reported as "not ours".
     """
     if pid <= 0:
         return False
@@ -117,7 +118,17 @@ def is_managed_process_alive(pid: int, start_token: str | None) -> bool:
         return False
     if start_token is None:
         return True
-    return process_start_token(pid) == start_token
+    live_token = process_start_token(pid)
+    if live_token is None:
+        # The token could not be *read* -- /proc mounted with hidepid, or a
+        # process owned by another user in a namespace -- which is not evidence
+        # of a mismatch. Treating it as one made `cementic stop` skip a live
+        # worker, so it never joined the not-stopped set and the "nothing left
+        # running" branch deleted its state files with "cleared stale state"
+        # while it kept indexing: the exact outcome the EPERM handling in
+        # is_pid_running exists to prevent, reached through a different door.
+        return True
+    return live_token == start_token
 
 
 def load_supervisor_state(state_path: Path) -> SupervisorState:
