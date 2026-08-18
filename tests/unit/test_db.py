@@ -6,11 +6,13 @@ import pytest
 
 from cementic.db import (
     REQUIRED_DB_EXTENSIONS,
+    Base,
     _ensure_ann_access_method,
     create_tables,
     ensure_embedding_ann_index,
     ensure_vector_extensions,
     get_engine,
+    utc_now,
 )
 from cementic.index_strategies import IndexParams
 
@@ -155,3 +157,73 @@ def test_ensure_embedding_ann_index_rejects_unsupported_metric() -> None:
             distance_metric="euclidean",
         )
     mock_engine.connect.assert_not_called()
+
+
+class TestActiveRevisionIndexRetrofit:
+    """Adding the one-active-per-collection index must not brick an upgrade."""
+
+    def _seed(self, engine, statuses: list[tuple[int, str, str]]) -> None:
+        from sqlalchemy import text as sa_text
+
+        with engine.begin() as conn:
+            for index, (rid, collection, status) in enumerate(statuses):
+                conn.execute(
+                    sa_text(
+                        "INSERT INTO pipeline_revisions (id, collection, status, label, "
+                        "extractor_profile_id, chunk_profile_id, embedding_profile_id, "
+                        "created_at) VALUES (:i, :c, :s, :l, 1, :cp, 1, :t)"
+                    ),
+                    {
+                        "i": rid,
+                        "c": collection,
+                        "s": status,
+                        "l": f"r{rid}",
+                        "cp": index + 1,
+                        "t": utc_now().isoformat(),
+                    },
+                )
+
+    def test_duplicate_actives_are_repaired_instead_of_aborting_startup(self, tmp_path):
+        """Regression: `CREATE UNIQUE INDEX ... WHERE status='active'` fails on a
+        database that already holds two actives -- the exact corruption the index
+        exists to prevent. create_tables runs at the top of both the watcher and
+        the worker, so `cementic start` died with an IntegrityError traceback and
+        no cementic command could repair it."""
+        from sqlalchemy import create_engine
+        from sqlalchemy import text as sa_text
+
+        engine = create_engine(f"sqlite:///{tmp_path / 'retrofit.db'}")
+        Base.metadata.create_all(engine)
+        self._seed(engine, [(9001, "c", "active"), (9002, "c", "active")])
+
+        create_tables(engine)
+
+        with engine.connect() as conn:
+            rows = {
+                row[0]: row[1]
+                for row in conn.execute(
+                    sa_text("SELECT id, status FROM pipeline_revisions")
+                )
+            }
+        # The newest wins, which is what every reader already resolved to.
+        assert rows == {9001: "retired", 9002: "active"}
+
+    def test_one_active_per_other_collection_is_left_alone(self, tmp_path):
+        """The repair must be per collection, not a global 'keep one active'."""
+        from sqlalchemy import create_engine
+        from sqlalchemy import text as sa_text
+
+        engine = create_engine(f"sqlite:///{tmp_path / 'multi.db'}")
+        Base.metadata.create_all(engine)
+        self._seed(engine, [(1, "a", "active"), (2, "b", "active"), (3, "b", "active")])
+
+        create_tables(engine)
+
+        with engine.connect() as conn:
+            rows = {
+                row[0]: row[1]
+                for row in conn.execute(
+                    sa_text("SELECT id, status FROM pipeline_revisions")
+                )
+            }
+        assert rows == {1: "active", 2: "retired", 3: "active"}

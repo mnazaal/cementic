@@ -6,7 +6,8 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import ForeignKey, Index, Integer, String, Text, create_engine, text
+from sqlalchemy import ForeignKey, Index, Integer, String, Text, create_engine, inspect, text
+from sqlalchemy.exc import IntegrityError, OperationalError, ProgrammingError
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship, sessionmaker
 
 from cementic.index_strategies import IndexParams, build_index_ddl
@@ -359,12 +360,44 @@ _ACTIVE_REVISION_UNIQUE_DDL = (
 )
 
 
+#: Retire the extra actives a pre-index database may already hold, keeping the
+#: newest per collection. Two actives is corruption by the invariant's own
+#: definition, and every reader already resolves it this way -- ``ORDER BY id
+#: DESC LIMIT 1`` -- so this makes the stored rows say what search and status
+#: have been reporting all along. Without it the index below cannot be built on
+#: exactly the databases that hit the race it exists to stop, and both workers
+#: die at startup with an IntegrityError that no cementic command can repair.
+_RETIRE_DUPLICATE_ACTIVES_DDL = (
+    "UPDATE pipeline_revisions SET status = 'retired' WHERE status = 'active' "
+    "AND id NOT IN (SELECT MAX(id) FROM pipeline_revisions WHERE status = 'active' "
+    "GROUP BY collection)"
+)
+
+
 def create_tables(engine: Engine) -> None:
     """Create all tables required by the versioned pipeline schema."""
     ensure_vector_extensions(engine)
     Base.metadata.create_all(engine)
     with engine.begin() as conn:
-        conn.execute(text(_ACTIVE_REVISION_UNIQUE_DDL))
+        conn.execute(text(_RETIRE_DUPLICATE_ACTIVES_DDL))
+    try:
+        with engine.begin() as conn:
+            conn.execute(text(_ACTIVE_REVISION_UNIQUE_DDL))
+    except (IntegrityError, ProgrammingError, OperationalError):
+        # `CREATE UNIQUE INDEX IF NOT EXISTS` checks the catalog before taking
+        # its lock, so the two workers `cementic start` spawns can both pass the
+        # check and race: the loser gets a duplicate-key error on pg_class. The
+        # index either exists now or the failure was real -- re-check rather
+        # than guess, since an unhandled raise here kills the worker at startup.
+        if not _active_revision_index_exists(engine):
+            raise
+
+
+def _active_revision_index_exists(engine: Engine) -> bool:
+    """Whether the one-active-per-collection index is present."""
+    return "uq_pipeline_revisions_one_active" in {
+        index["name"] for index in inspect(engine).get_indexes("pipeline_revisions")
+    }
 
 
 def get_session_factory(engine: Engine) -> sessionmaker[Session]:

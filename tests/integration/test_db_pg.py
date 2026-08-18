@@ -282,9 +282,15 @@ class TestAnnIndex:
                 build_memory=build_memory,
             )
 
-            # Check out several connections at once: the one that ran the build
-            # is idle in the pool and must be among the first handed back.
-            conns = [pg_engine.connect() for _ in range(3)]
+            # Drain the whole pool, not a hard-coded three: the build's
+            # connection returns to the *back* of the FIFO queue, so checking
+            # out three happened to reach it only while occupancy was low. With
+            # four or more idle connections -- another pg test holding some, or
+            # -n parallelism -- the tainted connection was never sampled and
+            # this test silently stopped testing anything.
+            pool = pg_engine.pool
+            checkout_count = pool.size() + pool.overflow() + 1
+            conns = [pg_engine.connect() for _ in range(max(checkout_count, 3))]
             try:
                 values = {
                     conn.execute(text("SHOW maintenance_work_mem")).scalar()
@@ -347,3 +353,42 @@ class TestAnnIndex:
                 params=IndexParams(),
                 distance_metric="euclidean",
             )
+
+
+@pytest.mark.pg
+class TestActiveRevisionIndexConcurrency:
+    """create_tables runs in both workers at once; the index DDL must tolerate it."""
+
+    def test_two_concurrent_create_tables_calls_both_succeed(self, pg_engine):
+        """Regression: `CREATE UNIQUE INDEX IF NOT EXISTS` checks the catalog
+        *before* taking its lock, so the two processes `cementic start` spawns
+        can both pass the check and race. The loser got a duplicate-key error on
+        pg_class -- not a RuntimeError, so runner.py let it through as a raw
+        traceback and the worker "exited immediately" on the first start after
+        every upgrade."""
+        import threading
+
+        from cementic.db import _active_revision_index_exists, create_tables
+
+        with pg_engine.begin() as conn:
+            conn.execute(text("DROP INDEX IF EXISTS uq_pipeline_revisions_one_active"))
+
+        outcomes: list[str] = []
+        barrier = threading.Barrier(4)
+
+        def run() -> None:
+            barrier.wait()
+            try:
+                create_tables(pg_engine)
+                outcomes.append("ok")
+            except Exception as error:  # noqa: BLE001 - the failure is the point
+                outcomes.append(type(error).__name__)
+
+        threads = [threading.Thread(target=run) for _ in range(4)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        assert outcomes == ["ok"] * 4, outcomes
+        assert _active_revision_index_exists(pg_engine)
