@@ -41,6 +41,9 @@ except Exception:
 PY
 }
 
+# CI's first step on every job; a version bump that skips `uv lock` fails all
+# of CI while every local gate stays green -- which is how v0.2.0 shipped red.
+run lockfile          uv lock --check
 run ruff              ruff check src/ tests/
 run mypy              mypy src/
 run unit              pytest tests/unit -q
