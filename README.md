@@ -27,16 +27,16 @@ This keeps old search available while a new extractor, chunking policy, or embed
 ## Installation
 
 ```bash
-# Beta from GitHub tag (Linux-first):
-pipx install "git+https://github.com/mnazaal/cementic.git@v0.1.0b1"
+# From GitHub tag (Linux-first):
+pipx install "git+https://github.com/mnazaal/cementic.git@v0.2.0"
 # or:
-uv tool install "git+https://github.com/mnazaal/cementic.git@v0.1.0b1"
+uv tool install "git+https://github.com/mnazaal/cementic.git@v0.2.0"
 
 # From source (development):
 uv pip install -e ".[dev]"
 ```
 
-The beta is verified for Linux with Python 3.10-3.12. macOS and Windows are
+cementic is verified for Linux with Python 3.10-3.12. macOS and Windows are
 best-effort until tested. Installing `llama-cpp-python[server]` builds llama.cpp
 from source on platforms without a prebuilt wheel, which needs a C/C++ toolchain
 and can take a while; if CMake reports it cannot find a compiler named `cc`, set

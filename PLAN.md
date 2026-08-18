@@ -244,13 +244,17 @@ shape as the 2026-08-14 note.
 
 Rough sizing: batches 1–4 are one focused session; 5–9 one to two more.
 
-## Plan of record — v1.0.0 release (2026-08-19)
+## Plan of record — zero-rough-edges release (2026-08-19; shipped as v0.2.0)
 
-**Goal.** Ship v1.0.0 with zero rough edges: every known defect either fixed
+**Goal.** Ship a release with zero rough edges: every known defect either fixed
 with a regression test or documented as a limitation with recorded evidence,
 the one code path no test evidence covers exercised against the live system,
 and the release mechanics done. "Rough edge" is defined by the user's
 criterion: anything a real user would hit and be surprised by.
+
+**Re-versioned 2026-08-18: this shipped as `v0.2.0`, not `v1.0.0`.** The work
+is unchanged; the user judged the 1.0 stability promise premature after days of
+single-user use. The bar for a future v1 is recorded below ("Road to v1").
 
 **Where this starts from.** `main` at `c34b57f` — fifth review closed,
 adversarial re-review closed, all five `./scripts/check.sh` gates green.
@@ -261,7 +265,7 @@ Working branch: `claude/v1-release`. Current version: `0.1.0b1`.
 | Decision | Choice | Rejected alternative and why |
 |---|---|---|
 | chunk_size | Re-embed at the shipped **320** | Pinning 352 kept the old index but paid a tokenize round trip per chunk forever and left config diverged from the default |
-| Release form | **Annotated git tag `v1.0.0`**, no PyPI | PyPI needs an account, a free name, and a publish pipeline nobody has asked for |
+| Release form | **Annotated git tag** (`v0.2.0` after the re-version), no PyPI | PyPI needs an account, a free name, and a publish pipeline nobody has asked for |
 | Piped previews | **Full text kept** | Capping reintroduces the substring-grep breakage the review fixed |
 | Reopened defects | **Both fixed in v1** | Shipping known silent-failure modes contradicts the zero-rough-edges goal |
 | Corpus location | `~/projects/bibs/papers` (5 PDFs, verified readable) | Old `~/bibs/papers` exists but is outside the agent's reach |
@@ -451,19 +455,44 @@ the README documents autostart where `search` is introduced.
 
 ### Exit criteria (all must hold at the tagged commit)
 
-- [ ] Five `./scripts/check.sh` gates green.
-- [ ] Batch 1a: wedged-daemon fake test red-green verified.
-- [ ] Batch 1b: v1.5 prefix test in place, pinning test retired, format
-      version bumped.
-- [ ] Batch 2: §2.9 is fixed-with-test **or** documented-with-evidence — no
-      "suspected" state anywhere.
-- [ ] Batch 3: all seven steps passed against the live database, new revision
-      at 320 active, search returns live paths.
-- [ ] README walked cold with zero text/behaviour mismatches; Known
-      limitations section present.
-- [ ] Version 1.0.0, CHANGELOG cut, tag on merged main, install-from-tag
-      verified in a clean environment.
-- [ ] No unmerged `claude/*` branch left behind.
+- [x] Five `./scripts/check.sh` gates green (last run: at the release commit).
+- [x] Batch 1a: wedged-daemon fake test red-green verified (04e974a).
+- [x] Batch 1b: v1.5 prefix test in place, pinning test retired, format
+      version bumped v1→v2 (9f1d148).
+- [x] Batch 2: §2.9 resolved — move-out case fixed with three tests (e2e one
+      verified red), root-move case documented with the measured evidence
+      table (b1999da).
+- [x] Batch 3: all seven steps passed against the live database 2026-08-18 —
+      remove (5 docs/249 chunks), rebuild 274/274 embedded 0 failed at 320,
+      revision `default-68e212bc-llama-cpp-12f77de0` promoted, search returns
+      live `~/projects/bibs/papers` paths, clean stop. The probe reported
+      `embedding healthy` *during* the build — the busy/wedged disambiguation
+      working live.
+- [x] README walked cold in a fresh venv (install, init postgres, doctor,
+      extract|chunk|embed): one mismatch found and fixed (missing C/C++
+      toolchain note); Known limitations section present (2a5428f).
+- [x] Version cut (re-versioned to 0.2.0), CHANGELOG cut. Remaining, in
+      order (user steps marked): merge `claude/v1-release` → `main` (user),
+      tag `v0.2.0` on main (user), `uv tool install` from the pushed tag in a
+      clean environment (agent can verify once the tag exists; install from
+      local source already verified at the release version).
+- [ ] Tag pushed and install-from-tag verified — the only open item.
+
+### Road to v1 (the user's bar, recorded 2026-08-18)
+
+All four must hold before a 1.0 tag; none is scheduled work yet:
+
+1. **Soak time under real use** — weeks of daily driving on the live corpus
+   without surprises. Confidence comes from use, not review passes.
+2. **More features first** — some of `TODO.md` belongs in a v1: more
+   extractors (`.docx`/`.html`/`.epub`), `cementic add`, richer search
+   output. Which subset is a decision for when v1 planning starts.
+3. **Config/CLI stability confidence** — the config schema and CLI surface
+   should stop moving; recent review cycles changed both repeatedly. A signal:
+   several consecutive releases with no breaking config/CLI change.
+4. **Multi-platform verification** — macOS (and possibly Windows) actually
+   tested rather than "best-effort", since the README ships install
+   instructions for them.
 
 **Sizing.** Batch 1: one focused session. Batch 2: ~1 h timebox plus fix time
 if it reproduces. Batch 3: ~30 min wall clock, mostly waiting. Batches 4–6:
