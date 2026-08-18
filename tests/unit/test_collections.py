@@ -5,6 +5,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from sqlalchemy import create_engine, event
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import sessionmaker
 
 from cementic.collections import (
@@ -566,6 +567,50 @@ class TestPromoteReadyRevision:
         assert outcome.status == "promoted"
         mock_promote.assert_called_once_with(session, "c1", revision)
         assert session.commit.called
+
+    @patch("cementic.collections.compute_revision_counts", return_value=_counts())
+    @patch("cementic.collections.promote_revision")
+    def test_losing_the_promote_race_is_an_outcome_not_a_raw_db_error(
+        self, mock_promote: MagicMock, _mock_counts: MagicMock, _config: Config
+    ) -> None:
+        """Regression: two promotes of *different* ready revisions each lock only
+        their own row, so neither blocks and neither sees the other's pending
+        activation. Only the one-active-per-collection index stops the second --
+        and the loser's raw psycopg2 unique violation, SQL and parameters
+        included, was printed at the user as `collection promote failed: ...`."""
+        session = MagicMock()
+        revision = MagicMock(spec=PipelineRevision)
+        session.query().filter_by().order_by().first.return_value = revision
+        session.commit.side_effect = IntegrityError(
+            "stmt",
+            {},
+            Exception('duplicate key value violates unique constraint '
+                      '"uq_pipeline_revisions_one_active"'),
+        )
+
+        outcome = promote_ready_revision(session, "c1", config=_config)
+
+        assert outcome.status == "lost_race"
+        assert session.rollback.called
+        mock_promote.assert_called_once_with(session, "c1", revision)
+
+    @patch("cementic.collections.compute_revision_counts", return_value=_counts())
+    @patch("cementic.collections.promote_revision")
+    def test_an_unrelated_integrity_error_still_surfaces(
+        self, _mock_promote: MagicMock, _mock_counts: MagicMock, _config: Config
+    ) -> None:
+        """Only the one-active index means "someone promoted first"; anything
+        else is a real fault and must not be reported as a lost race."""
+        session = MagicMock()
+        session.query().filter_by().order_by().first.return_value = MagicMock(
+            spec=PipelineRevision
+        )
+        session.commit.side_effect = IntegrityError(
+            "stmt", {}, Exception("null value in column \"collection\"")
+        )
+
+        with pytest.raises(IntegrityError):
+            promote_ready_revision(session, "c1", config=_config)
 
     @patch("cementic.collections.drop_orphan_vector_tables")
     @patch("cementic.collections.remove_artifacts", return_value=["/a/1.zst", "/a/2.zst"])

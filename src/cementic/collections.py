@@ -8,6 +8,7 @@ from typing import Any, cast
 
 from sqlalchemy import func
 from sqlalchemy.engine import Engine
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from cementic.config import Config
@@ -231,9 +232,10 @@ class PromotionOutcome:
 
     ``status`` is one of ``"promoted"``, ``"no_ready"`` (nothing to promote),
     ``"empty"`` (the ready revision has no live documents), ``"incomplete"`` (it
-    has unfinished work and ``force`` was not set), or ``"blocked_by_failures"``
-    (it built with failures and ``force`` was not set). Every non-promoted
-    outcome leaves the revision untouched.
+    has unfinished work and ``force`` was not set), ``"blocked_by_failures"``
+    (it built with failures and ``force`` was not set), or ``"lost_race"``
+    (a concurrent promote activated a different revision first). Every
+    non-promoted outcome leaves the revision untouched.
 
     ``unremoved_artifacts`` and ``cleanup_error`` describe post-commit cleanup
     of the superseded revision: the promotion itself is durable by then, so
@@ -245,6 +247,15 @@ class PromotionOutcome:
     counts: PipelineCounts | None = None
     unremoved_artifacts: list[str] = field(default_factory=list)
     cleanup_error: str | None = None
+
+
+def _is_one_active_violation(error: IntegrityError) -> bool:
+    """Whether this IntegrityError is the one-active-per-collection index firing.
+
+    Matched by index name so an unrelated constraint violation still surfaces as
+    the fault it is rather than being reported as a lost promote race.
+    """
+    return "uq_pipeline_revisions_one_active" in str(error.orig)
 
 
 def promote_ready_revision(
@@ -279,7 +290,19 @@ def promote_ready_revision(
         return PromotionOutcome("blocked_by_failures", revision=revision, counts=counts)
 
     promote_revision(session, collection, revision)
-    session.commit()
+    try:
+        session.commit()
+    except IntegrityError as error:
+        # The one-active-per-collection index caught a concurrent promote of a
+        # *different* revision: each promote locks only its own row, so neither
+        # blocks, and under READ COMMITTED neither sees the other's pending
+        # activation. Losing that race is an ordinary outcome, not a database
+        # fault -- reporting it as one dumped the raw psycopg2 unique-violation,
+        # SQL and parameters included, at the user.
+        session.rollback()
+        if not _is_one_active_violation(error):
+            raise
+        return PromotionOutcome("lost_race", revision=revision, counts=counts)
     # Only now that the promotion is durable are the superseded revisions'
     # artifact files safe to unlink, and their vector tables safe to drop --
     # the latter also because DROP TABLE takes its own transaction, which would
