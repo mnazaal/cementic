@@ -20,7 +20,9 @@ from cementic.source_watcher import SourceWatcher
 from cementic.validation import validate_collection_name
 
 app = typer.Typer(help="Internal cementic runner")
-console = Console()
+# soft_wrap: this output lands in the background log file, where rich's
+# off-TTY 80-column fallback hard-wrapped paths mid-word.
+console = Console(soft_wrap=True)
 
 
 def _load_config() -> Config:

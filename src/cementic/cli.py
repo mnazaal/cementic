@@ -148,10 +148,13 @@ app.add_typer(collection_app, name="collection")
 app.add_typer(embedding_app, name="embedding")
 app.add_typer(config_app, name="config")
 app.add_typer(init_app, name="init")
-console = Console()
-# Diagnostics for the stdin/stdout filter commands go here so a failure never
-# pollutes the data on stdout (which would otherwise be piped on as content).
-err_console = Console(stderr=True)
+# soft_wrap: off a TTY rich falls back to an 80-column hard wrap, which split
+# paths and aligned rows mid-word in piped or redirected output. Line breaking
+# belongs to the terminal or the consuming program, not to us.
+console = Console(soft_wrap=True)
+# Errors and diagnostics go here so a failure never pollutes the data on
+# stdout (which would otherwise be piped on as content, or break `--json | jq`).
+err_console = Console(stderr=True, soft_wrap=True)
 
 
 def _version_callback(value: bool) -> None:
@@ -225,11 +228,11 @@ def _get_config() -> Config:
         # rich would otherwise consume as markup -- dropping the one detail the
         # message exists to convey.
         except ConfigError as error:
-            console.print(f"[red]config error: {escape(str(error))}[/red]")
+            err_console.print(f"[red]config error: {escape(str(error))}[/red]")
             raise typer.Exit(1)
         except ValidationError as error:
             detail = format_config_error(error, resolve_config_path())
-            console.print(f"[red]config error: {escape(detail)}[/red]")
+            err_console.print(f"[red]config error: {escape(detail)}[/red]")
             raise typer.Exit(1)
         except SettingsError as error:
             # pydantic-settings JSON-parses complex-typed fields from the
@@ -237,8 +240,8 @@ def _get_config() -> Config:
             # ValidationError -- so a plausible spelling like
             # CEMENTIC_EXTRACT_BACKENDS=pdf=pymupdf4llm reached the user as a
             # multi-screen traceback from every command.
-            console.print(f"[red]config error: {escape(str(error))}[/red]")
-            console.print(
+            err_console.print(f"[red]config error: {escape(str(error))}[/red]")
+            err_console.print(
                 "hint: settings that take a list or table are read from the "
                 "environment as JSON, e.g. CEMENTIC_EXTRACT_BACKENDS='{\"pdf\": "
                 "\"pymupdf4llm\"}'"
@@ -308,7 +311,7 @@ def config_path() -> None:
     # one symptom it exists to diagnose.
     problem = config_path_error()
     if problem is not None:
-        console.print(f"config error: {problem}")
+        err_console.print(f"config error: {problem}")
         raise typer.Exit(1)
     active = resolve_config_path()
     typer.echo(str(active if active is not None else default_config_path()))
@@ -343,21 +346,21 @@ def init_postgres(
 ) -> None:
     """Copy static Docker/Podman Postgres setup files for cementic."""
     if directory.exists() and not directory.is_dir():
-        console.print(f"{directory} exists and is not a directory")
+        err_console.print(f"{directory} exists and is not a directory")
         raise typer.Exit(1)
     try:
         non_empty = directory.is_dir() and any(directory.iterdir())
     except OSError as error:
-        console.print(f"cannot read {directory}: {error}")
+        err_console.print(f"cannot read {directory}: {error}")
         raise typer.Exit(1)
     if non_empty and not force:
-        console.print(f"{directory} already exists and is not empty (use --force to overwrite)")
+        err_console.print(f"{directory} already exists and is not empty (use --force to overwrite)")
         raise typer.Exit(1)
 
     template_root = resources.files("cementic") / "templates" / "postgres"
     with resources.as_file(template_root) as source:
         if not source.is_dir():
-            console.print("Postgres setup templates are missing from this installation")
+            err_console.print("Postgres setup templates are missing from this installation")
             raise typer.Exit(1)
         # Overwrite the template files in place rather than clearing the
         # directory first: `--force` used to `rmtree` whatever it was pointed
@@ -366,7 +369,7 @@ def init_postgres(
         try:
             shutil.copytree(source, directory, dirs_exist_ok=True)
         except OSError as error:
-            console.print(f"failed to write setup files to {directory}: {error}")
+            err_console.print(f"failed to write setup files to {directory}: {error}")
             raise typer.Exit(1)
 
     console.print(f"Wrote Postgres setup to {directory}")
@@ -589,8 +592,8 @@ def _require_known_collection(session: Any, collection: str) -> None:
     """
     if collection_exists(session, collection):
         return
-    console.print(f"collection: {collection}")
-    console.print("status: unknown collection (check `cementic collection list`)")
+    err_console.print(f"collection: {collection}")
+    err_console.print("status: unknown collection (check `cementic collection list`)")
     raise typer.Exit(1)
 
 
@@ -599,9 +602,9 @@ def _report_db_error(error: Exception, action: str) -> None:
     if _is_database_unavailable(error):
         _print_database_unavailable(action)
     elif _is_schema_missing(error):
-        console.print(_NO_SCHEMA_HINT)
+        err_console.print(_NO_SCHEMA_HINT)
     else:
-        console.print(f"{action} failed: {error}")
+        err_console.print(f"{action} failed: {error}")
 
 
 _DB_HINT = (
@@ -617,8 +620,8 @@ def _state(ok: bool, ok_word: str, bad_word: str) -> str:
 
 def _print_database_unavailable(action: str) -> None:
     """Print a concise database-unavailable message with a recovery hint."""
-    console.print(f"{action}: database not reachable")
-    console.print(_DB_HINT)
+    err_console.print(f"{action}: database not reachable")
+    err_console.print(_DB_HINT)
 
 
 def _llama_daemon_runtime_status() -> str:
@@ -977,13 +980,13 @@ def start_background(
     try:
         collection = validate_collection_name(collection)
     except ValueError as e:
-        console.print(f"[red]Error: {e}[/red]")
+        err_console.print(f"[red]Error: {e}[/red]")
         raise typer.Exit(1)
 
     missing = [d for d in directories if not Path(d).is_dir()]
     if missing:
         for d in missing:
-            console.print(f"[red]Error: Directory does not exist: {d}[/red]")
+            err_console.print(f"[red]Error: Directory does not exist: {d}[/red]")
         raise typer.Exit(1)
 
     # Absolute from here on: the detached workers and any later `cementic status`
@@ -1019,7 +1022,7 @@ def _start_background_locked(directories: list[str], collection: str) -> None:
         bootstrapper.ensure_for_convert()
         bootstrapper.ensure_for_index()
     except RuntimeError as error:
-        console.print(f"[red]Bootstrap failed before background start: {error}[/red]")
+        err_console.print(f"[red]Bootstrap failed before background start: {error}[/red]")
         raise typer.Exit(1)
 
     base_cmd = [sys.executable, "-m", "cementic.runner"]
@@ -1060,7 +1063,7 @@ def _start_background_locked(directories: list[str], collection: str) -> None:
         # unwritable log dir). Without this the survivor keeps running with no
         # supervisor record, so `cementic stop` could never find it again.
         _terminate_managed(spawned)
-        console.print(f"[red]cementic failed to start: {error}[/red]")
+        err_console.print(f"[red]cementic failed to start: {error}[/red]")
         raise typer.Exit(1)
 
     _save_supervisor_state(
@@ -1076,9 +1079,9 @@ def _start_background_locked(directories: list[str], collection: str) -> None:
     # would leave the user believing indexing started.
     dead = _wait_for_worker_startup(spawned)
     if dead:
-        console.print("[red]cementic failed to start:[/red]")
+        err_console.print("[red]cementic failed to start:[/red]")
         for managed in dead:
-            console.print(f"- {managed.name} exited immediately; see {managed.log_file}")
+            err_console.print(f"- {managed.name} exited immediately; see {managed.log_file}")
         # Stop whatever did come up and clear the record. Leaving a survivor
         # running would hold the collection's advisory lock and make the next
         # `cementic start` refuse with "already running" -- contradicting the
@@ -1146,7 +1149,7 @@ def status(
         try:
             collection = validate_collection_name(collection)
         except ValueError as e:
-            console.print(f"[red]Error: {e}[/red]")
+            err_console.print(f"[red]Error: {e}[/red]")
             raise typer.Exit(1)
 
     state = _load_supervisor_state()
@@ -1183,7 +1186,7 @@ def status(
     )
 
     if health is not None and not health.db_reachable:
-        console.print(_DB_HINT)
+        err_console.print(_DB_HINT)
         # Non-zero so `cementic status && ...` cannot succeed against a database
         # cementic could not reach; every other database-backed command exits 1.
         raise typer.Exit(1)
@@ -1375,12 +1378,12 @@ def start_embedding_runtime() -> None:
     try:
         Bootstrapper(config).ensure_embedding_runtime()
     except RuntimeError as error:
-        console.print(f"embedding start failed: {error}")
+        err_console.print(f"embedding start failed: {error}")
         raise typer.Exit(1)
     try:
         client = get_llama_cpp_runtime_client(config=config, autostart=True)
     except Exception as error:
-        console.print(f"embedding start failed: {error}")
+        err_console.print(f"embedding start failed: {error}")
         raise typer.Exit(1)
     console.print("embedding: running")
     # Report the probed dimension, not the configured fallback: this command's
@@ -1405,7 +1408,7 @@ def stop_embedding_runtime() -> None:
     except RuntimeError as error:
         # The daemon is still up. Saying "stopped" here used to come with
         # discarding its pid file, so nothing could find it again.
-        console.print(f"embedding stop failed: {error}")
+        err_console.print(f"embedding stop failed: {error}")
         raise typer.Exit(1)
     console.print("embedding: stopped" if stopped else "embedding: already stopped")
 
@@ -1429,7 +1432,7 @@ def remove_collection(
     try:
         collection = validate_collection_name(collection)
     except ValueError as e:
-        console.print(f"[red]Error: {e}[/red]")
+        err_console.print(f"[red]Error: {e}[/red]")
         raise typer.Exit(1)
 
     if not force:
@@ -1538,7 +1541,7 @@ def promote_collection(
     try:
         collection = validate_collection_name(collection)
     except ValueError as e:
-        console.print(f"[red]Error: {e}[/red]")
+        err_console.print(f"[red]Error: {e}[/red]")
         raise typer.Exit(1)
 
     try:
@@ -1647,7 +1650,7 @@ def reindex_collection_command(
     try:
         collection = validate_collection_name(collection)
     except ValueError as e:
-        console.print(f"[red]Error: {e}[/red]")
+        err_console.print(f"[red]Error: {e}[/red]")
         raise typer.Exit(1)
 
     try:
@@ -1703,7 +1706,7 @@ def list_collection_revision_command(
     try:
         collection = validate_collection_name(collection)
     except ValueError as e:
-        console.print(f"[red]Error: {e}[/red]")
+        err_console.print(f"[red]Error: {e}[/red]")
         raise typer.Exit(1)
 
     try:
@@ -1771,7 +1774,7 @@ def search(
         try:
             filters = [validate_collection_name(c) for c in filters]
         except ValueError as e:
-            console.print(f"[red]Error: {e}[/red]")
+            err_console.print(f"[red]Error: {e}[/red]")
             raise typer.Exit(1)
 
     searcher = Searcher(_get_config())

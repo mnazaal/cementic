@@ -198,7 +198,9 @@ class TestListRevisionCommand:
         with patch("cementic.cli.get_engine", return_value=sqlite_engine):
             result = runner.invoke(app, ["collection", "revisions", "nocol"])
         assert result.exit_code == 1
-        assert "unknown collection" in result.stdout
+        # On stderr since the error-stream sweep: errors must not pollute the
+        # data stream.
+        assert "unknown collection" in result.stderr
 
     def test_list_revisions_with_data(self, runner, sqlite_engine, sqlite_session):
         config = get_config()

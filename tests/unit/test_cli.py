@@ -2147,6 +2147,72 @@ class _BatchTrackingEmbedProvider(_FakeEmbedProvider):
         return super().embed_batch(texts)
 
 
+class TestErrorStreamDiscipline:
+    """Errors go to stderr; stdout carries only the command's data.
+
+    Regression (§4.2-4.3 of the fifth review): config and database errors
+    printed to *stdout*, so `search q --json | jq` choked on "config error:
+    ..." as if it were data -- and rich's off-TTY 80-column fallback
+    hard-wrapped paths and hints mid-word in piped output.
+    """
+
+    def test_config_error_under_json_flag_keeps_stdout_clean(self, tmp_path, monkeypatch):
+        bad = tmp_path / "cementic.toml"
+        bad.write_text("this is := not toml", encoding="utf-8")
+        monkeypatch.setenv("CEMENTIC_CONFIG", str(bad))
+        # _get_config caches process-wide; an earlier test's good config would
+        # mask the broken file this test plants.
+        monkeypatch.setattr(cementic_cli, "_config", None)
+
+        result = runner.invoke(app, ["search", "q", "--json"])
+
+        assert result.exit_code == 1
+        assert result.stdout.strip() == ""
+        assert "config error" in result.stderr
+
+    @patch("cementic.cli.get_session_factory")
+    @patch("cementic.cli.get_engine")
+    def test_unknown_collection_error_is_on_stderr(
+        self, mock_get_engine, mock_get_session_factory
+    ):
+        mock_session = MagicMock()
+        mock_session.__enter__.return_value = mock_session
+        mock_session.__exit__.return_value = False
+        mock_get_session_factory.return_value = lambda: mock_session
+
+        with patch("cementic.cli.collection_exists", return_value=False):
+            result = runner.invoke(app, ["status", "-c", "nosuch"])
+
+        assert result.exit_code == 1
+        assert "unknown collection" in result.stderr
+        assert "unknown collection" not in result.stdout
+
+    def test_long_paths_are_not_hard_wrapped_off_tty(self):
+        long_dir = "/very-long" + "/segment-of-a-directory-path" * 5
+        result = runner.invoke(app, ["start", long_dir])
+
+        assert result.exit_code == 1
+        # The whole path must survive contiguously; the 80-column fallback
+        # used to split it mid-word.
+        assert long_dir in result.stderr
+
+    @patch("cementic.cli.get_engine")
+    def test_database_hint_is_one_unwrapped_stderr_line(self, mock_get_engine):
+        from sqlalchemy.exc import OperationalError
+
+        from cementic.cli import _DB_HINT
+
+        mock_get_engine.side_effect = OperationalError("statement", {}, Exception("down"))
+
+        result = runner.invoke(app, ["collection", "list"])
+
+        assert result.exit_code == 1
+        # The full >100-char hint as one contiguous substring pins soft_wrap;
+        # its presence on stderr pins the stream.
+        assert _DB_HINT in result.stderr
+        assert result.stdout.strip() == ""
+
+
 class TestFilterCommands:
     """extract / chunk / embed stdin-stdout filters (Move 3)."""
 

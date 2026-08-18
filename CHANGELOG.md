@@ -29,6 +29,10 @@
 
 ### Fixed
 
+- **Errors print to stderr, and output is no longer hard-wrapped at 80 columns when
+  piped.** Config and database errors used to land on stdout, so `search --json | jq`
+  choked on `config error: ...` as if it were data; and off a TTY every long path or hint
+  was split mid-word by rich's 80-column fallback, breaking `grep` over the output.
 - **Chunks are no longer embedded truncated.** `pipeline.chunk_size` counts tiktoken
   tokens while `llama_cpp.n_ctx` counts the embedding model's own, and for the default
   model one is up to 1.33 of the other — so at 512 against 512, **93% of full-size chunks
