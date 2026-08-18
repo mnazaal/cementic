@@ -29,18 +29,87 @@
 
 ### Fixed
 
+- **The embedding daemon no longer hangs for three minutes on any runtime-config
+  change.** Restarting a mismatched daemon took the daemon lock and then called a
+  stop that took the same lock again; `flock` is not reentrant even within one
+  process, so `search`, `embedding start` and the pipeline worker each waited out
+  the full 180s timeout and then failed with "another cementic process holds ..."
+  — naming themselves.
+- **`pipeline.chunk_size` values that merely cost a tokenize round trip are
+  allowed again.** The new config check refused everything above 345 at the
+  default `n_ctx = 512`, including 352 — a value measured to truncate nothing and
+  documented as the way to keep an index already built at it — so every command,
+  `config show` included, failed on such a config. Config load now refuses only
+  pairings that *must* truncate; `cementic status --doctor` reports the
+  round-trip cost as a warning, and truncation itself is still caught exactly,
+  per chunk, at embed time.
+- **Upgrading a database that already had two active revisions for one
+  collection no longer bricks `cementic start`.** The new one-active-per-
+  collection index could not be built on exactly the databases that hit the race
+  it exists to prevent: both workers died at startup with an IntegrityError no
+  cementic command could repair. The extra actives are now retired (newest kept,
+  which is what every reader already resolved to) before the index is created.
+- **The two workers no longer race each other creating that index.** `CREATE
+  UNIQUE INDEX IF NOT EXISTS` checks the catalog before taking its lock, so the
+  loser got a duplicate-key error on the first start after every upgrade.
+- **Losing a concurrent `collection promote` reads as a sentence, not a psycopg2
+  dump.** Two promotes of different ready revisions each lock only their own row;
+  the loser now reports "another promote activated a revision first" and changes
+  nothing.
+- **`cementic status --json` reports `current_file: null` when a worker is idle**,
+  not the literal string `"None"`, which every consumer testing truthiness read
+  as a busy worker.
+- **`... | cementic chunk "$UNSET"` reads the pipe again.** Rejecting an empty
+  PATH outright broke this ordinary shell idiom with `Is a directory: '.'`,
+  naming a path the user never typed. An empty PATH at a *terminal* is still a
+  clear error rather than a hang.
+- **A bad `CEMENTIC_CONFIG` is a message, not a traceback.** `~nosuchuser/...`
+  made `Path.expanduser()` raise, so the guard whose whole job is to explain bad
+  config paths crashed from every command.
+- **Config errors caused by the environment name the variable.** `CEMENTIC_DB_URL`
+  was never attributed (the section prefix was applied twice), and section-level
+  validator errors blamed the config file even when the value came from the
+  environment.
+- **`cementic status` exits 1 when its health probe crashes**, and says the
+  database and embedding rows are unknown instead of omitting them — a summary
+  two rows short read as a complete report of a healthy system, and
+  `cementic status 2>/dev/null && deploy` proceeded.
+- **`cementic stop` keeps the supervisor record when a force-kill fails.** It
+  holds the collection and watched directories, and was discarded while the
+  workers were still indexing. A worker whose `/proc` entry cannot be read
+  (hidepid, another uid) is also no longer cleared as stale while it keeps
+  running.
+- **Refusals print to stderr.** `promote`, `start`, `stop` and human-mode
+  `search` printed theirs to stdout, so `... 2>errors.log || cat errors.log`
+  showed nothing and a redirected result list ended with an error sentence in it.
+- **`cementic search` distinguishes an unknown collection from one that is not
+  indexed yet**, and no longer leads with "no results" when the name is the
+  problem. Piped previews are no longer cut at 80 columns, which broke substring
+  greps over redirected output.
+- **`cementic embed` names the real stdin line** when a record cannot be
+  embedded; blank lines used to shift the number.
+- **`cementic status --doctor` says when it is ignoring `-c` and `-v`** instead of
+  accepting both and using neither.
+- **Partial model downloads are reaped.** A download killed outright leaked a
+  multi-hundred-MB temp file per attempt, since each attempt used a new PID.
+- **Explaining a failed embedding no longer holds a write transaction open**, and
+  a daemon that goes away mid-explanation no longer converts a terminal `failed`
+  stamp into a released claim the next poll re-fails.
+
 - **The model auto-download is race-safe and reports failures in one line.** Two
   workers bootstrapping at once shared a single fixed temp file — interleaved writes
   could corrupt it, and with the SHA pin opted out the corrupt file was installed
   silently. The download now runs under a file lock (the loser reuses the winner's
-  file), uses a per-process temp name, and a network failure raises one line instead of
-  a raw requests traceback in the background log.
+  file), uses a per-process temp name whose leftovers are reaped on the next attempt,
+  and a network failure raises one line instead of a raw requests traceback in the
+  background log.
 - **Config validation now bounds the numerics and enforces the chunk-size invariant for
   *your* values.** `n_ctx = 0` used to silently disable the token-budget guard (the fix
   for silent truncation), a non-positive `pipeline_worker.poll_interval` hot-spun the
   worker, and out-of-range ports surfaced only as connection errors. A
-  `chunk_size`/`n_ctx` pairing that would embed truncated is refused at load — it was
-  previously only pinned for the shipped defaults.
+  `chunk_size`/`n_ctx` pairing that *must* embed truncated is refused at load — it was
+  previously only pinned for the shipped defaults. (See above for the narrower bound
+  this settled on.)
 - **Config errors name the environment variable when the environment caused them.**
   `CEMENTIC_DB_PORT=bad` used to render `<config file>: [database] port: ...`, sending
   you to edit a file whose value was never read.

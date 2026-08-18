@@ -84,6 +84,22 @@ the second EPERM site, the one command a guard's docstring names. §1 collects t
 <tr><td>§5 trimming</td><td><code>ffc2f0b</code></td><td>net −40 lines; the dataclasses are now the JSON contract</td></tr>
 <tr><td>§6 test gaps</td><td><code>5263d34</code></td><td>migration-commit test verified red on the unfixed code; embed validation landed with §1/§4.4</td></tr>
 </table>
+<p><strong>Adversarial re-review — 2026-08-18.</strong> The fixes above were then reviewed by six
+reviewers primed to refute, with disjoint scopes and no sight of each other's work; every claim was
+re-verified in the parent before anything was changed. It found <strong>six new defects introduced by the
+fixes themselves</strong>, three of them breaks-user: the daemon lock taken twice in one process (a
+deterministic 180s hang on every runtime-config change, caught in the wild during the review); a
+<code>chunk_size</code> validator that refused 352, the value PLAN.md documents as the way to keep the live
+index, failing every command including <code>config show</code>; and a partial unique index that could not be
+built on exactly the databases it existed to protect, plus an unguarded DDL race between the two workers.
+Also: <code>chunk ""</code> rejecting piped stdin, and a <code>"None"</code> string in <code>status --json</code>.
+Two §4.1 items marked closed above were in fact still live (<code>search</code>'s unknown-vs-unindexed wording,
+<code>--doctor</code> silently ignoring <code>-c</code>/<code>-v</code>) and are now fixed. The refusal-stream sweep
+was extended to <code>promote</code>/<code>start</code>/<code>stop</code>/<code>search</code> and
+<code>runner.py</code>, which had kept printing failures to stdout against the README's own convention.
+<strong>Lesson: a fix reviewed only by the pass that wrote it is unfinished.</strong> See the commits from
+<code>3f5e20d</code> onward on the same branch; all five gates green.</p>
+
 <p><strong>Kept / still open</strong>, with reasons:
 §2.9's directory-move blindness stays open — it was tagged unverified and needs a repro before any fix (tracked in PLAN.md).
 From §5: the per-section TOML re-parse is kept (caching on path+mtime risks stale-file flakiness in tests for a

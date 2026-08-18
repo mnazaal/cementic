@@ -25,9 +25,10 @@ Consequence: the next `cementic start ~/bibs/papers -c test` mints a new
 revision and re-embeds all 274 chunks, roughly 7 minutes, with the current
 revision serving throughout; then `cementic collection promote test`. Either let
 that happen, or pin `chunk_size = 352` in a config file to keep the present
-index. Nothing else was pending at handoff time. *(Correction 2026-08-18: the
-fifth review has since run and its findings are open — see "Plan of record"
-below.)*
+index. Nothing else was pending at handoff time. *(Update 2026-08-18: the fifth review
+and an adversarial re-review of its fixes have since run and are closed — see
+"Plan of record" below. Pinning `chunk_size = 352` still works: an over-strict
+validator that refused it was one of the defects the re-review caught.)*
 
 **Branch:** `claude/session-handoff-2026-08-15`, branched from `main` at
 `14f9f2a` and not yet merged — it carries this block, a correction to "Scale
@@ -186,9 +187,10 @@ shape as the 2026-08-14 note.
    paths at 80 columns. Tests pipe the output and assert stream and absence
    of mid-path wraps. This is what unblocks `--json | jq` composability.
 4. **Exit-code normalization (§4.1).** Adopt the convention most commands
-   already follow — 0 ok, 1 operation failed, 2 usage error / unknown name —
-   and move the stragglers to it (`collection remove <unknown>`, `promote`
-   with no ready revision). Document the table in README.
+   already follow — 0 ok, 1 operation failed, 2 usage error (Click's own
+   parser errors) — and move the stragglers to it (`collection remove
+   <unknown>`, `promote` with no ready revision). An unknown *name* is an
+   operation failure, so it exits 1, not 2. Document the table in README.
 5. **Config/runtime hardening (§3.1–3.3, §3.5–3.6).** Bounds on numerics
    (`n_ctx >= 1` closes the guard-disable hole; positive intervals and
    timeouts; port ranges), the chunk_size↔n_ctx invariant enforced at config
@@ -386,11 +388,12 @@ it matters.
 
 ## Review history and what is still open
 
-**Everything found by the first four reviews is fixed and merged**, except the
-items under "Deliberately not done" below. The fifth pass (2026-08-17) is the
-current open findings list — nothing from it is fixed yet. The notes are the
-record of what each found; this section keeps only the engineering *lessons and
-measurements* that have no other home, in the order they were learned.
+**Everything found by the first five reviews is fixed and merged**, except the
+items under "Deliberately not done" below. The fifth pass (2026-08-17) was closed
+on 2026-08-18, and an adversarial re-review of those fixes followed the same day
+(see below). The notes are the record of what each found; this section keeps only
+the engineering *lessons and measurements* that have no other home, in the order
+they were learned.
 
 - [`notes/code-review-2026-08-07.html`](notes/code-review-2026-08-07.html) — first full pass.
 - [`notes/code-review-2026-08-11.html`](notes/code-review-2026-08-11.html) — third
@@ -405,8 +408,21 @@ measurements* that have no other home, in the order they were learned.
   adjacent path the same defect reaches (`status --json`, the initial scan,
   `stop`'s kill loop, `config path`). **Closed 2026-08-18** on
   `claude/review-fixes-2026-08-17`; the note carries a resolution banner mapping
-  finding → commit. Only §2.9's directory-move blindness (unverified, needs a
-  repro) stays open — see "Deliberately not done".
+  finding → commit. Still open from it: §2.9's directory-move blindness
+  (unverified, needs a repro), the TOML re-parse, and three §5 trim candidates —
+  all under "Deliberately not done".
+- **Adversarial re-review of those fixes (2026-08-18)**, six reviewers primed to
+  refute, disjoint scopes, every claim re-verified in-parent before acting. It
+  found that the fixes had introduced six new defects of their own — a daemon
+  lock taken twice in one process (a deterministic 180 s hang on every
+  runtime-config change), a `chunk_size` validator that refused the value this
+  plan documents as the way to keep the live index, a partial unique index that
+  could not be built on the databases it existed to protect, an unguarded DDL
+  race between the two workers, `chunk ""` rejecting piped stdin, and a `"None"`
+  string in the machine-readable `status --json`. **Lesson: a fix reviewed only
+  by the pass that wrote it is unfinished.** The adversarial pass cost about as
+  much as the fifth review and found defects of the same severity, in code that
+  had just been written to close defects.
 
 **Read the 2026-08-17 and 2026-08-14 notes before opening a new review.** Its most useful section
 is not the findings but the ledger of what the earlier passes found and never
