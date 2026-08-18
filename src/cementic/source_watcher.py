@@ -81,9 +81,11 @@ class DocumentEventHandler(FileSystemEventHandler):
         delete_callback: Callable[[str], None] | None = None,
         ignore_directories: Iterable[str] = (),
         watched_roots: Iterable[Path] = (),
+        delete_directory_callback: Callable[[str], None] | None = None,
     ) -> None:
         self.callback = callback
         self.delete_callback = delete_callback
+        self.delete_directory_callback = delete_directory_callback
         self._ignored_directories = set(ignore_directories)
         self._watched_roots = [Path(root) for root in watched_roots]
         self._timers: dict[str, Any] = {}
@@ -156,9 +158,19 @@ class DocumentEventHandler(FileSystemEventHandler):
             self._debounced_process(src_path)
 
     def on_deleted(self, event: FileSystemEvent) -> None:
-        if event.is_directory:
-            return
         src_path = event.src_path.decode() if isinstance(event.src_path, bytes) else event.src_path
+        if event.is_directory:
+            # A directory moved *out* of the watched tree (or rm -r'd) arrives
+            # as one DirDeletedEvent with no per-file deletions -- measured
+            # against watchdog's inotify backend, 2026-08-18. Returning here
+            # left every document under it "present" until the next restart's
+            # missing-file reconciliation, so searches kept matching paths that
+            # no longer existed.
+            if self.delete_directory_callback and not self._is_ignored(
+                str(Path(src_path) / "x")
+            ):
+                self.delete_directory_callback(src_path)
+            return
         timer = self._timers.pop(src_path, None)
         if timer:
             timer.cancel()
@@ -287,6 +299,7 @@ class SourceWatcher:
             self._on_file_deleted,
             ignore_directories=self.config.source_watcher.ignore_directories,
             watched_roots=self._watched_roots,
+            delete_directory_callback=self._on_directory_deleted,
         )
         self._event_handler = event_handler
         for path in self._watched_roots:
@@ -412,6 +425,12 @@ class SourceWatcher:
             self._mark_document_deleted(file_path)
         except Exception as error:
             self._logger.error("Failed to mark deleted %s: %s", file_path, error)
+
+    def _on_directory_deleted(self, dir_path: str) -> None:
+        try:
+            self._mark_documents_deleted_under(dir_path)
+        except Exception as error:
+            self._logger.error("Failed to mark directory deleted %s: %s", dir_path, error)
 
     def _publish_current_file(self, file_path: str) -> None:
         """Publish "now working on X", at most once per interval.
@@ -542,6 +561,44 @@ class SourceWatcher:
         self._logger.info(
             "Marked document deleted: %s (collection=%s)", normalized_path, self.collection
         )
+
+    def _mark_documents_deleted_under(self, dir_path: str) -> None:
+        """Mark every document under a vanished directory deleted.
+
+        The directory is gone, so its path cannot be resolved; the prefix is
+        normalized textually instead, and matched with a trailing separator so
+        ``/a/docs`` never claims ``/a/docs-archive``'s documents.
+        """
+        prefix = str(Path(dir_path).absolute())
+        if self._watched_roots and not any(
+            Path(prefix).is_relative_to(root) or Path(root).is_relative_to(prefix)
+            for root in self._watched_roots
+        ):
+            return
+        with self.Session() as session:
+            documents = (
+                session.query(SourceDocument)
+                .filter(
+                    SourceDocument.collection == self.collection,
+                    SourceDocument.status != "deleted",
+                    SourceDocument.source_path.startswith(prefix + os.sep),
+                )
+                .all()
+            )
+            if not documents:
+                return
+            deleted_paths = [document.source_path for document in documents]
+            for document in documents:
+                document.status = "deleted"
+                document.file_hash = None
+            _purge_document_chunks(session, [document.id for document in documents])
+            session.commit()
+        for source_path in deleted_paths:
+            self._logger.info(
+                "Marked document deleted (directory removed): %s (collection=%s)",
+                source_path,
+                self.collection,
+            )
 
     def _handle_shutdown(self, signum: int, frame: object) -> None:
         """Signal handler: set the shutdown flag and nothing else.

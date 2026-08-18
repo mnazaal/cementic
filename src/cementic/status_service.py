@@ -421,20 +421,42 @@ def check_health(config: Config) -> HealthStatus:
     # known above. A status read must not wait out an in-flight batch.
     embedding_healthy = False
     if embedding_provider == "llama-cpp":
-        from cementic.embedding_runtime import DaemonHealth, build_llama_cpp_client, probe_daemon
+        from cementic.embedding_runtime import (
+            EMBED_PROBE_SECONDS,
+            DaemonHealth,
+            build_llama_cpp_client,
+            probe_daemon,
+        )
 
         try:
-            health = probe_daemon(build_llama_cpp_client(config), config, wait_seconds=0.0)
+            health = probe_daemon(
+                build_llama_cpp_client(config),
+                config,
+                wait_seconds=0.0,
+                # The second stage exercises the embedding path itself: the
+                # model list is served without the model lock, so on its own it
+                # called a daemon healthy that had answered no embedding for 21
+                # hours. Costs up to EMBED_PROBE_SECONDS, and only when the
+                # first stage already said healthy.
+                embed_probe_seconds=EMBED_PROBE_SECONDS,
+            )
         except Exception:
             health = DaemonHealth.DOWN
         # BUSY counts as healthy: the process is confirmed alive and merely
         # mid-batch. WRONG_MODEL does not -- the daemon answered, and what it
         # serves is not what this config asks for. Treating that as healthy is
         # what let a stale daemon look fine to `status` while search and the
-        # worker restarted it from under each other.
+        # worker restarted it from under each other. WEDGED does not either:
+        # it answers listings but no embeddings, with no worker load to explain
+        # the silence.
         embedding_healthy = health in (DaemonHealth.HEALTHY, DaemonHealth.BUSY)
         if health is DaemonHealth.WRONG_MODEL:
             llama_daemon = "running, serving a different model"
+        elif health is DaemonHealth.WEDGED:
+            llama_daemon = (
+                "running but not answering embeddings; restart it with "
+                "`cementic embedding stop && cementic embedding start`"
+            )
     else:
         try:
             from cementic.embedding_runtime import create_provider, runtime_spec_from_config

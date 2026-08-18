@@ -193,7 +193,7 @@ class TestTextPolicyIsPartOfEmbeddingIdentity:
     def test_policy_is_recorded(self):
         payload = self._payload_for("models/nomic-embed-text-v2-moe.Q8_0.gguf")
 
-        assert payload["text_policy"] == "nomic-v2-task-prefix"
+        assert payload["text_policy"] == "nomic-task-prefix"
 
     def test_a_renamed_model_records_a_different_policy(self):
         payload = self._payload_for("models/renamed.gguf")

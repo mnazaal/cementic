@@ -380,3 +380,114 @@ class TestDocumentEventHandler:
         handler.on_modified(event)
         time.sleep(0.1)
         assert len(callback_called) == 1
+
+
+class TestDirectoryMoveDeletion:
+    """A directory moved out of the watched tree must drop out of search live.
+
+    Measured against watchdog's inotify backend (2026-08-18): `mv watch/sub
+    ../outside/` delivers one DirDeletedEvent and **no per-file deletions**, so
+    the per-file on_deleted path never fires and every document under the moved
+    directory stayed "present" until the next restart's reconciliation --
+    searches kept matching paths that no longer existed (fifth review §2.9).
+    Moves *within* the tree and moves *in* deliver per-file events and were
+    already covered; the watched root itself moving delivers nothing at all
+    (documented limitation -- restart reconciles).
+    """
+
+    def _watcher_with_registered_docs(self, watcher_config, session_factory, watched):
+        sub = watched / "sub"
+        sub.mkdir()
+        inside = sub / "doc.md"
+        inside.write_text("content", encoding="utf-8")
+        sibling = watched / "sibling.md"
+        sibling.write_text("content", encoding="utf-8")
+        sw = SourceWatcher(watcher_config)
+        sw.Session = session_factory
+        sw.collection = "docs"
+        sw._watched_roots = [watched.resolve()]
+        sw._register_document(str(inside))
+        sw._register_document(str(sibling))
+        return sw
+
+    def test_documents_under_a_removed_directory_are_marked_deleted(
+        self, watcher_config: Config, watcher_db, temp_dir: Path
+    ) -> None:
+        _engine, session_factory, _db_path = watcher_db
+        watched = temp_dir / "docs"
+        watched.mkdir()
+        sw = self._watcher_with_registered_docs(watcher_config, session_factory, watched)
+
+        outside = temp_dir / "outside"
+        (watched / "sub").rename(outside)  # the move-out that emits no file events
+        sw._on_directory_deleted(str(watched / "sub"))
+
+        with session_factory() as session:
+            by_path = {
+                Path(doc.source_path).name: doc.status
+                for doc in session.query(SourceDocument).all()
+            }
+        assert by_path["doc.md"] == "deleted"
+        assert by_path["sibling.md"] == "pending"
+
+    def test_a_prefix_sharing_sibling_directory_is_not_claimed(
+        self, watcher_config: Config, watcher_db, temp_dir: Path
+    ) -> None:
+        """`/a/docs` vanishing must not delete `/a/docs-archive`'s documents."""
+        _engine, session_factory, _db_path = watcher_db
+        watched = temp_dir / "docs"
+        watched.mkdir()
+        archive = watched / "sub-archive"
+        archive.mkdir()
+        keeper = archive / "keep.md"
+        keeper.write_text("content", encoding="utf-8")
+        sw = self._watcher_with_registered_docs(watcher_config, session_factory, watched)
+        sw._register_document(str(keeper))
+
+        sw._on_directory_deleted(str(watched / "sub"))
+
+        with session_factory() as session:
+            by_path = {
+                Path(doc.source_path).name: doc.status
+                for doc in session.query(SourceDocument).all()
+            }
+        assert by_path["keep.md"] == "pending"
+        assert by_path["doc.md"] == "deleted"
+
+    def test_the_live_event_stream_reaches_the_prefix_delete(
+        self, watcher_config: Config, watcher_db, temp_dir: Path
+    ) -> None:
+        """End to end through a real observer: the DirDeletedEvent produced by
+        an actual move-out must arrive at the directory callback."""
+        import time as time_module
+
+        from watchdog.observers import Observer
+
+        from cementic.source_watcher import DocumentEventHandler
+
+        watched = temp_dir / "docs"
+        sub = watched / "sub"
+        sub.mkdir(parents=True)
+        (sub / "doc.md").write_text("content", encoding="utf-8")
+
+        deleted_dirs: list[str] = []
+        handler = DocumentEventHandler(
+            lambda path: None,
+            lambda path: None,
+            watched_roots=[watched.resolve()],
+            delete_directory_callback=deleted_dirs.append,
+        )
+        observer = Observer()
+        observer.schedule(handler, str(watched), recursive=True)
+        observer.start()
+        try:
+            time_module.sleep(0.3)
+            sub.rename(temp_dir / "outside")
+            deadline = time_module.monotonic() + 5.0
+            while not deleted_dirs and time_module.monotonic() < deadline:
+                time_module.sleep(0.05)
+        finally:
+            observer.stop()
+            observer.join(timeout=5)
+
+        assert deleted_dirs and deleted_dirs[0].endswith("sub")

@@ -850,6 +850,53 @@ class TestProbeDaemon:
 
         assert probe_daemon(client, Config(), wait_seconds=30) is DaemonHealth.BUSY
 
+    def test_a_wedged_daemon_is_detected_by_the_embed_probe(self) -> None:
+        """Regression (the 21-hour incident): /v1/models is served without the
+        model lock, so a daemon whose embedding path was dead answered listings
+        and read as healthy for as long as nobody restarted it."""
+        client = MagicMock(spec=RemoteEmbeddingClient)
+        client.probe_served_runtime.return_value = True
+        client.probe_embedding.return_value = False
+
+        with patch(
+            "cementic.embedding_runtime._worker_load_explains_slow_embeddings",
+            return_value=False,
+        ):
+            health = probe_daemon(client, Config(), embed_probe_seconds=5.0)
+
+        assert health is DaemonHealth.WEDGED
+        client.probe_embedding.assert_called_once_with(5.0)
+
+    def test_a_worker_batch_explains_a_slow_embed_probe(self) -> None:
+        """A live worker mid-batch legitimately holds the model lock for tens
+        of seconds; misreporting that as a wedge would alarm on every index."""
+        client = MagicMock(spec=RemoteEmbeddingClient)
+        client.probe_served_runtime.return_value = True
+        client.probe_embedding.return_value = False
+
+        with patch(
+            "cementic.embedding_runtime._worker_load_explains_slow_embeddings",
+            return_value=True,
+        ):
+            health = probe_daemon(client, Config(), embed_probe_seconds=5.0)
+
+        assert health is DaemonHealth.BUSY
+
+    def test_an_answering_embed_probe_is_healthy(self) -> None:
+        client = MagicMock(spec=RemoteEmbeddingClient)
+        client.probe_served_runtime.return_value = True
+        client.probe_embedding.return_value = True
+
+        assert probe_daemon(client, Config(), embed_probe_seconds=5.0) is DaemonHealth.HEALTHY
+
+    def test_without_the_embed_budget_the_probe_stays_one_stage(self) -> None:
+        """Callers that only need liveness (search's autostart) pay nothing new."""
+        client = MagicMock(spec=RemoteEmbeddingClient)
+        client.probe_served_runtime.return_value = True
+
+        assert probe_daemon(client, Config()) is DaemonHealth.HEALTHY
+        client.probe_embedding.assert_not_called()
+
     def test_a_non_remote_provider_degrades_to_its_own_check(self) -> None:
         client = MagicMock(spec=EmbeddingProvider)
         client.health_check.return_value = False
@@ -948,3 +995,95 @@ class TestDaemonLockIsNotTakenTwice:
             _stop_mismatched_llama_cpp_daemon(config)
 
         assert not pid_file.exists()
+
+
+class TestWorkerLoadCheck:
+    """The wedge/busy disambiguation reads the worker's own state file."""
+
+    def _state_file(self, tmp_path, **fields):
+        from cementic.state import StateManager, WorkerState
+
+        path = tmp_path / "worker.json"
+        manager = StateManager(path)
+        manager.save(WorkerState(**fields))
+        return path
+
+    def _config_with(self, path):
+        config = Config()
+        config.pipeline_worker.state_path = path
+        return config
+
+    def test_live_worker_with_a_current_file_explains_the_load(self, tmp_path) -> None:
+        from cementic.embedding_runtime import _worker_load_explains_slow_embeddings
+
+        path = self._state_file(tmp_path, current_file="/x.pdf", pid=1234, start_token="t")
+        with patch(
+            "cementic.embedding_runtime.is_managed_process_alive", return_value=True
+        ):
+            assert _worker_load_explains_slow_embeddings(self._config_with(path)) is True
+
+    def test_a_crashed_workers_leftover_state_does_not_count(self, tmp_path) -> None:
+        """The PID is token-checked: state left behind by a dead worker must not
+        excuse a wedged daemon."""
+        from cementic.embedding_runtime import _worker_load_explains_slow_embeddings
+
+        path = self._state_file(tmp_path, current_file="/x.pdf", pid=1234, start_token="t")
+        with patch(
+            "cementic.embedding_runtime.is_managed_process_alive", return_value=False
+        ):
+            assert _worker_load_explains_slow_embeddings(self._config_with(path)) is False
+
+    def test_an_idle_worker_does_not_count(self, tmp_path) -> None:
+        from cementic.embedding_runtime import _worker_load_explains_slow_embeddings
+
+        path = self._state_file(tmp_path, pid=1234, start_token="t")
+        with patch(
+            "cementic.embedding_runtime.is_managed_process_alive", return_value=True
+        ):
+            assert _worker_load_explains_slow_embeddings(self._config_with(path)) is False
+
+    def test_an_unreadable_state_file_means_no_explanation(self) -> None:
+        """Never the reason a probe fails: any error reading state degrades to
+        "no explanation", and the caller reports the probe's own result."""
+        from cementic.embedding_runtime import _worker_load_explains_slow_embeddings
+
+        config = Config()
+        config.pipeline_worker.state_path = None
+        assert _worker_load_explains_slow_embeddings(config) is False
+
+
+class TestProbeEmbedding:
+    """The embed probe must respect its budget against a genuinely hung server."""
+
+    def test_a_hung_embeddings_endpoint_fails_the_probe_within_budget(self) -> None:
+        import http.server
+        import threading
+        import time as time_module
+
+        release = threading.Event()
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):  # noqa: N802 - http.server API
+                release.wait(10)  # hang past any test budget until teardown
+
+            def log_message(self, *args):  # silence
+                pass
+
+        server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            client = RemoteEmbeddingClient(
+                host="127.0.0.1",
+                port=server.server_address[1],
+                embedding_dim=4,
+                expected_fingerprint="fp",
+            )
+            start = time_module.monotonic()
+            assert client.probe_embedding(0.3) is False
+            assert time_module.monotonic() - start < 2.0
+        finally:
+            release.set()
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)

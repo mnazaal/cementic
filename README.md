@@ -27,19 +27,22 @@ This keeps old search available while a new extractor, chunking policy, or embed
 ## Installation
 
 ```bash
-# Beta from GitHub tag (Linux-first):
-pipx install "git+https://github.com/mnazaal/cementic.git@v0.1.0b1"
+# From GitHub tag (Linux-first):
+pipx install "git+https://github.com/mnazaal/cementic.git@v0.2.0"
 # or:
-uv tool install "git+https://github.com/mnazaal/cementic.git@v0.1.0b1"
+uv tool install "git+https://github.com/mnazaal/cementic.git@v0.2.0"
 
 # From source (development):
 uv pip install -e ".[dev]"
 ```
 
-The beta is verified for Linux with Python 3.10-3.12. macOS and Windows are
-best-effort until tested. Installing `llama-cpp-python[server]` can take a while
-on some machines; the embedding model itself is downloaded separately on first
-use when auto-download is enabled.
+cementic is verified for Linux with Python 3.10-3.12. macOS and Windows are
+best-effort until tested. Installing `llama-cpp-python[server]` builds llama.cpp
+from source on platforms without a prebuilt wheel, which needs a C/C++ toolchain
+and can take a while; if CMake reports it cannot find a compiler named `cc`, set
+`CC`/`CXX` explicitly (e.g. `CC=gcc CXX=g++ pipx install ...`). The embedding
+model itself is downloaded separately on first use when auto-download is
+enabled.
 
 ## Prerequisites
 
@@ -76,10 +79,15 @@ extensions available.
 
 cementic connects to that database and, on first indexing/search run, validates
 or auto-downloads the configured `llama.cpp` model into the cementic user data
-directory when it is missing. Auto-download is the recommended beta path; use
+directory when it is missing. Auto-download is the recommended path; use
 `cementic status --doctor` to check the resolved model path without downloading.
 If Postgres is not reachable, doctor suggests generating the local setup or
 pointing cementic at your own Postgres.
+
+After the doctor check, run `cementic embedding start` once. It is optional —
+any command that needs embeddings starts the daemon on demand — but a cold
+start loads a ~2 GB model and can take 30 seconds or more, and it is nicer to
+pay that now than inside your first `cementic search`.
 
 ### Running Postgres as a persistent service (optional, Podman + systemd)
 
@@ -109,7 +117,10 @@ cementic status
 cementic collection list
 
 # Search the active revision, falling back to an in-progress build if a
-# collection has never been promoted (1-50 results; default 10)
+# collection has never been promoted (1-50 results; default 10).
+# Starts the embedding daemon on demand: the first search after a reboot
+# can block 30s+ on the model load (a notice is printed to stderr) —
+# `cementic embedding start` ahead of time avoids that.
 cementic search "vector database design" -c research
 
 # Run one document through the pipeline with no database — stdin/stdout filters,
@@ -404,6 +415,32 @@ When using Nomic v2 models, cementic automatically applies task prefixes:
 
 - document embeddings: `search_document: ...`
 - query embeddings: `search_query: ...`
+
+## Known limitations
+
+- **One background session at a time**, by design — see the note under Usage.
+  Multiple directories can share one session; multiple collections cannot run
+  concurrently.
+- **Moving the watched directory itself is invisible until restart.** The
+  filesystem watch delivers no event when the watched root is renamed or moved
+  away, so cementic keeps watching the old location. The next
+  `cementic start` reconciles: documents whose files are gone drop out of
+  search. (Moving or deleting *subdirectories* inside the watched tree is
+  handled live.)
+- **Model identity is matched by filename.** The task-prefix policy for Nomic
+  models is selected from the model file's name; renaming the GGUF (or
+  mirroring it under another name) silently switches to plain, unprefixed
+  embedding. Keep the upstream filename. `cementic embedding start` reports
+  which text policy was selected.
+- **Filtered search recall is approximate.** Collections sharing an embedding
+  profile share one ANN index, and a search restricted to one collection
+  filters candidates during the index scan; a collection holding a very small
+  share of a large shared table can return slightly fewer results than exist.
+  Dedicated per-collection profiles avoid this entirely.
+- **A daemon wedged mid-batch reads as busy until the batch clears.** The
+  health probe treats an unanswered embedding as legitimate load while a live
+  worker is mid-batch; a daemon that wedges at exactly that moment is reported
+  `busy` until the worker's claim times out, then `wedged`.
 
 ## Architecture
 

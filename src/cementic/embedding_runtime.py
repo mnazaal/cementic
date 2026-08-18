@@ -285,6 +285,25 @@ class RemoteEmbeddingClient(EmbeddingProvider):
     def matches_expected_runtime(self) -> bool:
         return self.probe_served_runtime() is True
 
+    def probe_embedding(self, timeout_seconds: float) -> bool:
+        """Whether the embedding endpoint answers a one-token request in time.
+
+        ``/v1/models`` is served without the model lock, so it stays chatty
+        while the embedding path is dead -- which is how a wedged daemon held
+        its port for 21 hours while ``status`` said healthy. Only an actual
+        embedding round trip exercises the path users depend on.
+        """
+        try:
+            response = requests.post(
+                f"{self.base_url}/v1/embeddings",
+                json={"model": self.expected_fingerprint, "input": "ping"},
+                timeout=timeout_seconds,
+            )
+            response.raise_for_status()
+        except Exception:
+            return False
+        return True
+
     def health_check(self) -> bool:
         return self.matches_expected_runtime()
 
@@ -542,10 +561,24 @@ class DaemonHealth(str, Enum):
     WRONG_MODEL = "wrong_model"
     #: No answer and no live process.
     DOWN = "down"
+    #: Answers listings but not embeddings, with no worker load to explain the
+    #: silence: the process is up, the port is held, and the one path users
+    #: depend on is dead.
+    WEDGED = "wedged"
+
+
+#: Budget for the optional embedding-path probe. A warm daemon answers a
+#: one-token embedding well inside a second; five leaves room for a concurrent
+#: search query's embedding to clear the model lock first.
+EMBED_PROBE_SECONDS = 5.0
 
 
 def probe_daemon(
-    client: EmbeddingProvider, config: Config, *, wait_seconds: float = 0.0
+    client: EmbeddingProvider,
+    config: Config,
+    *,
+    wait_seconds: float = 0.0,
+    embed_probe_seconds: float = 0.0,
 ) -> DaemonHealth:
     """Classify the embedding daemon, spending at most ``wait_seconds`` waiting.
 
@@ -557,13 +590,25 @@ def probe_daemon(
     ``wait_seconds=0`` costs one ``/v1/models`` round (a couple of seconds at
     most) and never polls, which is what a status read wants. Only a caller that
     genuinely needs the daemon *now* should pay to wait out a batch.
+
+    ``embed_probe_seconds>0`` adds a second stage after the model list answers:
+    a one-token embedding under that budget. ``/v1/models`` is metadata, served
+    without the model lock, so it cannot see a dead embedding path -- the
+    failure that let a wedged daemon read as healthy for 21 hours. A timed-out
+    probe is only ``WEDGED`` when no live pipeline worker is mid-work;
+    a worker's batch legitimately holds the model lock for tens of seconds,
+    and misreporting that as a wedge would page the user during every index.
     """
     if not isinstance(client, RemoteEmbeddingClient):
         return DaemonHealth.HEALTHY if client.health_check() else DaemonHealth.DOWN
 
     served = client.probe_served_runtime()
     if served is True:
-        return DaemonHealth.HEALTHY
+        if embed_probe_seconds <= 0 or client.probe_embedding(embed_probe_seconds):
+            return DaemonHealth.HEALTHY
+        if _worker_load_explains_slow_embeddings(config):
+            return DaemonHealth.BUSY
+        return DaemonHealth.WEDGED
     if served is False:
         # It answered. Whatever is loaded is not what this config asks for, and
         # no amount of waiting changes that.
@@ -576,6 +621,28 @@ def probe_daemon(
     if wait_seconds > 0 and _poll_until_ready(client, wait_seconds):
         return DaemonHealth.HEALTHY
     return DaemonHealth.BUSY
+
+
+def _worker_load_explains_slow_embeddings(config: Config) -> bool:
+    """Whether a live pipeline worker is mid-work, explaining a slow embed path.
+
+    Reads the worker's own state file: a *live* worker (PID token-checked, so a
+    crashed worker's leftover state does not count) reporting a current file or
+    activity is saturating the daemon legitimately. Never the reason a probe
+    fails -- any error reading state means "no explanation", not "wedged for
+    sure", and the caller still reports the probe's own result.
+    """
+    from cementic.state import StateManager
+
+    try:
+        state = StateManager(config.pipeline_worker.state_path).load()
+    except Exception:
+        return False
+    if not (state.current_file or state.current_activity):
+        return False
+    if not state.pid:
+        return False
+    return is_managed_process_alive(state.pid, state.start_token)
 
 
 def _create_llama_cpp_provider(
