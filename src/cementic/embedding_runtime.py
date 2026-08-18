@@ -43,6 +43,12 @@ from cementic.supervisor import (
 #: pinned by a test; see config.PipelineConfig.chunk_size.
 _TOKEN_RATIO_UPPER_BOUND = 1.45
 
+#: Arithmetic allowance for the task prefix (e.g. "search_document: ") the
+#: client prepends before embedding, in ``chunk.TOKENIZER`` tokens. The real
+#: prefix is 3-4 tokens; 8 keeps the config-time invariant conservative without
+#: putting a tokenizer in the config load path.
+_TASK_PREFIX_TOKEN_ALLOWANCE = 8
+
 #: Budget for a tokenize round trip. Tokenizing is trivial once the model is
 #: loaded, so a long timeout here buys nothing and costs the embedding request
 #: that follows its own budget when the daemon is cold.
@@ -340,10 +346,13 @@ class RemoteEmbeddingClient(EmbeddingProvider):
         return exact if exact > self.n_ctx else None
 
     def _over_budget_message(self, tokens: int) -> str:
+        # No advice sentence here: embed() also serves search queries, which
+        # were told to "Lower pipeline.chunk_size" for a query that was simply
+        # too long. Chunk-context advice is appended by over_budget_reason.
         return (
             f"text is about {tokens} tokens in the embedding model's own tokenizer, "
             f"over its {self.n_ctx}-token context window; the server would embed only "
-            "the head and drop the rest. Lower pipeline.chunk_size."
+            "the head and drop the rest"
         )
 
     def _embed_inputs(self, inputs: str | list[str]) -> list[list[float]]:
@@ -391,10 +400,13 @@ class RemoteEmbeddingClient(EmbeddingProvider):
         """Why ``text`` cannot be embedded, or None if it can.
 
         Lets a caller that got a None back from ``embed_batch`` say *why* rather
-        than reporting a bare failure.
+        than reporting a bare failure. Callers of this method hold chunk text,
+        so the chunk-sizing advice belongs here, not in the shared message.
         """
         over = self.over_budget_tokens(text)
-        return None if over is None else self._over_budget_message(over)
+        if over is None:
+            return None
+        return f"{self._over_budget_message(over)} -- lower pipeline.chunk_size"
 
     @property
     def embedding_dim(self) -> int:
@@ -675,11 +687,21 @@ def _stop_mismatched_llama_cpp_daemon(config: Config) -> None:
 
 
 def stop_llama_cpp_runtime(config: Config) -> bool:
-    """Stop the configured llama.cpp daemon if a live PID file exists."""
+    """Stop the configured llama.cpp daemon if a live PID file exists.
+
+    Runs under the same daemon file lock as start/autostart: unlocked, a stop
+    racing a concurrent autostart could kill the freshly started daemon or
+    unlink the pid file it had just written -- recreating exactly the orphan
+    (daemon holding the port with no record) the lock exists to prevent.
+    """
     pid_file = config.llama_cpp.daemon_pid_file
     if pid_file is None or not pid_file.exists():
         return False
+    with file_lock(_daemon_lock_path(config), timeout=_DAEMON_LOCK_TIMEOUT_SECONDS):
+        return _stop_llama_cpp_runtime_locked(config, pid_file)
 
+
+def _stop_llama_cpp_runtime_locked(config: Config, pid_file: Path) -> bool:
     record = _read_daemon_pid_file(pid_file)
     if record is None:
         pid_file.unlink(missing_ok=True)
@@ -867,8 +889,23 @@ def _wait_for_daemon_ready(
     """
     deadline = time.time() + timeout_seconds
     while time.time() < deadline:
-        if client.matches_expected_runtime():
-            return
+        models = client._list_models()
+        if models:
+            served = [str(model.get("id")) for model in models]
+            if client.expected_fingerprint in served:
+                return
+            # Answering, with a real (non-empty) model list that is not ours.
+            # One daemon serves one model fixed at launch, so waiting out the
+            # rest of the timeout cannot change this answer -- it used to burn
+            # the full budget and then report the generic "did not become
+            # ready" for a definitively wrong model.
+            raise RuntimeError(
+                _daemon_failure_message(
+                    "llama.cpp embedding daemon started but is serving a different "
+                    f"model/runtime than this config expects ({', '.join(served)}).",
+                    config,
+                )
+            )
         if pid is not None and not is_managed_process_alive(pid, start_token):
             raise RuntimeError(
                 _daemon_failure_message(

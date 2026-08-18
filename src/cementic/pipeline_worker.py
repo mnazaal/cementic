@@ -868,7 +868,7 @@ class PipelineWorker:
                         extractor_profile_id=extractor_profile_id,
                         chunk_profile_id=chunk_profile_id,
                     )
-                for (chunk_id, _), embedding in zip(claimed, embeddings):
+                for offset, ((chunk_id, _), embedding) in enumerate(zip(claimed, embeddings)):
                     row = (
                         session.query(ChunkEmbedding)
                         .filter_by(chunk_id=chunk_id, embedding_profile_id=profile_id)
@@ -877,8 +877,20 @@ class PipelineWorker:
                     if row is None:
                         continue
                     if embedding is None:
+                        # Prefer the provider's per-text reason: a chunk over
+                        # the context window used to be stamped with the
+                        # generic "Failed to generate embedding", leaving the
+                        # actual cause -- and the chunk_size fix -- invisible
+                        # in `status --verbose`.
+                        reason = (
+                            getattr(provider, "over_budget_reason", lambda _t: None)(
+                                texts[offset]
+                            )
+                            if provider is not None
+                            else None
+                        )
                         row.status = "failed"
-                        row.error_message = failure_message
+                        row.error_message = reason or failure_message
                     else:
                         row.status = "done"
                         row.error_message = None

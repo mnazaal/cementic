@@ -35,7 +35,7 @@ class TestConfigFile:
     def test_file_values_applied(self, tmp_path, monkeypatch) -> None:
         cfg = tmp_path / "cementic.toml"
         cfg.write_text(
-            '[database]\nhost = "file-host"\nport = 6000\n[pipeline]\nchunk_size = 999\n'
+            '[database]\nhost = "file-host"\nport = 6000\n[pipeline]\nchunk_size = 300\n'
         )
         monkeypatch.setenv("CEMENTIC_CONFIG", str(cfg))
         monkeypatch.delenv("CEMENTIC_DB_HOST", raising=False)
@@ -43,7 +43,7 @@ class TestConfigFile:
         config = Config()
         assert config.database.host == "file-host"
         assert config.database.port == 6000
-        assert config.pipeline.chunk_size == 999
+        assert config.pipeline.chunk_size == 300
 
     def test_env_overrides_file(self, tmp_path, monkeypatch) -> None:
         cfg = tmp_path / "cementic.toml"
@@ -220,9 +220,9 @@ class TestConfig:
 
     def test_pipeline_env_prefix(self):
         """Pipeline settings should use the pipeline env prefix."""
-        with patch.dict(os.environ, {"CEMENTIC_PIPELINE_CHUNK_SIZE": "1024"}):
+        with patch.dict(os.environ, {"CEMENTIC_PIPELINE_CHUNK_SIZE": "300"}):
             config = Config()
-            assert config.pipeline.chunk_size == 1024
+            assert config.pipeline.chunk_size == 300
 
     def test_pipeline_worker_env_prefix(self):
         """Pipeline worker settings should use the worker env prefix."""
@@ -329,6 +329,42 @@ class TestConfig:
             f"{config.llama_cpp.n_ctx}. Either chunks embed truncated, or the "
             "runtime guard pays an exact-count round trip on every chunk."
         )
+
+    @pytest.mark.parametrize(
+        ("section", "payload"),
+        [
+            ("llama_cpp", {"n_ctx": 0}),
+            ("llama_cpp", {"daemon_port": 0}),
+            ("llama_cpp", {"daemon_port": 65536}),
+            ("llama_cpp", {"embedding_dim": 0}),
+            ("llama_cpp", {"daemon_start_timeout_seconds": 0}),
+            ("llama_cpp", {"llama_embed_timeout_seconds": 0}),
+            ("llama_cpp", {"n_gpu_layers": -2}),
+            ("database", {"port": 0}),
+            ("database", {"port": 65536}),
+            ("pipeline_worker", {"poll_interval": 0}),
+            ("pipeline_worker", {"poll_interval": -1}),
+        ],
+    )
+    def test_out_of_range_numerics_are_refused(self, section, payload):
+        """Regression: these passed validation and broke invariants silently --
+        n_ctx=0 disabled the token-budget guard entirely (its cheap path reads
+        a non-positive window as "no budget"), a non-positive poll_interval
+        hot-spun the worker loop, and bad ports surfaced only as connection
+        errors much later."""
+        with pytest.raises(ValidationError):
+            Config(**{section: payload})
+
+    def test_chunk_size_n_ctx_invariant_holds_for_configured_values(self):
+        """Regression: the invariant was only *tested* at the shipped defaults,
+        so a user changing either knob re-opened the silent-truncation hole the
+        defaults were fixed for."""
+        # The old shipped pairing that truncated 93% of full-size chunks.
+        with pytest.raises(ValidationError, match="does not fit"):
+            Config(pipeline={"chunk_size": 512})
+        # A genuinely larger window legitimizes a larger chunk_size.
+        big = Config(pipeline={"chunk_size": 512}, llama_cpp={"n_ctx": 1024})
+        assert big.pipeline.chunk_size == 512
 
     def test_index_method_must_be_supported(self):
         """Index config rejects methods the strategy registry does not provide."""
@@ -450,6 +486,37 @@ class TestExplicitConfigPathIsHonoured:
         assert get_config() is not None
 
 
+class TestEnvErrorsBlameTheVariableNotTheFile:
+    def test_env_caused_error_names_the_variable(self, tmp_path, monkeypatch):
+        """Regression (reproduced live): CEMENTIC_DB_PORT=bad with a valid
+        config file rendered "<file>: [database] port: ..." -- sending the user
+        to edit a file whose value was never even read, since env overrides it."""
+        good = tmp_path / "cementic.toml"
+        good.write_text("[database]\nport = 5432\n", encoding="utf-8")
+        monkeypatch.setenv("CEMENTIC_CONFIG", str(good))
+        monkeypatch.setenv("CEMENTIC_DB_PORT", "not-a-port")
+
+        with pytest.raises(ValidationError) as excinfo:
+            Config()
+        rendered = format_config_error(excinfo.value, resolve_config_path())
+
+        assert "CEMENTIC_DB_PORT" in rendered
+        assert str(good) not in rendered
+
+    def test_file_caused_error_still_names_the_file(self, tmp_path, monkeypatch):
+        bad = tmp_path / "cementic.toml"
+        bad.write_text('[database]\nport = "not-a-port"\n', encoding="utf-8")
+        monkeypatch.setenv("CEMENTIC_CONFIG", str(bad))
+        monkeypatch.delenv("CEMENTIC_DB_PORT", raising=False)
+
+        with pytest.raises(ValidationError) as excinfo:
+            Config()
+        rendered = format_config_error(excinfo.value, resolve_config_path())
+
+        assert str(bad) in rendered
+        assert "[database] port" in rendered
+
+
 class TestConfigErrorsDoNotLeakValues:
     """pydantic embeds the offending value in both str(exc) and errors()["input"],
     so a mistyped credential key would otherwise be printed into the terminal and
@@ -473,7 +540,9 @@ class TestConfigErrorsDoNotLeakValues:
             Config()
         rendered = format_config_error(excinfo.value, None)
         assert "PLACEHOLDER-CANARY-VALUE" not in rendered
-        assert "port" in rendered
+        # The env-attribution rename means the key may appear as
+        # CEMENTIC_DB_PORT rather than "[database] port".
+        assert "port" in rendered.lower()
 
 
 class TestDatabaseUrlIsValidatedAsConfig:

@@ -241,25 +241,42 @@ def _suggest(name: str, candidates: set[str]) -> str:
 
 
 def format_config_error(error: ValidationError, path: Path | None) -> str:
-    """Render a pydantic failure as one line naming the file, section and key.
+    """Render a pydantic failure as one line naming the source, section and key.
 
     Deliberately built from ``loc``/``msg``/``type`` only. ``str(error)`` and
     ``err["input"]`` both embed the offending *value*, so formatting either one
     prints a mistyped ``[database] passwrd`` straight into the terminal and into
     the worker log files the CLI points users at.
+
+    When the failing key is set by a ``CEMENTIC_*`` variable, the message names
+    the variable: env overrides the file, so prefixing the innocent file path
+    (as every error here used to) sent the user to edit a file whose value was
+    never read.
     """
-    section_by_model = {model.__name__: name for name, model in _known_sections().items()}
+    sections = _known_sections()
+    section_by_model = {model.__name__: name for name, model in sections.items()}
     section = section_by_model.get(error.title)
+    env_prefix = None
+    if section is not None:
+        # _known_sections types its values as bare `type`; every section model
+        # is a BaseSettings subclass carrying model_config.
+        env_prefix = getattr(sections[section], "model_config", {}).get("env_prefix")
     lines: list[str] = []
+    any_line_blames_the_file = False
     for item in error.errors():
         location = ".".join(str(part) for part in item["loc"])
         where = section or (str(item["loc"][0]) if item["loc"] else "config")
         field = location or "<section>"
         hint = ""
-        if item["type"] == "extra_forbidden" and section in _known_sections():
-            hint = _suggest(location, _valid_keys(_known_sections()[section]))
-        lines.append(f"[{where}] {field}: {item['msg']}{hint}")
-    location_text = f"{path}: " if path is not None else ""
+        if item["type"] == "extra_forbidden" and section in sections:
+            hint = _suggest(location, _valid_keys(sections[section]))
+        env_name = f"{env_prefix}{location.upper()}" if env_prefix and location else None
+        if env_name is not None and os.environ.get(env_name) is not None:
+            lines.append(f"{env_name} (environment variable): {item['msg']}{hint}")
+        else:
+            any_line_blames_the_file = True
+            lines.append(f"[{where}] {field}: {item['msg']}{hint}")
+    location_text = f"{path}: " if path is not None and any_line_blames_the_file else ""
     return location_text + "; ".join(lines)
 
 
@@ -346,7 +363,7 @@ class DatabaseConfig(_SectionSettings):
     _toml_section = "database"
 
     host: str = Field(default="localhost", description="Database host")
-    port: int = Field(default=5432, description="Database port")
+    port: int = Field(default=5432, ge=1, le=65535, description="Database port")
     name: str = Field(default="cementic", description="Database name")
     user: str = Field(default="cementic", description="Database user")
     password: SecretStr = Field(
@@ -409,21 +426,29 @@ class LlamaCppConfig(_SectionSettings):
         default="models/nomic-embed-text-v2-moe.Q8_0.gguf",
         description="Path to .gguf model file",
     )
-    n_ctx: int = Field(default=512, description="Context window size")
+    # ge=1: n_ctx <= 0 silently disabled the token-budget guard (its cheap
+    # path treats a non-positive window as "no budget"), so every over-long
+    # chunk went back to embedding truncated.
+    n_ctx: int = Field(default=512, ge=1, description="Context window size")
     n_gpu_layers: int = Field(
         default=0,
+        ge=-1,
         description="Number of layers to offload to GPU (-1 for all)",
     )
     embedding_dim: int = Field(
         default=768,
+        ge=1,
         description="Fallback embedding dimension; the live model's dimension is "
         "probed and stored in the profile when available",
     )
     verbose: bool = Field(default=False, description="Enable verbose output")
     daemon_host: str = Field(default="127.0.0.1", description="llama.cpp daemon host")
-    daemon_port: int = Field(default=11555, description="llama.cpp daemon port")
+    daemon_port: int = Field(
+        default=11555, ge=1, le=65535, description="llama.cpp daemon port"
+    )
     daemon_start_timeout_seconds: int = Field(
         default=120,
+        ge=1,
         description="Seconds to wait for the llama.cpp daemon to become ready. "
         "A cold start loads a multi-GB model from disk; the previous 30s default "
         "contradicted cementic's own 'can take 30s+' warning and gave up on "
@@ -432,6 +457,7 @@ class LlamaCppConfig(_SectionSettings):
     )
     llama_embed_timeout_seconds: int = Field(
         default=120,
+        ge=1,
         description="Seconds to wait for an embedding HTTP request to complete; "
         "separate from daemon_start_timeout_seconds since a large batch can "
         "legitimately run far longer than a startup probe should ever wait",
@@ -679,8 +705,11 @@ class PipelineWorkerConfig(_SectionSettings):
         le=128,
         description="Number of chunks to embed in one batch",
     )
+    # gt=0: zero or negative turned the idle wait into a hot spin pinning a
+    # core, with nothing anywhere reporting why.
     poll_interval: float = Field(
         default=1.0,
+        gt=0,
         description="Seconds between polling for pending chunks",
     )
 
@@ -732,6 +761,44 @@ class Config(BaseSettings):
     source_watcher: SourceWatcherConfig = Field(default_factory=SourceWatcherConfig)
     pipeline_worker: PipelineWorkerConfig = Field(default_factory=PipelineWorkerConfig)
     bootstrap: BootstrapConfig = Field(default_factory=BootstrapConfig)
+
+    @model_validator(mode="after")
+    def _chunks_must_fit_the_context_window(self) -> "Config":
+        """Refuse a chunk_size / n_ctx pairing that would embed truncated.
+
+        The invariant was previously only *tested* at the shipped defaults, so
+        a user changing either knob got no check at all -- the exact drift that
+        once truncated 93% of full-size chunks in silence. Enforced with pure
+        arithmetic so no tokenizer enters the config load path: a full chunk
+        plus its task prefix, times the measured worst-case cl100k-to-model
+        token ratio, must clear the window.
+        """
+        if self.pipeline.embedding_provider != "llama-cpp":
+            return self
+        # Imported here, not at module scope: embedding_runtime imports config.
+        from cementic.embedding_runtime import (
+            _TASK_PREFIX_TOKEN_ALLOWANCE,
+            _TOKEN_RATIO_UPPER_BOUND,
+        )
+
+        worst_case = (
+            self.pipeline.chunk_size + _TASK_PREFIX_TOKEN_ALLOWANCE
+        ) * _TOKEN_RATIO_UPPER_BOUND
+        if worst_case > self.llama_cpp.n_ctx:
+            largest_safe = (
+                int(self.llama_cpp.n_ctx / _TOKEN_RATIO_UPPER_BOUND)
+                - _TASK_PREFIX_TOKEN_ALLOWANCE
+            )
+            raise ValueError(
+                f"pipeline.chunk_size={self.pipeline.chunk_size} does not fit "
+                f"llama_cpp.n_ctx={self.llama_cpp.n_ctx}: one tiktoken token can "
+                f"be {_TOKEN_RATIO_UPPER_BOUND} of the model's own, so a full "
+                f"chunk plus its task prefix can reach {worst_case:.0f} model "
+                "tokens and would embed truncated. Use chunk_size <= "
+                f"{largest_safe}, or raise n_ctx only if the model's real "
+                "context length allows it (the default Nomic model caps at 512)."
+            )
+        return self
 
     def _normalize_paths(self) -> None:
         """Expand ``~`` and anchor relative paths to the current directory.

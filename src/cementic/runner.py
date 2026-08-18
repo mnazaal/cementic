@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import typer
 from pydantic import ValidationError
+from pydantic_settings import SettingsError
 from rich.console import Console
 from rich.markup import escape
 
@@ -42,6 +43,12 @@ def _load_config() -> Config:
     except ValidationError as error:
         detail = format_config_error(error, resolve_config_path())
         console.print(f"[red]config error: {escape(detail)}[/red]")
+        raise typer.Exit(1)
+    except SettingsError as error:
+        # Parity with the CLI's _get_config: pydantic-settings raises this (a
+        # ValueError, not a ValidationError) for a non-JSON env value on a
+        # complex-typed field, which otherwise reached this log as a traceback.
+        console.print(f"[red]config error: {escape(str(error))}[/red]")
         raise typer.Exit(1)
 
 
@@ -128,6 +135,12 @@ def run_pipeline_worker(
     except KeyboardInterrupt:
         worker.stop()
         return
+    except RuntimeError as e:
+        # Parity with the source watcher above: a startup RuntimeError (e.g. an
+        # unindexable embedding dimension from _ensure_target_revision) reached
+        # the background log as a traceback that explains nothing.
+        console.print(f"[red]Pipeline worker failed: {e}[/red]")
+        raise typer.Exit(1)
     # A fatal startup failure (already running, DB lock held, embedding runtime
     # unreachable) returns normally from start(), so without this the process
     # exits 0 and any systemd unit or CI check keying on exit status concludes

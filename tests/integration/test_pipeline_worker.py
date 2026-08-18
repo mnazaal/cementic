@@ -76,6 +76,20 @@ class FailingEmbeddingClient(FakeEmbeddingClient):
         raise RuntimeError("injected embedding failure")
 
 
+class OverBudgetEmbeddingClient(FakeEmbeddingClient):
+    """Every text exceeds the model's context window: embed_batch reports each
+    as None and over_budget_reason explains why, as the real client does."""
+
+    def embed_batch(self, texts: list[str]) -> list[list[float] | None]:
+        return [None for _ in texts]
+
+    def over_budget_reason(self, text: str) -> str | None:
+        return (
+            "text is about 999 tokens, over its 512-token context window"
+            " -- lower pipeline.chunk_size"
+        )
+
+
 class BatchOnlyFailureClient(FakeEmbeddingClient):
     """Batch calls fail, individual calls succeed.
 
@@ -522,6 +536,34 @@ class TestPipelineWorkerErrorPaths:
             failed = session.query(ChunkEmbedding).filter_by(status="failed").count()
         assert done > 0, "individually-embeddable chunks must still be saved"
         assert failed == 0
+
+    @pytest.mark.pg
+    def test_over_budget_chunk_failure_names_the_reason(
+        self, pg_setup, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Regression: a chunk over the context window was stamped with the
+        generic "Failed to generate embedding" -- the provider's
+        over_budget_reason existed but only `cementic embed` used it, so
+        `status --verbose` never showed the actual cause or its fix."""
+        config, session_factory, pdf_fixtures_dir = pg_setup
+        collection = "test_over_budget_reason"
+
+        pipeline, source_watcher = _setup_worker(config, session_factory, collection, monkeypatch)
+        source_watcher._register_document(str(pdf_fixtures_dir / "test_doc_a.pdf"))
+        pipeline.embedding_client = FakeEmbeddingClient()
+        revision = pipeline._ensure_target_revision()
+        pipeline._step_extract(revision)
+        pipeline._step_chunk(revision)
+
+        pipeline.embedding_client = OverBudgetEmbeddingClient()
+        pipeline._step_embed(revision)
+
+        with session_factory() as session:
+            failed = session.query(ChunkEmbedding).filter_by(status="failed").all()
+            assert failed, "expected over-budget chunks to be marked failed"
+            assert all(
+                "lower pipeline.chunk_size" in (row.error_message or "") for row in failed
+            )
 
 
 class TestTerminalFailuresAndDeletedDocs:

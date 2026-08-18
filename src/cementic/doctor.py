@@ -90,9 +90,17 @@ def collect_doctor_report(config: Config) -> dict[str, Any]:
     config_error = config_file_error()
 
     def _config_message(path: Any, error: str | None) -> str:
-        """Say which of the three states this is, rather than always "loaded"."""
+        """Say which of the three states this is, rather than always "loaded".
+
+        The error branch is unreachable through the CLI (get_config refuses a
+        broken file before this runs, and the CLI reports that refusal as its
+        own failing report); it stays for library callers holding a Config
+        built while the file is broken.
+        """
         if error is not None:
-            return f"{error}; this file is being ignored and defaults are in use"
+            # Not "ignored and defaults in use": since config load became a
+            # hard error, commands refuse to run on a broken file.
+            return f"{error}; commands will refuse to run until this is fixed"
         if path is None:
             return "no config file; built-in defaults in use (`cementic config init` writes one)"
         return "loaded"
@@ -115,10 +123,26 @@ def collect_doctor_report(config: Config) -> dict[str, Any]:
         with engine.connect() as conn:
             conn.execute(text("SELECT 1"))
             database_ok = True
-            extensions = {name: _extension_check(conn, name) for name in REQUIRED_DB_EXTENSIONS}
-            extension_ok = all(item["status"] in {"ok", "warning"} for item in extensions.values())
-        checks["database"] = {"status": "ok", "reachable": True}
-        checks["extensions"] = extensions
+            checks["database"] = {"status": "ok", "reachable": True}
+            # A failure past this point is about inspecting extensions, not
+            # about the database: it used to fall into the handler below, which
+            # reported an unreachable database (plus the init-postgres hint) for
+            # a server that had just answered SELECT 1.
+            try:
+                extensions = {
+                    name: _extension_check(conn, name) for name in REQUIRED_DB_EXTENSIONS
+                }
+                extension_ok = all(
+                    item["status"] in {"ok", "warning"} for item in extensions.values()
+                )
+                checks["extensions"] = extensions
+            except Exception as extension_error:
+                checks["extensions"] = {
+                    "(inspection)": {
+                        "status": "fail",
+                        "message": f"could not inspect extensions: {extension_error}",
+                    }
+                }
     except Exception as error:
         checks["database"] = {
             "status": "fail",

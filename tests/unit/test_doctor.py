@@ -68,6 +68,31 @@ class TestConfigCheck:
         assert report["checks"]["config"]["status"] == "ok"
 
 
+class TestExtensionFailureIsNotADatabaseFailure:
+    @patch("cementic.doctor._daemon_state", return_value=(True, "reachable"))
+    @patch("cementic.doctor._extension_check", side_effect=RuntimeError("permission denied"))
+    @patch("cementic.doctor.get_engine")
+    def test_extension_inspection_failure_keeps_database_ok(
+        self, mock_get_engine, mock_ext, mock_daemon
+    ) -> None:
+        """Regression: a failure while *inspecting extensions* fell into the
+        database handler, which reported an unreachable database -- with the
+        init-postgres hint -- for a server that had just answered SELECT 1."""
+        conn = MagicMock()
+        mock_get_engine.return_value.connect.return_value.__enter__.return_value = conn
+
+        report = collect_doctor_report(Config())
+
+        assert report["checks"]["database"]["status"] == "ok"
+        assert report["checks"]["database"]["reachable"] is True
+        extensions = report["checks"]["extensions"]
+        assert any(
+            "could not inspect extensions" in payload["message"]
+            for payload in extensions.values()
+        )
+        assert report["ok"] is False
+
+
 class TestDaemonCheck:
     """A busy daemon must not be reported as broken.
 

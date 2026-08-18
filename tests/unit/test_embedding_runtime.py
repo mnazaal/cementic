@@ -437,17 +437,46 @@ class TestAutostartChecksTheModelFirst:
 class TestWaitForDaemon:
     """Tests for _wait_for_daemon_ready."""
 
-    def test_daemon_immediately_ready(self) -> None:
+    @staticmethod
+    def _client(served: list[str] | None, expected: str = "ours") -> MagicMock:
+        """A client whose /v1/models probe reports the given model ids (None =
+        not answering)."""
         client = MagicMock(spec=RemoteEmbeddingClient)
-        client.matches_expected_runtime.return_value = True
+        client._list_models.return_value = (
+            None if served is None else [{"id": model_id} for model_id in served]
+        )
+        client.expected_fingerprint = expected
+        return client
+
+    def test_daemon_immediately_ready(self) -> None:
         # Should not raise
-        _wait_for_daemon_ready(client, timeout_seconds=5, config=Config())
+        _wait_for_daemon_ready(self._client(["ours"]), timeout_seconds=5, config=Config())
 
     def test_daemon_timeout_raises(self) -> None:
-        client = MagicMock(spec=RemoteEmbeddingClient)
-        client.matches_expected_runtime.return_value = False
         with pytest.raises(RuntimeError, match="did not become ready"):
-            _wait_for_daemon_ready(client, timeout_seconds=0.01, config=Config())
+            _wait_for_daemon_ready(self._client(None), timeout_seconds=0.01, config=Config())
+
+    def test_transient_empty_model_list_is_waited_out_not_failed(self) -> None:
+        """An empty list mid-load is not a definitive wrong-model answer."""
+        with pytest.raises(RuntimeError, match="did not become ready"):
+            _wait_for_daemon_ready(self._client([]), timeout_seconds=0.01, config=Config())
+
+    def test_wrong_model_fails_fast_instead_of_waiting_out_the_timeout(
+        self, temp_dir
+    ) -> None:
+        """Regression: a daemon answering /v1/models with a different model is
+        a definitive mismatch (one model per daemon, fixed at launch), yet the
+        loop polled it for the full startup timeout -- up to 120s -- and then
+        reported the generic "did not become ready"."""
+        config = Config()
+        config.llama_cpp.daemon_log_file = temp_dir / "daemon.log"
+
+        started = time.monotonic()
+        with pytest.raises(RuntimeError, match="serving a different"):
+            _wait_for_daemon_ready(
+                self._client(["someone-elses-model"]), timeout_seconds=30, config=config
+            )
+        assert time.monotonic() - started < 5  # did not wait out the 30s budget
 
     def test_dead_daemon_fails_immediately_instead_of_waiting(self, temp_dir) -> None:
         """A child that exits must be noticed, not waited out.
@@ -458,8 +487,7 @@ class TestWaitForDaemon:
         """
         config = Config()
         config.llama_cpp.daemon_log_file = temp_dir / "daemon.log"
-        client = MagicMock(spec=RemoteEmbeddingClient)
-        client.matches_expected_runtime.return_value = False
+        client = self._client(None)
 
         started = time.monotonic()
         with patch("cementic.embedding_runtime.is_managed_process_alive", return_value=False):
@@ -476,8 +504,7 @@ class TestWaitForDaemon:
             "loading model...\nerror loading model: unable to open GGUF\n", encoding="utf-8"
         )
         config.llama_cpp.daemon_log_file = log_file
-        client = MagicMock(spec=RemoteEmbeddingClient)
-        client.matches_expected_runtime.return_value = False
+        client = self._client(None)
 
         with patch("cementic.embedding_runtime.is_managed_process_alive", return_value=False):
             with pytest.raises(RuntimeError) as excinfo:
@@ -492,11 +519,9 @@ class TestWaitForDaemon:
     def test_missing_log_file_is_not_fatal(self, temp_dir) -> None:
         config = Config()
         config.llama_cpp.daemon_log_file = temp_dir / "absent.log"
-        client = MagicMock(spec=RemoteEmbeddingClient)
-        client.matches_expected_runtime.return_value = False
 
         with pytest.raises(RuntimeError, match="did not become ready"):
-            _wait_for_daemon_ready(client, timeout_seconds=0.01, config=config)
+            _wait_for_daemon_ready(self._client(None), timeout_seconds=0.01, config=config)
 
 
 class TestEmbeddingRuntime:

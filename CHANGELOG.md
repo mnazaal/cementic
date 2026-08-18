@@ -29,6 +29,27 @@
 
 ### Fixed
 
+- **Config validation now bounds the numerics and enforces the chunk-size invariant for
+  *your* values.** `n_ctx = 0` used to silently disable the token-budget guard (the fix
+  for silent truncation), a non-positive `pipeline_worker.poll_interval` hot-spun the
+  worker, and out-of-range ports surfaced only as connection errors. A
+  `chunk_size`/`n_ctx` pairing that would embed truncated is refused at load — it was
+  previously only pinned for the shipped defaults.
+- **Config errors name the environment variable when the environment caused them.**
+  `CEMENTIC_DB_PORT=bad` used to render `<config file>: [database] port: ...`, sending
+  you to edit a file whose value was never read.
+- **A chunk over the model's context window now says so.** The worker stamped the
+  generic "Failed to generate embedding"; `status --verbose` now shows the token count,
+  the window, and the `chunk_size` fix. A too-long *query* is no longer advised to
+  "lower pipeline.chunk_size".
+- **`status --doctor` reports a broken config instead of dying on it.** It exited with
+  a one-line error and no report — less output than plain `status` from the one command
+  that exists to diagnose the setup. A failure while inspecting extensions is also no
+  longer misreported as an unreachable database.
+- **`embedding stop` takes the daemon lock**, so it can no longer race a concurrent
+  autostart into an orphaned daemon; and a freshly started daemon serving the wrong
+  model fails fast with the model names instead of burning the whole 120 s startup
+  budget to report "did not become ready".
 - **`collection promote` with no ready revision exits 1.** It was the one
   promoted-nothing outcome that exited 0 (empty, incomplete and blocked all exit 1), so
   `promote && search` proceeded as if a revision had been published. The README documents

@@ -726,6 +726,24 @@ class TestBackgroundCommands:
         assert data["ok"] is False
         assert data["checks"]["database"]["message"] == "down"
 
+    def test_status_doctor_still_reports_when_config_is_broken(self, tmp_path, monkeypatch):
+        """Regression: --doctor died on the config error with no report at all
+        -- the one command that exists to diagnose a broken setup produced
+        *less* output than plain `status`. It now emits a failing report (valid
+        JSON under --json) with the precise error on stderr."""
+        bad = tmp_path / "cementic.toml"
+        bad.write_text("this is := not toml", encoding="utf-8")
+        monkeypatch.setenv("CEMENTIC_CONFIG", str(bad))
+        monkeypatch.setattr(cementic_cli, "_config", None)
+
+        result = runner.invoke(app, ["status", "--doctor", "--json"])
+
+        assert result.exit_code == 1
+        assert "config error" in result.stderr
+        data = json.loads(result.stdout)
+        assert data["ok"] is False
+        assert data["checks"]["config"]["status"] == "fail"
+
     @patch("cementic.cli.collect_doctor_report")
     def test_status_doctor_outputs_human_summary_when_ok(self, mock_collect):
         mock_collect.return_value = {

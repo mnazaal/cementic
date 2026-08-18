@@ -1136,7 +1136,24 @@ def status(
 ) -> None:
     """Show background worker status and collection progress."""
     if doctor:
-        report = collect_doctor_report(_get_config())
+        try:
+            report = collect_doctor_report(_get_config())
+        except typer.Exit:
+            # _get_config already printed the precise config error to stderr.
+            # A broken config is exactly what --doctor exists to diagnose, so
+            # emit the failing report it promises (--json consumers still get
+            # JSON) instead of dying with less output than plain `status`.
+            config_path = resolve_config_path()
+            report = {
+                "ok": False,
+                "checks": {
+                    "config": {
+                        "status": "fail",
+                        "path": str(config_path) if config_path is not None else None,
+                        "message": "config failed to load; the error is printed on stderr",
+                    }
+                },
+            }
         if json_output:
             typer.echo(json.dumps(report, indent=2, sort_keys=True))
         else:
