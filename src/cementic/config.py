@@ -54,6 +54,20 @@ DEFAULT_IGNORED_DIRECTORIES: tuple[str, ...] = (
 )
 
 
+def _expand_user_path(raw: str) -> Path | None:
+    """Expand a leading ``~``, or None when the home directory is unknowable.
+
+    ``Path.expanduser()`` raises RuntimeError for ``~nosuchuser`` (and for ``~``
+    with no HOME). Both callers below are the *diagnostic* path for a bad
+    ``CEMENTIC_CONFIG``, so letting that escape turned "your config path is
+    wrong" into a raw traceback from every command.
+    """
+    try:
+        return Path(raw).expanduser()
+    except RuntimeError:
+        return None
+
+
 def resolve_config_path() -> Path | None:
     """Resolve the active config file path, or None if there isn't one.
 
@@ -67,7 +81,9 @@ def resolve_config_path() -> Path | None:
         # CEMENTIC_CONFIG=~/cementic.toml never matched is_file() (the ~ stays
         # literal), so the variable was silently ignored while the guard that
         # exists to report exactly that judged the same path usable.
-        candidates.append(Path(explicit).expanduser())
+        expanded = _expand_user_path(explicit)
+        if expanded is not None:
+            candidates.append(expanded)
     candidates.append(Path.cwd() / "cementic.toml")
     candidates.append(Path(user_config_dir("cementic")) / "config.toml")
     for candidate in candidates:
@@ -161,7 +177,12 @@ def config_path_error() -> str | None:
     explicit = os.environ.get("CEMENTIC_CONFIG")
     if not explicit:
         return None
-    candidate = Path(explicit).expanduser()
+    candidate = _expand_user_path(explicit)
+    if candidate is None:
+        return (
+            f"CEMENTIC_CONFIG points at {explicit}, whose home directory cannot be "
+            "resolved (no such user)"
+        )
     if candidate.is_file():
         return None
     if candidate.is_dir():
@@ -262,22 +283,71 @@ def format_config_error(error: ValidationError, path: Path | None) -> str:
         # is a BaseSettings subclass carrying model_config.
         env_prefix = getattr(sections[section], "model_config", {}).get("env_prefix")
     lines: list[str] = []
-    any_line_blames_the_file = False
     for item in error.errors():
-        location = ".".join(str(part) for part in item["loc"])
-        where = section or (str(item["loc"][0]) if item["loc"] else "config")
+        parts = [str(part) for part in item["loc"]]
+        # The section can come from the error's own model (a section validated
+        # on its own) or from the first location part (the same section reached
+        # through Config). Without the second case no env_prefix was available
+        # for anything raised through Config(), so nothing was ever attributed.
+        item_section = section
+        if item_section is None and parts and parts[0] in sections:
+            item_section = parts[0]
+            parts = parts[1:]
+        item_prefix = env_prefix
+        if item_section is not None and item_section in sections:
+            item_prefix = getattr(sections[item_section], "model_config", {}).get("env_prefix")
+        location = ".".join(parts)
+        where = item_section or (parts[0] if parts else "config")
         field = location or "<section>"
         hint = ""
-        if item["type"] == "extra_forbidden" and section in sections:
-            hint = _suggest(location, _valid_keys(sections[section]))
-        env_name = f"{env_prefix}{location.upper()}" if env_prefix and location else None
-        if env_name is not None and os.environ.get(env_name) is not None:
+        if item["type"] == "extra_forbidden" and item_section in sections:
+            hint = _suggest(location, _valid_keys(sections[item_section]))
+        env_name = _blaming_env_var(location, item_prefix)
+        if env_name is not None:
             lines.append(f"{env_name} (environment variable): {item['msg']}{hint}")
-        else:
-            any_line_blames_the_file = True
-            lines.append(f"[{where}] {field}: {item['msg']}{hint}")
-    location_text = f"{path}: " if path is not None and any_line_blames_the_file else ""
-    return location_text + "; ".join(lines)
+            continue
+        # Prefix per line, not once around the joined string: a file-caused and
+        # an env-caused error in the same section used to be joined and then
+        # prefixed together, so the env line read as if it came from the file.
+        location_text = f"{path}: " if path is not None else ""
+        line = f"{location_text}[{where}] {field}: {item['msg']}{hint}"
+        if not location:
+            # A whole-section or whole-config validator has no key to blame, so
+            # nothing above can attribute it -- and its inputs may well have come
+            # from the environment. Name the variables actually in effect rather
+            # than sending the user to a file whose values may be overridden.
+            active = _active_env_vars(item_prefix)
+            if active:
+                line += f" (in effect: {', '.join(active)})"
+        lines.append(line)
+    return "; ".join(lines)
+
+
+def _blaming_env_var(location: str, env_prefix: str | None) -> str | None:
+    """The CEMENTIC_* variable responsible for this error location, if any.
+
+    Two shapes reach here: a plain field name, whose variable is the section
+    prefix plus the name, and a field whose validation alias *is* the variable
+    (``CEMENTIC_DB_URL``), where prefixing again produced the nonexistent
+    ``CEMENTIC_DB_CEMENTIC_DB_URL`` and so never attributed the most-documented
+    variable in the project.
+    """
+    if not location:
+        return None
+    if location.startswith("CEMENTIC_") and os.environ.get(location) is not None:
+        return location
+    if env_prefix:
+        candidate = f"{env_prefix}{location.upper()}"
+        if os.environ.get(candidate) is not None:
+            return candidate
+    return None
+
+
+def _active_env_vars(env_prefix: str | None) -> list[str]:
+    """Every set CEMENTIC_* variable belonging to this section, sorted."""
+    if not env_prefix:
+        return []
+    return sorted(name for name in os.environ if name.startswith(env_prefix))
 
 
 #: Config-file problems already reported, so the warning is not repeated once
@@ -764,39 +834,40 @@ class Config(BaseSettings):
 
     @model_validator(mode="after")
     def _chunks_must_fit_the_context_window(self) -> "Config":
-        """Refuse a chunk_size / n_ctx pairing that would embed truncated.
+        """Refuse a chunk_size / n_ctx pairing that *must* embed truncated.
 
         The invariant was previously only *tested* at the shipped defaults, so
         a user changing either knob got no check at all -- the exact drift that
-        once truncated 93% of full-size chunks in silence. Enforced with pure
-        arithmetic so no tokenizer enters the config load path: a full chunk
-        plus its task prefix, times the measured worst-case cl100k-to-model
-        token ratio, must clear the window.
+        once truncated 93% of full-size chunks in silence.
+
+        The bound here is deliberately the one that cannot be argued with: a
+        chunk plus its task prefix that exceeds the window even at one model
+        token per tiktoken token is too long however the text tokenizes. The
+        *likely*-truncation band above it is not refused, because refusing it
+        made `chunk_size = 352` -- a value measured to produce zero over-budget
+        chunks on the live corpus, and the documented way to keep an index
+        already built at it -- fail every command including `config show`.
+        That band costs a tokenize round trip per chunk, not correctness, and
+        `cementic doctor` reports it; truncation itself is caught exactly, per
+        chunk, against the model's own tokenizer by
+        ``RemoteEmbeddingClient.over_budget_tokens``.
         """
         if self.pipeline.embedding_provider != "llama-cpp":
             return self
         # Imported here, not at module scope: embedding_runtime imports config.
-        from cementic.embedding_runtime import (
-            _TASK_PREFIX_TOKEN_ALLOWANCE,
-            _TOKEN_RATIO_UPPER_BOUND,
-        )
+        from cementic.embedding_runtime import _TASK_PREFIX_TOKEN_ALLOWANCE
 
-        worst_case = (
-            self.pipeline.chunk_size + _TASK_PREFIX_TOKEN_ALLOWANCE
-        ) * _TOKEN_RATIO_UPPER_BOUND
-        if worst_case > self.llama_cpp.n_ctx:
-            largest_safe = (
-                int(self.llama_cpp.n_ctx / _TOKEN_RATIO_UPPER_BOUND)
-                - _TASK_PREFIX_TOKEN_ALLOWANCE
-            )
+        smallest_possible = self.pipeline.chunk_size + _TASK_PREFIX_TOKEN_ALLOWANCE
+        if smallest_possible > self.llama_cpp.n_ctx:
             raise ValueError(
-                f"pipeline.chunk_size={self.pipeline.chunk_size} does not fit "
-                f"llama_cpp.n_ctx={self.llama_cpp.n_ctx}: one tiktoken token can "
-                f"be {_TOKEN_RATIO_UPPER_BOUND} of the model's own, so a full "
-                f"chunk plus its task prefix can reach {worst_case:.0f} model "
-                "tokens and would embed truncated. Use chunk_size <= "
-                f"{largest_safe}, or raise n_ctx only if the model's real "
-                "context length allows it (the default Nomic model caps at 512)."
+                f"pipeline.chunk_size={self.pipeline.chunk_size} cannot fit "
+                f"llama_cpp.n_ctx={self.llama_cpp.n_ctx}: a full chunk plus its "
+                f"task prefix is at least {smallest_possible} tokens even if the "
+                "model tokenizes as coarsely as tiktoken, so it would embed "
+                "truncated. Use chunk_size <= "
+                f"{self.llama_cpp.n_ctx - _TASK_PREFIX_TOKEN_ALLOWANCE}, or raise "
+                "n_ctx only if the model's real context length allows it (the "
+                "default Nomic model caps at 512)."
             )
         return self
 

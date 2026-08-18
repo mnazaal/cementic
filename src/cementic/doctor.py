@@ -200,5 +200,47 @@ def collect_doctor_report(config: Config) -> dict[str, Any]:
         ),
     }
 
+    checks["chunk_budget"] = _chunk_budget_check(config)
+
     ok = (config_error is None) and database_ok and extension_ok and model_ok and daemon_ok
     return {"ok": ok, "checks": checks}
+
+
+def _chunk_budget_check(config: Config) -> dict[str, Any]:
+    """Report the chunk_size / n_ctx pairing's effect on the embed fast path.
+
+    Config load refuses only pairings that must truncate. The wider band, where
+    a full chunk *might* exceed the window, is a performance matter -- every
+    chunk pays an exact tokenize round trip -- so it is reported here rather
+    than blocking every command.
+    """
+    from cementic.embedding_runtime import (
+        _TASK_PREFIX_TOKEN_ALLOWANCE,
+        _TOKEN_RATIO_UPPER_BOUND,
+    )
+
+    chunk_size = config.pipeline.chunk_size
+    n_ctx = config.llama_cpp.n_ctx
+    if config.pipeline.embedding_provider != "llama-cpp":
+        return {
+            "status": "ok",
+            "chunk_size": chunk_size,
+            "message": f"not checked for provider {config.pipeline.embedding_provider}",
+        }
+
+    worst_case = (chunk_size + _TASK_PREFIX_TOKEN_ALLOWANCE) * _TOKEN_RATIO_UPPER_BOUND
+    fast_path = worst_case <= n_ctx
+    largest_fast = int(n_ctx / _TOKEN_RATIO_UPPER_BOUND) - _TASK_PREFIX_TOKEN_ALLOWANCE
+    return {
+        "status": "ok" if fast_path else "warning",
+        "chunk_size": chunk_size,
+        "n_ctx": n_ctx,
+        "message": (
+            f"chunk_size {chunk_size} clears the {n_ctx}-token window without a "
+            "per-chunk tokenize round trip"
+            if fast_path
+            else f"chunk_size {chunk_size} is within the {n_ctx}-token window but "
+            f"above the cheap-check bound ({largest_fast}), so every chunk pays an "
+            "exact tokenize round trip while embedding; nothing is truncated"
+        ),
+    }

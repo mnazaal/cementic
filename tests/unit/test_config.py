@@ -17,6 +17,7 @@ from cementic.config import (
     IndexConfig,
     LlamaCppConfig,
     config_file_error,
+    config_path_error,
     format_config_error,
     get_config,
     load_config_file,
@@ -359,12 +360,29 @@ class TestConfig:
         """Regression: the invariant was only *tested* at the shipped defaults,
         so a user changing either knob re-opened the silent-truncation hole the
         defaults were fixed for."""
-        # The old shipped pairing that truncated 93% of full-size chunks.
-        with pytest.raises(ValidationError, match="does not fit"):
+        # The old shipped pairing that truncated 93% of full-size chunks: a full
+        # chunk plus its prefix cannot fit however the model tokenizes.
+        with pytest.raises(ValidationError, match="cannot fit"):
             Config(pipeline={"chunk_size": 512})
         # A genuinely larger window legitimizes a larger chunk_size.
         big = Config(pipeline={"chunk_size": 512}, llama_cpp={"n_ctx": 1024})
         assert big.pipeline.chunk_size == 512
+
+    def test_chunk_size_that_only_costs_the_fast_path_is_allowed(self):
+        """Regression: refusing the *likely*-truncation band made chunk_size=352
+        -- measured to produce zero over-budget chunks on the live corpus, and
+        the documented way to keep an index already built at it -- fail every
+        command, `config show` included. Truncation is caught exactly, per
+        chunk, at embed time; the config guard refuses only the impossible."""
+        config = Config(pipeline={"chunk_size": 352})
+        assert config.pipeline.chunk_size == 352
+
+    def test_doctor_warns_when_the_chunk_budget_loses_the_fast_path(self):
+        """The band the validator no longer refuses is still reported."""
+        from cementic.doctor import _chunk_budget_check
+
+        assert _chunk_budget_check(Config(pipeline={"chunk_size": 352}))["status"] == "warning"
+        assert _chunk_budget_check(Config())["status"] == "ok"
 
     def test_index_method_must_be_supported(self):
         """Index config rejects methods the strategy registry does not provide."""
@@ -656,3 +674,55 @@ class TestBuildMemoryIsValidated:
     def test_rejected_values(self, value):
         with pytest.raises(ValidationError, match="memory size"):
             IndexConfig(build_memory=value)
+
+
+class TestConfigPathDiagnostics:
+    """`CEMENTIC_CONFIG` problems must be one line, never a traceback."""
+
+    def test_unknown_home_directory_is_reported_not_raised(self, monkeypatch):
+        """Regression: `Path.expanduser()` raises RuntimeError for `~nosuchuser`,
+        so `CEMENTIC_CONFIG='~nosuchuser/c.toml' cementic config path` printed a
+        raw traceback from the guard whose whole job is to explain bad paths."""
+        monkeypatch.setenv("CEMENTIC_CONFIG", "~nosuchuser/cementic.toml")
+        problem = config_path_error()
+        assert problem is not None
+        assert "home directory cannot be resolved" in problem
+
+    def test_unknown_home_directory_does_not_break_path_resolution(self, monkeypatch, tmp_path):
+        """resolve_config_path grew the same unguarded expanduser call, so an
+        unresolvable ~user took down every command, not just the diagnostic."""
+        monkeypatch.setenv("CEMENTIC_CONFIG", "~nosuchuser/cementic.toml")
+        monkeypatch.chdir(tmp_path)
+        # Must fall through to the ordinary candidates rather than raising.
+        assert resolve_config_path() is None
+
+
+class TestEnvAttributionCoversEveryShape:
+    """A value that came from the environment must not be blamed on the file."""
+
+    def _error(self, **kwargs) -> ValidationError:
+        try:
+            Config(**kwargs)
+        except ValidationError as error:
+            return error
+        raise AssertionError("expected a ValidationError")
+
+    def test_alias_named_env_var_is_attributed(self, monkeypatch, tmp_path):
+        """Regression: `url_override`'s validation alias *is* the variable name,
+        so prefixing the section produced CEMENTIC_DB_CEMENTIC_DB_URL and the
+        most-documented variable in the project was never attributed."""
+        monkeypatch.setenv("CEMENTIC_DB_URL", "not a url at all")
+        error = self._error()
+        rendered = format_config_error(error, tmp_path / "config.toml")
+        assert "CEMENTIC_DB_URL (environment variable)" in rendered
+        assert str(tmp_path / "config.toml") not in rendered
+
+    def test_section_validator_names_the_active_env_vars(self, monkeypatch, tmp_path):
+        """A model-validator error has an empty loc, so no key can be blamed --
+        but its inputs may still have come from the environment, and pointing at
+        a file whose values are overridden sends the user to edit the wrong
+        thing."""
+        monkeypatch.setenv("CEMENTIC_PIPELINE_CHUNK_SIZE", "64")
+        error = self._error(pipeline={"chunk_overlap": 128})
+        rendered = format_config_error(error, tmp_path / "config.toml")
+        assert "CEMENTIC_PIPELINE_CHUNK_SIZE" in rendered
