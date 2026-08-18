@@ -19,11 +19,13 @@ from cementic.pipeline_worker import (
     revision_is_complete,
 )
 from cementic.revisions import (
+    bucket_revisions_by_status,
     drain_pending_artifact_removals,
     drain_pending_vector_table_drops,
     ensure_revision_ann_index,
     get_active_revision,
     promote_revision,
+    unreferenced_profile_ids,
 )
 from cementic.storage import safe_remove_artifact
 from cementic.vector_store import (
@@ -100,25 +102,14 @@ def list_collections(session: Session) -> list[CollectionSummary]:
         .all()
     }
 
-    active_by_collection: dict[str, PipelineRevision] = {}
-    ready_by_collection: dict[str, PipelineRevision] = {}
-    building_by_collection: dict[str, PipelineRevision] = {}
-    # Ready and building need separate slots, not one "not active" slot chosen
-    # by highest id: a ready revision sitting behind a newer building one is the
-    # normal state after any profile-affecting config change, and collapsing
-    # them hid the promotable revision that `collection promote` targets.
-    for revision in (
-        session.query(PipelineRevision)
-        .filter(PipelineRevision.status.in_(["active", "building", "ready"]))
-        .order_by(PipelineRevision.collection, PipelineRevision.id.desc())
-        .all()
-    ):
-        if revision.status == "active":
-            active_by_collection.setdefault(revision.collection, revision)
-        elif revision.status == "ready":
-            ready_by_collection.setdefault(revision.collection, revision)
-        else:
-            building_by_collection.setdefault(revision.collection, revision)
+    active_by_collection, ready_by_collection, building_by_collection = (
+        bucket_revisions_by_status(
+            session.query(PipelineRevision)
+            .filter(PipelineRevision.status.in_(["active", "building", "ready"]))
+            .order_by(PipelineRevision.collection, PipelineRevision.id.desc())
+            .all()
+        )
+    )
 
     return [
         CollectionSummary(
@@ -174,7 +165,7 @@ def delete_collection_records(session: Session, collection: str) -> DeleteCollec
         .filter(SourceDocument.id.in_(doc_ids))
         .delete(synchronize_session=False)
     )
-    vector_profile_ids = []
+    vector_profile_ids: list[int] = []
     unique_profile_ids = sorted(set(candidate_profile_ids))
     if unique_profile_ids:
         remaining_by_profile: dict[int, int] = {
@@ -186,11 +177,10 @@ def delete_collection_records(session: Session, collection: str) -> DeleteCollec
             .group_by(PipelineRevision.embedding_profile_id)
             .all()
         }
-        vector_profile_ids = [
-            profile_id
-            for profile_id in unique_profile_ids
-            if remaining_by_profile.get(profile_id, 0) == 0
-        ]
+        # The same droppability rule pruning uses, not a re-derivation of it.
+        vector_profile_ids = unreferenced_profile_ids(
+            unique_profile_ids, remaining_by_profile
+        )
     session.commit()
     return DeleteCollectionResult(
         deleted_docs=deleted_docs,
@@ -359,8 +349,9 @@ def reindex_collection(
     # rebuild that failed -- a >2000-dim profile HNSW rejects, a statement
     # timeout, Ctrl-C, disk full -- left the collection with no ANN index at
     # all, permanently and silently: search still succeeds by sequential scan.
+    # No commit here: the index DDL runs and commits on its own connection
+    # inside ensure_revision_ann_index, and this session only ever read.
     ensure_revision_ann_index(session, revision, config, force_rebuild=force)
-    session.commit()
     return ReindexOutcome(
         "reindexed", method=config.index.method, previous_method=previous_method
     )

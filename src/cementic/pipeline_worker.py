@@ -5,7 +5,6 @@ from __future__ import annotations
 import logging
 import os
 import signal
-import sys
 import threading
 import zlib
 from dataclasses import dataclass, replace
@@ -50,6 +49,7 @@ from cementic.state import DaemonState, StateManager
 from cementic.storage import extracted_document_path, read_extracted_text, write_extracted_text
 from cementic.supervisor import is_managed_process_alive, process_start_token
 from cementic.vector_store import ensure_vector_table_schema, upsert_vectors
+from cementic.worker_runtime import report_fatal, setup_worker_logger
 
 PIPELINE_WORKER_LOCK_NAMESPACE = 0xC3E17C
 
@@ -320,24 +320,9 @@ class PipelineWorker:
         self.fatal_reason: str | None = None
 
     def _setup_logging(self) -> logging.Logger:
-        logger = logging.getLogger("cementic.pipeline")
-        logger.setLevel(logging.INFO)
-        log_file = self.config.pipeline_worker.log_file
-        if log_file is None:
-            raise RuntimeError("Pipeline worker log file is not configured")
-        formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
-        if not any(
-            isinstance(handler, logging.FileHandler)
-            and handler.baseFilename == str(log_file)
-            for handler in logger.handlers
-        ):
-            log_file.parent.mkdir(parents=True, exist_ok=True)
-            handler = logging.FileHandler(log_file)
-            handler.setLevel(logging.INFO)
-            handler.setFormatter(formatter)
-            logger.addHandler(handler)
-        logger.propagate = False
-        return logger
+        return setup_worker_logger(
+            "cementic.pipeline", self.config.pipeline_worker.log_file, "Pipeline worker"
+        )
 
     def _create_embedding_client(self) -> EmbeddingProvider:
         spec = runtime_spec_from_config(self.config)
@@ -419,16 +404,7 @@ class PipelineWorker:
                 self.stop()
 
     def _fatal(self, message: str, *args: Any) -> None:
-        """Log a fatal startup reason and echo it to stderr.
-
-        The module logger writes to its own file, but `cementic start` points the
-        user at the spawned process's stdout/stderr log. Without this echo the
-        user is sent to a file that cannot explain why the worker exited.
-        """
-        self._logger.error(message, *args)
-        rendered = message % args if args else message
-        self.fatal_reason = rendered
-        print(rendered, file=sys.stderr, flush=True)
+        self.fatal_reason = report_fatal(self._logger, message, *args)
 
     def _run_processing_loop(self, revision_id: int) -> None:
         reported_error = False

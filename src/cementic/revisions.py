@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, cast
@@ -423,6 +423,27 @@ def drain_pending_vector_table_drops(session: Session) -> list[int]:
     """Take and clear the vector tables awaiting a drop for this session."""
     pending = session.info.pop(_PENDING_VECTOR_TABLE_DROPS, [])
     return list(pending) if isinstance(pending, list) else []
+
+
+def bucket_revisions_by_status(
+    revisions: Iterable[PipelineRevision],
+) -> tuple[dict[str, PipelineRevision], dict[str, PipelineRevision], dict[str, PipelineRevision]]:
+    """Newest (active, ready, building) revision per collection (pure).
+
+    Input must be ordered newest-first within each collection; setdefault then
+    keeps the newest per slot. Ready and building get separate slots because a
+    ready revision behind a newer building one is the normal state after any
+    profile-affecting config change, and collapsing them hid the promotable
+    revision `collection promote` targets. This loop used to exist twice, in
+    collections.list_collections and the status service.
+    """
+    active: dict[str, PipelineRevision] = {}
+    ready: dict[str, PipelineRevision] = {}
+    building: dict[str, PipelineRevision] = {}
+    for revision in revisions:
+        bucket = {"active": active, "ready": ready}.get(revision.status, building)
+        bucket.setdefault(revision.collection, revision)
+    return active, ready, building
 
 
 def unreferenced_profile_ids(

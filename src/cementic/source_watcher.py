@@ -23,6 +23,7 @@ from cementic.db import Chunk, SourceDocument, create_tables, get_engine, get_se
 from cementic.extract import supported_extensions
 from cementic.state import DaemonState, StateManager
 from cementic.supervisor import is_managed_process_alive, process_start_token
+from cementic.worker_runtime import report_fatal, setup_worker_logger
 
 #: Minimum gap between "now working on X" state-file writes. Display only, so a
 #: little staleness is fine; the alternative is one full read-modify-write per
@@ -198,24 +199,9 @@ class SourceWatcher:
         self.fatal_reason: str | None = None
 
     def _setup_logging(self) -> logging.Logger:
-        logger = logging.getLogger("cementic.source_watcher")
-        logger.setLevel(logging.INFO)
-        log_file = self.config.source_watcher.log_file
-        if log_file is None:
-            raise RuntimeError("Source watcher log file is not configured")
-        formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
-        if not any(
-            isinstance(handler, logging.FileHandler)
-            and handler.baseFilename == str(log_file)
-            for handler in logger.handlers
-        ):
-            log_file.parent.mkdir(parents=True, exist_ok=True)
-            handler = logging.FileHandler(log_file)
-            handler.setLevel(logging.INFO)
-            handler.setFormatter(formatter)
-            logger.addHandler(handler)
-        logger.propagate = False
-        return logger
+        return setup_worker_logger(
+            "cementic.source_watcher", self.config.source_watcher.log_file, "Source watcher"
+        )
 
     def start(self, directories: list[str], collection: str = "default") -> None:
         self.collection = collection
@@ -269,16 +255,7 @@ class SourceWatcher:
             self.stop()
 
     def _fatal(self, message: str, *args: Any) -> None:
-        """Log a fatal startup reason and echo it to stderr.
-
-        The module logger writes to its own file, but `cementic start` points the
-        user at the spawned process's stdout/stderr log. Without this echo the
-        user is sent to a file that cannot explain why the worker exited.
-        """
-        self._logger.error(message, *args)
-        rendered = message % args if args else message
-        self.fatal_reason = rendered
-        print(rendered, file=sys.stderr, flush=True)
+        self.fatal_reason = report_fatal(self._logger, message, *args)
 
     def _start_watcher(self, directories: list[str]) -> None:
         observer = Observer()

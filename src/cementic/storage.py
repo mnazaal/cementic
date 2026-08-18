@@ -67,14 +67,18 @@ def safe_remove_artifact(config: Config, artifact_path: str) -> None:
     root = config.storage.artifacts_path
     if root is None:
         raise RuntimeError("Artifact storage path is not configured")
-    resolved = Path(artifact_path).resolve()
+    path = Path(artifact_path)
+    # Symlink check first, and unlink the *given* path rather than the resolved
+    # one: resolve() follows links, so the old order checked containment on the
+    # target and then unlinked the target -- one swapped link away from deleting
+    # a file the containment check never saw.
+    if path.is_symlink():
+        raise ValueError(f"Refusing to remove symlink artifact: {path}")
+    resolved = path.resolve()
     try:
         resolved.relative_to(root.resolve())
     except ValueError:
         raise ValueError(
             f"Artifact path {resolved} is outside the artifacts root {root}"
         ) from None
-    path = Path(artifact_path)
-    if path.is_symlink():
-        raise ValueError(f"Refusing to remove symlink artifact: {path}")
-    resolved.unlink(missing_ok=True)
+    path.unlink(missing_ok=True)

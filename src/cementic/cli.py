@@ -6,7 +6,9 @@ import os
 import shutil
 import sys
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
+from dataclasses import asdict
 from importlib import resources
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
@@ -155,6 +157,33 @@ console = Console(soft_wrap=True)
 # Errors and diagnostics go here so a failure never pollutes the data on
 # stdout (which would otherwise be piped on as content, or break `--json | jq`).
 err_console = Console(stderr=True, soft_wrap=True)
+
+
+@contextmanager
+def _db_session() -> Iterator[Any]:
+    """One ORM session against the configured database.
+
+    The engine/session-factory ritual around every database command appeared
+    seven times; `collection remove` keeps its own copy because it needs the
+    engine again after the session closes.
+    """
+    engine = get_engine(_get_config().database.url)
+    session_factory = get_session_factory(engine)
+    with session_factory() as session:
+        yield session
+
+
+def _validated_collection_name(collection: str) -> str:
+    """validate_collection_name, rendered as a CLI error instead of a raise.
+
+    The five-line try/except around it used to appear at every command that
+    takes a collection name, verbatim.
+    """
+    try:
+        return validate_collection_name(collection)
+    except ValueError as e:
+        err_console.print(f"[red]Error: {e}[/red]")
+        raise typer.Exit(1)
 
 
 def _version_callback(value: bool) -> None:
@@ -745,9 +774,9 @@ def _print_status_summary(
 def _in_flight_revision_text(ready_label: str | None, building_label: str | None) -> str:
     """Render the not-yet-active revision under the status it is actually in.
 
-    Both summary builders bucket ready and building together, so a finished
-    revision was reported as `building=...` -- hiding the one fact the promote
-    workflow turns on, that there is something ready to promote.
+    (Both summary builders used to bucket ready and building together, so a
+    finished revision was reported as `building=...` -- hiding the one fact the
+    promote workflow turns on, that there is something ready to promote.)
     """
     # Labels are interpolated into a markup-enabled string, so escape them: a
     # label containing a closing tag would raise MarkupError mid-render, and one
@@ -887,36 +916,17 @@ def _print_status_json(
         output["health"] = {"error": health_error}
 
     try:
-        engine = get_engine(_get_config().database.url)
-        session_factory = get_session_factory(engine)
-        with session_factory() as session:
+        with _db_session() as session:
             if collection is None:
                 rows = list_collections(session)
                 status_by_collection = load_pipeline_status_bulk(
                     _get_config(), [row.name for row in rows]
                 )
-                collections_data: dict[str, dict[str, Any]] = {}
-                for row in rows:
-                    ps = status_by_collection[row.name]
-                    collections_data[row.name] = {
-                        "documents": ps.documents,
-                        "extracted_done": ps.extracted_done,
-                        "extracted_failed": ps.extracted_failed,
-                        "chunked_done": ps.chunked_done,
-                        "chunked_failed": ps.chunked_failed,
-                        "total_chunks": ps.total_chunks,
-                        "pending_embeddings": ps.pending_embeddings,
-                        "processing_embeddings": ps.processing_embeddings,
-                        "done_embeddings": ps.done_embeddings,
-                        "failed_embeddings": ps.failed_embeddings,
-                        "extraction_pct": ps.extraction_pct,
-                        "chunking_pct": ps.chunking_pct,
-                        "embedding_pct": ps.embedding_pct,
-                        "active_revision_label": ps.active_revision_label,
-                        "ready_revision_label": ps.ready_revision_label,
-                        "building_revision_label": ps.building_revision_label,
-                    }
-                output["collections"] = collections_data
+                # asdict: PipelineStatus *is* the JSON contract; a hand-kept
+                # key list here drifted from it (and existed twice).
+                output["collections"] = {
+                    row.name: asdict(status_by_collection[row.name]) for row in rows
+                }
             else:
                 # Mirror _require_known_collection on the human path: a typo'd
                 # name otherwise produced a full zero-filled pipeline block at
@@ -927,39 +937,10 @@ def _print_status_json(
                         " (check `cementic collection list`)"
                     )
                 ps = load_pipeline_status(_get_config(), collection)
-                output["pipeline"] = {
-                    "collection": collection,
-                    "documents": ps.documents,
-                    "extracted_done": ps.extracted_done,
-                    "extracted_failed": ps.extracted_failed,
-                    "chunked_done": ps.chunked_done,
-                    "chunked_failed": ps.chunked_failed,
-                    "total_chunks": ps.total_chunks,
-                    "pending_embeddings": ps.pending_embeddings,
-                    "processing_embeddings": ps.processing_embeddings,
-                    "done_embeddings": ps.done_embeddings,
-                    "failed_embeddings": ps.failed_embeddings,
-                    "extraction_pct": ps.extraction_pct,
-                    "chunking_pct": ps.chunking_pct,
-                    "embedding_pct": ps.embedding_pct,
-                    "active_revision_label": ps.active_revision_label,
-                    "ready_revision_label": ps.ready_revision_label,
-                    "building_revision_label": ps.building_revision_label,
-                }
+                output["pipeline"] = {"collection": collection, **asdict(ps)}
                 if verbose:
                     files = load_file_progress(_get_config(), collection)
-                    output["files"] = [
-                        {
-                            "source_path": f.source_path,
-                            "extraction_status": f.extraction_status,
-                            "chunking_status": f.chunking_status,
-                            "embeddings_done": f.embeddings_done,
-                            "embeddings_failed": f.embeddings_failed,
-                            "embeddings_total": f.embeddings_total,
-                            "error_message": f.error_message,
-                        }
-                        for f in files
-                    ]
+                    output["files"] = [asdict(f) for f in files]
         failed = False
     except Exception as error:
         output["error"] = _NO_SCHEMA_HINT if _is_schema_missing(error) else str(error)
@@ -985,11 +966,7 @@ def start_background(
     ),
 ) -> None:
     """Start source watcher and pipeline worker in the background."""
-    try:
-        collection = validate_collection_name(collection)
-    except ValueError as e:
-        err_console.print(f"[red]Error: {e}[/red]")
-        raise typer.Exit(1)
+    collection = _validated_collection_name(collection)
 
     missing = [d for d in directories if not Path(d).is_dir()]
     if missing:
@@ -1174,11 +1151,7 @@ def status(
         return
 
     if collection is not None:
-        try:
-            collection = validate_collection_name(collection)
-        except ValueError as e:
-            err_console.print(f"[red]Error: {e}[/red]")
-            raise typer.Exit(1)
+        collection = _validated_collection_name(collection)
 
     state = _load_supervisor_state()
     source_watcher_status, pipeline_worker_status = load_worker_statuses(_get_config())
@@ -1227,9 +1200,7 @@ def status(
         raise typer.Exit(1)
 
     try:
-        engine = get_engine(_get_config().database.url)
-        session_factory = get_session_factory(engine)
-        with session_factory() as session:
+        with _db_session() as session:
             if collection is None:
                 rows = list_collections(session)
                 console.print()
@@ -1348,9 +1319,11 @@ def stop_background(
         activity = _pipeline_worker_activity()
         if activity is not None:
             console.print(f"discarding in-progress work: {activity}")
-        killed = force_kill(remaining)
+        # force_kill returns the pids it could NOT kill; the old name `killed`
+        # read as the opposite.
+        unkilled = force_kill(remaining)
         time.sleep(0.5)
-        still_alive = [pid for pid in killed if is_pid_running(pid)]
+        still_alive = [pid for pid in unkilled if is_pid_running(pid)]
         _get_supervisor_state_path().unlink(missing_ok=True)
         if not still_alive:
             _clear_worker_state_files()
@@ -1464,11 +1437,7 @@ def remove_collection(
     force: bool = typer.Option(False, "--force", help="Skip confirmation prompt"),
 ) -> None:
     """Delete all documents and chunks belonging to a collection."""
-    try:
-        collection = validate_collection_name(collection)
-    except ValueError as e:
-        err_console.print(f"[red]Error: {e}[/red]")
-        raise typer.Exit(1)
+    collection = _validated_collection_name(collection)
 
     if not force:
         confirm = typer.confirm(f"Delete collection '{collection}' and all associated chunks?")
@@ -1535,9 +1504,7 @@ def remove_collection(
 def list_collection_command() -> None:
     """Show known collections."""
     try:
-        engine = get_engine(_get_config().database.url)
-        session_factory = get_session_factory(engine)
-        with session_factory() as session:
+        with _db_session() as session:
             rows = list_collections(session)
 
         console.print("collections")
@@ -1573,16 +1540,10 @@ def promote_collection(
     ),
 ) -> None:
     """Promote the ready pipeline revision for one collection."""
-    try:
-        collection = validate_collection_name(collection)
-    except ValueError as e:
-        err_console.print(f"[red]Error: {e}[/red]")
-        raise typer.Exit(1)
+    collection = _validated_collection_name(collection)
 
     try:
-        engine = get_engine(_get_config().database.url)
-        session_factory = get_session_factory(engine)
-        with session_factory() as session:
+        with _db_session() as session:
             _require_known_collection(session, collection)
             outcome = promote_ready_revision(
                 session, collection, config=_get_config(), force=force
@@ -1686,16 +1647,10 @@ def reindex_collection_command(
     The index is built once, when a revision first completes, so editing
     `index.method` afterwards otherwise had no effect and no way to ask for one.
     """
-    try:
-        collection = validate_collection_name(collection)
-    except ValueError as e:
-        err_console.print(f"[red]Error: {e}[/red]")
-        raise typer.Exit(1)
+    collection = _validated_collection_name(collection)
 
     try:
-        engine = get_engine(_get_config().database.url)
-        session_factory = get_session_factory(engine)
-        with session_factory() as session:
+        with _db_session() as session:
             # Before the "this can take several minutes" line, so an unknown
             # collection does not first announce work that will never start.
             _require_known_collection(session, collection)
@@ -1742,16 +1697,10 @@ def list_collection_revision_command(
     collection: str = typer.Argument(..., help="Collection name to inspect"),
 ) -> None:
     """Show revision history for one collection."""
-    try:
-        collection = validate_collection_name(collection)
-    except ValueError as e:
-        err_console.print(f"[red]Error: {e}[/red]")
-        raise typer.Exit(1)
+    collection = _validated_collection_name(collection)
 
     try:
-        engine = get_engine(_get_config().database.url)
-        session_factory = get_session_factory(engine)
-        with session_factory() as session:
+        with _db_session() as session:
             _require_known_collection(session, collection)
             rows = list_collection_revisions(session, collection)
             console.print(f"{'collection':<11} {collection}")
@@ -1810,11 +1759,7 @@ def search(
     """Search indexed documents."""
     filters = _build_collection_filters(collections, trailing_collections)
     if filters is not None:
-        try:
-            filters = [validate_collection_name(c) for c in filters]
-        except ValueError as e:
-            err_console.print(f"[red]Error: {e}[/red]")
-            raise typer.Exit(1)
+        filters = [_validated_collection_name(c) for c in filters]
 
     searcher = Searcher(_get_config())
 

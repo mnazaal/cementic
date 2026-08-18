@@ -19,6 +19,7 @@ from cementic.db import (
 )
 from cementic.revisions import (
     BUILDING_STATUSES,
+    bucket_revisions_by_status,
     chunk_scope,
     chunked_scope,
     embedding_scope,
@@ -212,25 +213,23 @@ def load_pipeline_status_bulk(config: Config, collections: list[str]) -> dict[st
             .all()
         )
 
-        active_by_collection: dict[str, PipelineRevision] = {}
+        active_by_collection, ready_by_collection, building_by_collection = (
+            bucket_revisions_by_status(revision_rows)
+        )
+        # Target selection wants the newest not-yet-active revision whatever
+        # its status: the newer of the two per-status newest ones.
         in_flight_by_collection: dict[str, PipelineRevision] = {}
-        ready_by_collection: dict[str, PipelineRevision] = {}
-        building_by_collection: dict[str, PipelineRevision] = {}
-        for revision in revision_rows:
-            if revision.status == "active":
-                active_by_collection.setdefault(revision.collection, revision)
-                continue
-            # Target selection wants the newest not-yet-active revision, whatever
-            # its status.
-            in_flight_by_collection.setdefault(revision.collection, revision)
-            # Reporting must not collapse the two into that one slot: a ready
-            # revision behind a newer building one is the normal state after any
-            # profile-affecting config change, and collapsing them hid the
-            # promotable revision that `collection promote` targets.
-            if revision.status == "ready":
-                ready_by_collection.setdefault(revision.collection, revision)
-            else:
-                building_by_collection.setdefault(revision.collection, revision)
+        for name in collections:
+            candidates = [
+                revision
+                for revision in (
+                    ready_by_collection.get(name),
+                    building_by_collection.get(name),
+                )
+                if revision is not None
+            ]
+            if candidates:
+                in_flight_by_collection[name] = max(candidates, key=lambda r: r.id)
 
         target_by_collection = {
             collection: _select_target_revision(
