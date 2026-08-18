@@ -15,6 +15,7 @@ from cementic.config import (
 )
 from cementic.db import REQUIRED_DB_EXTENSIONS, get_engine
 from cementic.embedding_runtime import (
+    EMBED_PROBE_SECONDS,
     DaemonHealth,
     build_llama_cpp_client,
     probe_daemon,
@@ -63,7 +64,14 @@ def _daemon_state(config: Config) -> tuple[bool, str]:
     the port, so any llama.cpp server -- serving any model -- reported as ok,
     and the two commands could describe the same daemon differently.
     """
-    health = probe_daemon(build_llama_cpp_client(config), config, wait_seconds=0.0)
+    health = probe_daemon(
+        build_llama_cpp_client(config),
+        config,
+        wait_seconds=0.0,
+        # Same second stage as `cementic status`: the model list is served
+        # without the model lock, so it cannot see a dead embedding path.
+        embed_probe_seconds=EMBED_PROBE_SECONDS,
+    )
     if health is DaemonHealth.HEALTHY:
         return True, "reachable"
     if health is DaemonHealth.BUSY:
@@ -73,6 +81,11 @@ def _daemon_state(config: Config) -> tuple[bool, str]:
         return True, "running but busy (serving a request); not idle enough to answer /v1/models"
     if health is DaemonHealth.WRONG_MODEL:
         return False, "serving a different model than this config expects"
+    if health is DaemonHealth.WEDGED:
+        return False, (
+            "running but not answering embeddings; restart it with "
+            "`cementic embedding stop && cementic embedding start`"
+        )
     return False, ""
 
 

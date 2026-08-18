@@ -559,6 +559,61 @@ class TestCheckHealth:
         result = check_health(config)
         assert result.embedding_healthy is False
 
+    @patch("cementic.status_service.get_engine")
+    @patch("cementic.embedding_runtime.build_llama_cpp_client")
+    def test_a_wedged_daemon_is_unhealthy_with_a_restart_hint(
+        self, mock_client, mock_engine
+    ) -> None:
+        """Regression (2026-08-15): a daemon answered /v1/models but hung every
+        embedding for 21 hours while `status` said `embedding healthy`. The
+        model list is served without the model lock, so only an actual embedding
+        round trip can see this state."""
+        from cementic.embedding_runtime import RemoteEmbeddingClient
+
+        config = Config()
+        config.pipeline.embedding_provider = "llama-cpp"
+        mock_conn = MagicMock()
+        mock_engine.return_value.connect.return_value.__enter__.return_value = mock_conn
+        client = MagicMock(spec=RemoteEmbeddingClient)
+        client.probe_served_runtime.return_value = True
+        client.probe_embedding.return_value = False
+        mock_client.return_value = client
+
+        with patch(
+            "cementic.embedding_runtime._worker_load_explains_slow_embeddings",
+            return_value=False,
+        ):
+            result = check_health(config)
+
+        assert result.embedding_healthy is False
+        assert "not answering embeddings" in result.llama_daemon
+        assert "embedding stop" in result.llama_daemon
+
+    @patch("cementic.status_service.get_engine")
+    @patch("cementic.embedding_runtime.build_llama_cpp_client")
+    def test_a_daemon_saturated_by_a_live_worker_stays_healthy(
+        self, mock_client, mock_engine
+    ) -> None:
+        """The same probe timeout during a worker batch is load, not a wedge."""
+        from cementic.embedding_runtime import RemoteEmbeddingClient
+
+        config = Config()
+        config.pipeline.embedding_provider = "llama-cpp"
+        mock_conn = MagicMock()
+        mock_engine.return_value.connect.return_value.__enter__.return_value = mock_conn
+        client = MagicMock(spec=RemoteEmbeddingClient)
+        client.probe_served_runtime.return_value = True
+        client.probe_embedding.return_value = False
+        mock_client.return_value = client
+
+        with patch(
+            "cementic.embedding_runtime._worker_load_explains_slow_embeddings",
+            return_value=True,
+        ):
+            result = check_health(config)
+
+        assert result.embedding_healthy is True
+
     def test_health_llama_cpp_busy_not_unhealthy(self, temp_dir) -> None:
         """A daemon mid-batch cannot answer /v1/models, because llama_cpp.server
         serializes every request behind one lock. With the process confirmed
