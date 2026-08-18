@@ -266,6 +266,25 @@ class TestSourceWatcherStateManagement:
         assert daemon._shutdown_event.is_set()
         mock_update.assert_not_called()
 
+    def test_stop_stops_the_observer_before_cancelling_timers(self, tmp_path):
+        """Regression: cancel_all ran first, so an event landing before the
+        observer stopped re-armed a debounce timer, which then fired into a
+        watcher whose state already said STOPPED."""
+        daemon = SourceWatcher()
+        order: list[str] = []
+        handler = MagicMock()
+        handler.cancel_all.side_effect = lambda: order.append("cancel_all")
+        observer = MagicMock()
+        observer.stop.side_effect = lambda: order.append("observer.stop")
+        observer.join.side_effect = lambda: order.append("observer.join")
+        daemon._event_handler = handler
+        daemon.watcher = observer
+
+        with patch.object(daemon.state_manager, "update"):
+            daemon.stop()
+
+        assert order == ["observer.stop", "observer.join", "cancel_all"]
+
     def test_scan_existing_stops_on_shutdown(self, tmp_path):
         """A shutdown mid-scan abandons the walk instead of indexing the rest."""
         for name in ("a.md", "b.md", "c.md"):

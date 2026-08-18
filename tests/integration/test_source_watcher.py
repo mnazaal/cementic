@@ -101,6 +101,10 @@ class TestWatchDirectoryPreconditions:
         try:
             sw._start_watcher([str(temp_dir / "gone"), str(good)])
             assert sw._watched_roots == [good.resolve()]
+            # Regression: the missing directory used to set fatal_reason, so a
+            # run that watched the surviving directory for hours exited 1 as a
+            # "startup failure" when it finally shut down cleanly.
+            assert sw.fatal_reason is None
         finally:
             sw.stop()
 

@@ -293,7 +293,17 @@ class SourceWatcher:
                 self._watched_roots.append(path)
             else:
                 missing.append(directory)
-                self._fatal("Watch directory does not exist: %s", directory)
+                # A warning, not _fatal: with other directories surviving the
+                # watcher still has work, but the poisoned fatal_reason made
+                # the runner exit 1 for a "startup failure" when that run
+                # finally shut down cleanly hours later. The all-missing case
+                # raises below and stays fatal.
+                self._logger.error("Watch directory does not exist: %s", directory)
+                print(
+                    f"Watch directory does not exist: {directory}",
+                    file=sys.stderr,
+                    flush=True,
+                )
 
         event_handler = DocumentEventHandler(
             self._on_file_detected,
@@ -573,10 +583,13 @@ class SourceWatcher:
         if self._shutdown_signal is not None:
             self._logger.info("Received signal %s, shutting down...", self._shutdown_signal)
             self._shutdown_signal = None
-        if self._event_handler:
-            self._event_handler.cancel_all()
+        # Observer first, timers second: an event delivered after cancel_all
+        # but before the observer stopped re-armed a debounce timer, which then
+        # fired into a watcher whose state already said STOPPED.
         if self.watcher:
             self.watcher.stop()
             self.watcher.join()
+        if self._event_handler:
+            self._event_handler.cancel_all()
         self.state_manager.update(daemon_state=DaemonState.STOPPED, pid=None)
         self._logger.info("Source watcher stopped")
