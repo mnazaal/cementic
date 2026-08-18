@@ -427,6 +427,34 @@ def _supervisor_processes(state: dict[str, object]) -> list[dict[str, object]]:
     return [proc for proc in processes if isinstance(proc, dict)]
 
 
+def _known_collection_names(candidates: list[str]) -> set[str]:
+    """Which of these collections cementic knows about at all."""
+    try:
+        with _db_session() as session:
+            return {name for name in candidates if collection_exists(session, name)}
+    except Exception:
+        # Only ever refines an error message; never the reason a search fails.
+        return set()
+
+
+def _unsearchable_message(unknown: list[str], unindexed: set[str]) -> str:
+    """One line naming what is wrong with each unsearchable collection."""
+    missing = [name for name in unknown if name not in unindexed]
+    parts = []
+    if missing:
+        parts.append(f"unknown collection {', '.join(missing)}")
+    if unindexed:
+        parts.append(
+            f"no indexed revision for {', '.join(sorted(unindexed))}"
+        )
+    return f"search failed: {'; '.join(parts)} (check `cementic collection list`)"
+
+
+def _stdin_is_a_terminal() -> bool:
+    """Whether stdin is a terminal (a seam: test runners replace sys.stdin)."""
+    return sys.stdin.isatty()
+
+
 def _is_managed_proc_alive(process: dict[str, object]) -> bool:
     return is_managed_process_alive(
         managed_process_pid(process), managed_process_start_token(process)
@@ -696,7 +724,13 @@ def _print_status_summary(
     else:
         workers = "[yellow]partial[/yellow]"
     console.print(f"{'workers':<11} {workers}")
-    if health is not None:
+    if health is None:
+        # Say the rows are missing rather than just omitting them: a summary two
+        # rows short reads as a complete report of a healthy system, and the
+        # explanation on stderr is lost to `2>/dev/null`.
+        console.print(f"{'database':<11} [red]unknown (health check failed)[/red]")
+        console.print(f"{'embedding':<11} [red]unknown (health check failed)[/red]")
+    else:
         console.print(f"{'database':<11} {_state(health.db_reachable, 'reachable', 'unreachable')}")
         if health.embedding_healthy:
             embedding_text = "[green]healthy[/green]"
@@ -746,7 +780,7 @@ def _print_status_summary(
         f"processed={source_watcher_status.processed_count}, "
         f"failed={source_watcher_status.failed_count}"
     )
-    if source_watcher_status.current_file != "None":
+    if source_watcher_status.current_file is not None:
         console.print(f"  current file: {source_watcher_status.current_file}")
     if source_watcher_status.skipped_files:
         console.print("  skipped files:")
@@ -762,7 +796,7 @@ def _print_status_summary(
         f"pipeline worker: {pipeline_worker_status.process}, "
         f"state={pipeline_worker_status.state}, pid={pipeline_worker_status.pid}"
     )
-    if pipeline_worker_status.current_file != "None":
+    if pipeline_worker_status.current_file is not None:
         console.print(f"  current file: {pipeline_worker_status.current_file}")
     if pipeline_worker_status.current_activity:
         console.print(f"  activity: {pipeline_worker_status.current_activity}")
@@ -913,7 +947,16 @@ def _print_status_json(
             "llama_daemon": health.llama_daemon,
         }
     elif health_error is not None:
-        output["health"] = {"error": health_error}
+        # Same keys, nulled, plus the reason: replacing the whole object made
+        # `d["health"]["db_reachable"]` raise KeyError for a consumer that had
+        # no way to know the shape could change.
+        output["health"] = {
+            "db_reachable": None,
+            "embedding_provider": None,
+            "embedding_healthy": None,
+            "llama_daemon": None,
+            "error": health_error,
+        }
 
     try:
         with _db_session() as session:
@@ -922,8 +965,9 @@ def _print_status_json(
                 status_by_collection = load_pipeline_status_bulk(
                     _get_config(), [row.name for row in rows]
                 )
-                # asdict: PipelineStatus *is* the JSON contract; a hand-kept
-                # key list here drifted from it (and existed twice).
+                # asdict: PipelineStatus *is* the JSON contract, so a hand-kept
+                # key list here (which existed twice, identically) is a copy
+                # waiting to drift, not one that had already drifted.
                 output["collections"] = {
                     row.name: asdict(status_by_collection[row.name]) for row in rows
                 }
@@ -990,7 +1034,7 @@ def start_background(
         with file_lock(_get_start_lock_path(), timeout=0):
             _start_background_locked(directories, collection)
     except LockUnavailableError:
-        console.print("[yellow]Another `cementic start` is already in progress[/yellow]")
+        err_console.print("[yellow]Another `cementic start` is already in progress[/yellow]")
         raise typer.Exit(1)
 
 
@@ -1000,9 +1044,9 @@ def _start_background_locked(directories: list[str], collection: str) -> None:
     running = [proc for proc in _supervisor_processes(state) if _is_managed_proc_alive(proc)]
 
     if running:
-        console.print("[yellow]Background cementic processes already running:[/yellow]")
+        err_console.print("[yellow]Background cementic processes already running:[/yellow]")
         for proc in running:
-            console.print(f"- {proc.get('name')}: PID {proc.get('pid')}")
+            err_console.print(f"- {proc.get('name')}: PID {proc.get('pid')}")
         raise typer.Exit(1)
 
     try:
@@ -1124,6 +1168,22 @@ def status(
 ) -> None:
     """Show background worker status and collection progress."""
     if doctor:
+        # --doctor reports runtime readiness, which is not per-collection and has
+        # no verbose form. Silently ignoring these flags let `status --doctor -c
+        # typo -v` look like it had answered a question it never read.
+        ignored = [
+            flag
+            for flag, given in (
+                ("-c/--collection", collection),
+                ("-v/--verbose", verbose),
+            )
+            if given
+        ]
+        if ignored:
+            err_console.print(
+                f"note: {', '.join(ignored)} {'is' if len(ignored) == 1 else 'are'} "
+                "ignored with --doctor, which reports runtime readiness, not collections"
+            )
         try:
             report = collect_doctor_report(_get_config())
         except typer.Exit:
@@ -1193,7 +1253,13 @@ def status(
     if health is None and health_error is not None:
         err_console.print(f"health: unavailable ({health_error})")
 
-    if health is not None and not health.db_reachable:
+    if health is None:
+        # A health probe that raised leaves the database state unknown, which is
+        # not the same as reachable: exiting 0 let `cementic status && deploy`
+        # proceed on a report that was missing the very rows it would have
+        # failed on.
+        raise typer.Exit(1)
+    if not health.db_reachable:
         err_console.print(_DB_HINT)
         # Non-zero so `cementic status && ...` cannot succeed against a database
         # cementic could not reach; every other database-backed command exits 1.
@@ -1324,11 +1390,16 @@ def stop_background(
         unkilled = force_kill(remaining)
         time.sleep(0.5)
         still_alive = [pid for pid in unkilled if is_pid_running(pid)]
-        _get_supervisor_state_path().unlink(missing_ok=True)
         if not still_alive:
+            _get_supervisor_state_path().unlink(missing_ok=True)
             _clear_worker_state_files()
         if still_alive:
-            console.print(
+            # The supervisor record is deliberately kept: it is the only place
+            # the collection and watched directories are written down, and
+            # discarding it while the workers are still indexing left the next
+            # `stop` to rediscover them from worker state files with no idea
+            # what they were watching.
+            err_console.print(
                 f"force killed {len(remaining) - len(still_alive)} process(es); "
                 f"could not kill: {', '.join(str(pid) for pid in still_alive)}"
             )
@@ -1339,6 +1410,7 @@ def stop_background(
         return
 
     still_running = [proc for proc in processes if managed_process_pid(proc) in remaining]
+    stopped_pids = [pid for pid in signaled_pids if pid not in remaining]
     _save_supervisor_state(
         {
             "collection": state.get("collection"),
@@ -1348,14 +1420,18 @@ def stop_background(
     )
 
     timed_out = [pid for pid in remaining if pid not in unsignalable_pids]
+    if stopped_pids:
+        # A mixed outcome used to report only the failure, so a stop that took
+        # down one of two workers read as having done nothing.
+        err_console.print(f"stopped {len(stopped_pids)} process(es)")
     if timed_out:
-        console.print(
+        err_console.print(
             f"stop timed out after {timeout_seconds}s; "
             f"still running PID(s): {', '.join(str(pid) for pid in timed_out)}"
         )
     if unsignalable_pids:
         # No timeout elapsed for these -- the signal itself was refused.
-        console.print(
+        err_console.print(
             f"could not signal PID(s) {', '.join(str(pid) for pid in unsignalable_pids)}: "
             "permission denied; still running, likely started by another user"
         )
@@ -1364,10 +1440,13 @@ def stop_background(
         # Otherwise this reads as a hung worker. It is not: the worker cannot
         # answer SIGTERM from inside CREATE INDEX, and the statement is not
         # resumable, so forcing now throws the whole build away.
-        console.print(f"the pipeline worker is {activity}, which does not stop on request")
-        console.print("--force will discard that work; it restarts from scratch next run")
-    else:
-        console.print("use --force to kill stubborn processes")
+        err_console.print(f"the pipeline worker is {activity}, which does not stop on request")
+        err_console.print("--force will discard that work; it restarts from scratch next run")
+    elif timed_out:
+        # Only a timed-out process can be helped by --force. Printing this when
+        # every remaining PID was EPERM-unsignalable sent the user at a retry
+        # that is guaranteed to fail the same way, for the same reason.
+        err_console.print("use --force to kill stubborn processes")
     # Same reason as the force path above: nothing was stopped, so a caller
     # chaining on success must not proceed.
     raise typer.Exit(1)
@@ -1454,6 +1533,11 @@ def remove_collection(
                 console.print(f"collection: {collection}")
                 console.print("status: not found")
                 return
+    except typer.Exit:
+        # typer.Exit subclasses RuntimeError, so the broad handler below
+        # would otherwise swallow a deliberate exit and re-report it as
+        # "failed: 1".
+        raise
     except Exception as e:
         _report_db_error(e, f"collection remove '{collection}'")
         raise typer.Exit(1)
@@ -1520,6 +1604,11 @@ def list_collection_command() -> None:
                 f"active={row.active_revision_label or '-'}  "
                 f"{_in_flight_revision_text(row.ready_revision_label, row.building_revision_label)}"
             )
+    except typer.Exit:
+        # typer.Exit subclasses RuntimeError, so the broad handler below
+        # would otherwise swallow a deliberate exit and re-report it as
+        # "failed: 1" -- which is what a bad CEMENTIC_CONFIG produced here.
+        raise
     except Exception as error:
         _report_db_error(error, "collection list")
         raise typer.Exit(1)
@@ -1548,8 +1637,10 @@ def promote_collection(
             outcome = promote_ready_revision(
                 session, collection, config=_get_config(), force=force
             )
-            # Read everything we need while the session is open; ORM attributes
-            # expire on commit and would raise once the session closes.
+            # Read everything we need while the session is open. Not because
+            # attributes expire on commit -- the session factory sets
+            # expire_on_commit=False -- but because a lazy load after the
+            # session closes has no connection to load through.
             status = outcome.status
             counts = outcome.counts
             unremoved = outcome.unremoved_artifacts
@@ -1568,17 +1659,30 @@ def promote_collection(
         _report_db_error(error, "collection promote")
         raise typer.Exit(1)
 
-    console.print(f"collection: {collection}")
+    if status != "promoted":
+        # A refusal is an error: exit 1 with nothing on stdout, per the stream
+        # convention in the README. These lines used to go to stdout, so
+        # `promote 2>errors.log || cat errors.log` printed nothing at all.
+        err_console.print(f"collection: {collection}")
+    else:
+        console.print(f"collection: {collection}")
     if status == "no_ready":
-        console.print("status: no ready revision")
-        console.print("`cementic status -c` shows whether a build is still in progress")
+        err_console.print("status: no ready revision")
+        err_console.print("`cementic status -c` shows whether a build is still in progress")
         # Exit 1 like every other promote that promoted nothing: this was the
         # one no-op outcome that exited 0, so a script chaining
         # `promote && search` proceeded as if a revision had been published.
         raise typer.Exit(1)
+    if status == "lost_race":
+        err_console.print("status: another promote activated a revision first")
+        err_console.print(
+            "nothing was changed by this command; `cementic collection list` shows "
+            "which revision is active now"
+        )
+        raise typer.Exit(1)
     if status == "empty":
-        console.print("status: nothing to promote (revision has no documents)")
-        console.print(
+        err_console.print("status: nothing to promote (revision has no documents)")
+        err_console.print(
             "promoting would retire the active revision and leave nothing searchable"
         )
         raise typer.Exit(1)
@@ -1594,8 +1698,8 @@ def promote_collection(
                 pending.append(f"chunk={not_chunked}")
             if not_embedded > 0:
                 pending.append(f"embed={not_embedded}")
-        console.print(f"status: incomplete ({', '.join(pending)} pending)")
-        console.print(
+        err_console.print(f"status: incomplete ({', '.join(pending)} pending)")
+        err_console.print(
             "the revision took on new work after it was marked ready; "
             "wait for `cementic status` to show it finished, or --force to publish it as-is"
         )
@@ -1609,8 +1713,8 @@ def promote_collection(
                 parts.append(f"chunk={counts.chunked_failed}")
             if counts.failed_embeddings:
                 parts.append(f"embed={counts.failed_embeddings}")
-        console.print(f"status: blocked ({', '.join(parts)} failed)")
-        console.print("re-run with --force to promote anyway")
+        err_console.print(f"status: blocked ({', '.join(parts)} failed)")
+        err_console.print("re-run with --force to promote anyway")
         raise typer.Exit(1)
     console.print("status: promoted")
     console.print(f"revision: {revision_label}")
@@ -1774,6 +1878,11 @@ def search(
         # dropped invisibly — and in --json mode the stream was well-formed and
         # the exit code 0, leaving a script no way to notice.
         unknown = searcher.unsearchable_collections(filters) if filters else []
+        # "No indexed revision" was said for a name cementic has never heard of
+        # as well as for a real collection still building, so a typo read as a
+        # timing problem. Split them: the two need different actions.
+        unindexed = _known_collection_names(unknown) if unknown else set()
+        message = _unsearchable_message(unknown, unindexed)
 
         if json_output:
             for result in results:
@@ -1781,34 +1890,37 @@ def search(
             if unknown:
                 # stdout is the JSONL stream; diagnostics go to stderr, and the
                 # exit code has to distinguish this from a genuine no-match.
-                err_console.print(
-                    f"search failed: no indexed revision for {', '.join(unknown)} "
-                    "(check `cementic collection list`)"
-                )
+                err_console.print(message)
                 raise typer.Exit(1)
             return
 
-        if not results:
+        if not results and not unknown:
+            # Only when the query genuinely matched nothing: leading with "no
+            # results" for a typo'd collection buried the actual answer under a
+            # sentence that said the search worked.
             console.print("no results")
-        else:
+        elif results:
             rank_w = len(str(len(results)))
             for i, result in enumerate(results, 1):
                 preview = " ".join(result["content"].split())
                 console.print(
                     f"{i:>{rank_w}}. {result['score']:.3f}  {escape(result['source_path'])}"
                 )
-                # Keep the preview to a single line (truncate to the terminal width).
-                console.print(f"   {escape(preview)}", no_wrap=True, overflow="ellipsis")
+                # One line per hit. Truncation is for a terminal, where a long
+                # preview would wrap and bury the ranking; off a TTY the width
+                # is a fixed 80-column fallback that cut previews mid-sentence
+                # and broke substring greps over redirected output.
+                if console.is_terminal:
+                    console.print(f"   {escape(preview)}", no_wrap=True, overflow="ellipsis")
+                else:
+                    console.print(f"   {escape(preview)}")
 
         if unknown:
             # Same condition, same exit code as the --json branch above: the two
             # modes used to disagree (0 here, 1 there) for identical input, so
             # whether a script could detect a typo'd collection depended on the
             # output format it happened to ask for.
-            console.print(
-                f"search failed: no indexed revision for {', '.join(unknown)} "
-                "(check `cementic collection list`)"
-            )
+            err_console.print(message)
             raise typer.Exit(1)
 
     except typer.Exit:
@@ -1845,6 +1957,11 @@ EXAMPLES:
 def extract(path: str = typer.Argument(..., help="Path to a document file")) -> None:
     """Extract one document to Markdown on stdout — no database, for piping/debugging."""
     cfg = _get_config()
+    if path == "":
+        # Path("") is Path("."), so the directory guard below reported an empty
+        # subject: "extract failed:  is a directory, not a document file".
+        err_console.print("extract failed: no path given")
+        raise typer.Exit(1)
     if Path(path).is_dir():
         # Falling through said "no extractor for '(none)'" -- technically the
         # registry's answer for a suffixless path, but nonsense as a message.
@@ -1880,9 +1997,17 @@ def chunk(
     """
     cfg = _get_config()
     try:
-        # `is not None`, not truthiness: `cementic chunk ""` used to fall
-        # through to stdin and sit there looking hung.
-        text = Path(path).read_text(encoding="utf-8") if path is not None else sys.stdin.read()
+        # An empty PATH means "read stdin" when stdin is a pipe -- an unset
+        # shell variable in `... | cementic chunk "$MAYBE_PATH"` is the ordinary
+        # way to get one, and treating it as a path made that exit 1 with
+        # `Is a directory: '.'`, naming a path the user never typed. Only when
+        # stdin is a terminal is it a mistake, and then it is reported rather
+        # than sat on, which is what looked hung.
+        if path == "" and _stdin_is_a_terminal():
+            err_console.print("chunk failed: no PATH given and stdin is a terminal")
+            raise typer.Exit(1)
+        read_stdin = path is None or path == ""
+        text = sys.stdin.read() if read_stdin else Path(str(path)).read_text(encoding="utf-8")
     except (OSError, ValueError) as error:
         # ValueError covers UnicodeDecodeError: `chunk` takes text, and a binary
         # file should be a one-line error, not a traceback.
@@ -1987,9 +2112,13 @@ def embed() -> None:
                     reason = getattr(provider, "over_budget_reason", lambda _text: None)(
                         texts[offset]
                     )
+                    # The real stdin line, like every other error above it:
+                    # `start + offset + 1` counted records, so blank lines in
+                    # the input shifted it -- the exact mislocation the parse
+                    # and validation errors were fixed to stop reporting.
                     err_console.print(
-                        f"embed failed: line {start + offset + 1} could not be embedded"
-                        + (f": {reason}" if reason else "")
+                        f"embed failed: line {numbered[start + offset][0]} "
+                        "could not be embedded" + (f": {reason}" if reason else "")
                     )
                     raise typer.Exit(1)
                 typer.echo(json.dumps({**rec, "embedding": vector}))

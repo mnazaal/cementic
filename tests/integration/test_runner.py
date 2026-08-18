@@ -46,7 +46,8 @@ class TestSourceWatcherCommand:
 
         result = runner.invoke(app, ["source-watcher", "/tmp/test"])
         assert result.exit_code == 1
-        assert "Bootstrap failed" in result.stdout
+        assert "Bootstrap failed" in result.stderr
+        assert result.stdout.strip() == ""
 
     @patch("cementic.runner.SourceWatcher")
     @patch("cementic.runner.Bootstrapper")
@@ -96,7 +97,8 @@ class TestPipelineWorkerCommand:
 
         result = runner.invoke(app, ["pipeline-worker"])
         assert result.exit_code == 1
-        assert "Bootstrap failed" in result.stdout
+        assert "Bootstrap failed" in result.stderr
+        assert result.stdout.strip() == ""
 
     @patch("cementic.runner.PipelineWorker")
     @patch("cementic.runner.Bootstrapper")

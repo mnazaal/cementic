@@ -96,7 +96,17 @@ def test_search_command_stays_fast_with_mocked_backend(mock_searcher_class: Magi
 @patch("cementic.cli.list_collections", return_value=[])
 @patch("cementic.cli.get_session_factory")
 @patch("cementic.cli.get_engine")
-@patch("cementic.cli.check_health", return_value=None)
+@patch(
+    "cementic.cli.check_health",
+    # A real health object, not None: None now means the probe failed, which
+    # exits 1 rather than printing a summary two rows short.
+    return_value=SimpleNamespace(
+        db_reachable=True,
+        embedding_provider="llama-cpp",
+        embedding_healthy=True,
+        llama_daemon="running",
+    ),
+)
 @patch("cementic.cli.load_worker_statuses")
 @patch("cementic.cli._load_supervisor_state", return_value={"processes": [], "directories": []})
 @patch("cementic.cli.build_supervisor_status")
@@ -116,7 +126,7 @@ def test_status_command_stays_fast_with_mocked_backend(
             state="running",
             pid=str(1),
             process="running",
-            current_file="None",
+            current_file=None,
             watched_directories=[],
             processed_count=0,
             failed_count=0,
@@ -125,7 +135,7 @@ def test_status_command_stays_fast_with_mocked_backend(
             state="running",
             pid=str(2),
             process="running",
-            current_file="None",
+            current_file=None,
             watched_directories=[],
             processed_count=0,
             failed_count=0,

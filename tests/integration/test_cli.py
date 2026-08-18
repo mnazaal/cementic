@@ -182,7 +182,10 @@ class TestPromoteCommand:
         with patch("cementic.cli.get_engine", return_value=sqlite_engine):
             result = runner.invoke(app, ["collection", "promote", "emptycol"])
         assert result.exit_code == 1
-        assert "no documents" in result.stdout
+        # On stderr, per the README's stream convention: a refusal is an error,
+        # so stdout carries nothing at all.
+        assert "no documents" in result.stderr
+        assert result.stdout.strip() == ""
 
 
 class TestListRevisionCommand:

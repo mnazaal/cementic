@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from types import SimpleNamespace
 
 import pytest
 from typer.testing import CliRunner
@@ -79,13 +80,23 @@ def test_pg_cli_status_verbose_reports_real_collection(
     )
     pg_session.commit()
     monkeypatch.setattr(cementic_cli, "_config", pg_config)
-    monkeypatch.setattr("cementic.cli.check_health", lambda config: None)
+    # A real health object, not None: None now means the probe *failed*, which
+    # exits 1 rather than printing a summary two rows short.
+    monkeypatch.setattr(
+        "cementic.cli.check_health",
+        lambda config: SimpleNamespace(
+            db_reachable=True,
+            embedding_provider="llama-cpp",
+            embedding_healthy=True,
+            llama_daemon="running",
+        ),
+    )
     def _stopped_worker() -> WorkerStatus:
         return WorkerStatus(
             state="stopped",
             pid="N/A",
             process="stopped",
-            current_file="None",
+            current_file=None,
             watched_directories=[],
             processed_count=0,
             failed_count=0,

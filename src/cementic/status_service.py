@@ -41,7 +41,10 @@ class WorkerStatus:
     state: str
     pid: str
     process: str
-    current_file: str
+    #: The file being processed, or None when idle. Kept as None rather than a
+    #: "None" string: the string leaked into `status --json`, where every
+    #: consumer testing truthiness or `is not None` saw a stopped worker as busy.
+    current_file: str | None
     watched_directories: list[str]
     processed_count: int
     failed_count: int
@@ -142,7 +145,7 @@ def build_worker_status(state: WorkerState) -> WorkerStatus:
         state=daemon_state_text(state.daemon_state),
         pid=str(state.pid) if state.pid else "N/A",
         process="running" if running else "stopped",
-        current_file=str(state.current_file or "None"),
+        current_file=str(state.current_file) if state.current_file else None,
         watched_directories=[str(path) for path in watched_directories],
         processed_count=state.processed_count,
         failed_count=state.failed_count,

@@ -24,6 +24,11 @@ app = typer.Typer(help="Internal cementic runner")
 # soft_wrap: this output lands in the background log file, where rich's
 # off-TTY 80-column fallback hard-wrapped paths mid-word.
 console = Console(soft_wrap=True)
+# Failures go to stderr, like the CLI's: the runner's stdout and stderr are
+# merged into one background log file, so this costs nothing there -- but a
+# runner invoked directly (debugging, a service unit that separates the two)
+# used to report every failure on stdout, against the documented convention.
+err_console = Console(stderr=True, soft_wrap=True)
 
 
 def _load_config() -> Config:
@@ -38,17 +43,17 @@ def _load_config() -> Config:
     try:
         return get_config()
     except ConfigError as error:
-        console.print(f"[red]config error: {escape(str(error))}[/red]")
+        err_console.print(f"[red]config error: {escape(str(error))}[/red]")
         raise typer.Exit(1)
     except ValidationError as error:
         detail = format_config_error(error, resolve_config_path())
-        console.print(f"[red]config error: {escape(detail)}[/red]")
+        err_console.print(f"[red]config error: {escape(detail)}[/red]")
         raise typer.Exit(1)
     except SettingsError as error:
         # Parity with the CLI's _get_config: pydantic-settings raises this (a
         # ValueError, not a ValidationError) for a non-JSON env value on a
         # complex-typed field, which otherwise reached this log as a traceback.
-        console.print(f"[red]config error: {escape(str(error))}[/red]")
+        err_console.print(f"[red]config error: {escape(str(error))}[/red]")
         raise typer.Exit(1)
 
 
@@ -66,7 +71,7 @@ def run_source_watcher(
     try:
         collection = validate_collection_name(collection)
     except ValueError as e:
-        console.print(f"[red]Error: {e}[/red]")
+        err_console.print(f"[red]Error: {e}[/red]")
         raise typer.Exit(1)
 
     config = _load_config()
@@ -76,7 +81,7 @@ def run_source_watcher(
     try:
         bootstrapper.ensure_for_convert()
     except RuntimeError as e:
-        console.print(f"[red]Bootstrap failed: {e}[/red]")
+        err_console.print(f"[red]Bootstrap failed: {e}[/red]")
         raise typer.Exit(1)
 
     try:
@@ -92,7 +97,7 @@ def run_source_watcher(
         # e.g. every watch directory vanished between `cementic start`'s check
         # and here. A one-line reason on stderr lands in the background log the
         # CLI points at; a traceback would not explain anything.
-        console.print(f"[red]Source watcher failed: {e}[/red]")
+        err_console.print(f"[red]Source watcher failed: {e}[/red]")
         raise typer.Exit(1)
     # Outside the try: `typer.Exit` subclasses `RuntimeError`, so raising this
     # inside it would be caught by the handler above and reported as
@@ -115,7 +120,7 @@ def run_pipeline_worker(
     try:
         collection = validate_collection_name(collection)
     except ValueError as e:
-        console.print(f"[red]Error: {e}[/red]")
+        err_console.print(f"[red]Error: {e}[/red]")
         raise typer.Exit(1)
 
     config = _load_config()
@@ -125,7 +130,7 @@ def run_pipeline_worker(
     try:
         bootstrapper.ensure_for_index()
     except RuntimeError as e:
-        console.print(f"[red]Bootstrap failed: {e}[/red]")
+        err_console.print(f"[red]Bootstrap failed: {e}[/red]")
         raise typer.Exit(1)
 
     try:
@@ -139,7 +144,7 @@ def run_pipeline_worker(
         # Parity with the source watcher above: a startup RuntimeError (e.g. an
         # unindexable embedding dimension from _ensure_target_revision) reached
         # the background log as a traceback that explains nothing.
-        console.print(f"[red]Pipeline worker failed: {e}[/red]")
+        err_console.print(f"[red]Pipeline worker failed: {e}[/red]")
         raise typer.Exit(1)
     # A fatal startup failure (already running, DB lock held, embedding runtime
     # unreachable) returns normally from start(), so without this the process

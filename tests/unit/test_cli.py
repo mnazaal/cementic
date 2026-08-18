@@ -252,7 +252,7 @@ class TestRootHelp:
                 state="running",
                 pid=("111"),
                 process="running",
-                current_file="None",
+                current_file=None,
                 watched_directories=["/docs"],
                 processed_count=3,
                 failed_count=1,
@@ -261,7 +261,7 @@ class TestRootHelp:
                 state="running",
                 pid=("222"),
                 process="running",
-                current_file="None",
+                current_file=None,
                 watched_directories=[],
                 processed_count=0,
                 failed_count=0,
@@ -797,7 +797,7 @@ class TestBackgroundCommands:
                 state="running",
                 pid=("111"),
                 process="running",
-                current_file="None",
+                current_file=None,
                 watched_directories=["/docs"],
                 processed_count=3,
                 failed_count=1,
@@ -898,7 +898,7 @@ class TestBackgroundCommands:
                 state="running",
                 pid=("111"),
                 process="running",
-                current_file="None",
+                current_file=None,
                 watched_directories=["/docs"],
                 processed_count=3,
                 failed_count=1,
@@ -983,7 +983,7 @@ class TestBackgroundCommands:
                 state="stopped",
                 pid=("N/A"),
                 process="stopped",
-                current_file="None",
+                current_file=None,
                 watched_directories=[],
                 processed_count=0,
                 failed_count=0,
@@ -992,7 +992,7 @@ class TestBackgroundCommands:
                 state="stopped",
                 pid=("N/A"),
                 process="stopped",
-                current_file="None",
+                current_file=None,
                 watched_directories=[],
                 processed_count=0,
                 failed_count=0,
@@ -1060,7 +1060,7 @@ class TestBackgroundCommands:
                 state="running",
                 pid=("111"),
                 process="running",
-                current_file="None",
+                current_file=None,
                 watched_directories=["/docs"],
                 processed_count=3,
                 failed_count=1,
@@ -1069,7 +1069,7 @@ class TestBackgroundCommands:
                 state="running",
                 pid=("222"),
                 process="running",
-                current_file="None",
+                current_file=None,
                 watched_directories=[],
                 processed_count=0,
                 failed_count=0,
@@ -1530,6 +1530,16 @@ class TestCollectionCommands:
         assert idle.exit_code == 0
         assert "still watching" not in idle.output
 
+        # A worker watching a *different* collection must not trigger the
+        # warning either: the negative case above only proved "no processes ->
+        # no warning", so dropping the collection check would have kept the
+        # suite green while every remove warned about unrelated workers.
+        other = invoke(
+            {"collection": "someone-else", "processes": [{"name": "watcher", "pid": 1}]}
+        )
+        assert other.exit_code == 0
+        assert "still watching" not in other.output
+
 
 class TestStatusCommand:
     """Test the status command."""
@@ -1565,6 +1575,40 @@ class TestStopCommand:
     def test_stop_with_no_processes(self) -> None:
         result = runner.invoke(app, ["stop", "--force"])
         assert result.exit_code == 0
+
+    def test_a_force_kill_that_failed_keeps_the_supervisor_record(self, tmp_path):
+        """Regression: the force path unlinked supervisor.json unconditionally,
+        before the check that correctly preserves the worker state files. That
+        record is the only place the collection and watched directories are
+        written down, so a failed force discarded them while the workers were
+        still indexing."""
+        state_path = tmp_path / "supervisor.json"
+        state_path.write_text(
+            json.dumps(
+                {
+                    "collection": "papers",
+                    "directories": ["/data/papers"],
+                    "processes": [{"name": "watcher", "pid": 4321, "log_file": "w.log"}],
+                }
+            )
+        )
+        with (
+            patch("cementic.cli._get_supervisor_state_path", return_value=state_path),
+            patch("cementic.cli._is_managed_proc_alive", return_value=True),
+            patch("cementic.cli.os.kill"),
+            patch("cementic.cli.wait_for_exit", return_value=[4321]),
+            patch("cementic.cli.force_kill", return_value=[4321]),
+            patch("cementic.cli.is_pid_running", return_value=True),
+            patch("cementic.cli._clear_worker_state_files") as mock_clear,
+            patch("cementic.cli.time.sleep"),
+        ):
+            result = runner.invoke(app, ["stop", "--force"])
+
+        assert result.exit_code == 1
+        assert "could not kill" in result.stderr
+        assert state_path.exists(), "the supervisor record must survive a failed force"
+        assert json.loads(state_path.read_text())["collection"] == "papers"
+        mock_clear.assert_not_called()
 
 
 class TestCliHelpers:
@@ -1814,11 +1858,11 @@ class TestStatusSurfacesWorkerErrors:
         ):
             mock_state.return_value = {"collection": "c", "directories": [], "processes": []}
             healthy = WorkerStatus(
-                state="running", pid="1", process="running", current_file="None",
+                state="running", pid="1", process="running", current_file=None,
                 watched_directories=[], processed_count=0, failed_count=0,
             )
             failing = WorkerStatus(
-                state="running", pid="2", process="running", current_file="None",
+                state="running", pid="2", process="running", current_file=None,
                 watched_directories=[], processed_count=0, failed_count=0,
                 last_error=worker_error, last_error_at="2026-08-06T00:00:00+00:00",
             )
@@ -1859,7 +1903,7 @@ class TestStatusExitCodes:
             state="stopped",
             pid=("N/A"),
             process="stopped",
-            current_file="None",
+            current_file=None,
             watched_directories=[],
             processed_count=0,
             failed_count=0,
@@ -1909,7 +1953,7 @@ class TestStatusEdgeCases:
                 state="running",
                 pid=str(1111),
                 process="running",
-                current_file="None",
+                current_file=None,
                 watched_directories=[],
                 processed_count=0,
                 failed_count=0,
@@ -1918,7 +1962,7 @@ class TestStatusEdgeCases:
                 state="running",
                 pid=str(2222),
                 process="running",
-                current_file="None",
+                current_file=None,
                 watched_directories=[],
                 processed_count=0,
                 failed_count=0,
@@ -1936,12 +1980,16 @@ class TestStatusEdgeCases:
             mock_get_session_factory.return_value = lambda: mock_session
 
             result = runner.invoke(app, ["status"])
-            assert result.exit_code == 0
-            # No health section in the report itself...
-            assert "health:" not in result.stdout
-            # ...but the crash is explained on stderr rather than the whole
-            # section silently vanishing (regression).
+            # Exit 1, not 0: a probe that crashed leaves the database state
+            # unknown, and `cementic status && deploy` used to sail past a
+            # report that was missing the very rows it would have failed on.
+            assert result.exit_code == 1
+            # The crash is explained on stderr...
             assert "health: unavailable" in result.stderr
+            # ...and the rows say they are unknown rather than vanishing, which
+            # read as a complete report of a healthy system under 2>/dev/null.
+            assert "health:" not in result.stdout
+            assert "unknown (health check failed)" in result.stdout
 
     @patch("cementic.cli.list_collections", return_value=[])
     def test_status_json_output(self, mock_list_collections):
@@ -1952,7 +2000,7 @@ class TestStatusEdgeCases:
                     state="running",
                     pid=str(1111),
                     process="running",
-                    current_file="None",
+                    current_file=None,
                     watched_directories=[],
                     processed_count=0,
                     failed_count=0,
@@ -1961,7 +2009,7 @@ class TestStatusEdgeCases:
                     state="running",
                     pid=str(2222),
                     process="running",
-                    current_file="None",
+                    current_file=None,
                     watched_directories=[],
                     processed_count=0,
                     failed_count=0,
@@ -2003,6 +2051,12 @@ class TestStatusEdgeCases:
                                 # only in the human output.
                                 assert "current_file" in parsed["source_watcher"]
                                 assert "current_file" in parsed["pipeline_worker"]
+                                # The *value*, not just the key: an idle worker
+                                # emitted the literal string "None", so every
+                                # consumer testing truthiness or `is not None`
+                                # read a stopped worker as busy.
+                                assert parsed["source_watcher"]["current_file"] is None
+                                assert parsed["pipeline_worker"]["current_file"] is None
 
     @patch("cementic.cli.list_collections", return_value=[])
     def test_status_json_output_survives_piping_with_long_paths(self, mock_list_collections):
@@ -2014,7 +2068,7 @@ class TestStatusEdgeCases:
                     state="running",
                     pid=str(1111),
                     process="running",
-                    current_file="None",
+                    current_file=None,
                     watched_directories=[],
                     processed_count=0,
                     failed_count=0,
@@ -2023,7 +2077,7 @@ class TestStatusEdgeCases:
                     state="running",
                     pid=str(2222),
                     process="running",
-                    current_file="None",
+                    current_file=None,
                     watched_directories=[],
                     processed_count=0,
                     failed_count=0,
@@ -2382,12 +2436,24 @@ class TestFilterCommands:
         assert "Traceback" not in result.output
         assert "not text" in result.stderr
 
-    def test_chunk_empty_path_argument_is_an_error_not_stdin(self, tmp_path):
-        """Regression: `chunk ""` fell through the truthiness check to stdin
-        and sat there looking hung."""
-        result = runner.invoke(app, ["chunk", ""], input="should not be read")
+    def test_chunk_empty_path_argument_reads_piped_stdin(self):
+        """`... | cementic chunk "$UNSET"` must still chunk the piped text.
+
+        Rejecting an empty PATH outright (the first attempt at the hung-on-a-
+        terminal fix) broke this ordinary shell idiom with `Is a directory: '.'`,
+        naming a path the user never typed.
+        """
+        result = runner.invoke(app, ["chunk", ""], input="piped text to chunk")
+        assert result.exit_code == 0, result.output
+        assert "piped text to chunk" in result.stdout
+
+    def test_chunk_empty_path_on_a_terminal_is_a_clear_error(self):
+        """Regression: `chunk ""` at a terminal fell through to stdin and sat
+        there looking hung."""
+        with patch("cementic.cli._stdin_is_a_terminal", return_value=True):
+            result = runner.invoke(app, ["chunk", ""])
         assert result.exit_code == 1
-        assert "chunk failed" in result.stderr
+        assert "stdin is a terminal" in result.stderr
         assert result.stdout.strip() == ""
 
     def test_extract_directory_is_a_clear_error(self, tmp_path):
@@ -2477,3 +2543,172 @@ class TestStopExplainsAnIndexBuild:
 
         assert result.exit_code == 1
         assert "use --force" in result.output
+
+
+class TestRefusalsUseStderr:
+    """Every exit-1 refusal must obey the README's stream convention.
+
+    Regression: `promote`, `start`, `stop` and human-mode `search` printed their
+    refusal and its hint to *stdout*, so `cementic collection promote c
+    2>errors.log || cat errors.log` printed nothing at all, and a script parsing
+    the human search results got an error sentence appended as a result row.
+    """
+
+    @patch("cementic.cli.get_session_factory")
+    @patch("cementic.cli.get_engine")
+    def test_promote_with_no_ready_revision_explains_itself_on_stderr(
+        self, mock_engine, mock_session_factory
+    ):
+        mock_session = MagicMock()
+        mock_session.__enter__.return_value = mock_session
+        mock_session.__exit__.return_value = False
+        mock_session_factory.return_value = lambda: mock_session
+
+        with (
+            patch("cementic.cli.collection_exists", return_value=True),
+            patch(
+                "cementic.cli.promote_ready_revision",
+                return_value=PromotionOutcome("no_ready"),
+            ),
+        ):
+            result = runner.invoke(app, ["collection", "promote", "work"])
+
+        assert result.exit_code == 1
+        assert "no ready revision" in result.stderr
+        assert result.stdout.strip() == ""
+
+    @patch("cementic.cli.get_session_factory")
+    @patch("cementic.cli.get_engine")
+    def test_promote_reports_a_lost_race_in_words_not_a_raw_db_error(
+        self, mock_engine, mock_session_factory
+    ):
+        """The one-active index refuses the second of two concurrent promotes;
+        that is an ordinary outcome, not a psycopg2 dump for the user to read."""
+        mock_session = MagicMock()
+        mock_session.__enter__.return_value = mock_session
+        mock_session.__exit__.return_value = False
+        mock_session_factory.return_value = lambda: mock_session
+
+        with (
+            patch("cementic.cli.collection_exists", return_value=True),
+            patch(
+                "cementic.cli.promote_ready_revision",
+                return_value=PromotionOutcome("lost_race"),
+            ),
+        ):
+            result = runner.invoke(app, ["collection", "promote", "work"])
+
+        assert result.exit_code == 1
+        assert "another promote activated a revision first" in result.stderr
+        assert "duplicate key" not in result.stderr
+        assert result.stdout.strip() == ""
+
+    def test_search_failure_is_on_stderr_not_appended_to_the_results(self):
+        """The --json twin already did this; the human path did not, so a
+        redirected result list ended with an error sentence in it."""
+        searcher = MagicMock()
+        searcher.search.return_value = []
+        searcher.unsearchable_collections.return_value = ["nosuch"]
+        with patch("cementic.cli.Searcher", return_value=searcher):
+            result = runner.invoke(app, ["search", "anything", "-c", "nosuch"])
+
+        assert result.exit_code == 1
+        assert "no indexed revision" in result.stderr
+        assert "no indexed revision" not in result.stdout
+
+    def test_start_refuses_a_second_run_on_stderr(self):
+        with patch(
+            "cementic.cli._load_supervisor_state",
+            return_value={"processes": [{"name": "watcher", "pid": 1}], "directories": []},
+        ):
+            with patch("cementic.cli._is_managed_proc_alive", return_value=True):
+                result = runner.invoke(app, ["start", ".", "-c", "c"])
+
+        assert result.exit_code == 1
+        assert "already running" in result.stderr
+        assert "already running" not in result.stdout
+
+
+class _RefusingEmbedProvider(_FakeEmbedProvider):
+    """Provider that cannot embed the last text of a batch."""
+
+    def embed_batch(self, texts: list[str]) -> list[list[float] | None]:
+        return [[0.1, 0.2, 0.3] for _ in texts[:-1]] + [None]
+
+    def over_budget_reason(self, text: str) -> str:
+        return "too long"
+
+
+class TestEmbedReportsRealStdinLines:
+    """Every embed error names the same line numbers the user can count to."""
+
+    @patch("cementic.cli.runtime_spec_from_config", return_value=object())
+    @patch("cementic.cli.create_provider", return_value=_RefusingEmbedProvider())
+    def test_an_unembeddable_record_names_its_stdin_line(self, _provider, _spec):
+        """Regression: this branch alone still counted *records*, so a blank line
+        in the input shifted it -- the exact mislocation the parse and validation
+        errors in the same command were fixed to stop reporting."""
+        stdin = '{"content": "first"}\n\n{"content": "second"}\n'
+
+        result = runner.invoke(app, ["embed"], input=stdin)
+
+        assert result.exit_code == 1
+        # The failing record is the second one, on stdin line 3.
+        assert "line 3 could not be embedded" in result.stderr
+        assert "line 2" not in result.stderr
+
+
+class TestFifthReviewSection41Leftovers:
+    """The two §4.1 defects the resolution banner marked closed but left live."""
+
+    def test_search_says_unknown_collection_not_no_indexed_revision(self):
+        """A name cementic has never heard of and a real collection still
+        building got the same sentence, so a typo read as a timing problem."""
+        searcher = MagicMock()
+        searcher.search.return_value = []
+        searcher.unsearchable_collections.return_value = ["persnal"]
+        with (
+            patch("cementic.cli.Searcher", return_value=searcher),
+            patch("cementic.cli._known_collection_names", return_value=set()),
+        ):
+            result = runner.invoke(app, ["search", "q", "-c", "persnal"])
+
+        assert result.exit_code == 1
+        assert "unknown collection persnal" in result.stderr
+
+    def test_search_still_says_no_indexed_revision_for_a_known_collection(self):
+        """The other half: a collection that exists but has nothing searchable
+        yet must keep its own, different diagnosis."""
+        searcher = MagicMock()
+        searcher.search.return_value = []
+        searcher.unsearchable_collections.return_value = ["building"]
+        with (
+            patch("cementic.cli.Searcher", return_value=searcher),
+            patch("cementic.cli._known_collection_names", return_value={"building"}),
+        ):
+            result = runner.invoke(app, ["search", "q", "-c", "building"])
+
+        assert result.exit_code == 1
+        assert "no indexed revision for building" in result.stderr
+        assert "unknown collection" not in result.stderr
+
+    def test_search_does_not_lead_with_no_results_when_the_name_is_wrong(self):
+        """"no results" first said the search had worked, burying the answer."""
+        searcher = MagicMock()
+        searcher.search.return_value = []
+        searcher.unsearchable_collections.return_value = ["persnal"]
+        with (
+            patch("cementic.cli.Searcher", return_value=searcher),
+            patch("cementic.cli._known_collection_names", return_value=set()),
+        ):
+            result = runner.invoke(app, ["search", "q", "-c", "persnal"])
+
+        assert "no results" not in result.stdout
+
+    def test_doctor_says_when_it_is_ignoring_flags(self):
+        """`status --doctor -c typo -v` accepted both flags and used neither."""
+        result = runner.invoke(app, ["status", "--doctor", "-c", "anything", "-v"])
+
+        assert "ignored with --doctor" in result.stderr
+        assert "-c/--collection" in result.stderr
+        assert "-v/--verbose" in result.stderr
