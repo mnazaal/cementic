@@ -1575,7 +1575,11 @@ def promote_collection(
     console.print(f"collection: {collection}")
     if status == "no_ready":
         console.print("status: no ready revision")
-        return
+        console.print("`cementic status -c` shows whether a build is still in progress")
+        # Exit 1 like every other promote that promoted nothing: this was the
+        # one no-op outcome that exited 0, so a script chaining
+        # `promote && search` proceeded as if a revision had been published.
+        raise typer.Exit(1)
     if status == "empty":
         console.print("status: nothing to promote (revision has no documents)")
         console.print(

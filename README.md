@@ -160,6 +160,14 @@ and `search -c` each say so and exit non-zero. `collection remove` is the
 deliberate exception — removing something already gone reports `not found` and
 succeeds, so it stays safe to run twice.
 
+Exit codes follow one convention: **0** — the operation happened (including a
+no-op documented as safe, like removing an already-absent collection); **1** —
+it could not happen (database unreachable, a refused or empty promote, workers
+that would not stop, an unknown collection); **2** — a usage error from the CLI
+parser (unknown flag, missing argument). Errors and hints print to stderr;
+stdout carries only the command's output, so `--json` streams stay parseable
+under `jq` even when something fails.
+
 `cementic start` runs a single background session (one source watcher + one pipeline worker)
 at a time, tracked in one supervisor state file. Running `cementic start` again for a different
 collection while one is already active refuses with "Background cementic processes already

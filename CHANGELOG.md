@@ -29,6 +29,10 @@
 
 ### Fixed
 
+- **`collection promote` with no ready revision exits 1.** It was the one
+  promoted-nothing outcome that exited 0 (empty, incomplete and blocked all exit 1), so
+  `promote && search` proceeded as if a revision had been published. The README documents
+  the full exit-code convention.
 - **Errors print to stderr, and output is no longer hard-wrapped at 80 columns when
   piped.** Config and database errors used to land on stdout, so `search --json | jq`
   choked on `config error: ...` as if it were data; and off a TTY every long path or hint

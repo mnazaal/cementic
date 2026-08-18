@@ -1693,14 +1693,19 @@ class TestCollectionCommandsEdgeCases:
     @patch("cementic.cli.get_session_factory")
     @patch("cementic.cli.get_engine")
     def test_promote_no_ready_revision(self, mock_get_engine, mock_get_session_factory):
-        """promote_collection shows 'no ready revision' when none exists."""
+        """Nothing was promoted, so the exit code says so.
+
+        Regression: this was the one promoted-nothing outcome that exited 0
+        (empty, incomplete and blocked all exit 1), so a script chaining
+        `promote && search` proceeded as if a revision had been published.
+        """
         mock_session = MagicMock()
         mock_session.__enter__.return_value = mock_session
         mock_get_session_factory.return_value = lambda: mock_session
         outcome = PromotionOutcome(status="no_ready")
         with patch("cementic.cli.promote_ready_revision", return_value=outcome):
             result = runner.invoke(app, ["collection", "promote", "mycol"])
-        assert result.exit_code == 0
+        assert result.exit_code == 1
         assert "no ready revision" in result.output
 
     @patch("cementic.cli.promote_ready_revision", side_effect=ValueError("boom"))
