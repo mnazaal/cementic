@@ -3,120 +3,26 @@
 <!-- session-handoff:begin (2026-08-15) -->
 ## Where the work stands
 
-The **fourth code review is done, fixed, and merged** — seven commits, `main` at
-`14f9f2a`. Every finding, the commit that closed it, and what stays deliberately
-open are in `notes/code-review-2026-08-14.html`; that note is the record and this
-block does not repeat it.
+**v0.2.0 is shipped** — tag `v0.2.0` = merge commit `9c9273f` on `main`, pushed
+2026-08-18. It carries the fifth review's fixes, the adversarial re-review's
+fixes, and the zero-rough-edges release batches; the two plan-of-record
+sections below are the record, and the exit-criteria checklist in the second
+one is fully checked with evidence.
 
-The live corpus is **indexed and searchable for the first time**: collection
-`test` (watching `~/bibs/papers`), 5 documents, 249/249 chunks embedded, 0
-failed, revision 2 `default-03033c91-llama-cpp-bea283a3` active. `collection
-promote` followed by `search` was exercised end to end against the live
-database, which closes the previous handoff's one "not carried forward" item.
+The live corpus is **indexed and searchable at the shipped defaults**:
+collection `test` (watching `~/projects/bibs/papers` — it moved from
+`~/bibs/papers`), 5 documents, 274/274 chunks embedded at `chunk_size = 320`,
+0 failed, revision `default-68e212bc-llama-cpp-12f77de0` active. The full
+remove → start → build → promote → search → stop cycle was exercised against
+the live database on release day. Workers are stopped; nothing runs in the
+background.
 
-**Entry point — one decision, already measured, nothing blocking it.** The
-active index was built at `chunk_size = 352`; the shipped default is now **320**.
-Both are correct (0 chunks over the model's 512-token window, measured on this
-corpus), but only 320 keeps the token-budget guard's cheap path — at 352 the
-task prefix pushes every chunk 3 tokens past the skip threshold and each one
-pays an extra tokenize round trip (the guard is
-`RemoteEmbeddingClient.over_budget_tokens` in `embedding_runtime.py`).
-Consequence: the next `cementic start ~/bibs/papers -c test` mints a new
-revision and re-embeds all 274 chunks, roughly 7 minutes, with the current
-revision serving throughout; then `cementic collection promote test`. Either let
-that happen, or pin `chunk_size = 352` in a config file to keep the present
-index. Nothing else was pending at handoff time. *(Update 2026-08-18: the fifth review
-and an adversarial re-review of its fixes have since run and are closed — see
-"Plan of record" below. Pinning `chunk_size = 352` still works: an over-strict
-validator that refused it was one of the defects the re-review caught.)*
+**Entry point:** nothing is pending. The next work is whatever the user wants
+from "Road to v1" (in the release plan below): soak time, TODO features,
+config/CLI stability, multi-platform testing. No decision blocks anything.
 
-**Branch:** `claude/session-handoff-2026-08-15`, branched from `main` at
-`14f9f2a` and not yet merged — it carries this block, a correction to "Scale
-context" below, and a staleness sweep of the standing docs. Merge it and no
-`claude/*` branches remain. Nothing is running in the background.
-*(Correction 2026-08-18: merged — `main` carries it.)*
-
-**Verification:** `./scripts/check.sh`. At `14f9f2a`: 893 tests passing, ruff and
-mypy clean.
-
-### Environment facts that cost time to rediscover
-
-Carried forward and still true: the venv is an **editable install of this working
-tree** (`cementic` runs whatever branch is checked out); the user **merges
-branches into `main` between turns** (re-check the branch before committing — it
-happened twice more this session); integration tests need a separate `<name>_test`
-database; `podman` and `psql` are unusable from the sandbox, so inspect Postgres
-through SQLAlchemy. New this session:
-
-- **The sandbox does not mount `~/bibs`.** Twice I read "I cannot see it" as "it
-  does not exist" and said so — once concluding the user's whole PDF corpus had
-  been deleted. Never infer a path's absence from inside the sandbox.
-- **Timings measured in the sandbox are ~4x slower than the host.** In-sandbox
-  embedding measured 5.9 s/chunk; the host does 1.4 s/chunk. A "the shipped
-  defaults are incompatible" finding was built on the sandbox number and had to
-  be retracted. Timings for user-facing advice must come from host-side evidence
-  (e.g. polling `chunk_embeddings` while the real worker runs).
-- **SIGKILL on a wedged llama.cpp daemon leaves its listening socket bound** —
-  the port accepts connections and hangs forever, with no owning process, until
-  the zombie is reaped. SIGTERM releases it cleanly. Use SIGTERM; if a port is
-  stuck, `llama_cpp.daemon_port` is in neither the embedding-profile nor the
-  runtime fingerprint, so moving it costs no re-embed.
-
-### Two predicted failures actually occurred, live
-
-Both are already in the review as accepted/known, but they are no longer
-theoretical and are worth weighting accordingly:
-
-- An **orphaned embedding daemon** ran 21 hours holding the port while cementic
-  had lost its pid record, so `embedding stop` reported "already stopped" and
-  nothing could reclaim it. It was wedged, and it is what stalled the re-index.
-- **`check_health` called that wedged daemon "healthy"**, because it only asks
-  whether `/v1/models` lists the model. `cementic status` said `embedding
-  healthy` while every request hung.
-
-### Numbers measured this session
-
-- **50 chunks/PDF** at `chunk_size = 352` (the old figure of 34 was at 512), so
-  20k PDFs is ~**1M chunks**. "Scale context" below has been corrected to match.
-- **Embedding: 1.4 s/chunk** host-side, roughly linear in batch size. 1M chunks
-  is therefore ~387 hours of continuous embedding — the real ceiling at 20k PDFs
-  is indexing throughput, not query latency.
-- **Search: 214 ms warm end to end, of which 197 ms is embedding the query** — a
-  constant, independent of corpus size. Everything else is 17 ms; a bare KNN over
-  10k vectors is 5.6 ms median / 9.3 ms p90. Search at 20k PDFs should stay
-  ~0.2 s. What users perceive as a slow search is the daemon cold-starting.
-- **RAM is the binding constraint before latency is:** 15 GB total, ~3 GB
-  available, 6.2 GB swap already in use. A 1M-vector HNSW index needs ~3 GB
-  resident, so switch `index.method` to `diskann` well before that (vectorscale
-  0.9.0 and the `diskann` access method are installed and verified present).
-
-### Dead ends — do not repeat
-
-- **The ANN scaling benchmark was abandoned, and its design was the reason.** It
-  built the HNSW index at 10k and then inserted 90k more rows *into the indexed
-  table* (every row paying graph maintenance), while generating 768 Gaussians per
-  row in pure Python — Postgres sat `idle in transaction` waiting on the client.
-  A rewrite must bulk-load first, index once at the end, and generate vectors
-  with numpy. Only the 10k point survived; it is recorded above. The script was
-  discarded, not promoted.
-- **Retracted, do not act on:** the `batch_size`/`llama_embed_timeout_seconds`
-  defaults are fine (see the sandbox-timing note above), and the PDF corpus was
-  never missing.
-- A symbol inventory over the whole package found exactly **one** truly dead
-  symbol, since removed. The package is clean; a future dead-code pass should
-  expect a near-empty result rather than assume the tool is broken.
-
-**Not carried forward:** nothing from the scratchpad was promoted — the fixes,
-tests, review note and README changes are all committed, and the remaining
-artifacts were run logs and throwaway probes whose cases are now covered by
-regression tests.
-<!-- session-handoff:end -->
-
-Design rationale and roadmap for cementic: a CLI that watches directories of
-documents, builds a versioned **extract → chunk → embed** pipeline in Postgres
-(pgvector / vectorscale), and serves semantic search over the active revision of
-each collection. User-facing docs live in `README.md`; this document is for
-contributors.
+**Verification:** `./scripts/check.sh` — all five gates green at the release
+commit.
 
 ## Plan of record — fifth-review fixes (2026-08-18)
 
@@ -476,7 +382,14 @@ the README documents autostart where `search` is introduced.
       tag `v0.2.0` on main (user), `uv tool install` from the pushed tag in a
       clean environment (agent can verify once the tag exists; install from
       local source already verified at the release version).
-- [ ] Tag pushed and install-from-tag verified — the only open item.
+- [x] Tag pushed by the user 2026-08-18 (`v0.2.0` = merge commit `9c9273f`).
+      Install verified in a clean venv from the exact tagged tree
+      (`git archive v0.2.0`): reports 0.2.0, doctor ok. The literal
+      `uv tool install git+https://...@v0.2.0` could not run from the agent
+      sandbox (private repo, no agent credentials; the git+file:// route is
+      blocked by the ref-transaction guard) — the tagged *tree* installing
+      cleanly is the same evidence minus network transport. **Plan closed:
+      v0.2.0 shipped.**
 
 ### Road to v1 (the user's bar, recorded 2026-08-18)
 
