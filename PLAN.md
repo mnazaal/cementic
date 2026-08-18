@@ -25,12 +25,15 @@ Consequence: the next `cementic start ~/bibs/papers -c test` mints a new
 revision and re-embeds all 274 chunks, roughly 7 minutes, with the current
 revision serving throughout; then `cementic collection promote test`. Either let
 that happen, or pin `chunk_size = 352` in a config file to keep the present
-index. Nothing else is pending.
+index. Nothing else was pending at handoff time. *(Correction 2026-08-18: the
+fifth review has since run and its findings are open — see "Plan of record"
+below.)*
 
 **Branch:** `claude/session-handoff-2026-08-15`, branched from `main` at
 `14f9f2a` and not yet merged — it carries this block, a correction to "Scale
 context" below, and a staleness sweep of the standing docs. Merge it and no
 `claude/*` branches remain. Nothing is running in the background.
+*(Correction 2026-08-18: merged — `main` carries it.)*
 
 **Verification:** `./scripts/check.sh`. At `14f9f2a`: 893 tests passing, ruff and
 mypy clean.
@@ -113,6 +116,125 @@ documents, builds a versioned **extract → chunk → embed** pipeline in Postgr
 (pgvector / vectorscale), and serves semantic search over the active revision of
 each collection. User-facing docs live in `README.md`; this document is for
 contributors.
+
+## Plan of record — fifth-review fixes (2026-08-18)
+
+Scope: close the fifth review, [`notes/code-review-2026-08-17.html`](notes/code-review-2026-08-17.html).
+All file:line evidence lives in the note; this section holds only execution
+order, the decisions, and the exit criteria. Mechanics: one branch
+(`claude/review-fixes-2026-08-17`), conventional commits, one commit per
+finding-cluster with its regression test, each commit green under
+`./scripts/check.sh` — all five gates, PG included (that lesson is paid for).
+When done, the note gets a resolution banner mapping finding → commit, same
+shape as the 2026-08-14 note.
+
+### Order of attack
+
+`§` references are the note's sections.
+
+1. **Finish the five half-landed fixes (§1).** Each currently contradicts a
+   commit message or docstring that claims it done, so they go first:
+   - `status --json` on an unknown collection: validate before the JSON early
+     return; error to stderr, non-zero exit. Correct the README/CHANGELOG
+     "exits non-zero" claims in the same commit.
+   - The initial scan records skips: symlinks, walk errors, and registration
+     failures go through `record_skipped` exactly as live inotify events do.
+   - `stop`'s kill loop: `PermissionError` means alive-but-not-ours (mirror
+     `force_kill`'s reasoning); never clear supervisor/worker state while such
+     a pid remains; report it and exit non-zero.
+   - `CEMENTIC_CONFIG`: `expanduser` in `resolve_config_path`; `config path`
+     calls the existing `config_path_error` guard so an unusable value is
+     reported instead of silently masked by the fallback.
+   - `promote` prints the artifact-removal failure list (as `remove` already
+     does); `embed` rejects empty/whitespace `content`.
+2. **Worker/DB correctness (§2)**, in severity order:
+   - §2.1 `collection remove` vs a running worker. **Decision — recommended
+     mechanism:** the worker re-validates its cached revision id once per poll
+     cycle (one cheap SELECT) and exits cleanly when it is gone; `collection
+     remove` additionally warns when workers for that collection are running.
+     Rejected alternative: refusing removal while workers run — heavier UX,
+     and the delete itself is already cascade-safe; the defect is only the
+     zombie worker and the watcher resurrecting the collection.
+   - §2.7 search's `-c` fallback ranks revisions via `_searchable_revisions`
+     so there is one source of revision choice. Twice-derived carry; the
+     regression test pins building-vs-ready.
+   - §2.5 `IS DISTINCT FROM` semantics for `source_content_hash` in the claim
+     query, and write the hash on the failure path too, so a NULL row cannot
+     wedge a revision in `building`.
+   - §2.2 `SET LOCAL maintenance_work_mem`; delete the false "connection is
+     discarded" comment.
+   - §2.4 reset `skipped_files` on watcher restart; §2.6 drop whitespace-only
+     chunks before `chunk_index` assignment so indexes stay contiguous and
+     `total_chunks` honest; §2.3 a post-commit cleanup failure after a durable
+     promote is a warning, not "promote failed" exit 1.
+   - §2.8 partial unique index `ON pipeline_revisions (collection) WHERE
+     status = 'active'`, applied through the ensure-schema path (same
+     mechanism as `ensure_vector_table_schema` — `create_all` won't retrofit
+     it), plus promote re-reading status under `FOR UPDATE`.
+   - §2.9's smaller items ride along wherever their file is already open;
+     the directory-move blindness (unverified) gets a repro test first and a
+     fix only if it reproduces.
+3. **Error-stream and wrapping discipline (§4.2–4.3).** Mechanical, wide
+   blast radius, kept in its own commits: all human error text to stderr via
+   an `err_console`; `soft_wrap=True` so off-TTY output stops hard-wrapping
+   paths at 80 columns. Tests pipe the output and assert stream and absence
+   of mid-path wraps. This is what unblocks `--json | jq` composability.
+4. **Exit-code normalization (§4.1).** Adopt the convention most commands
+   already follow — 0 ok, 1 operation failed, 2 usage error / unknown name —
+   and move the stragglers to it (`collection remove <unknown>`, `promote`
+   with no ready revision). Document the table in README.
+5. **Config/runtime hardening (§3.1–3.3, §3.5–3.6).** Bounds on numerics
+   (`n_ctx >= 1` closes the guard-disable hole; positive intervals and
+   timeouts; port ranges), the chunk_size↔n_ctx invariant enforced at config
+   validation against the *configured* values (today it is only tested at the
+   shipped defaults), env-vs-file attribution in config error messages,
+   `over_budget_reason` wired into worker failure rows and the query-side
+   message (which currently blames `pipeline.chunk_size` for a long query),
+   `runner.py` parity with the CLI's error handling (`RuntimeError`,
+   `SettingsError`), `embedding stop` under the daemon lock, autostart
+   failing fast on a definitive model mismatch instead of waiting 120 s, and
+   doctor's unreachable/false branches.
+6. **Bootstrap download (§3.4).** Third-time carry — **decision: fix now.**
+   Unique temp name, download performed under the daemon file lock (taken
+   before the download, not after), `requests` exceptions wrapped into the
+   normal error format. If overruled, the deferral gets written into
+   "Deliberately not done" with reasons, so it stops being re-derived.
+7. **CLI paper cuts (§4.4)**, batched by file: binary-stdin decode error in
+   `embed`, `chunk ""` falsy-check reading stdin, embed JSONL error line
+   attribution, `strict=True` on the zips, the wrong-noun messages
+   (`start <file>`, `extract <dir>`), `status -v` file-listing errors
+   surfaced, `check_health` crash no longer silently deleting the health
+   section, `current_file` included in `--json`.
+8. **Trimming (§5).** Last, so cleanup diffs never mix with behavior fixes:
+   the 17-key status dict ×2, engine/session boilerplate ×7, the
+   `validate_collection_name` wrapper ×9, the ~70 worker/watcher duplicated
+   lines, the bucketing loop ×2, the dead `session.commit()`, TOML parsed
+   once per `get_config()`, and the stale docstrings/comments — except those
+   an earlier batch already touches, which get fixed there.
+9. **Test and doc debt (§6–§7).** Regression tests for the three untested
+   fourth-review fixes (search-migration commit, `reindex --force`
+   failure-atomicity, embed input validation — the last largely produced by
+   batch 1), plus whatever README/CHANGELOG claims batches 1 and 4 have not
+   already corrected.
+
+### Out of scope here, tracked elsewhere
+
+- The chunk_size 320-vs-352 re-embed decision — handoff block above.
+- Environment, not code: the orphaned daemon observed on port 11555 (SIGTERM
+  it, per the handoff block's socket note), and the indexed corpus directory
+  no longer existing on disk (every current search result carries a dead
+  `source_path` — re-point or remove the collection).
+- The deferred-features list at the bottom of this document.
+
+### Exit criteria
+
+- Every §1–§7 finding is either fixed with a regression test or explicitly
+  moved to "Deliberately not done" with a reason.
+- Resolution banner in the 2026-08-17 note, finding → commit.
+- `./scripts/check.sh` green, PG gate included.
+- No unmerged `claude/*` branch left behind.
+
+Rough sizing: batches 1–4 are one focused session; 5–9 one to two more.
 
 ## Design principles
 
@@ -258,10 +380,11 @@ it matters.
 
 ## Review history and what is still open
 
-**Everything found by the four reviews is fixed and merged**, except the items
-under "Deliberately not done" below. The notes are the record of what each found;
-this section keeps only the engineering *lessons and measurements* that have no
-other home, in the order they were learned.
+**Everything found by the first four reviews is fixed and merged**, except the
+items under "Deliberately not done" below. The fifth pass (2026-08-17) is the
+current open findings list — nothing from it is fixed yet. The notes are the
+record of what each found; this section keeps only the engineering *lessons and
+measurements* that have no other home, in the order they were learned.
 
 - [`notes/code-review-2026-08-07.html`](notes/code-review-2026-08-07.html) — first full pass.
 - [`notes/code-review-2026-08-11.html`](notes/code-review-2026-08-11.html) — third
@@ -270,19 +393,17 @@ other home, in the order they were learned.
   pass. Carries a resolution banner mapping every finding to the commit that
   closed it, and a reconciliation of the two earlier notes, so a fifth review
   starts from that rather than re-deriving.
+- [`notes/code-review-2026-08-17.html`](notes/code-review-2026-08-17.html) — fifth
+  pass, reviewing the fourth pass's fixes plus fresh eyes per subsystem. Headline
+  pattern: several fixes are correct on the path they touched and absent on an
+  adjacent path the same defect reaches (`status --json`, the initial scan,
+  `stop`'s kill loop, `config path`). All findings currently open; §9 has the
+  suggested order of attack.
 
-**Read the 2026-08-14 note before opening a new review.** Its most useful section
+**Read the 2026-08-17 and 2026-08-14 notes before opening a new review.** Its most useful section
 is not the findings but the ledger of what the earlier passes found and never
 fixed — roughly fifteen items were re-derived independently three times before
 anyone acted on them.
-
-The 2026-08-11 pass re-confirmed ~20 findings independently (both blockers among
-them) and added: an unguarded `shutil.rmtree` in `init postgres --force`; a
-revision reaching `ready` with zero documents; failure counts laundered past the
-promote gate by a worker restart; `index.method` unreachable on a built system;
-`--n_batch` never passed, so raising `n_ctx` is a no-op; raw tracebacks on a
-malformed `CEMENTIC_DB_URL` in the three commands meant to explain it; and two
-CI marker holes that make a green run meaningless.
 
 The 2026-08-11 pass re-confirmed ~20 findings independently (both blockers among
 them) and added: an unguarded `shutil.rmtree` in `init postgres --force`; a
