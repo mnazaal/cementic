@@ -19,7 +19,12 @@ from cementic.embedding_text import describe_text_policy
 #: this whenever those rules change: it is part of the embedding profile
 #: fingerprint, and without a bump old and new vectors would be mixed in one
 #: profile with no way to tell them apart.
-EMBEDDING_TEXT_FORMAT_VERSION = "v1"
+EMBEDDING_TEXT_FORMAT_VERSION = "v2"
+# v2: task prefixes extended from nomic-embed-text-v2 filenames to the whole
+# nomic-embed-text family -- v1/v1.5 are trained with the same asymmetric
+# prefixes and were silently embedded without them. Vectors from a v1/v1.5
+# model under the old rule are unprefixed and must not share a profile with
+# prefixed ones.
 # v2: chunk_text no longer emits a duplicate tail chunk when a chunk ends exactly
 # at the end of the text, so chunk output changed for boundary-length documents.
 # v3: covers three later changes to chunk_text output that each shipped without a
