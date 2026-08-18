@@ -276,3 +276,48 @@ def test_search_works_against_a_pre_migration_vector_table(
 
     assert [result["content"] for result in results] == ["still findable"]
     cleanup_pg_tables(pg_session)
+
+
+@pytest.mark.pg
+def test_search_migration_is_committed_not_rolled_back(
+    pg_engine, pg_session, pg_config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression (fourth review, previously untested): the migration ran
+    inside the search session, whose context manager rolled the DDL back on
+    close -- so on a pre-migration database *every* search re-ran the
+    full-table backfill under ACCESS EXCLUSIVE and threw the work away."""
+    cleanup_pg_tables(pg_session)
+    revision = seed_active_vector_collection(
+        pg_session,
+        collection="premigration_commit",
+        source_path="/docs/old.pdf",
+        chunks=[("still findable", [1.0, 0.0, 0.0, 0.0])],
+    )
+    pg_session.commit()
+    table = vector_table_name(revision.embedding_profile_id)
+    with pg_engine.begin() as conn:
+        for column in FILTER_COLUMNS:
+            conn.execute(text(f"ALTER TABLE {table} DROP COLUMN {column}"))
+
+    monkeypatch.setattr(
+        "cementic.search._create_embedding_provider",
+        lambda config_json, config=None: FakeSearchEmbeddingClient(),
+    )
+
+    Searcher(pg_config).search("neural", top_k=5, collections=["premigration_commit"])
+
+    # The columns must be visible to a *fresh* connection: durable, not part of
+    # a transaction the search session rolled back.
+    with pg_engine.connect() as conn:
+        columns = {
+            row[0]
+            for row in conn.execute(
+                text(
+                    "SELECT column_name FROM information_schema.columns "
+                    "WHERE table_name = :table"
+                ),
+                {"table": table},
+            )
+        }
+    assert set(FILTER_COLUMNS) <= columns
+    cleanup_pg_tables(pg_session)

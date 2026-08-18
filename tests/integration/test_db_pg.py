@@ -206,6 +206,55 @@ class TestAnnIndex:
         finally:
             _cleanup(pg_engine, emb_prof_id)
 
+    def test_failed_force_rebuild_keeps_the_old_index(self, pg_engine):
+        """Regression (fourth review, previously untested): the drop used to
+        commit separately from the create, so a rebuild that failed left the
+        collection with no ANN index at all -- permanently and silently, since
+        search keeps working by sequential scan."""
+        from unittest.mock import patch
+
+        session_factory = sessionmaker(bind=pg_engine)
+        with session_factory() as session:
+            pipeline = _create_minimal_pipeline(session, embedding_dim=4)
+            emb_prof_id = pipeline.embedding_profile_id
+            session.commit()
+
+        try:
+            _create_vector_table(pg_engine, emb_prof_id, 4)
+            ensure_embedding_ann_index(
+                pg_engine, profile_id=emb_prof_id, method="hnsw", params=IndexParams()
+            )
+
+            with (
+                patch(
+                    "cementic.db.build_index_ddl",
+                    return_value="CREATE INDEX this is not valid SQL",
+                ),
+                pytest.raises(Exception),
+            ):
+                ensure_embedding_ann_index(
+                    pg_engine,
+                    profile_id=emb_prof_id,
+                    method="hnsw",
+                    params=IndexParams(),
+                    force_rebuild=True,
+                )
+
+            table = vector_store.vector_table_name(emb_prof_id)
+            with pg_engine.connect() as conn:
+                indexes = [
+                    row[0]
+                    for row in conn.execute(
+                        text("SELECT indexname FROM pg_indexes WHERE tablename = :t"),
+                        {"t": table},
+                    )
+                ]
+            assert any("ann" in name for name in indexes), (
+                f"the old ANN index must survive a failed rebuild: {indexes}"
+            )
+        finally:
+            _cleanup(pg_engine, emb_prof_id)
+
     def test_build_memory_does_not_leak_into_the_pool(self, pg_engine):
         """Regression: a session-level SET pinned maintenance_work_mem on the
         pooled connection -- the code comment claimed the connection was
