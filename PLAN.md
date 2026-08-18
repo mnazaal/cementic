@@ -246,107 +246,224 @@ Rough sizing: batches 1–4 are one focused session; 5–9 one to two more.
 
 ## Plan of record — v1.0.0 release (2026-08-19)
 
-Goal: **zero rough edges** — every known defect fixed or explicitly documented
-as a limitation with a reason, the one untested code path exercised against the
-live system, and the release mechanics done. Decisions settled with the user
-2026-08-18: re-embed at the shipped `chunk_size = 320` (no config pin); release
-form is an annotated **git tag `v1.0.0`** (no PyPI); piped search previews stay
-full-text; both reopened silent-degradation defects are in scope.
+**Goal.** Ship v1.0.0 with zero rough edges: every known defect either fixed
+with a regression test or documented as a limitation with recorded evidence,
+the one code path no test evidence covers exercised against the live system,
+and the release mechanics done. "Rough edge" is defined by the user's
+criterion: anything a real user would hit and be surprised by.
 
-### Prerequisite — resolved 2026-08-18
+**Where this starts from.** `main` at `c34b57f` — fifth review closed,
+adversarial re-review closed, all five `./scripts/check.sh` gates green.
+Working branch: `claude/v1-release`. Current version: `0.1.0b1`.
 
-The corpus moved to `~/projects/bibs/papers` (5 PDFs, verified readable; the
-old `~/bibs/papers` still exists but is outside the agent's reach). Documents
-are keyed on `(collection, source_path)`, so pointing the watcher at the new
-path would mint 5 new documents beside the old dead-path rows. Batch 3 therefore
-runs `collection remove test --force` first and starts fresh on the new path —
-the 320 re-embed rebuilds everything regardless, this leaves no dead rows, and
-it exercises `remove` against the live database as a bonus. (Consequence: the
-old revision is gone during the ~7 min rebuild, so `search` is briefly empty —
-acceptable for a corpus of 5.)
+**Decisions already settled** (user, 2026-08-18 — do not re-litigate):
 
-### Order of attack
+| Decision | Choice | Rejected alternative and why |
+|---|---|---|
+| chunk_size | Re-embed at the shipped **320** | Pinning 352 kept the old index but paid a tokenize round trip per chunk forever and left config diverged from the default |
+| Release form | **Annotated git tag `v1.0.0`**, no PyPI | PyPI needs an account, a free name, and a publish pipeline nobody has asked for |
+| Piped previews | **Full text kept** | Capping reintroduces the substring-grep breakage the review fixed |
+| Reopened defects | **Both fixed in v1** | Shipping known silent-failure modes contradicts the zero-rough-edges goal |
+| Corpus location | `~/projects/bibs/papers` (5 PDFs, verified readable) | Old `~/bibs/papers` exists but is outside the agent's reach |
 
-0. **Merge `claude/review-fixes-2026-08-17` into `main`** — done (fast-forward
-   to `c34b57f`, 2026-08-18). Everything below happens on `claude/v1-release`,
-   branched from that main.
-1. **Silent-degradation fixes** — the two "Deliberately not done" items reopened
-   for v1, each with a regression test:
-   - **`check_health` must detect a wedged daemon.** It only asks `/v1/models`
-     for the model list, so on 2026-08-15 a daemon that answered listings but
-     hung every embedding held the port 21 hours while `status` said
-     `embedding healthy`. Probe with a real one-token embedding round trip
-     under a short timeout (a couple of seconds — the daemon is warm if it is
-     healthy); a timeout or error is `unhealthy`, with the reason surfaced in
-     `status`/`--doctor`.
-   - **Nomic v1/v1.5 models must get task prefixes.** `_NOMIC_V2_MARKER`
-     matches only `nomic-embed-text-v2`, so pointing `model_path` at the
-     v1.5 GGUF that sits in `models/` silently disables the asymmetric
-     prefixes both generations need — measurably worse retrieval, no error.
-     Widen the match to the nomic-embed-text family, bump
-     `EMBEDDING_TEXT_FORMAT_VERSION` (v1/v1.5 vectors embedded under the old
-     rule would mix with new ones in a profile; no live profile is affected —
-     the active profile uses v2, whose policy is unchanged), and retire the
-     test that pins the wrong behaviour.
-2. **§2.9 directory-move repro, timeboxed.** One focused attempt against
-   watchdog's real event stream (move a watched subdirectory, move the root,
-   move-in from outside). If it reproduces: fix with a regression test. If
-   not, or if watchdog genuinely does not deliver the events: document it as a
-   known limitation in the README with the repro attempt recorded here — a
-   documented limitation with evidence is not a rough edge; an undocumented
-   *suspected* one is.
-3. **Live-fire validation** — the one path no test evidence covers on the real
-   database, and the execution of the 320 decision, in one pass (user present,
-   since it writes live state):
-   `cementic collection remove test --force` → `cementic start
-   ~/projects/bibs/papers -c test` → watch the build at 320 (~7 min) →
-   `cementic collection promote test` →
-   `cementic search` returns live paths → `cementic stop`. This exercises, on
-   the real system: the index retrofit in `create_tables`, the supervisor
-   liveness fixes, the worker's restructured embed transaction, and promote's
-   race handling. Any failure here reopens batch 1 territory before release.
-4. **Cold-start UX, docs only.** `search` autostarting the daemon (30 s+ on a
-   cold model load) is by design; the notice already goes to stderr. The
-   quickstart gains one line — run `cementic embedding start` once after
-   install to pay the cold start up front — and the README documents the
-   autostart behaviour where `search` is introduced.
-5. **Docs walked, not skimmed.** In a clean environment (fresh venv or
-   container), follow README top to bottom exactly as written — install,
-   `init postgres`, config, start, promote, search — and fix every place the
-   text and the behaviour disagree. Add a **Known limitations** section:
-   one background session at a time (by design), ANN pre-filter recall on
-   shared vector tables, `check_health`'s remaining scope, §2.9's verdict from
-   batch 2. README stays user-facing; reasons live here.
-6. **Release mechanics.**
-   - `pyproject.toml` version `0.1.0b1` → `1.0.0`.
-   - CHANGELOG: cut `[Unreleased]` to `[1.0.0] — <date>`. (CHANGELOG.md stays:
-     the no-changelog default is for repos with no external consumers, which
-     stops applying at a tagged release.)
-   - Annotated tag `v1.0.0`, message = the release highlights.
-   - Verify `uv tool install` from the git URL at the tag, in a clean
-     environment, runs the quickstart.
+### Batch map
+
+Six batches. 1 and 2 are independent of each other and of the corpus; 3 needs
+the user present; 4–6 are cheap and sequential. Dependency: 5 must follow 1–4
+(it documents their outcomes); 6 is last by definition.
+
+| # | What | Kind | Needs user? |
+|---|---|---|---|
+| 1 | Two silent-degradation fixes | Code + tests | No |
+| 2 | §2.9 directory-move repro | Investigation, then code or docs | No |
+| 3 | Live-fire: remove → start at 320 → promote → search → stop | Operation | **Yes** (writes live state) |
+| 4 | Cold-start UX line in quickstart | Docs | No |
+| 5 | README walked cold + Known limitations section | Docs + verification | No |
+| 6 | Version bump, CHANGELOG cut, tag, install-from-tag check | Release | Tag push is user's |
+
+### Batch 1a — `check_health` must detect a wedged daemon
+
+**Symptom.** On 2026-08-15 a daemon answered `/v1/models` but hung every
+embedding request for 21 hours; `cementic status` said `embedding healthy` the
+whole time.
+
+**Why.** `check_health` (`status_service.py:399`) classifies via
+`probe_daemon(..., wait_seconds=0.0)` (`embedding_runtime.py:547`), which only
+does a `/v1/models` round trip. A wedged daemon still answers listings — the
+probe cannot see that the *embedding* path is dead.
+
+**Design constraint.** The daemon serializes requests behind one model lock, so
+a real embedding probe against a daemon mid-batch (30 s+ is normal) times out
+too — naive probing misreports *busy* as *wedged*. `status` must also never
+block long (that defect was already fixed once; do not reintroduce it).
+
+**Change.**
+- `probe_daemon` gains an opt-in second stage: after the model list answers
+  HEALTHY, issue a one-token `/v1/embeddings` request with a ~5 s budget.
+- On timeout/error, consult the pipeline worker's state file
+  (`current_activity` / `current_file`, `state.py:34–49`): a worker mid-embed
+  means the daemon is legitimately saturated → `BUSY` (healthy, as today).
+  No active worker and no answer → new `DaemonHealth.WEDGED` → unhealthy,
+  `llama_daemon` message "running but not answering embeddings".
+- `check_health` and `status --doctor` use the two-stage probe; `--doctor` may
+  spend a slightly larger budget. Total worst-case `status` latency stays
+  under ~7 s and only when the first stage said healthy.
+
+**Tests.** Fake daemon (local HTTP server) that answers `/v1/models` and hangs
+`/v1/embeddings`: with no worker activity → `status` reports unhealthy, exits
+per the health rules, within the budget. Same fake with a worker state file
+showing mid-embed activity → healthy/busy. Genuine fast fake → healthy.
+Falsify: revert the second stage, the wedged test must go red.
+
+**Files.** `embedding_runtime.py` (probe), `status_service.py` (wiring),
+`doctor.py` (budget), `tests/unit/test_status_service.py`,
+`tests/unit/test_embedding_runtime.py`.
+
+### Batch 1b — Nomic v1/v1.5 models must get task prefixes
+
+**Symptom.** Pointing `llama_cpp.model_path` at
+`models/nomic-embed-text-v1.5.f16.gguf` (which sits in this repo) silently
+disables the asymmetric `search_document:`/`search_query:` prefixes that v1 and
+v1.5 need exactly as v2 does. Retrieval degrades measurably; nothing errors.
+
+**Why.** `_NOMIC_V2_MARKER = "nomic-embed-text-v2"` (`embedding_text.py`)
+matches only v2 filenames. The wrong behaviour is *pinned by a test*
+(`test_embedding_text.py:24–26` asserts `"nomic-embed-text"` gets no prefix),
+so it reads as intentional.
+
+**Change.**
+- Widen the marker to the family: any model filename containing
+  `nomic-embed-text` selects the task-prefix policy. Rename the policy
+  constant accordingly (`NOMIC_V2_POLICY` → family name);
+  `describe_text_policy` keeps reporting the selection.
+- Bump `EMBEDDING_TEXT_FORMAT_VERSION` `"v1"` → `"v2"` (`profiles.py:22`):
+  v1/v1.5 vectors embedded under the old rule are unprefixed, and the version
+  exists precisely so old and new vectors never mix in one profile. **Impact
+  on the live index: none in effect** — the bump changes every profile
+  fingerprint, so the next `start` mints a new revision, but batch 3 rebuilds
+  from scratch anyway; do batch 1b before batch 3 so the rebuild happens once.
+- Retire the pinning test; replace with three: v1.5 filename gets prefixes,
+  v2 unchanged, non-Nomic unchanged.
+
+**Files.** `embedding_text.py`, `profiles.py`,
+`tests/unit/test_embedding_text.py`.
+
+**Known residual (documented, not fixed).** Matching on *filename* still
+mis-selects for a renamed GGUF; reading GGUF metadata is the real fix and
+stays deferred ("Deliberately not done", first review). v1 documents the
+filename convention in the README.
+
+### Batch 2 — §2.9 directory-move blindness: reproduce or document
+
+**Claim (fifth review, tagged unverified).** Moving a watched directory leaves
+the watcher blind until restart: watchdog may not emit per-file events for a
+directory move, and the scan only runs at startup.
+
+**Protocol (timeboxed to ~1 h).**
+1. Scripted repro against watchdog's real event stream, no cementic: observer
+   on `tmp/watch`, then (a) `mv tmp/watch/sub tmp/watch/sub2` (move within),
+   (b) `mv tmp/outside tmp/watch/new` (move in), (c) `mv tmp/watch/sub tmp/`
+   (move out). Record exactly which events watchdog delivers for each.
+2. Map onto `DocumentEventHandler` (`source_watcher.py`): which of those
+   events does it handle, which fall through?
+3. **If files can enter a watched tree with no per-file event** (the harmful
+   direction — silent non-indexing): fix, smallest correct version — likely
+   handling `DirMovedEvent` by scanning the moved-in tree with the existing
+   `_on_file_detected` path. Regression test with a real observer.
+4. **If watchdog delivers per-file events** for every case: the claim is
+   falsified; record the evidence table here and close §2.9.
+5. Either way the README's watching section states what a directory move does.
+
+**Exit.** No "suspected" state remains: §2.9 becomes fixed-with-test or
+documented-with-evidence.
+
+### Batch 3 — live-fire validation (user present)
+
+The only remaining path with no evidence on the real system, and the execution
+of the 320 decision, in one pass. Also live-exercises this week's fixes on the
+start path: the index retrofit in `create_tables`, supervisor liveness, the
+worker's restructured embed transaction, promote.
+
+**Steps** (each with its expected outcome; stop and diagnose on any mismatch):
+1. `cementic status --doctor` → all ok/warning, no fail.
+2. `cementic collection remove test --force` → deleted; reports docs/chunks
+   removed and vector tables dropped.
+3. `cementic start ~/projects/bibs/papers -c test` → workers up;
+   `status` shows building revision, documents appearing.
+4. Wait ~7 min (5 PDFs, ~250 chunks at 320). `status -c test` → extraction,
+   chunking, embedding all complete, 0 failed.
+5. `cementic collection promote test` → promoted; revision label reported.
+6. `cementic search "language models" -n 3` → hits with **live** paths under
+   `~/projects/bibs/papers`, sensible scores.
+7. `cementic stop` → both workers stop; `status` shows stopped; exit 0.
+
+**Note.** Search is empty between steps 2 and 5 (~7 min) — accepted when the
+fresh-start route was chosen (no old revision to serve).
+
+**Failure rule.** Any step failing reopens code work before release; the fix
+gets a regression test and batch 3 restarts from step 1.
+
+### Batch 4 — cold-start UX (docs only)
+
+`search` autostarts the daemon; a cold model load blocks 30 s+ with a stderr
+notice. By design. Two doc changes: quickstart gains "run
+`cementic embedding start` once after install to pay the model load up front";
+the README documents autostart where `search` is introduced.
+
+### Batch 5 — README walked cold + Known limitations
+
+1. In a clean environment (fresh venv; container if Postgres setup is part of
+   the walk), follow README top to bottom **exactly as written** — install,
+   `init postgres`, config, start, promote, search. Every text/behaviour
+   mismatch is a defect: fix the text or the behaviour, nothing else.
+2. Add a **Known limitations** section (user-facing wording; reasons stay
+   here): one background session at a time (by design); ANN pre-filter recall
+   on shared vector tables; model identity matched by filename (batch 1b
+   residual); §2.9's verdict from batch 2; anything batch 3 surfaced and
+   deliberately did not fix.
+
+### Batch 6 — release mechanics
+
+1. `pyproject.toml` version `0.1.0b1` → `1.0.0`.
+2. CHANGELOG: cut `[Unreleased]` → `[1.0.0] — <date>`. (CHANGELOG.md stays:
+   the no-changelog default is for repos without external consumers, which
+   stops applying at a tagged release.)
+3. All five gates green at the release commit.
+4. Merge `claude/v1-release` → `main` (user), then annotated tag `v1.0.0` on
+   main, message = release highlights (user pushes tag).
+5. In a clean environment: `uv tool install git+<repo-url>@v1.0.0`, run the
+   quickstart's first commands. This is the last gate — it catches packaging
+   problems (missing files in the sdist, entry-point breakage) that no test
+   in the repo can.
 
 ### Out of scope, tracked elsewhere
 
-- Everything in `TODO.md` (more extractors, `cementic add`, multimodal, search
-  enrichment) — features, not edges; they are post-v1 by definition.
+- Everything in `TODO.md` (extractors, `cementic add`, multimodal, search
+  enrichment) — features, not edges; post-v1 by definition.
 - PyPI publication — revisit if anyone outside this machine wants
   `pip install cementic`.
-- The kept §5 trims and the TOML re-parse (reasons under "Deliberately not
-  done"; internal, invisible to a user).
+- GGUF-metadata model identity (batch 1b residual), the kept §5 trims, the
+  TOML re-parse — reasons under "Deliberately not done".
 
-### Exit criteria
+### Exit criteria (all must hold at the tagged commit)
 
-- All five `./scripts/check.sh` gates green at the tagged commit.
-- The live-fire pass (batch 3) completed against the real database: new
-  revision at 320 built, promoted, searched, workers stopped cleanly.
-- Every item in this document's open lists is fixed, or documented in the
-  README's Known limitations with a reason here.
-- README walked in a clean environment with zero text/behaviour mismatches.
-- Tag `v1.0.0` on merged `main`; no unmerged `claude/*` branch left behind.
+- [ ] Five `./scripts/check.sh` gates green.
+- [ ] Batch 1a: wedged-daemon fake test red-green verified.
+- [ ] Batch 1b: v1.5 prefix test in place, pinning test retired, format
+      version bumped.
+- [ ] Batch 2: §2.9 is fixed-with-test **or** documented-with-evidence — no
+      "suspected" state anywhere.
+- [ ] Batch 3: all seven steps passed against the live database, new revision
+      at 320 active, search returns live paths.
+- [ ] README walked cold with zero text/behaviour mismatches; Known
+      limitations section present.
+- [ ] Version 1.0.0, CHANGELOG cut, tag on merged main, install-from-tag
+      verified in a clean environment.
+- [ ] No unmerged `claude/*` branch left behind.
 
-Rough sizing: batches 1–2 one focused session; 3–6 one more (batch 3 is mostly
-waiting on the re-embed).
+**Sizing.** Batch 1: one focused session. Batch 2: ~1 h timebox plus fix time
+if it reproduces. Batch 3: ~30 min wall clock, mostly waiting. Batches 4–6:
+one short session combined.
 
 ## Design principles
 
