@@ -471,6 +471,16 @@ class TestChunkCommand:
         assert json.loads(result.output.splitlines()[0])["index"] == 0
 
 
+def _healthy_health() -> SimpleNamespace:
+    """A passing health report for tests that are not about health."""
+    return SimpleNamespace(
+        db_reachable=True,
+        embedding_provider="llama-cpp",
+        embedding_healthy=True,
+        llama_daemon="running",
+    )
+
+
 class TestSearchCommand:
     """Test search command."""
 
@@ -595,7 +605,15 @@ class TestSearchCommand:
         mock_session.__exit__.return_value = False
         mock_get_session_factory.return_value = lambda: mock_session
 
-        with patch("cementic.cli.collection_exists", return_value=False):
+        # check_health opens its own engine through status_service, not the
+        # cementic.cli seams mocked above -- unmocked, this test only passed on
+        # machines where a live Postgres happened to answer 127.0.0.1:5432, and
+        # failed in CI where `status` exits at the db-unreachable gate before
+        # the collection check it is about.
+        with (
+            patch("cementic.cli.collection_exists", return_value=False),
+            patch("cementic.cli.check_health", return_value=_healthy_health()),
+        ):
             result = runner.invoke(app, argv)
 
         assert result.exit_code == 1
@@ -2274,7 +2292,12 @@ class TestErrorStreamDiscipline:
         mock_session.__exit__.return_value = False
         mock_get_session_factory.return_value = lambda: mock_session
 
-        with patch("cementic.cli.collection_exists", return_value=False):
+        # Same live-Postgres trap as the unknown-collection test above:
+        # check_health must be mocked or the db-unreachable gate exits first.
+        with (
+            patch("cementic.cli.collection_exists", return_value=False),
+            patch("cementic.cli.check_health", return_value=_healthy_health()),
+        ):
             result = runner.invoke(app, ["status", "-c", "nosuch"])
 
         assert result.exit_code == 1
