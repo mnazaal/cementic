@@ -162,7 +162,52 @@ class TestEnsureLlamaModel:
             bootstrapper._ensure_llama_model()
 
         assert (temp_dir / "download.gguf").read_bytes() == b"model-bytes"
-        assert not (temp_dir / ".download.gguf.tmp").exists()
+        assert not list(temp_dir.glob(".download.gguf.*tmp"))
+
+    @patch("cementic.bootstrap.requests.get")
+    def test_network_failure_is_one_line_not_a_traceback(self, mock_get, temp_dir) -> None:
+        """Regression (third-time carry): a connection reset or DNS failure
+        propagated as a raw requests traceback into the background log; every
+        caller catches RuntimeError and prints "Bootstrap failed: ..."."""
+        import requests as requests_module
+
+        config = Config()
+        config.llama_cpp.model_path = "download.gguf"
+        config.bootstrap.auto_download_llama_model = True
+        config.bootstrap.llama_model_sha256 = None
+        bootstrapper = Bootstrapper(config)
+
+        mock_get.side_effect = requests_module.exceptions.ConnectionError("reset by peer")
+
+        with (
+            patch("cementic.config.user_data_dir", return_value=str(temp_dir)),
+            pytest.raises(RuntimeError, match="Model download failed"),
+        ):
+            bootstrapper._ensure_llama_model()
+
+        assert not list(temp_dir.glob(".download.gguf.*tmp"))
+
+    @patch("cementic.bootstrap.requests.get")
+    def test_waiter_reuses_the_winners_file_instead_of_redownloading(
+        self, mock_get, temp_dir
+    ) -> None:
+        """The download runs under a file lock; whoever waited re-checks for
+        the winner's file. Simulated by a first bootstrapper completing before
+        a second runs: the second must not touch the network at all."""
+        config = Config()
+        config.llama_cpp.model_path = "download.gguf"
+        config.bootstrap.auto_download_llama_model = True
+        config.bootstrap.llama_model_sha256 = None
+        response = Mock()
+        response.iter_content.return_value = [b"model-bytes"]
+        mock_get.return_value.__enter__.return_value = response
+
+        with patch("cementic.config.user_data_dir", return_value=str(temp_dir)):
+            Bootstrapper(config)._ensure_llama_model()
+            assert mock_get.call_count == 1
+            Bootstrapper(config)._ensure_llama_model()
+
+        assert mock_get.call_count == 1
 
     @patch("cementic.bootstrap.requests.get")
     def test_download_rejects_checksum_mismatch_and_removes_temp(self, mock_get, temp_dir) -> None:

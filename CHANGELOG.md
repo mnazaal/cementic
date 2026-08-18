@@ -29,6 +29,12 @@
 
 ### Fixed
 
+- **The model auto-download is race-safe and reports failures in one line.** Two
+  workers bootstrapping at once shared a single fixed temp file — interleaved writes
+  could corrupt it, and with the SHA pin opted out the corrupt file was installed
+  silently. The download now runs under a file lock (the loser reuses the winner's
+  file), uses a per-process temp name, and a network failure raises one line instead of
+  a raw requests traceback in the background log.
 - **Config validation now bounds the numerics and enforces the chunk-size invariant for
   *your* values.** `n_ctx = 0` used to silently disable the token-budget guard (the fix
   for silent truncation), a non-positive `pipeline_worker.poll_interval` hot-spun the

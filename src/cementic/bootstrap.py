@@ -24,8 +24,14 @@ from cementic.config import (
     resolve_llama_model_path,
 )
 from cementic.db import get_engine
+from cementic.filelock import file_lock
 
 _logger = logging.getLogger("cementic.bootstrap")
+
+#: How long a bootstrapper waits for another process's in-flight model
+#: download. Generous: the file is hundreds of MB, and the waiter re-checks
+#: for the winner's file instead of downloading again.
+_MODEL_DOWNLOAD_LOCK_TIMEOUT_SECONDS = 1800.0
 
 _COMPOSE_HINT = (
     "Run `cementic init postgres ./cementic-postgres` once and follow its README, "
@@ -153,26 +159,50 @@ class Bootstrapper:
             )
 
         model_path.parent.mkdir(parents=True, exist_ok=True)
-        temp_path = model_path.with_name(f".{model_path.name}.tmp")
+        # One downloader at a time: the watcher and the worker both bootstrap
+        # at startup, and two concurrent downloads shared one fixed temp name.
+        # Interleaved writes produced a corrupt file -- which, with the SHA pin
+        # opted out, os.replace installed silently. A process that waited here
+        # re-checks for the winner's file instead of downloading it again.
+        lock_path = model_path.with_name(f".{model_path.name}.lock")
+        with file_lock(lock_path, timeout=_MODEL_DOWNLOAD_LOCK_TIMEOUT_SECONDS):
+            if model_path.exists():
+                if self._model_path_is_default():
+                    _ensure_sha256(model_path, expected_sha256)
+                return
+            self._download_llama_model(model_path, expected_sha256)
+
+    def _download_llama_model(self, model_path: Path, expected_sha256: str | None) -> None:
+        # pid-suffixed temp name as defence in depth, should the lock ever be
+        # bypassed (say, by an older cementic running concurrently).
+        temp_path = model_path.with_name(f".{model_path.name}.{os.getpid()}.tmp")
         temp_path.unlink(missing_ok=True)
         max_download_bytes = 5 * 1024 * 1024 * 1024  # 5 GiB
         downloaded = 0
-        with requests.get(
-            self.config.bootstrap.llama_model_url, stream=True, timeout=60
-        ) as response:
-            response.raise_for_status()
-            with open(temp_path, "wb") as f:
-                for chunk in response.iter_content(chunk_size=1024 * 1024):
-                    if chunk:
-                        f.write(chunk)
-                        downloaded += len(chunk)
-                        if downloaded > max_download_bytes:
-                            f.close()
-                            temp_path.unlink(missing_ok=True)
-                            raise RuntimeError(
-                                f"Model download exceeded maximum size "
-                                f"({max_download_bytes} bytes)"
-                            )
+        try:
+            with requests.get(
+                self.config.bootstrap.llama_model_url, stream=True, timeout=60
+            ) as response:
+                response.raise_for_status()
+                with open(temp_path, "wb") as f:
+                    for chunk in response.iter_content(chunk_size=1024 * 1024):
+                        if chunk:
+                            f.write(chunk)
+                            downloaded += len(chunk)
+                            if downloaded > max_download_bytes:
+                                f.close()
+                                temp_path.unlink(missing_ok=True)
+                                raise RuntimeError(
+                                    f"Model download exceeded maximum size "
+                                    f"({max_download_bytes} bytes)"
+                                )
+        except (requests.exceptions.RequestException, OSError) as error:
+            # One line for the background log, not a raw requests traceback:
+            # every caller catches RuntimeError and prints "Bootstrap failed".
+            temp_path.unlink(missing_ok=True)
+            raise RuntimeError(
+                f"Model download failed from {self.config.bootstrap.llama_model_url}: {error}"
+            ) from error
         try:
             _ensure_sha256(temp_path, expected_sha256)
             os.replace(temp_path, model_path)
