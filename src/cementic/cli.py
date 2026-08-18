@@ -1458,6 +1458,18 @@ def remove_collection(
     console.print("status: deleted")
     console.print(f"documents: {result.deleted_docs}")
     console.print(f"chunks: {result.deleted_chunks}")
+    # A running watcher re-registers the files it watches and resurrects the
+    # collection; the pipeline worker notices the deleted revision and exits on
+    # its next poll. Deleting is still allowed -- the rows cascade safely --
+    # but silently racing the watcher is not.
+    supervisor_state = _load_supervisor_state()
+    if supervisor_state.get("collection") == collection and any(
+        _is_managed_proc_alive(proc) for proc in _supervisor_processes(supervisor_state)
+    ):
+        console.print(
+            "warning: background workers are still watching this collection; "
+            "the watcher will re-register its files -- run `cementic stop` to stop them"
+        )
     try:
         unremoved = remove_artifacts(result.artifact_paths, config=_get_config())
         drop_orphan_vector_tables(engine, result.vector_profile_ids)

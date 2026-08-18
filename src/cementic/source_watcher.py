@@ -237,7 +237,9 @@ class SourceWatcher:
         self.Session = get_session_factory(engine)
 
         # Counters are per-session: reset so `status` reports this run, not an
-        # ever-growing total across restarts.
+        # ever-growing total across restarts. skipped_files with them -- it is
+        # the paths behind failed_count, and resetting one but not the other
+        # showed a fresh run still "skipping" last run's files.
         self.state_manager.update(
             daemon_state=DaemonState.RUNNING,
             watched_directories=directories,
@@ -246,6 +248,7 @@ class SourceWatcher:
             processed_count=0,
             failed_count=0,
             current_file=None,
+            skipped_files=[],
         )
 
         signal.signal(signal.SIGTERM, self._handle_shutdown)

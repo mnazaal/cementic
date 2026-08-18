@@ -443,6 +443,9 @@ class TestWorkerProcessingLoop:
         config = Config()
         config.pipeline_worker.log_file = temp_dir / "worker.log"
         worker = PipelineWorker(config)
+        # The loop now verifies its revision still exists once per pass;
+        # a MagicMock session answers that check (get() -> truthy).
+        worker.Session = MagicMock()
 
         with (
             patch.object(worker, "_step_extract", return_value=False) as mock_extract,
@@ -471,6 +474,7 @@ class TestWorkerProcessingLoop:
         config.pipeline_worker.log_file = temp_dir / "worker.log"
         config.pipeline_worker.state_path = temp_dir / "worker-state.json"
         worker = PipelineWorker(config)
+        worker.Session = MagicMock()
 
         with (
             patch.object(worker, "_step_extract", side_effect=RuntimeError("boom")),
@@ -520,6 +524,7 @@ class TestWorkerProcessingLoop:
         config.pipeline_worker.log_file = temp_dir / "worker.log"
         config.pipeline_worker.state_path = temp_dir / "worker-state.json"
         worker = PipelineWorker(config)
+        worker.Session = MagicMock()
         worker.state_manager.update(last_error="stale", last_error_at="then")
 
         calls = {"n": 0}
@@ -557,6 +562,7 @@ class TestWorkerProcessingLoop:
         config = Config()
         config.pipeline_worker.log_file = temp_dir / "worker.log"
         worker = PipelineWorker(config)
+        worker.Session = MagicMock()
 
         def extract_once(_revision_id: int) -> bool:
             worker._shutdown_event.set()
@@ -582,6 +588,7 @@ class TestWorkerProcessingLoop:
         config = Config()
         config.pipeline_worker.log_file = temp_dir / "worker.log"
         worker = PipelineWorker(config)
+        worker.Session = MagicMock()
         calls: list[int] = []
 
         def flaky_extract(_revision_id: int) -> bool:
@@ -870,6 +877,8 @@ class TestProviderFailuresAreVisible:
     def test_a_down_provider_reaches_the_state_file(self, temp_dir: Path) -> None:
         """End of the chain: the raise propagates to the loop, which publishes it."""
         worker = self._worker(temp_dir)
+        # The loop verifies its revision still exists once per pass.
+        worker.Session = MagicMock()
 
         with (
             patch.object(worker, "_step_extract", return_value=False),

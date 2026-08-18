@@ -186,6 +186,7 @@ class StateManager:
         last_error: Any = UNSET,
         last_error_at: Any = UNSET,
         current_activity: Any = UNSET,
+        skipped_files: Any = UNSET,
     ) -> WorkerState:
         """Update specific fields and save."""
         with self._lock:
@@ -211,6 +212,8 @@ class StateManager:
                 state.last_error_at = last_error_at
             if current_activity is not UNSET:
                 state.current_activity = current_activity
+            if skipped_files is not UNSET:
+                state.skipped_files = skipped_files
 
             self.save(state)
             return state

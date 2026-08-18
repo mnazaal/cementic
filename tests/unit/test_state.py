@@ -167,6 +167,19 @@ class TestAtomicIncrement:
         ]
         assert manager.load().skipped_files == state.skipped_files
 
+    def test_skipped_files_reset_with_the_counters(self, temp_dir: Path) -> None:
+        """Regression: restart reset processed/failed to zero but kept
+        skipped_files, so a fresh run still showed last run's skips -- paths
+        with no counter behind them."""
+        manager = StateManager(temp_dir / "state.json")
+        manager.record_skipped("/docs/old-run.md", "symlink")
+
+        state = manager.update(processed_count=0, failed_count=0, skipped_files=[])
+
+        assert state.failed_count == 0
+        assert state.skipped_files == []
+        assert manager.load().skipped_files == []
+
     def test_record_skipped_can_clear_current_file_in_the_same_write(
         self, temp_dir: Path
     ) -> None:

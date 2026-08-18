@@ -272,21 +272,97 @@ class TestPipelineWorkerErrorPaths:
         pdf_path = str(pdf_fixtures_dir / "test_doc_a.pdf")
         source_watcher._register_document(pdf_path)
 
-        # Real text, then a long run of whitespace that chunks on its own.
+        # Real text, a long run of whitespace that chunks on its own *in the
+        # middle*, then real text again -- so the dropped chunk would leave a
+        # gap in chunk_index if the filter did not renumber.
         monkeypatch.setattr(
             pipeline_worker_module,
             "read_extracted_text",
-            lambda _path: "actual words here\n" + ("\n" * 5000),
+            lambda _path: "actual words here\n" + ("\n" * 5000) + "closing words here\n",
         )
 
         revision = pipeline._ensure_target_revision()
         _run_pipeline_until_idle(pipeline, revision)
 
         with session_factory() as session:
-            contents = [c.content for c in session.query(Chunk).all()]
+            chunks = session.query(Chunk).order_by(Chunk.chunk_index).all()
+            contents = [c.content for c in chunks]
+            indexes = [c.chunk_index for c in chunks]
+            chunked = session.query(ChunkedDocument).first()
+            assert chunked is not None
+            total_chunks = chunked.total_chunks
 
         assert contents, "expected at least one real chunk"
         assert all(content.strip() for content in contents)
+        # Regression: the filter used to keep the original indexes, so dropping
+        # a mid-document whitespace chunk broke the invariant that chunk_index
+        # runs 0..total_chunks-1 over the stored rows.
+        assert indexes == list(range(len(indexes)))
+        assert total_chunks == len(indexes)
+
+    def test_worker_exits_when_its_revision_is_removed(
+        self, sqlite_setup, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Regression: the worker resolves its revision id once at startup, and
+        every step silently no-ops when that row is gone -- so `collection
+        remove` under a running worker left it idling forever, reported healthy
+        by `cementic status`, holding the collection's advisory lock."""
+        import threading
+        import time
+
+        config, session_factory, pdf_fixtures_dir = sqlite_setup
+        collection = "test_removed_underfoot"
+
+        pipeline, _source_watcher = _setup_worker(
+            config, session_factory, collection, monkeypatch
+        )
+        revision = pipeline._ensure_target_revision()
+
+        with session_factory() as session:
+            session.query(PipelineRevision).filter_by(id=revision).delete()
+            session.commit()
+
+        # The loop must run on this thread (the in-memory SQLite pool is
+        # per-thread); the timer only sets the shutdown flag as a backstop so
+        # a regression fails the assertion instead of hanging the suite.
+        backstop = threading.Timer(5.0, pipeline._shutdown_event.set)
+        backstop.start()
+        started = time.monotonic()
+        pipeline._run_processing_loop(revision)
+        elapsed = time.monotonic() - started
+        backstop.cancel()
+
+        assert elapsed < 4.0, "the loop must exit on its own when its revision is gone"
+
+    def test_null_source_content_hash_is_reclaimed_not_wedged(
+        self, sqlite_setup, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Regression: SQL NULL != x is not true, so a done chunked row with a
+        NULL source_content_hash matched no claim condition -- yet the
+        hash-scoped revision counts did not count it either, wedging the
+        revision in `building` forever with nothing to show why."""
+        config, session_factory, pdf_fixtures_dir = sqlite_setup
+        collection = "test_null_hash"
+
+        pipeline, source_watcher = _setup_worker(config, session_factory, collection, monkeypatch)
+        source_watcher._register_document(str(pdf_fixtures_dir / "test_doc_a.pdf"))
+        revision = pipeline._ensure_target_revision()
+        _run_pipeline_until_idle(pipeline, revision)
+
+        with session_factory() as session:
+            chunked = session.query(ChunkedDocument).first()
+            assert chunked is not None and chunked.status == "done"
+            chunked.source_content_hash = None
+            session.commit()
+
+        claimed = pipeline._step_chunk(revision)
+
+        assert claimed, "a NULL-hash row must be re-claimed, not silently skipped"
+        with session_factory() as session:
+            chunked = session.query(ChunkedDocument).first()
+            assert chunked is not None
+            assert chunked.source_content_hash is not None
+            assert chunked.status == "done"
 
     def test_failed_re_extraction_stops_serving_the_previous_content(
         self, sqlite_setup, monkeypatch: pytest.MonkeyPatch

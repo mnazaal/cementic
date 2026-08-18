@@ -8,7 +8,7 @@ import signal
 import sys
 import threading
 import zlib
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, NoReturn
@@ -434,6 +434,19 @@ class PipelineWorker:
         reported_error = False
         while not self._shutdown_event.is_set():
             try:
+                with self.Session() as session:
+                    if session.get(PipelineRevision, revision_id) is None:
+                        # `collection remove` deleted it out from under us.
+                        # Every step no-ops against a missing revision, so
+                        # without this check the worker idled forever --
+                        # reported as healthy by `cementic status` while doing
+                        # nothing, and still holding the collection's advisory
+                        # lock. One extra SELECT per poll cycle.
+                        self._logger.info(
+                            "Revision %s is gone (collection removed); exiting",
+                            revision_id,
+                        )
+                        return
                 if self._step_extract(revision_id):
                     continue
                 if self._step_chunk(revision_id):
@@ -512,7 +525,13 @@ class PipelineWorker:
                 .filter(
                     or_(
                         ExtractedDocument.id.is_(None),
-                        ExtractedDocument.source_file_hash != SourceDocument.file_hash,
+                        # IS DISTINCT FROM, not !=: SQL NULL != x is NULL, so a
+                        # row that ever reached done/failed with a NULL hash
+                        # matched no claim condition and its work was stuck --
+                        # invisible to this query yet also never counted done.
+                        ExtractedDocument.source_file_hash.is_distinct_from(
+                            SourceDocument.file_hash
+                        ),
                         ExtractedDocument.status.notin_(["done", "failed"]),
                     )
                 )
@@ -612,7 +631,10 @@ class PipelineWorker:
                 .filter(
                     or_(
                         ChunkedDocument.id.is_(None),
-                        ChunkedDocument.source_content_hash != ExtractedDocument.content_hash,
+                        # Same NULL semantics as the extract claim above.
+                        ChunkedDocument.source_content_hash.is_distinct_from(
+                            ExtractedDocument.content_hash
+                        ),
                         ChunkedDocument.status.notin_(["done", "failed"]),
                     )
                 )
@@ -665,8 +687,15 @@ class PipelineWorker:
             # no text, so they compete for result slots and render as a blank
             # preview. Filtered here rather than in chunk_text, which is a pure
             # function whose non-overlapping output must still reassemble into
-            # the original document exactly.
-            chunk_items = [item for item in chunk_items if item.content.strip()]
+            # the original document exactly. Renumbered after filtering: the
+            # dropped chunk's index otherwise left a gap, breaking the invariant
+            # that chunk_index runs 0..total_chunks-1 over the stored rows.
+            chunk_items = [
+                replace(item, chunk_index=index)
+                for index, item in enumerate(
+                    item for item in chunk_items if item.content.strip()
+                )
+            ]
             status = "done"
             error_message = None
         except Exception as error:
@@ -680,13 +709,22 @@ class PipelineWorker:
             if chunked is None:
                 self.state_manager.update(current_file=None)
                 return True
+            if extracted is None:
+                # The extracted document vanished mid-chunk (a concurrent purge
+                # or deletion). Writing done/failed here would leave a NULL
+                # source_content_hash -- counted by no revision count yet
+                # claimed by no query, wedging the revision. The row references
+                # nothing any more; remove it.
+                session.delete(chunked)
+                session.commit()
+                self.state_manager.update(current_file=None)
+                return True
 
             session.query(Chunk).filter_by(chunked_document_id=chunked_id).delete(
                 synchronize_session=False
             )
-            if extracted is not None:
-                chunked.source_content_hash = extracted.content_hash
-            if status == "done" and extracted is not None:
+            chunked.source_content_hash = extracted.content_hash
+            if status == "done":
                 for item in chunk_items:
                     session.add(
                         Chunk(

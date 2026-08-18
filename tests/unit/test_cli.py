@@ -1472,6 +1472,46 @@ class TestCollectionCommands:
         assert "collection: missing" in result.output
         assert "status: not found" in result.output
 
+    @patch("cementic.cli.get_session_factory")
+    @patch("cementic.cli.get_engine")
+    def test_collection_remove_warns_when_workers_still_running(
+        self, mock_get_engine, mock_get_session_factory
+    ):
+        """Regression: removing a collection under running workers succeeded in
+        silence -- the watcher then re-registered the files and resurrected the
+        collection, while the pipeline worker sat on the deleted revision."""
+        mock_session = MagicMock()
+        mock_session.__enter__.return_value = mock_session
+        mock_session.__exit__.return_value = False
+        mock_get_session_factory.return_value = lambda: mock_session
+        deletion = SimpleNamespace(
+            deleted_docs=1, deleted_chunks=2, artifact_paths=[], vector_profile_ids=[]
+        )
+
+        def invoke(supervisor_state):
+            with (
+                patch("cementic.cli.delete_collection_records", return_value=deletion),
+                patch("cementic.cli.remove_artifacts", return_value=[]),
+                patch("cementic.cli.drop_orphan_vector_tables"),
+                patch(
+                    "cementic.cli._load_supervisor_state", return_value=supervisor_state
+                ),
+                patch("cementic.cli._is_managed_proc_alive", return_value=True),
+            ):
+                return runner.invoke(app, ["collection", "remove", "mycol", "--force"])
+
+        running = invoke(
+            {"collection": "mycol", "processes": [{"name": "watcher", "pid": 1}]}
+        )
+        assert running.exit_code == 0
+        assert "status: deleted" in running.output
+        assert "still watching this collection" in running.output
+        assert "cementic stop" in running.output
+
+        idle = invoke({})
+        assert idle.exit_code == 0
+        assert "still watching" not in idle.output
+
 
 class TestStatusCommand:
     """Test the status command."""
