@@ -353,29 +353,33 @@ mis-selects for a renamed GGUF; reading GGUF metadata is the real fix and
 stays deferred ("Deliberately not done", first review). v1 documents the
 filename convention in the README.
 
-### Batch 2 — §2.9 directory-move blindness: reproduce or document
+### Batch 2 — §2.9 directory-move blindness: RESOLVED 2026-08-18
 
-**Claim (fifth review, tagged unverified).** Moving a watched directory leaves
-the watcher blind until restart: watchdog may not emit per-file events for a
-directory move, and the scan only runs at startup.
+**Measured** (watchdog inotify backend, scripted repro, no cementic):
 
-**Protocol (timeboxed to ~1 h).**
-1. Scripted repro against watchdog's real event stream, no cementic: observer
-   on `tmp/watch`, then (a) `mv tmp/watch/sub tmp/watch/sub2` (move within),
-   (b) `mv tmp/outside tmp/watch/new` (move in), (c) `mv tmp/watch/sub tmp/`
-   (move out). Record exactly which events watchdog delivers for each.
-2. Map onto `DocumentEventHandler` (`source_watcher.py`): which of those
-   events does it handle, which fall through?
-3. **If files can enter a watched tree with no per-file event** (the harmful
-   direction — silent non-indexing): fix, smallest correct version — likely
-   handling `DirMovedEvent` by scanning the moved-in tree with the existing
-   `_on_file_detected` path. Regression test with a real observer.
-4. **If watchdog delivers per-file events** for every case: the claim is
-   falsified; record the evidence table here and close §2.9.
-5. Either way the README's watching section states what a directory move does.
+| Case | Events delivered | Handler coverage |
+|---|---|---|
+| A: `mv watch/sub watch/sub2` (within) | `DirMovedEvent` + per-file `FileMovedEvent`s | already covered (`on_moved` per file) |
+| B: `mv outside/new watch/new` (move in) | `DirCreatedEvent` + per-file `FileCreatedEvent`s | already covered (`on_created` per file) |
+| C: `mv watch/sub outside/` (move out) | **one `DirDeletedEvent`, no per-file deletions** | **was uncovered — fixed** |
+| D: `mv watch watch2` (root itself) | **nothing at all** | unfixable from inside the watch — documented |
 
-**Exit.** No "suspected" state remains: §2.9 becomes fixed-with-test or
-documented-with-evidence.
+The review's "blind until restart" claim was therefore true for C and D, in the
+*stale-results* direction (documents under a moved-out directory stayed
+"present"; searches matched dead paths). The feared *silent non-indexing*
+direction (files entering unseen) does not occur — case B synthesizes per-file
+created events.
+
+**Fix (case C).** `on_deleted` no longer drops directory events: a
+`delete_directory_callback` marks every document under the vanished prefix
+deleted (trailing-separator match, so `/a/docs` never claims
+`/a/docs-archive`), reusing the same purge path as single-file deletion.
+Three tests: prefix delete, prefix-sibling safety, and end-to-end through a
+real observer (that one verified red with the wiring removed).
+
+**Documented limitation (case D).** inotify delivers nothing when the watched
+root itself is moved; the watcher cannot see it. Startup reconciliation repairs
+it on the next `cementic start`. Goes in README Known limitations (batch 5).
 
 ### Batch 3 — live-fire validation (user present)
 
