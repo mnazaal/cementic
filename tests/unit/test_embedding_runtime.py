@@ -918,3 +918,33 @@ def test_runtime_fingerprint_tracks_the_batch_size() -> None:
     )
 
     assert small != matched
+
+
+class TestDaemonLockIsNotTakenTwice:
+    """The restart path holds the daemon lock; the stop it calls must not retake it."""
+
+    def test_stopping_a_mismatched_daemon_under_the_lock_does_not_deadlock(
+        self, temp_dir
+    ) -> None:
+        """Regression: `get_llama_cpp_runtime_client` takes the daemon lock and
+        then called the *public* `stop_llama_cpp_runtime`, which takes the same
+        lock again. flock is not reentrant even within one process, so every
+        runtime-config change waited out the full 180s timeout and then failed
+        with "another cementic process holds ..." -- naming itself."""
+        from cementic.embedding_runtime import (
+            _daemon_lock_path,
+            _stop_mismatched_llama_cpp_daemon,
+        )
+        from cementic.filelock import file_lock
+
+        pid_file = temp_dir / "daemon.pid"
+        # A PID that cannot exist, so the stop unlinks the record and returns
+        # rather than signalling anything.
+        pid_file.write_text(json.dumps({"pid": 4194300, "start_token": "x", "port": 1}))
+        config = Config()
+        config.llama_cpp.daemon_pid_file = pid_file
+
+        with file_lock(_daemon_lock_path(config), timeout=5.0):
+            _stop_mismatched_llama_cpp_daemon(config)
+
+        assert not pid_file.exists()

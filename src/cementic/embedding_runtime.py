@@ -682,8 +682,17 @@ def _stop_mismatched_llama_cpp_daemon(config: Config) -> None:
 
     Callers reach here only after establishing that no daemon serving the wanted
     runtime is available, so the stop is unconditional.
+
+    Runs the *locked body* directly: its only caller already holds the daemon
+    lock, and ``flock`` is not reentrant even within one process, so calling the
+    public ``stop_llama_cpp_runtime`` here deadlocked the restart path against
+    itself -- every runtime-config change waited out the full lock timeout and
+    then failed with "another cementic process holds ...", naming this one.
     """
-    stop_llama_cpp_runtime(config)
+    pid_file = config.llama_cpp.daemon_pid_file
+    if pid_file is None or not pid_file.exists():
+        return
+    _stop_llama_cpp_runtime_locked(config, pid_file)
 
 
 def stop_llama_cpp_runtime(config: Config) -> bool:
