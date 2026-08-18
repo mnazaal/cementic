@@ -830,8 +830,11 @@ def _print_collection_detail(
                     status_line += f" | error: {f.error_message[:80]}"
                 console.print(status_line)
         except Exception as error:
-            if not _is_database_unavailable(error):
-                console.print(f"files: error - {error}")
+            # This used to be swallowed at exit 0 (and the database-unavailable
+            # case printed nothing at all), so a truncated report read as the
+            # complete answer.
+            err_console.print(f"files: could not be listed: {error}")
+            raise typer.Exit(1)
 
 
 def _print_status_json(
@@ -840,6 +843,7 @@ def _print_status_json(
     pipeline_worker_status: Any,
     directories: list[str],
     health: Any,
+    health_error: str | None,
     collection: str | None,
     verbose: bool,
 ) -> bool:
@@ -857,6 +861,7 @@ def _print_status_json(
             "processed": source_watcher_status.processed_count,
             "failed": source_watcher_status.failed_count,
             "skipped_files": source_watcher_status.skipped_files,
+            "current_file": source_watcher_status.current_file,
             "last_error": source_watcher_status.last_error,
             "last_error_at": source_watcher_status.last_error_at,
         },
@@ -864,6 +869,7 @@ def _print_status_json(
             "process": pipeline_worker_status.process,
             "state": pipeline_worker_status.state,
             "pid": pipeline_worker_status.pid,
+            "current_file": pipeline_worker_status.current_file,
             "last_error": pipeline_worker_status.last_error,
             "last_error_at": pipeline_worker_status.last_error_at,
             "current_activity": pipeline_worker_status.current_activity,
@@ -877,6 +883,8 @@ def _print_status_json(
             "embedding_healthy": health.embedding_healthy,
             "llama_daemon": health.llama_daemon,
         }
+    elif health_error is not None:
+        output["health"] = {"error": health_error}
 
     try:
         engine = get_engine(_get_config().database.url)
@@ -986,7 +994,10 @@ def start_background(
     missing = [d for d in directories if not Path(d).is_dir()]
     if missing:
         for d in missing:
-            err_console.print(f"[red]Error: Directory does not exist: {d}[/red]")
+            # An existing file is not a missing directory; saying "does not
+            # exist" about a path the user can see sends them the wrong way.
+            reason = "is not a directory" if Path(d).exists() else "does not exist"
+            err_console.print(f"[red]Error: {d} {reason}[/red]")
         raise typer.Exit(1)
 
     # Absolute from here on: the detached workers and any later `cementic status`
@@ -1176,8 +1187,12 @@ def status(
 
     try:
         health = check_health(_get_config())
-    except Exception:
+        health_error = None
+    except Exception as error:
+        # The whole health section used to vanish without a word, making a
+        # crashed health probe indistinguishable from health never being asked.
         health = None
+        health_error = str(error)
 
     if json_output:
         failed = _print_status_json(
@@ -1186,6 +1201,7 @@ def status(
             pipeline_worker_status,
             directories,
             health,
+            health_error,
             collection,
             verbose,
         )
@@ -1201,6 +1217,8 @@ def status(
         health,
         verbose,
     )
+    if health is None and health_error is not None:
+        err_console.print(f"health: unavailable ({health_error})")
 
     if health is not None and not health.db_reachable:
         err_console.print(_DB_HINT)
@@ -1882,6 +1900,11 @@ EXAMPLES:
 def extract(path: str = typer.Argument(..., help="Path to a document file")) -> None:
     """Extract one document to Markdown on stdout — no database, for piping/debugging."""
     cfg = _get_config()
+    if Path(path).is_dir():
+        # Falling through said "no extractor for '(none)'" -- technically the
+        # registry's answer for a suffixless path, but nonsense as a message.
+        err_console.print(f"extract failed: {path} is a directory, not a document file")
+        raise typer.Exit(1)
     try:
         markdown = extract_document(path, cfg)
     except (OSError, ValueError, RuntimeError) as error:
@@ -1912,7 +1935,9 @@ def chunk(
     """
     cfg = _get_config()
     try:
-        text = Path(path).read_text(encoding="utf-8") if path else sys.stdin.read()
+        # `is not None`, not truthiness: `cementic chunk ""` used to fall
+        # through to stdin and sit there looking hung.
+        text = Path(path).read_text(encoding="utf-8") if path is not None else sys.stdin.read()
     except (OSError, ValueError) as error:
         # ValueError covers UnicodeDecodeError: `chunk` takes text, and a binary
         # file should be a one-line error, not a traceback.
@@ -1944,17 +1969,31 @@ def embed() -> None:
     needs the embedding model/runtime.
     """
     cfg = _get_config()
+    # Parsed with real stdin line numbers: blank lines used to shift every
+    # reported number, so "line 2" could point at a perfectly good record.
+    numbered: list[tuple[int, Any]] = []
     try:
-        records = [json.loads(line) for line in sys.stdin if line.strip()]
-    except json.JSONDecodeError as error:
-        err_console.print(f"embed failed: invalid JSONL on stdin: {error}")
+        for stdin_line_number, line in enumerate(sys.stdin, 1):
+            if not line.strip():
+                continue
+            try:
+                numbered.append((stdin_line_number, json.loads(line)))
+            except json.JSONDecodeError as error:
+                err_console.print(
+                    f"embed failed: invalid JSON on stdin line {stdin_line_number}: {error}"
+                )
+                raise typer.Exit(1)
+    except UnicodeDecodeError as error:
+        # Binary stdin surfaced as a raw traceback; `chunk` already handles it.
+        err_console.print(f"embed failed: stdin is not text: {error}")
         raise typer.Exit(1)
-    if not records:
+    if not numbered:
         return
+    records = [rec for _, rec in numbered]
     # Validate the whole input before embedding any of it, so a malformed line
     # is not reported only after some output has already been written.
     contents: list[str] = []
-    for line_number, rec in enumerate(records, 1):
+    for line_number, rec in numbered:
         if not isinstance(rec, dict):
             err_console.print(
                 f"embed failed: line {line_number} is a JSON {type(rec).__name__}, "
@@ -1994,7 +2033,9 @@ def embed() -> None:
                 for content in contents[start : start + batch_size]
             ]
             vectors = provider.embed_batch(texts)
-            for offset, (rec, vector) in enumerate(zip(batch, vectors)):
+            # strict: a provider returning the wrong count must be an error,
+            # not records silently dropped from the output stream.
+            for offset, (rec, vector) in enumerate(zip(batch, vectors, strict=True)):
                 if vector is None:
                     # embed_batch reports per-item failure as None. Emitting
                     # "embedding": null would look like a successful record.

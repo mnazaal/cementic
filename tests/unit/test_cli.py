@@ -1937,8 +1937,11 @@ class TestStatusEdgeCases:
 
             result = runner.invoke(app, ["status"])
             assert result.exit_code == 0
-            # Health section should not appear (health is None)
-            assert "health:" not in result.output
+            # No health section in the report itself...
+            assert "health:" not in result.stdout
+            # ...but the crash is explained on stderr rather than the whole
+            # section silently vanishing (regression).
+            assert "health: unavailable" in result.stderr
 
     @patch("cementic.cli.list_collections", return_value=[])
     def test_status_json_output(self, mock_list_collections):
@@ -1991,11 +1994,15 @@ class TestStatusEdgeCases:
 
                                 result = runner.invoke(app, ["status", "--json"])
                                 assert result.exit_code == 0
-                                assert '"supervisor"' in result.output
-                                assert '"source_watcher"' in result.output
-                                assert '"pipeline_worker"' in result.output
-                                assert '"health"' in result.output
-                                assert '"collections"' in result.output
+                                parsed = json.loads(result.stdout)
+                                assert "supervisor" in parsed
+                                assert "health" in parsed
+                                assert "collections" in parsed
+                                # Regression: --json omitted current_file, so
+                                # the one field showing live progress existed
+                                # only in the human output.
+                                assert "current_file" in parsed["source_watcher"]
+                                assert "current_file" in parsed["pipeline_worker"]
 
     @patch("cementic.cli.list_collections", return_value=[])
     def test_status_json_output_survives_piping_with_long_paths(self, mock_list_collections):
@@ -2060,7 +2067,17 @@ class TestStartEdgeCases:
         """start_background exits 1 when directory doesn't exist."""
         result = runner.invoke(app, ["start", "/nonexistent/path/xyz"])
         assert result.exit_code == 1
-        assert "Directory does not exist" in result.output
+        assert "does not exist" in result.stderr
+
+    def test_start_on_a_file_says_not_a_directory(self, tmp_path):
+        """Regression: `cementic start some.pdf` said "Directory does not
+        exist" about a path the user could plainly see existed."""
+        file_path = tmp_path / "some.pdf"
+        file_path.write_bytes(b"pdf")
+        result = runner.invoke(app, ["start", str(file_path)])
+        assert result.exit_code == 1
+        assert "is not a directory" in result.stderr
+        assert "does not exist" not in result.stderr
 
     @patch("cementic.cli._is_managed_proc_alive", return_value=True)
     @patch("cementic.cli._load_supervisor_state")
@@ -2344,6 +2361,40 @@ class TestFilterCommands:
         result = runner.invoke(app, ["embed"], input="")
         assert result.exit_code == 0
         assert result.output.strip() == ""
+
+    @patch("cementic.cli.runtime_spec_from_config", return_value=object())
+    @patch("cementic.cli.create_provider", return_value=_FakeEmbedProvider())
+    def test_embed_error_names_the_real_stdin_line(self, mock_create, mock_spec):
+        """Regression: blank lines were dropped before numbering, so the error
+        for line 4 was reported as line 2."""
+        stdin = '{"content": "ok"}\n\n\n{"content": null}\n'
+        result = runner.invoke(app, ["embed"], input=stdin)
+        assert result.exit_code == 1
+        assert "line 4" in result.stderr
+
+    @patch("cementic.cli.runtime_spec_from_config", return_value=object())
+    @patch("cementic.cli.create_provider", return_value=_FakeEmbedProvider())
+    def test_embed_binary_stdin_is_an_error_not_a_traceback(self, mock_create, mock_spec):
+        """Regression: only JSONDecodeError was caught, so binary stdin
+        surfaced as a raw UnicodeDecodeError traceback."""
+        result = runner.invoke(app, ["embed"], input=b"\x89PNG\r\n\x1a\n\xff\xfe")
+        assert result.exit_code == 1
+        assert "Traceback" not in result.output
+        assert "not text" in result.stderr
+
+    def test_chunk_empty_path_argument_is_an_error_not_stdin(self, tmp_path):
+        """Regression: `chunk ""` fell through the truthiness check to stdin
+        and sat there looking hung."""
+        result = runner.invoke(app, ["chunk", ""], input="should not be read")
+        assert result.exit_code == 1
+        assert "chunk failed" in result.stderr
+        assert result.stdout.strip() == ""
+
+    def test_extract_directory_is_a_clear_error(self, tmp_path):
+        """Regression: a directory said "no extractor for '(none)'"."""
+        result = runner.invoke(app, ["extract", str(tmp_path)])
+        assert result.exit_code == 1
+        assert "is a directory" in result.stderr
 
     @pytest.mark.parametrize(
         "record",
