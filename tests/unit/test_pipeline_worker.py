@@ -25,6 +25,7 @@ from cementic.db import (
 from cementic.pipeline_worker import (
     PipelineCounts,
     PipelineWorker,
+    _over_budget_reasons,
     _pipeline_worker_lock_key,
     _purge_all_chunks,
     _purge_superseded_chunks,
@@ -1093,3 +1094,34 @@ class TestIndexBuildIsVisible:
             for call in worker.state_manager.update.call_args_list
             if "current_activity" in call.kwargs
         ]
+
+
+class TestOverBudgetReasonsAreCollectedOutsideTheTransaction:
+    """Explaining a failed embedding must not hold a write transaction open."""
+
+    def test_a_provider_that_raises_still_leaves_the_row_terminal(self):
+        """Regression: `over_budget_reason` was called inside the session that
+        had just upserted vectors. It can issue an exact-tokenize round trip, so
+        a daemon that went away raised there -- and the handler released the
+        claim, returning rows to `pending` that the old code stamped `failed`.
+        The next poll re-embedded and re-failed them, indefinitely."""
+        provider = MagicMock()
+        provider.over_budget_reason.side_effect = ConnectionError("daemon went away")
+
+        reasons = _over_budget_reasons(provider, ["a", "b"], [[0.1], None])
+
+        assert reasons == [None, None]
+
+    def test_reasons_are_only_requested_for_the_failed_texts(self):
+        """One round trip per failure, not per row."""
+        provider = MagicMock()
+        provider.over_budget_reason.return_value = "too long"
+
+        reasons = _over_budget_reasons(provider, ["a", "b", "c"], [[0.1], None, [0.3]])
+
+        assert reasons == [None, "too long", None]
+        provider.over_budget_reason.assert_called_once_with("b")
+
+    def test_a_provider_without_the_method_yields_no_reasons(self):
+        reasons = _over_budget_reasons(object(), ["a"], [None])
+        assert reasons == [None]

@@ -302,6 +302,32 @@ def _compute_revision_counts(
     )
 
 
+def _over_budget_reasons(
+    provider: Any, texts: list[str], embeddings: list[list[float] | None]
+) -> list[str | None]:
+    """Per-text explanations for the embeddings that came back None.
+
+    Pure bookkeeping around a provider call that may do network I/O, so it runs
+    outside the database transaction that stamps the rows. A provider that
+    cannot answer (unreachable daemon) yields None for that text: the row is
+    still stamped terminal with the generic message, which is strictly better
+    than losing the stamp to an exception.
+    """
+    reason_for = getattr(provider, "over_budget_reason", None)
+    if provider is None or reason_for is None:
+        return [None] * len(embeddings)
+    reasons: list[str | None] = []
+    for offset, embedding in enumerate(embeddings):
+        if embedding is not None or offset >= len(texts):
+            reasons.append(None)
+            continue
+        try:
+            reasons.append(reason_for(texts[offset]))
+        except Exception:
+            reasons.append(None)
+    return reasons
+
+
 class PipelineWorker:
     """Builds the target pipeline revision for one collection."""
 
@@ -831,6 +857,13 @@ class PipelineWorker:
         # terminal status or return the rows to `pending`. Leaving them
         # `processing` would stall the revision short of completion with no
         # error surfaced anywhere.
+        # Ask the provider *why* each failed text failed before opening the
+        # transaction: over_budget_reason can issue an exact-tokenize round trip
+        # (seconds, over the network), which held the write transaction open
+        # while it ran, and could itself raise -- turning a terminal "failed"
+        # stamp into a released claim that the next poll re-embeds and fails
+        # again. A missing reason is not worth either.
+        reasons = _over_budget_reasons(provider, texts, embeddings)
         try:
             with self.Session() as session:
                 if successes:
@@ -858,15 +891,8 @@ class PipelineWorker:
                         # generic "Failed to generate embedding", leaving the
                         # actual cause -- and the chunk_size fix -- invisible
                         # in `status --verbose`.
-                        reason = (
-                            getattr(provider, "over_budget_reason", lambda _t: None)(
-                                texts[offset]
-                            )
-                            if provider is not None
-                            else None
-                        )
                         row.status = "failed"
-                        row.error_message = reason or failure_message
+                        row.error_message = reasons[offset] or failure_message
                     else:
                         row.status = "done"
                         row.error_message = None
