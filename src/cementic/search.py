@@ -15,7 +15,7 @@ from cementic.embedding_runtime import (
     create_provider,
     runtime_spec_from_profile_json,
 )
-from cementic.revisions import BUILDING_STATUSES, get_active_revision
+from cementic.revisions import BUILDING_STATUSES
 from cementic.vector_store import (
     ensure_vector_table_schema,
     index_access_method,
@@ -128,6 +128,11 @@ def _mixed_model_message(revisions: list[PipelineRevision]) -> str:
         f"embedding models, and scores from different models are not comparable. "
         f"{groups}. Search one model's collections at a time, e.g. -c {example}"
     )
+
+
+#: Statuses a revision may be searched in, in no particular order; the *rank*
+#: between them lives in _searchable_revisions.
+SEARCHABLE_STATUSES = ("active", *BUILDING_STATUSES)
 
 
 def _searchable_revisions(revisions: list[PipelineRevision]) -> list[PipelineRevision]:
@@ -322,34 +327,21 @@ class Searcher:
         session: Any,
         collections: list[str] | None,
     ) -> list[PipelineRevision]:
-        if collections is not None:
-            wanted = list(dict.fromkeys(collections))
-            revisions: list[PipelineRevision] = []
-            for collection in wanted:
-                active_revision = get_active_revision(session, collection)
-                if active_revision is not None:
-                    revisions.append(active_revision)
-                    continue
-
-                fallback_revision = (
-                    session.query(PipelineRevision)
-                    .filter(
-                        PipelineRevision.collection == collection,
-                        PipelineRevision.status.in_(BUILDING_STATUSES),
-                    )
-                    .order_by(PipelineRevision.id.desc())
-                    .first()
-                )
-                if fallback_revision is not None:
-                    revisions.append(fallback_revision)
-            return revisions
-
-        revisions = (
-            session.query(PipelineRevision)
-            .filter(PipelineRevision.status.in_(["active", "ready", "building"]))
-            .order_by(PipelineRevision.collection, PipelineRevision.id.desc())
-            .all()
+        # One revision-choice rule for both paths, via _searchable_revisions.
+        # The -c path used to take the newest in-flight revision by id, so a
+        # `building` one out-ranked a `ready` one -- while searching the same
+        # collection without -c preferred ready. Same query, same data,
+        # different answer depending on how the collection was named.
+        query = session.query(PipelineRevision).filter(
+            PipelineRevision.status.in_(SEARCHABLE_STATUSES)
         )
+        if collections is not None:
+            query = query.filter(
+                PipelineRevision.collection.in_(list(dict.fromkeys(collections)))
+            )
+        revisions = query.order_by(
+            PipelineRevision.collection, PipelineRevision.id.desc()
+        ).all()
         return _searchable_revisions(revisions)
 
 

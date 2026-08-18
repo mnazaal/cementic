@@ -4,7 +4,11 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
 
+from cementic.config import Config
+from cementic.db import Base, PipelineRevision
 from cementic.search import (
     Searcher,
     SearchResult,
@@ -13,6 +17,74 @@ from cementic.search import (
     _score_from_distance,
     _searchable_revisions,
 )
+
+
+class TestRevisionChoiceAgreesWithAndWithoutDashC:
+    """Regression (independently derived twice): naming a collection with -c
+    took the newest in-flight revision by id, so a newer `building` revision
+    out-ranked a `ready` one -- while the same collection searched without -c
+    ranked active > ready > building. Same data, different revision, silently
+    different results depending only on how the collection was named."""
+
+    def _searcher_and_session(self):
+        engine = create_engine("sqlite:///:memory:")
+        Base.metadata.create_all(engine)
+        session = sessionmaker(bind=engine, expire_on_commit=False)()
+        with (
+            patch("cementic.search.get_engine"),
+            patch("cementic.search.get_session_factory"),
+        ):
+            searcher = Searcher(config=Config())
+        return searcher, session
+
+    _next_chunk_profile = iter(range(1, 100))
+
+    def _revision(self, collection: str, status: str) -> PipelineRevision:
+        # sqlite does not enforce the profile FKs, which are irrelevant here;
+        # chunk_profile_id varies because (collection, profile triple) is
+        # unique -- as in reality, where a new revision means a changed profile.
+        return PipelineRevision(
+            collection=collection,
+            extractor_profile_id=1,
+            chunk_profile_id=next(self._next_chunk_profile),
+            embedding_profile_id=1,
+            status=status,
+            label=f"{collection}-{status}",
+        )
+
+    def test_named_collection_prefers_ready_over_newer_building(self):
+        searcher, session = self._searcher_and_session()
+        session.add(self._revision("papers", "ready"))
+        session.add(self._revision("papers", "building"))  # newer id
+        session.commit()
+
+        named = searcher._load_searchable_revisions(session, ["papers"])
+        unnamed = searcher._load_searchable_revisions(session, None)
+
+        assert [revision.status for revision in named] == ["ready"]
+        assert [(revision.collection, revision.status) for revision in named] == [
+            (revision.collection, revision.status) for revision in unnamed
+        ]
+
+    def test_named_collection_still_falls_back_to_building_only(self):
+        searcher, session = self._searcher_and_session()
+        session.add(self._revision("papers", "building"))
+        session.commit()
+
+        named = searcher._load_searchable_revisions(session, ["papers"])
+
+        assert [revision.status for revision in named] == ["building"]
+
+    def test_named_collection_prefers_active_over_everything(self):
+        searcher, session = self._searcher_and_session()
+        session.add(self._revision("papers", "active"))
+        session.add(self._revision("papers", "ready"))
+        session.add(self._revision("papers", "building"))
+        session.commit()
+
+        named = searcher._load_searchable_revisions(session, ["papers"])
+
+        assert [revision.status for revision in named] == ["active"]
 
 
 class TestSearcher:
@@ -103,58 +175,11 @@ class TestSearcher:
         assert results[0]["source_path"] == "/tmp/papers.pdf"
         embedding_provider.embed.assert_called_once()
 
-    @patch("cementic.search.get_engine")
-    @patch("cementic.search.get_session_factory")
-    @patch("cementic.search._create_embedding_provider")
-    def test_search_falls_back_to_building_when_active_query_empty(
-        self, mock_create_embedding_provider, mock_session_factory, mock_get_engine
-    ):
-        building_revision = SimpleNamespace(
-            collection="papers",
-            status="building",
-            embedding_profile_id=1,
-            chunk_profile_id=2,
-            extractor_profile_id=1,
-            embedding_profile=SimpleNamespace(
-                config_json=(
-                    '{"provider": "llama-cpp", '
-                    '"model_identifier": "nomic-embed-text", "embedding_dim": 768}'
-                ),
-                model_identifier="nomic-embed-text",
-                embedding_dim=768,
-                distance_metric="cosine",
-            ),
-        )
-        row = SimpleNamespace(
-            collection="papers",
-            source_path="/tmp/papers.pdf",
-            content="partial chunk text",
-            distance=0.1,
-        )
-        exec_result = MagicMock()
-        exec_result.scalar.return_value = 1
-        exec_result.__iter__.return_value = iter([row])
-
-        # active query → empty, fallback query → building revision
-        active_query = self.RevisionQuery([])
-        fallback_query = self.RevisionQuery([building_revision])
-
-        mock_session = MagicMock()
-        mock_session.__enter__.return_value = mock_session
-        mock_session.__exit__.return_value = False
-        mock_session.query.side_effect = [active_query, fallback_query]
-        mock_session.execute.return_value = exec_result
-        mock_session_factory.return_value = lambda: mock_session
-
-        embedding_provider = MagicMock()
-        embedding_provider.health_check.return_value = True
-        embedding_provider.embed.return_value = [0.1] * 768
-        mock_create_embedding_provider.return_value = embedding_provider
-
-        searcher = Searcher()
-        results = searcher.search("hello", collections=["papers"])
-
-        assert results[0]["source_path"] == "/tmp/papers.pdf"
+    # (A test simulating the -c path's former two-query shape -- active first,
+    # then a separate in-flight fallback -- was removed when revision choice was
+    # unified through _searchable_revisions; the fallback-to-building behaviour
+    # it pinned is covered by test_search_uses_building_revision_when_no_active_exists
+    # and TestRevisionChoiceAgreesWithAndWithoutDashC.)
 
     @patch("cementic.search.get_engine")
     @patch("cementic.search.get_session_factory")
