@@ -119,6 +119,12 @@ contributors.
 
 ## Plan of record — fifth-review fixes (2026-08-18)
 
+**Executed same day** — twelve fix/refactor/test commits on
+`claude/review-fixes-2026-08-17`, in the batch order below, every batch green
+under all five `./scripts/check.sh` gates (PG included). The note's resolution
+banner maps finding → commit; the deliberate exceptions are recorded there and
+under "Deliberately not done". Kept as the record of the decisions.
+
 Scope: close the fifth review, [`notes/code-review-2026-08-17.html`](notes/code-review-2026-08-17.html).
 All file:line evidence lives in the note; this section holds only execution
 order, the decisions, and the exit criteria. Mechanics: one branch
@@ -397,8 +403,10 @@ measurements* that have no other home, in the order they were learned.
   pass, reviewing the fourth pass's fixes plus fresh eyes per subsystem. Headline
   pattern: several fixes are correct on the path they touched and absent on an
   adjacent path the same defect reaches (`status --json`, the initial scan,
-  `stop`'s kill loop, `config path`). All findings currently open; §9 has the
-  suggested order of attack.
+  `stop`'s kill loop, `config path`). **Closed 2026-08-18** on
+  `claude/review-fixes-2026-08-17`; the note carries a resolution banner mapping
+  finding → commit. Only §2.9's directory-move blindness (unverified, needs a
+  repro) stays open — see "Deliberately not done".
 
 **Read the 2026-08-17 and 2026-08-14 notes before opening a new review.** Its most useful section
 is not the findings but the ledger of what the earlier passes found and never
@@ -737,6 +745,20 @@ had. Two remain open and are worth reopening rather than re-closing:
   same prefixes as v2 but do not match `_NOMIC_V2_MARKER`. Note the wrong
   behaviour is currently *pinned by a test* (`test_embedding_text.py`), which
   must be retired with the fix or it reads as intentional.
+
+From the **fifth** review (2026-08-18), deferred or kept with reasons:
+
+- **The watcher is blind to directory moves until restart** (fifth review §2.9,
+  tagged unverified). Needs a repro against watchdog's actual event stream
+  before any fix — a speculative fix here would be code for a defect nobody has
+  observed.
+- **TOML parsed once per pydantic-settings section source** (~9× per `Config`
+  construction). Caching keyed on path+mtime risks stale reads on
+  coarse-mtime filesystems — test flakiness — for a millisecond-scale win.
+  Revisit only if config load ever shows up in a profile.
+- Three §5 trim candidates stay: `_llama_daemon_runtime_status` (a seam its
+  tests pin), `_state` (turned out multi-use), and the `state_path is None`
+  guards (they defend the field's declared type).
 
 Closed again by the round-two review, with reasons — each of these looks like a
 bug and is one, but the fix costs more than the defect:

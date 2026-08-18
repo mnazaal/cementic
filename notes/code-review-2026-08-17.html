@@ -62,6 +62,36 @@ The headline result is a pattern, not a single bug: <strong>several of the fixes
 touched and absent on an adjacent path the same defect reaches</strong> — the JSON mode, the initial scan,
 the second EPERM site, the one command a guard's docstring names. §1 collects those; everything else is new.</p>
 
+<div class="f" style="border-left-color: var(--ok);">
+<p class="hd"><span class="ok">Resolution — 2026-08-18.</span> Every finding below is closed on branch
+<code>claude/review-fixes-2026-08-17</code>, in the §9 order, each commit green under all five
+<code>./scripts/check.sh</code> gates (PG included). The exceptions are listed under "kept / still open".</p>
+<table>
+<tr><th>Findings</th><th>Commit</th><th>Note</th></tr>
+<tr><td>§1.1–§1.7, plus §2.3 (same code path)</td><td><code>c75f40b</code></td>
+    <td>the README "exit non-zero" claim is made true rather than edited; CHANGELOG's embed entry now covers empty/whitespace</td></tr>
+<tr><td>§2.7 search revision divergence</td><td><code>776dc0a</code></td><td>both paths through <code>_searchable_revisions</code></td></tr>
+<tr><td>§2.2 SET leak · §2.8 two actives</td><td><code>cf33dbb</code></td>
+    <td>SET LOCAL verified red-on-old/green-on-new against live PG; partial unique index retrofits through <code>create_tables</code>, promote re-reads status under FOR UPDATE</td></tr>
+<tr><td>§2.1 remove-vs-workers · §2.4 · §2.5 · §2.6</td><td><code>ebf9c01</code></td>
+    <td>mechanism: the worker re-checks its revision once per poll and exits; <code>collection remove</code> warns about the watcher</td></tr>
+<tr><td>§2.9 fatal_reason poisoning + stop ordering</td><td><code>5927adc</code></td><td></td></tr>
+<tr><td>§4.2 error streams · §4.3 hard wrap</td><td><code>526d437</code></td><td><code>soft_wrap</code> on all consoles; errors via <code>err_console</code></td></tr>
+<tr><td>§4.1 exit codes</td><td><code>40ac632</code></td><td><code>promote</code> no-ready exits 1; README documents the 0/1/2 convention</td></tr>
+<tr><td>§3.1 bounds · §3.2 invariant · §3.3 env attribution · §3.5 over-budget reason · §3.6 runtime/doctor/runner</td><td><code>b7f17ae</code></td><td></td></tr>
+<tr><td>§3.4 bootstrap download (third-time carry)</td><td><code>f9828c9</code></td><td>file lock + per-pid temp + wrapped requests errors</td></tr>
+<tr><td>§4.4 paper cuts</td><td><code>42acd1b</code></td><td></td></tr>
+<tr><td>§5 trimming</td><td><code>ffc2f0b</code></td><td>net −40 lines; the dataclasses are now the JSON contract</td></tr>
+<tr><td>§6 test gaps</td><td><code>5263d34</code></td><td>migration-commit test verified red on the unfixed code; embed validation landed with §1/§4.4</td></tr>
+</table>
+<p><strong>Kept / still open</strong>, with reasons:
+§2.9's directory-move blindness stays open — it was tagged unverified and needs a repro before any fix (tracked in PLAN.md).
+From §5: the per-section TOML re-parse is kept (caching on path+mtime risks stale-file flakiness in tests for a
+millisecond-scale win); <code>_llama_daemon_runtime_status</code> stays (a test-pinned seam), <code>_state</code> turned out
+multi-use, and the <code>state_path is None</code> guards defend the field's declared type. §7's doc claims were corrected in
+the same commits as the code they describe.</p>
+</div>
+
 <h2>1. Fixes that stopped one layer short</h2>
 
 <div class="f v">
