@@ -285,7 +285,19 @@ def promote_revision(
     """Promote a ready revision to active for one collection."""
     if revision.collection != collection:
         raise ValueError("Revision does not belong to the requested collection")
-    if revision.status != "ready":
+    # Re-read the status under FOR UPDATE rather than trusting the ORM
+    # attribute: it may be stale, and two concurrent promotes both passing a
+    # stale "ready" check is how two actives happen. The partial unique index
+    # (db.create_tables) backstops that corruption at the database; this turns
+    # the race into one winner and one clear error. FOR UPDATE is a no-op on
+    # SQLite, where there is no concurrent writer to race.
+    current_status = (
+        session.query(PipelineRevision.status)
+        .filter_by(id=revision.id)
+        .with_for_update()
+        .scalar()
+    )
+    if current_status != "ready":
         raise ValueError("Only ready revisions can be promoted")
 
     (

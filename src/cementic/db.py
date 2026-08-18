@@ -346,10 +346,25 @@ def ensure_vector_extensions(engine: Engine) -> None:
             ) from error
 
 
+#: One active revision per collection is an invariant promote_revision
+#: maintains procedurally, but two concurrent promotes under READ COMMITTED can
+#: each miss the other's newly-activated row and leave two actives -- which
+#: search and status then disagree about. This partial unique index makes the
+#: database refuse the second activation outright. It lives here rather than on
+#: the model because create_all cannot retrofit an index onto existing
+#: databases; IF NOT EXISTS makes it idempotent on both PostgreSQL and SQLite.
+_ACTIVE_REVISION_UNIQUE_DDL = (
+    "CREATE UNIQUE INDEX IF NOT EXISTS uq_pipeline_revisions_one_active "
+    "ON pipeline_revisions (collection) WHERE status = 'active'"
+)
+
+
 def create_tables(engine: Engine) -> None:
     """Create all tables required by the versioned pipeline schema."""
     ensure_vector_extensions(engine)
     Base.metadata.create_all(engine)
+    with engine.begin() as conn:
+        conn.execute(text(_ACTIVE_REVISION_UNIQUE_DDL))
 
 
 def get_session_factory(engine: Engine) -> sessionmaker[Session]:
@@ -420,11 +435,14 @@ def ensure_embedding_ann_index(
         if build_memory is not None:
             # An HNSW graph that does not fit in maintenance_work_mem spills and
             # the build slows sharply -- measured 1454s at the 64MB default
-            # versus 345s at 2GB for 100k 768-dim vectors. Set on the connection
-            # rather than the server so it applies wherever cementic runs, and
-            # only for the build; the connection is discarded afterwards. The
-            # value's grammar is validated in config, not here.
-            conn.execute(text(f"SET maintenance_work_mem = '{build_memory}'"))
+            # versus 345s at 2GB for 100k 768-dim vectors. SET LOCAL, not SET:
+            # the connection returns to the *pool* afterwards (engine.connect()
+            # is pooled, not discarded), and a session-level SET would leave
+            # every later borrower running with gigabytes of
+            # maintenance_work_mem. LOCAL scopes it to this transaction, which
+            # still covers the CREATE INDEX below -- the commit() is after it.
+            # The value's grammar is validated in config, not here.
+            conn.execute(text(f"SET LOCAL maintenance_work_mem = '{build_memory}'"))
         # If an index already exists under a different method, drop it first so a
         # method switch actually takes effect (CREATE INDEX IF NOT EXISTS alone
         # would silently keep the old one).

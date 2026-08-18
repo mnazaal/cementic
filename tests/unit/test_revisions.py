@@ -214,8 +214,15 @@ class TestPromoteRevision:
         with pytest.raises(ValueError, match="does not belong"):
             promote_revision(session, "col", revision)
 
+    @staticmethod
+    def _mock_db_status(session: MagicMock, status: str | None) -> None:
+        """Answer promote_revision's FOR UPDATE status re-read."""
+        chain = session.query.return_value.filter_by.return_value.with_for_update
+        chain.return_value.scalar.return_value = status
+
     def test_raises_when_not_ready(self, _config: Config) -> None:
         session = MagicMock()
+        self._mock_db_status(session, "building")
         revision = MagicMock(spec=PipelineRevision)
         revision.collection = "col"
         revision.status = "building"
@@ -226,6 +233,7 @@ class TestPromoteRevision:
     @patch("cementic.revisions.prune_collection_history")
     def test_promotes_ready_revision(self, mock_prune: MagicMock, _config: Config) -> None:
         session = MagicMock()
+        self._mock_db_status(session, "ready")
         revision = MagicMock(spec=PipelineRevision)
         revision.collection = "col"
         revision.status = "ready"
@@ -234,6 +242,72 @@ class TestPromoteRevision:
         assert result.status == "active"
         assert result.promoted_at is not None
         mock_prune.assert_called_once_with(session, "col")
+
+    def test_stale_orm_status_is_not_trusted(self, _config: Config) -> None:
+        """Regression: the readiness check read revision.status off the ORM
+        object, so two concurrent promotes could both see a stale "ready" and
+        both pass -- the second retiring the first's newly-active revision
+        while activating its own. The status is re-read from the database
+        under FOR UPDATE."""
+        engine = create_engine("sqlite:///:memory:")
+        Base.metadata.create_all(engine)
+        session = sessionmaker(bind=engine, expire_on_commit=False)()
+        revision = PipelineRevision(
+            collection="col",
+            extractor_profile_id=1,
+            chunk_profile_id=1,
+            embedding_profile_id=1,
+            status="ready",
+            label="rev",
+        )
+        session.add(revision)
+        session.commit()
+
+        # Another actor promoted (and later retired) it; this ORM object is stale.
+        session.execute(
+            PipelineRevision.__table__.update()
+            .where(PipelineRevision.id == revision.id)
+            .values(status="retired")
+        )
+        assert revision.status == "ready"  # the stale attribute the bug trusted
+
+        with pytest.raises(ValueError, match="Only ready"):
+            promote_revision(session, "col", revision)
+
+
+class TestOneActiveRevisionPerCollection:
+    """The database itself must refuse a second active revision (regression:
+    nothing did, so the promote race left two actives for search and status to
+    disagree about)."""
+
+    def test_second_active_is_refused(self) -> None:
+        from sqlalchemy.exc import IntegrityError
+
+        from cementic.db import create_tables
+
+        engine = create_engine("sqlite:///:memory:")
+        create_tables(engine)
+        session = sessionmaker(bind=engine, expire_on_commit=False)()
+
+        def revision(status: str, chunk_profile_id: int) -> PipelineRevision:
+            return PipelineRevision(
+                collection="col",
+                extractor_profile_id=1,
+                chunk_profile_id=chunk_profile_id,
+                embedding_profile_id=1,
+                status=status,
+                label=f"rev-{chunk_profile_id}",
+            )
+
+        session.add(revision("active", 1))
+        session.commit()
+        # A second *retired* revision is fine; the index is partial.
+        session.add(revision("retired", 2))
+        session.commit()
+
+        session.add(revision("active", 3))
+        with pytest.raises(IntegrityError):
+            session.commit()
 
 
 class TestEnsureRevisionAnnIndex:

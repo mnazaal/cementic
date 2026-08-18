@@ -206,6 +206,48 @@ class TestAnnIndex:
         finally:
             _cleanup(pg_engine, emb_prof_id)
 
+    def test_build_memory_does_not_leak_into_the_pool(self, pg_engine):
+        """Regression: a session-level SET pinned maintenance_work_mem on the
+        pooled connection -- the code comment claimed the connection was
+        discarded, but engine.connect() returns it to the pool, so every later
+        borrower ran with the build's gigabytes. SET LOCAL scopes it to the
+        build transaction."""
+        session_factory = sessionmaker(bind=pg_engine)
+        with session_factory() as session:
+            pipeline = _create_minimal_pipeline(session, embedding_dim=4)
+            emb_prof_id = pipeline.embedding_profile_id
+            session.commit()
+
+        try:
+            _create_vector_table(pg_engine, emb_prof_id, 4)
+            with pg_engine.connect() as conn:
+                default_value = conn.execute(text("SHOW maintenance_work_mem")).scalar()
+            build_memory = "1234MB"
+            assert build_memory != default_value
+
+            ensure_embedding_ann_index(
+                pg_engine,
+                profile_id=emb_prof_id,
+                method="hnsw",
+                params=IndexParams(),
+                build_memory=build_memory,
+            )
+
+            # Check out several connections at once: the one that ran the build
+            # is idle in the pool and must be among the first handed back.
+            conns = [pg_engine.connect() for _ in range(3)]
+            try:
+                values = {
+                    conn.execute(text("SHOW maintenance_work_mem")).scalar()
+                    for conn in conns
+                }
+            finally:
+                for conn in conns:
+                    conn.close()
+            assert values == {default_value}
+        finally:
+            _cleanup(pg_engine, emb_prof_id)
+
     def test_switch_index_method_rebuilds(self, pg_engine):
         """Switching index.method must rebuild the index, not silently keep the old one."""
         session_factory = sessionmaker(bind=pg_engine)
