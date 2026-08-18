@@ -68,7 +68,8 @@
   the nearest neighbours of nothing.
 - **`cementic embed` no longer invents vectors.** A record with no `content` was embedded
   as the empty string and a `null` one as the literal text `"None"`, each emitted as a
-  normal-looking embedding at exit 0.
+  normal-looking embedding at exit 0. Empty and whitespace-only strings are refused the
+  same way — the pipeline worker never embeds such chunks either.
 - **`cementic collection remove` reports artifacts it could not delete** rather than
   printing `status: deleted` with the files still on disk and the rows naming them gone.
 - **Files the watcher refuses are visible in `cementic status`.** Symlinks, unreadable

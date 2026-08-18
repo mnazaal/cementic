@@ -234,16 +234,22 @@ class StateManager:
             self.save(state)
             return state
 
-    def record_skipped(self, path: str, reason: str) -> WorkerState:
+    def record_skipped(
+        self, path: str, reason: str, *, current_file: Any = UNSET
+    ) -> WorkerState:
         """Count a file the watcher refused, and remember which one it was.
 
         Same lock as ``increment`` and the same reason for it: the initial scan
-        and the debounce timers run on different threads.
+        and the debounce timers run on different threads. ``current_file`` lets
+        a failure path clear the "now working on" display in the same atomic
+        write, as ``increment`` does.
         """
         with self._lock:
             state = self.load()
             state.failed_count += 1
             state.skipped_files.append(f"{path}: {reason}")
+            if current_file is not UNSET:
+                state.current_file = current_file
             # Keep only the most recent, so a directory of symlinks cannot grow
             # the state file without bound. failed_count stays exact.
             if len(state.skipped_files) > MAX_RECORDED_SKIPPED_FILES:

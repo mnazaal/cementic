@@ -36,6 +36,7 @@ from cementic.collections import (
 from cementic.config import (
     Config,
     ConfigError,
+    config_path_error,
     default_config_path,
     format_config_error,
     get_config,
@@ -302,6 +303,13 @@ use_ocr = false
 @config_app.command("path", short_help="Print the active (or default) config path")
 def config_path() -> None:
     """Print the active config file path, or the default location if none exists."""
+    # The same guard every other command hits via get_config(): without it this
+    # command printed the fallback path for an unusable CEMENTIC_CONFIG -- the
+    # one symptom it exists to diagnose.
+    problem = config_path_error()
+    if problem is not None:
+        console.print(f"config error: {problem}")
+        raise typer.Exit(1)
     active = resolve_config_path()
     typer.echo(str(active if active is not None else default_config_path()))
 
@@ -899,6 +907,14 @@ def _print_status_json(
                     }
                 output["collections"] = collections_data
             else:
+                # Mirror _require_known_collection on the human path: a typo'd
+                # name otherwise produced a full zero-filled pipeline block at
+                # exit 0, indistinguishable from a real collection not started.
+                if not collection_exists(session, collection):
+                    raise ValueError(
+                        f"unknown collection: {collection}"
+                        " (check `cementic collection list`)"
+                    )
                 ps = load_pipeline_status(_get_config(), collection)
                 output["pipeline"] = {
                     "collection": collection,
@@ -1253,6 +1269,7 @@ def stop_background(
         )
 
     signaled_pids: list[int] = []
+    unsignalable_pids: list[int] = []
     for proc in processes:
         pid = managed_process_pid(proc)
         # Only signal a process we can confirm is still ours; a recycled PID
@@ -1262,11 +1279,21 @@ def stop_background(
         try:
             os.kill(pid, 15)
             signaled_pids.append(pid)
-        except (ProcessLookupError, OSError):
-            continue
+        except ProcessLookupError:
+            continue  # exited between the liveness check and the signal
+        except OSError:
+            # EPERM: alive, just not ours to signal (sudo, a service account, a
+            # user namespace) -- the same reasoning as is_pid_running. Folding
+            # this into "already gone" made stop print "cleared stale state"
+            # and delete the state files of workers that kept indexing.
+            unsignalable_pids.append(pid)
 
     timeout_seconds = 10.0  # grace period before --force is required
     remaining = wait_for_exit(signaled_pids, timeout_seconds=timeout_seconds)
+    # SIGTERM never reached the EPERM'd pids, so they are certainly still
+    # running: they rejoin the not-stopped set so no path below clears their
+    # state, and --force reports them as unkillable instead of stale.
+    remaining += unsignalable_pids
 
     if not remaining:
         _get_supervisor_state_path().unlink(missing_ok=True)
@@ -1309,10 +1336,18 @@ def stop_background(
         }
     )
 
-    console.print(
-        f"stop timed out after {timeout_seconds}s; "
-        f"still running PID(s): {', '.join(str(pid) for pid in remaining)}"
-    )
+    timed_out = [pid for pid in remaining if pid not in unsignalable_pids]
+    if timed_out:
+        console.print(
+            f"stop timed out after {timeout_seconds}s; "
+            f"still running PID(s): {', '.join(str(pid) for pid in timed_out)}"
+        )
+    if unsignalable_pids:
+        # No timeout elapsed for these -- the signal itself was refused.
+        console.print(
+            f"could not signal PID(s) {', '.join(str(pid) for pid in unsignalable_pids)}: "
+            "permission denied; still running, likely started by another user"
+        )
     activity = _pipeline_worker_activity()
     if activity is not None:
         # Otherwise this reads as a hung worker. It is not: the worker cannot
@@ -1506,6 +1541,8 @@ def promote_collection(
             # expire on commit and would raise once the session closes.
             status = outcome.status
             counts = outcome.counts
+            unremoved = outcome.unremoved_artifacts
+            cleanup_error = outcome.cleanup_error
             revision_label = (
                 outcome.revision.label or outcome.revision.id
                 if outcome.revision is not None
@@ -1562,6 +1599,17 @@ def promote_collection(
         raise typer.Exit(1)
     console.print("status: promoted")
     console.print(f"revision: {revision_label}")
+    # Same contract as `collection remove`: the promote is committed, so
+    # leftover files are a warning, not a failure -- but they used to be
+    # discarded entirely here while remove reported them.
+    if cleanup_error is not None:
+        console.print(f"warning: promoted but cleanup failed: {cleanup_error}")
+    if unremoved:
+        console.print(f"warning: {len(unremoved)} artifact file(s) could not be removed:")
+        for path in unremoved[:5]:
+            console.print(f"  {path}")
+        if len(unremoved) > 5:
+            console.print(f"  ... and {len(unremoved) - 5} more")
 
 
 @collection_app.command(
@@ -1886,6 +1934,16 @@ def embed() -> None:
             missing = "is missing" if "content" not in rec else f"is {json.dumps(content)}"
             err_console.print(
                 f"embed failed: line {line_number} has no text to embed: \"content\" {missing}"
+            )
+            raise typer.Exit(1)
+        if not content.strip():
+            # The same hole as missing/null, one layer down: empty and
+            # whitespace-only strings embed into a plausible-looking vector for
+            # text that was never there. The pipeline worker never embeds such
+            # chunks either.
+            err_console.print(
+                f"embed failed: line {line_number} has no text to embed: "
+                "\"content\" is empty or whitespace"
             )
             raise typer.Exit(1)
         contents.append(content)

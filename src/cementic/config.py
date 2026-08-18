@@ -63,7 +63,11 @@ def resolve_config_path() -> Path | None:
     candidates: list[Path] = []
     explicit = os.environ.get("CEMENTIC_CONFIG")
     if explicit:
-        candidates.append(Path(explicit))
+        # expanduser to match config_path_error's check: without it,
+        # CEMENTIC_CONFIG=~/cementic.toml never matched is_file() (the ~ stays
+        # literal), so the variable was silently ignored while the guard that
+        # exists to report exactly that judged the same path usable.
+        candidates.append(Path(explicit).expanduser())
     candidates.append(Path.cwd() / "cementic.toml")
     candidates.append(Path(user_config_dir("cementic")) / "config.toml")
     for candidate in candidates:

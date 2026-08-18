@@ -1,6 +1,7 @@
 """Tests for document watcher daemon."""
 
 import hashlib
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -280,3 +281,52 @@ class TestSourceWatcherStateManagement:
             daemon._scan_existing(tmp_path)
 
         assert len(seen) == 1
+
+    def test_scan_existing_passes_symlinks_through_to_be_recorded(self, tmp_path):
+        """Regression: the scan filtered symlinks *before* _on_file_detected, so
+        `cementic start` on a tree of symlinks recorded nothing -- no counter,
+        no skip entry -- while a live event for the same file was recorded by
+        _register_document. Broken symlinks fail is_file() and vanished too."""
+        (tmp_path / "real.md").write_text("content", encoding="utf-8")
+        (tmp_path / "link.md").symlink_to(tmp_path / "real.md")
+        (tmp_path / "dangling.md").symlink_to(tmp_path / "nowhere.md")
+        daemon = SourceWatcher()
+        seen: list[str] = []
+
+        with patch.object(daemon, "_on_file_detected", side_effect=seen.append):
+            daemon._scan_existing(tmp_path)
+
+        assert sorted(Path(p).name for p in seen) == ["dangling.md", "link.md", "real.md"]
+
+    def test_scan_walk_error_records_the_unreadable_path(self, tmp_path):
+        """Regression: an unreadable subtree bumped failed_count but recorded no
+        path, so `status --verbose` could not say *what* was missing."""
+        daemon = SourceWatcher()
+
+        def fake_walk(directory, onerror=None):
+            onerror(PermissionError(13, "Permission denied", str(tmp_path / "locked")))
+            return iter([])
+
+        with patch("cementic.source_watcher.os.walk", side_effect=fake_walk):
+            with patch.object(daemon.state_manager, "record_skipped") as mock_skip:
+                daemon._scan_existing(tmp_path)
+
+        mock_skip.assert_called_once()
+        path, reason = mock_skip.call_args.args
+        assert path == str(tmp_path / "locked")
+        assert "unreadable during scan" in reason
+
+    def test_registration_failure_records_the_path(self, tmp_path):
+        """Regression: an exception in _register_document bumped failed_count
+        but left the path only in the log file."""
+        daemon = SourceWatcher()
+
+        with patch.object(daemon, "_register_document", side_effect=RuntimeError("db down")):
+            with patch.object(daemon.state_manager, "record_skipped") as mock_skip:
+                daemon._on_file_detected(str(tmp_path / "doc.md"))
+
+        mock_skip.assert_called_once()
+        path, reason = mock_skip.call_args.args
+        assert path == str(tmp_path / "doc.md")
+        assert "registration failed" in reason
+        assert "db down" in reason

@@ -59,6 +59,16 @@ class TestConfigCommands:
         assert result.exit_code == 0
         assert result.stdout.strip() == str(default_config_path())
 
+    def test_path_reports_unusable_explicit_config(self, tmp_path, monkeypatch) -> None:
+        """Regression: `config path` printed the fallback for a CEMENTIC_CONFIG
+        pointing nowhere -- the exact symptom config_path_error exists to
+        diagnose, hidden by the one command a user would run to check it."""
+        monkeypatch.setenv("CEMENTIC_CONFIG", str(tmp_path / "nope.toml"))
+        result = runner.invoke(app, ["config", "path"])
+        assert result.exit_code == 1
+        assert "does not exist" in result.output
+        assert str(default_config_path()) not in result.output
+
     def test_init_writes_then_refuses_clobber(self) -> None:
         target = default_config_path()
         assert not target.exists()
@@ -403,6 +413,33 @@ class TestStopFallsBackToWorkerStateFiles:
         assert result.exit_code == 0
         assert "no background cementic processes found" in result.output
 
+    def test_eperm_workers_are_not_cleared_as_stale(self, tmp_path):
+        """Regression: PermissionError from os.kill was folded into "already
+        exited", so stop printed "cleared stale state", exited 0, and deleted
+        the state files of workers that kept indexing under another uid --
+        the exact case is_pid_running was fixed to call alive."""
+        config = self._config_with_state(tmp_path, pid=4242)
+
+        with (
+            patch("cementic.cli._get_config", return_value=config),
+            patch("cementic.cli._load_supervisor_state", return_value={}),
+            patch("cementic.cli._get_supervisor_state_path", return_value=tmp_path / "sup.json"),
+            patch("cementic.cli.is_managed_process_alive", return_value=True),
+            patch(
+                "cementic.cli.os.kill",
+                side_effect=PermissionError(1, "Operation not permitted"),
+            ),
+            patch("cementic.cli.wait_for_exit", return_value=[]),
+        ):
+            result = runner.invoke(app, ["stop"])
+
+        assert result.exit_code == 1
+        assert "permission denied" in result.output
+        assert "cleared stale state" not in result.output
+        # The worker's own state file must survive, or nothing can ever find
+        # this pid again.
+        assert config.pipeline_worker.state_path.exists()
+
 
 class TestChunkCommand:
     """Test the stdin/stdout chunk filter."""
@@ -535,6 +572,7 @@ class TestSearchCommand:
         "argv",
         [
             ["status", "-c", "nosuch"],
+            ["status", "-c", "nosuch", "--json"],
             ["collection", "revisions", "nosuch"],
             ["collection", "promote", "nosuch"],
             ["collection", "reindex", "nosuch"],
@@ -562,6 +600,27 @@ class TestSearchCommand:
 
         assert result.exit_code == 1
         assert "unknown collection" in result.output
+
+    @patch("cementic.cli.get_session_factory")
+    @patch("cementic.cli.get_engine")
+    def test_status_json_unknown_collection_has_no_pipeline_block(
+        self, mock_get_engine, mock_get_session_factory
+    ):
+        """Regression: `status -c typo --json` emitted a full zero-filled
+        pipeline block at exit 0 -- the exact defect the human path had already
+        fixed, alive in the mode scripts actually consume."""
+        mock_session = MagicMock()
+        mock_session.__enter__.return_value = mock_session
+        mock_session.__exit__.return_value = False
+        mock_get_session_factory.return_value = lambda: mock_session
+
+        with patch("cementic.cli.collection_exists", return_value=False):
+            result = runner.invoke(app, ["status", "-c", "nosuch", "--json"])
+
+        assert result.exit_code == 1
+        parsed = json.loads(result.output)
+        assert "unknown collection" in parsed["error"]
+        assert "pipeline" not in parsed
 
     @patch("cementic.cli.Searcher")
     def test_human_and_json_modes_agree_on_the_unknown_collection_exit_code(
@@ -1177,6 +1236,34 @@ class TestBackgroundCommands:
         assert args == (mock_session, "research")
         assert isinstance(kwargs["config"], Config)
         assert kwargs["force"] is False
+
+    @patch("cementic.cli.get_session_factory")
+    @patch("cementic.cli.get_engine")
+    def test_collection_promote_warns_about_leftover_artifacts_at_exit_zero(
+        self, mock_get_engine, mock_get_session_factory
+    ):
+        """The promote is durable, so leftovers are a warning, not a failure --
+        but they must be *printed*, as `collection remove` already does."""
+        revision = SimpleNamespace(collection="research", status="active", label="rev-1")
+        mock_session = MagicMock()
+        mock_session.__enter__.return_value = mock_session
+        mock_session.__exit__.return_value = False
+        mock_get_session_factory.return_value = lambda: mock_session
+
+        outcome = PromotionOutcome(
+            status="promoted",
+            revision=revision,
+            unremoved_artifacts=["/artifacts/old.zst"],
+            cleanup_error="DROP TABLE failed: disk error",
+        )
+        with patch("cementic.cli.promote_ready_revision", return_value=outcome):
+            result = runner.invoke(app, ["collection", "promote", "research"])
+
+        assert result.exit_code == 0
+        assert "status: promoted" in result.output
+        assert "cleanup failed" in result.output
+        assert "could not be removed" in result.output
+        assert "/artifacts/old.zst" in result.output
 
     @patch("cementic.cli.get_session_factory")
     @patch("cementic.cli.get_engine")
@@ -2128,6 +2215,22 @@ class TestFilterCommands:
         result = runner.invoke(app, ["embed"], input="")
         assert result.exit_code == 0
         assert result.output.strip() == ""
+
+    @pytest.mark.parametrize(
+        "record",
+        ['{"content": ""}', '{"content": "   \\n\\t  "}'],
+        ids=["empty", "whitespace-only"],
+    )
+    @patch("cementic.cli.runtime_spec_from_config", return_value=object())
+    @patch("cementic.cli.create_provider", return_value=_FakeEmbedProvider())
+    def test_embed_rejects_content_with_no_text(self, mock_create, mock_spec, record):
+        """Regression: {"content": ""} embedded into a plausible-looking vector
+        at exit 0 -- the same hole the missing/null fix closed, one layer down.
+        The pipeline worker never embeds whitespace-only chunks either."""
+        result = runner.invoke(app, ["embed"], input=record + "\n")
+        assert result.exit_code == 1
+        assert result.stdout.strip() == ""
+        assert "no text to embed" in result.stderr
 
     @patch("cementic.cli.runtime_spec_from_config", return_value=object())
     def test_embed_batches_requests_by_config_batch_size(self, mock_spec):

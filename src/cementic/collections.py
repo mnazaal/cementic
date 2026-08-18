@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, cast
 
 from sqlalchemy import func
@@ -244,11 +244,17 @@ class PromotionOutcome:
     has unfinished work and ``force`` was not set), or ``"blocked_by_failures"``
     (it built with failures and ``force`` was not set). Every non-promoted
     outcome leaves the revision untouched.
+
+    ``unremoved_artifacts`` and ``cleanup_error`` describe post-commit cleanup
+    of the superseded revision: the promotion itself is durable by then, so
+    these are warnings for the caller to surface, never a failed promote.
     """
 
     status: str
     revision: PipelineRevision | None = None
     counts: PipelineCounts | None = None
+    unremoved_artifacts: list[str] = field(default_factory=list)
+    cleanup_error: str | None = None
 
 
 def promote_ready_revision(
@@ -287,10 +293,24 @@ def promote_ready_revision(
     # Only now that the promotion is durable are the superseded revisions'
     # artifact files safe to unlink, and their vector tables safe to drop --
     # the latter also because DROP TABLE takes its own transaction, which would
-    # have blocked on the locks the session held until this commit.
-    remove_artifacts(drain_pending_artifact_removals(session), config=config)
-    drop_orphan_vector_tables(session.get_bind(), drain_pending_vector_table_drops(session))
-    return PromotionOutcome("promoted", revision=revision)
+    # have blocked on the locks the session held until this commit. Cleanup
+    # failures from here on are reported in the outcome, never raised: the
+    # promote already happened, and `collection remove` follows the same
+    # committed-means-succeeded contract.
+    unremoved: list[str] = []
+    cleanup_error: str | None = None
+    try:
+        unremoved = remove_artifacts(drain_pending_artifact_removals(session), config=config)
+        drop_orphan_vector_tables(session.get_bind(), drain_pending_vector_table_drops(session))
+    except Exception as error:
+        logger.warning("Cleanup after promoting %s failed", collection, exc_info=True)
+        cleanup_error = str(error)
+    return PromotionOutcome(
+        "promoted",
+        revision=revision,
+        unremoved_artifacts=unremoved,
+        cleanup_error=cleanup_error,
+    )
 
 
 @dataclass(frozen=True)

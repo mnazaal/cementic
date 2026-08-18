@@ -167,6 +167,21 @@ class TestAtomicIncrement:
         ]
         assert manager.load().skipped_files == state.skipped_files
 
+    def test_record_skipped_can_clear_current_file_in_the_same_write(
+        self, temp_dir: Path
+    ) -> None:
+        """A registration failure clears the "now working on" display atomically,
+        as increment() does, instead of leaving the failed file shown as current."""
+        manager = StateManager(temp_dir / "state.json")
+        manager.update(current_file="/docs/broken.md")
+
+        state = manager.record_skipped(
+            "/docs/broken.md", "registration failed: boom", current_file=None
+        )
+
+        assert state.current_file is None
+        assert state.skipped_files == ["/docs/broken.md: registration failed: boom"]
+
     def test_recorded_skips_are_bounded_but_the_count_is_not(self, temp_dir: Path) -> None:
         """A directory of symlinks must not grow the state file without bound."""
         manager = StateManager(temp_dir / "state.json")

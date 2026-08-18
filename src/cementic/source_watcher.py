@@ -375,9 +375,12 @@ class SourceWatcher:
         def _on_walk_error(error: OSError) -> None:
             # os.walk swallows errors by default, so an unreadable subtree was
             # skipped in complete silence: no log line, no counter, and a
-            # collection quietly missing however many documents it held.
+            # collection quietly missing however many documents it held. The
+            # path goes through record_skipped so `status --verbose` can name
+            # the subtree, not just count it.
             self._logger.error("Could not read directory during scan: %s", error)
-            self.state_manager.increment(failed=1)
+            failed_path = str(error.filename) if error.filename else str(directory)
+            self.state_manager.record_skipped(failed_path, f"unreadable during scan: {error}")
 
         for dirpath, dirnames, filenames in os.walk(directory, onerror=_on_walk_error):
             # The scan can walk a large tree for minutes; without this a
@@ -391,11 +394,15 @@ class SourceWatcher:
                 if self._shutdown_event.is_set():
                     return
                 file_path = root / filename
-                if (
-                    file_path.is_file()
-                    and not file_path.is_symlink()
-                    and file_path.suffix.lower() in extensions
-                ):
+                if file_path.suffix.lower() not in extensions:
+                    continue
+                # Symlinks pass through so they get *recorded*: filtering them
+                # here dropped them with no counter and no skip entry, while a
+                # live inotify event for the same file reached
+                # _register_document's record_skipped. is_symlink() is checked
+                # separately because a broken symlink fails is_file() and would
+                # otherwise vanish the same way.
+                if file_path.is_file() or file_path.is_symlink():
                     self._on_file_detected(str(file_path))
 
     def _on_file_detected(self, file_path: str) -> None:
@@ -403,7 +410,12 @@ class SourceWatcher:
             self._register_document(file_path)
         except Exception as error:
             self._logger.error("Failed to register %s: %s", file_path, error)
-            self.state_manager.increment(failed=1, current_file=None)
+            # record_skipped, not a bare failed increment: the file never
+            # became a document, so without the path in skipped_files the only
+            # evidence was a log line the user has to know to look for.
+            self.state_manager.record_skipped(
+                file_path, f"registration failed: {error}", current_file=None
+            )
 
     def _on_file_deleted(self, file_path: str) -> None:
         try:

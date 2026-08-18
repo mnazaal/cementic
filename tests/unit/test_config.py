@@ -76,6 +76,15 @@ class TestConfigFile:
         monkeypatch.setenv("CEMENTIC_CONFIG", str(path))
         assert resolve_config_path() == path
 
+    def test_resolve_path_expands_tilde_in_explicit_env(self, tmp_path, monkeypatch) -> None:
+        """Regression: CEMENTIC_CONFIG=~/cementic.toml never matched is_file()
+        (the ~ stayed literal), so the variable was silently ignored -- while
+        config_path_error, which does expand, judged the same value usable."""
+        (tmp_path / "cementic.toml").write_text("")
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("CEMENTIC_CONFIG", "~/cementic.toml")
+        assert resolve_config_path() == tmp_path / "cementic.toml"
+
     def test_resolve_path_project_local(self, tmp_path, monkeypatch) -> None:
         monkeypatch.delenv("CEMENTIC_CONFIG", raising=False)
         monkeypatch.chdir(tmp_path)

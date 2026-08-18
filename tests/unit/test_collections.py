@@ -567,6 +567,57 @@ class TestPromoteReadyRevision:
         mock_promote.assert_called_once_with(session, "c1", revision)
         assert session.commit.called
 
+    @patch("cementic.collections.drop_orphan_vector_tables")
+    @patch("cementic.collections.remove_artifacts", return_value=["/a/1.zst", "/a/2.zst"])
+    @patch("cementic.collections.compute_revision_counts", return_value=_counts())
+    @patch("cementic.collections.promote_revision")
+    def test_promote_reports_unremovable_artifacts(
+        self,
+        mock_promote: MagicMock,
+        _mock_counts: MagicMock,
+        _mock_remove: MagicMock,
+        _mock_drop: MagicMock,
+        _config: Config,
+    ) -> None:
+        """Regression: remove_artifacts' failure list was discarded here while
+        `collection remove` reported it -- files left behind with the rows
+        naming them gone, so nothing could ever find them again."""
+        session = MagicMock()
+        revision = MagicMock(spec=PipelineRevision)
+        session.query().filter_by().order_by().first.return_value = revision
+
+        outcome = promote_ready_revision(session, "c1", config=_config)
+
+        assert outcome.status == "promoted"
+        assert outcome.unremoved_artifacts == ["/a/1.zst", "/a/2.zst"]
+        assert outcome.cleanup_error is None
+
+    @patch(
+        "cementic.collections.drop_orphan_vector_tables", side_effect=RuntimeError("boom")
+    )
+    @patch("cementic.collections.remove_artifacts", return_value=[])
+    @patch("cementic.collections.compute_revision_counts", return_value=_counts())
+    @patch("cementic.collections.promote_revision")
+    def test_cleanup_crash_after_commit_is_still_a_promoted_outcome(
+        self,
+        mock_promote: MagicMock,
+        _mock_counts: MagicMock,
+        _mock_remove: MagicMock,
+        _mock_drop: MagicMock,
+        _config: Config,
+    ) -> None:
+        """Regression: an exception here propagated to the CLI, which printed
+        "collection promote failed" and exited 1 -- for a promote that was
+        already committed and durable."""
+        session = MagicMock()
+        revision = MagicMock(spec=PipelineRevision)
+        session.query().filter_by().order_by().first.return_value = revision
+
+        outcome = promote_ready_revision(session, "c1", config=_config)
+
+        assert outcome.status == "promoted"
+        assert outcome.cleanup_error is not None and "boom" in outcome.cleanup_error
+
     @patch(
         "cementic.collections.compute_revision_counts",
         return_value=PipelineCounts(
