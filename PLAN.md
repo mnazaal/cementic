@@ -215,7 +215,7 @@ running the CLI against the live corpus. The generalisable parts:
       search, stop, with search scores identical to the pre-change revision, so
       identity changed and retrieval did not. The live run also found three
       defects the green suite did not; see "Lessons from Batch C" above.
-- [x] Batch A (`5c0f0f4`): verified live — pid file deleted by hand,
+- [x] Batch A (`e5ba0b9`): verified live — pid file deleted by hand,
       `embedding status` reported `running, pid=88794 (recovered: pid file was
       missing or stale)` and rewrote the file; a wrong port and a wrong
       `--model_alias` were both refused; `embedding stop` actually terminated
