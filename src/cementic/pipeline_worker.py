@@ -441,7 +441,7 @@ class PipelineWorker:
                 self.stop()
 
     def _fatal(self, message: str, *args: Any) -> None:
-        self.fatal_reason = report_fatal(self._logger, message, *args)
+        self.fatal_reason = report_fatal(self._logger, self.state_manager, message, *args)
 
     def _run_processing_loop(self, revision_id: int) -> None:
         reported_error = False

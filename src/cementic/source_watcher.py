@@ -249,6 +249,12 @@ class SourceWatcher:
             failed_count=0,
             current_file=None,
             skipped_files=[],
+            # Clear any fatal reason a previous failed start published to
+            # `last_error` (via `report_fatal`). Without this a startup failure
+            # that has since been fixed would be reported by `cementic status`
+            # forever, mirroring the pipeline worker's clear at the same point.
+            last_error=None,
+            last_error_at=None,
         )
 
         signal.signal(signal.SIGTERM, self._handle_shutdown)
@@ -269,7 +275,7 @@ class SourceWatcher:
             self.stop()
 
     def _fatal(self, message: str, *args: Any) -> None:
-        self.fatal_reason = report_fatal(self._logger, message, *args)
+        self.fatal_reason = report_fatal(self._logger, self.state_manager, message, *args)
 
     def _start_watcher(self, directories: list[str]) -> None:
         observer = Observer()

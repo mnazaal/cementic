@@ -996,6 +996,79 @@ class TestStartupGateChecksEmbedding:
         client.describe.assert_called_once()
 
 
+class TestFatalStartupReasonReachesTheStateFile:
+    """A startup failure past `cementic start`'s 2 s grace only shows up in
+
+    `cementic status` if it lands in `last_error` -- `_STARTUP_GRACE_SECONDS`
+    (cli.py) is far shorter than `daemon_start_timeout_seconds`, so a slow
+    embedding daemon load can keep failing long after `start` already reported
+    success. Regression: `report_fatal` logged and echoed to stderr but never
+    touched the state file, so neither `status` nor `doctor` could show it.
+    """
+
+    def test_embedding_startup_failure_lands_in_last_error(self, temp_dir: Path) -> None:
+        config = Config()
+        config.pipeline_worker.log_file = temp_dir / "worker.log"
+        config.pipeline_worker.state_path = temp_dir / "state.json"
+        worker = PipelineWorker(config)
+
+        with (
+            patch("cementic.pipeline_worker.get_engine"),
+            patch("cementic.pipeline_worker.create_tables"),
+            patch("cementic.pipeline_worker.get_session_factory"),
+            patch.object(
+                worker,
+                "_create_embedding_client",
+                side_effect=RuntimeError("connection refused"),
+            ),
+        ):
+            worker.start(collection="c")
+
+        state = worker.state_manager.load()
+        assert state.last_error is not None
+        assert "connection refused" in state.last_error
+        assert state.last_error_at is not None
+
+    def test_a_clean_start_after_a_failed_one_clears_last_error(self, temp_dir: Path) -> None:
+        config = Config()
+        config.pipeline_worker.log_file = temp_dir / "worker.log"
+        config.pipeline_worker.state_path = temp_dir / "state.json"
+        worker = PipelineWorker(config)
+
+        with (
+            patch("cementic.pipeline_worker.get_engine"),
+            patch("cementic.pipeline_worker.create_tables"),
+            patch("cementic.pipeline_worker.get_session_factory"),
+            patch.object(
+                worker, "_create_embedding_client", side_effect=RuntimeError("boom")
+            ),
+        ):
+            worker.start(collection="c")
+        assert worker.state_manager.load().last_error is not None
+
+        class StopLoopError(Exception):
+            pass
+
+        client = MagicMock()
+        with (
+            patch("cementic.pipeline_worker.get_engine"),
+            patch("cementic.pipeline_worker.create_tables"),
+            patch("cementic.pipeline_worker.get_session_factory"),
+            patch("cementic.pipeline_worker.requeue_interrupted_artifacts"),
+            patch.object(worker, "_create_embedding_client", return_value=client),
+            patch.object(worker, "_ensure_target_revision", return_value=1),
+            patch.object(worker, "_run_processing_loop", side_effect=StopLoopError),
+        ):
+            try:
+                worker.start(collection="c")
+            except StopLoopError:
+                pass
+
+        state = worker.state_manager.load()
+        assert state.last_error is None
+        assert state.last_error_at is None
+
+
 class TestSupersededChunksArePurged:
     """Re-extraction must remove the chunks describing the old text.
 

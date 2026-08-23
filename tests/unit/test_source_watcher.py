@@ -1,6 +1,7 @@
 """Tests for document watcher daemon."""
 
 import hashlib
+import os
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -19,6 +20,7 @@ from cementic.db import (
 )
 from cementic.source_watcher import DocumentEventHandler, SourceWatcher
 from cementic.state import DaemonState
+from cementic.supervisor import process_start_token
 
 
 class _NonClosingSession:
@@ -436,3 +438,60 @@ class TestErrorStateIsRetracted:
                 watcher._on_file_detected(str(tmp_path / "a.md"))
 
         mock_update.assert_not_called()
+
+
+class TestFatalStartupReasonReachesTheStateFile:
+    """A startup failure past `cementic start`'s 2 s grace only shows up in
+
+    `cementic status` if it lands in `last_error` -- `_STARTUP_GRACE_SECONDS`
+    (cli.py) is far shorter than the source watcher's own startup work, so a
+    fatal condition discovered after `start` already reported success was
+    previously reported nowhere `status` or `doctor` look. Regression:
+    `report_fatal` logged and echoed to stderr but never touched the state
+    file.
+    """
+
+    def test_already_running_failure_lands_in_last_error(self, tmp_path):
+        watcher = SourceWatcher()
+        watcher.state_manager.state_path = tmp_path / "state.json"
+        watcher.state_manager.update(
+            daemon_state=DaemonState.RUNNING,
+            pid=os.getpid(),
+            start_token=process_start_token(os.getpid()),
+        )
+
+        watcher.start([str(tmp_path)], collection="c")
+
+        state = watcher.state_manager.load()
+        assert state.last_error is not None
+        assert "already running" in state.last_error
+        assert state.last_error_at is not None
+
+    def test_a_clean_start_after_a_failed_one_clears_last_error(self, tmp_path):
+        state_path = tmp_path / "state.json"
+        stale = SourceWatcher()
+        stale.state_manager.state_path = state_path
+        stale.state_manager.update(
+            daemon_state=DaemonState.RUNNING,
+            pid=os.getpid(),
+            start_token=process_start_token(os.getpid()),
+        )
+        stale.start([str(tmp_path)], collection="c")
+        assert stale.state_manager.load().last_error is not None
+
+        # The stale run is done publishing; mark it stopped, as `cementic stop`
+        # would, so the next start is not itself refused as a duplicate.
+        stale.state_manager.update(daemon_state=DaemonState.STOPPED, pid=None)
+
+        watch_dir = tmp_path / "watched"
+        watch_dir.mkdir()
+        watcher = SourceWatcher()
+        watcher.state_manager.state_path = state_path
+        # The wait loop past startup is irrelevant here; skip it.
+        watcher._shutdown_event.set()
+
+        watcher.start([str(watch_dir)], collection="c")
+
+        state = watcher.state_manager.load()
+        assert state.last_error is None
+        assert state.last_error_at is None

@@ -533,7 +533,13 @@ def _start_background_locked(directories: list[str], collection: str) -> None:
         _get_supervisor_state_path().unlink(missing_ok=True)
         raise typer.Exit(1)
 
-    console.print("[green]Started cementic in background[/green]")
+    # "Started" is as far as this can honestly claim: the grace period above
+    # only rules out an immediate crash. A worker whose startup fails past it
+    # (e.g. the embedding daemon still loading its model, up to
+    # `daemon_start_timeout_seconds`) reports the reason to `cementic status`,
+    # not here -- claiming success this early used to leave the user believing
+    # indexing had started while it kept failing for another two minutes.
+    console.print("[green]Source watcher and pipeline worker started[/green]")
     console.print(f"- source watcher PID: {source_watcher_pid}")
     console.print(f"- pipeline worker PID: {pipeline_pid}")
     console.print(f"- collection: {collection}")
@@ -541,7 +547,10 @@ def _start_background_locked(directories: list[str], collection: str) -> None:
         console.print(
             "- note: no collection was specified, so documents will be indexed into 'default'"
         )
-    console.print("Use `cementic status` to check progress and `cementic stop` to stop both.")
+    console.print(
+        "Run `cementic status` to confirm -- a startup failure in the next "
+        "couple of minutes will show up there. `cementic stop` stops both."
+    )
 
 
 @app.command(

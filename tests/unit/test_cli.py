@@ -22,7 +22,7 @@ from cementic.cli import (
 from cementic.cli_collection import collection_callback
 from cementic.collections import PromotionOutcome, ReindexOutcome
 from cementic.config import Config, default_config_path
-from cementic.pipeline_worker import PipelineCounts
+from cementic.pipeline_worker import PipelineCounts, PipelineWorker
 from cementic.state import StateManager
 from cementic.status_service import WorkerStatus
 from cementic.supervisor import ManagedProcess
@@ -1158,6 +1158,33 @@ class TestBackgroundCommands:
         assert second_command[1:4] == ["-m", "cementic.runner", "pipeline-worker"]
         assert second_command[4:] == ["--collection", "test"]
 
+    @patch("cementic.cli._wait_for_worker_startup", return_value=[])
+    @patch("cementic.cli.spawn_detached")
+    def test_start_message_does_not_claim_unobserved_success(
+        self, mock_spawn, mock_startup, temp_dir: Path
+    ):
+        """`start` only ever watched for `_STARTUP_GRACE_SECONDS` (2 s), while a
+
+        worker's own startup dependency can keep failing for far longer
+        (`daemon_start_timeout_seconds`, up to two minutes). "Started cementic
+        in background" claimed a success the grace period cannot establish;
+        the message must say what was actually observed and point at `status`
+        to confirm it.
+        """
+        mock_spawn.side_effect = [1111, 2222]
+        mock_path = temp_dir / "supervisor.json"
+
+        with patch("cementic.cli._get_supervisor_state_path", return_value=mock_path):
+            with patch("cementic.cli.Bootstrapper") as mock_bootstrapper:
+                mock_bootstrapper.return_value.ensure_for_convert.return_value = None
+                mock_bootstrapper.return_value.ensure_for_index.return_value = None
+                result = runner.invoke(app, ["start", str(temp_dir), "--collection", "test"])
+
+        assert result.exit_code == 0
+        assert "Started cementic in background" not in result.output
+        assert "Source watcher and pipeline worker started" in result.output
+        assert "cementic status" in result.output
+
     @patch("cementic.cli.spawn_detached")
     def test_concurrent_start_is_refused_rather_than_racing(self, mock_spawn, temp_dir: Path):
         """A second `cementic start` must not spawn while one is mid-flight.
@@ -1944,6 +1971,59 @@ class TestStatusSurfacesWorkerErrors:
         payload = json.loads(result.output)
         assert payload["pipeline_worker"]["last_error"] == "ProgrammingError: boom"
         assert payload["source_watcher"]["last_error"] is None
+
+
+class TestStatusRendersARealFatalStartupReason:
+    """A worker's *real* startup failure must reach `cementic status`.
+
+    Unlike `TestStatusSurfacesWorkerErrors` above, `load_worker_statuses` is
+    not mocked here: the state file is written by a real `PipelineWorker.start()`
+    call through the real `report_fatal`, and `status` reads it back from disk.
+    `cementic start` only watches for `_STARTUP_GRACE_SECONDS` (2 s) before
+    declaring success, while a worker's own startup dependency (e.g. the
+    embedding daemon) can keep failing for up to `daemon_start_timeout_seconds`
+    (up to two minutes) -- so this failure is entirely plausible after `start`
+    has already told the user it worked. Regression: `report_fatal` logged and
+    echoed to stderr but never touched the state file, so neither `status` nor
+    `doctor` could show it.
+    """
+
+    def test_pipeline_worker_startup_failure_is_visible_in_status(self, tmp_path):
+        config = Config()
+        config.pipeline_worker.log_file = tmp_path / "pw.log"
+        config.pipeline_worker.state_path = tmp_path / "pw.json"
+        config.source_watcher.log_file = tmp_path / "sw.log"
+        config.source_watcher.state_path = tmp_path / "sw.json"
+
+        # The real worker entry point: a startup failure past the embedding
+        # client gate, exactly like a daemon still loading its model.
+        worker = PipelineWorker(config)
+        with (
+            patch("cementic.pipeline_worker.get_engine"),
+            patch("cementic.pipeline_worker.create_tables"),
+            patch("cementic.pipeline_worker.get_session_factory"),
+            patch.object(
+                worker,
+                "_create_embedding_client",
+                side_effect=RuntimeError("connection refused"),
+            ),
+        ):
+            worker.start(collection="c")
+
+        # The real CLI entry point: `load_worker_statuses` is untouched, so it
+        # reads the state file the worker above actually wrote.
+        with (
+            patch("cementic.cli._get_config", return_value=config),
+            patch("cementic.cli._load_supervisor_state", return_value={}),
+            # DB health is out of scope for this test; a raised probe still
+            # lets `_print_status_summary` (and its last-error line) run first.
+            patch("cementic.cli.check_health", side_effect=RuntimeError("no db here")),
+        ):
+            result = runner.invoke(app, ["status"])
+
+        assert "last error" in result.output
+        assert "pipeline worker" in result.output
+        assert "connection refused" in result.output
 
 
 class TestStatusExitCodes:
