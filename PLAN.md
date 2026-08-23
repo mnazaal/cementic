@@ -39,10 +39,136 @@ active. Workers are stopped; nothing runs in the background.
 was added in `e5812cd`; several docs still say five, which is Batch 5).
 <!-- session-handoff:end -->
 
+## Plan of record — fourth-review carry-overs (2026-08-23)
+
+**Status: LIVE.** The only live execution order in this file.
+
+**One defect, four faces.** The four items left open from the fourth review look
+unrelated and are not. In each, a cheap proxy stands in for the real thing, and
+nothing notices when the two diverge:
+
+| item | the proxy | what it stands for |
+|---|---|---|
+| 1 | 2 seconds of observation | a startup that can fail 120 s in |
+| 2 | a pid file | whether the daemon is running |
+| 3 | a path string | which model produced these vectors |
+| 4 | a hand-typed `"v1"` | what the extraction libraries actually do |
+
+So the fix in each case is *consult the authoritative source, or make the
+divergence visible* — not tighten the proxy. Tightening is what produced these:
+a longer grace, a more carefully written pid file and a more disciplined habit of
+bumping `EXTRACTION_VERSION` all leave the same hole.
+
+**Ordering is driven by one deadline.** Batch C changes three fingerprints and
+therefore forces exactly one full rebuild. At today's corpus — 5 documents, 274
+chunks — that is about six minutes. At the target scale in "Measurements behind
+the defaults" it is days. **The cost of Batch C only ever grows, so it goes
+first.** A and B are independent of it and of each other.
+
+### Batch C — fingerprint correctness (do first; cost grows daily)
+
+Three changes, one rebuild. Landing them separately would mean three rebuilds.
+
+**3. Model identity must not be a path string.** `resolve_llama_model_path`
+honours a relative path that exists from the current directory, and that *string*
+is what enters the embedding profile fingerprint. Run cementic from two
+directories that each have a different GGUF at the same relative path and both
+models' vectors land in one profile, where they get compared — precisely what
+`search`'s mixed-model refusal exists to prevent, walked past because the
+fingerprint asserts the models are identical.
+
+Fix: identify the model by content. `bootstrap.py:61 _sha256_file` already
+exists; reuse it. Hashing a ~500 MB GGUF on every profile resolution is too
+expensive, so cache the digest in the data dir keyed on
+`(resolved absolute path, size, mtime_ns)` — any of the three changing
+re-hashes. The fingerprint carries the digest, not the path.
+
+*Anti-scope: do not parse GGUF metadata. That is the theoretically-right answer
+and it needs a format parser; a content hash distinguishes two files, which is
+the whole defect.*
+
+**4. `EXTRACTION_VERSION` must be derived, not typed.** `profiles.py:36` is a
+literal `"v1"` inside the extractor fingerprint, while the Markdown is actually
+produced by pymupdf and pymupdf4llm. Bump either and output changes while the
+fingerprint does not, so cementic keeps artifacts it should rebuild and one
+revision ends up half-extracted by each version with nothing marking the seam.
+
+Fix: put `importlib.metadata.version(...)` for the extraction libraries into the
+payload, so a bump moves the fingerprint on its own.
+
+The counter-argument is real and is probably why it was typed by hand: this makes
+every patch bump force a full re-extract. Two answers. First, the revision system
+exists for exactly this — the new revision builds in the background while the old
+one keeps serving, which is the mechanism working, not a catastrophe. Second, if
+the rebuild cost does bite at scale, the correct control point is a tighter pin
+in `pyproject.toml` so bumps are deliberate — not a fingerprint that lies about
+what produced the data.
+
+**Free rider: remove `verbose` from the embedding profile fingerprint.**
+"Deliberately not done" records this as worth doing *only* batched with a
+model-identity change, so the corpus is re-embedded once rather than twice. This
+is that change. `verbose` correctly stays in the *runtime* fingerprint, where it
+is a launch argument.
+
+**Exit:** one rebuild, verified end to end — remove, start, build, promote,
+search — against the live corpus, and `collection revisions` showing the new
+fingerprints.
+
+### Batch A — the daemon's identity comes from the OS, not a file
+
+**2. An orphaned daemon cannot be reclaimed.** Lose the pid record and the daemon
+holds the port while `embedding status` says "stopped" and `embedding stop`
+returns "already stopped"; the next autostart spawns a competitor that cannot
+bind. Observed live 2026-08-15, where it stalled a re-index for hours — the only
+one of the four that has already cost real time. Batch 1 (`7ed71f7`) closed one
+cause; a crash between spawn and write, a wiped data dir, or a hand-deleted file
+all still produce it.
+
+Fix: stop treating the pid file as the sole source of truth. When it is missing
+or stale, recover the daemon from `/proc` by matching the command line cementic
+itself spawned — module, port, and resolved model path together. `supervisor.py`
+already reads `/proc/<pid>/stat` (`_proc_stat_fields`), so this extends an
+established idiom rather than adding one, and the project is Linux-first.
+
+`embedding status` then reports a recovered daemon rather than "stopped", and
+`embedding stop` can actually stop it.
+
+*Anti-scope: match on the full expected command line, with the same rigour
+`process_start_token` applies to pid reuse. A loose match kills someone else's
+process. If the match is not certain, report the pid and refuse — never guess.*
+
+### Batch B — `start` stops asserting what it has not observed
+
+**1. `cementic start` reports success after 2 s** while the startup path can fail
+for another 118. The reason reaches only a background log whose path is printed
+in the *other* branch, and neither `status` nor `doctor` surfaces it.
+
+Fix, in two halves. `runner.py`'s fatal paths currently print to stderr and exit;
+route them through the worker state file as well, so the reason survives where
+something can read it. Batch 1 gave the source watcher a `last_error` writer and
+`status` already renders that row, so the channel exists and is simply not
+connected on this path. Then make `start`'s message honest: it observed a
+process that had not died within two seconds, so it should say the workers were
+started and point at `cementic status` to confirm, rather than asserting success
+it cannot yet know.
+
+*Anti-scope: do not lengthen the grace period. Blocking `start` for two minutes
+to buy certainty is a worse trade than reporting honestly and letting `status`
+answer.*
+
+### Exit criteria
+
+- [ ] Batch C: three fingerprint changes in one commit, one verified rebuild.
+- [ ] Batch A: a daemon with its pid file deleted is found, reported, and
+      stoppable; a non-matching process is never signalled.
+- [ ] Batch B: a worker that dies at t=30 s is visible in `cementic status`;
+      `start` no longer claims success it has not observed.
+- [ ] All six `./scripts/check.sh` gates green at every commit.
+
 ## Plan of record — sixth-review fixes (2026-08-23)
 
-**Status: LIVE.** This is the only live execution order in this file; everything
-below it is closed record or deferral register.
+**Status: CLOSED** — all six batches done; see its exit criteria. Kept as the
+record of the decisions.
 
 **Scope.** The 17-item ordered action list in `notes/review-codebase.html`,
 batched by dependency. Every file:line and every piece of evidence lives in that
@@ -582,6 +708,29 @@ true — which is what makes deleting it safe rather than risky. Rejected: the u
 pgvectorscale-from-source job for nothing).
 *Revisit when:* cementic needs to run somewhere that cannot get Python 3.12 —
 unlikely while `uv` can install one anywhere in a single command.
+
+**2026-08-23-g — Why is Batch C scheduled before the item that has actually
+caused an outage?**
+Choice: fingerprints first, daemon reclaim second. Batch A closes the only one of
+the four that has already cost real time, so it looks like the obvious first
+move. But Batch C's cost is the one that changes: it forces a full rebuild, which
+is ~6 minutes at today's 274 chunks and days at the corpus size PLAN targets.
+Batch A costs the same whenever it is done. Scheduling by what grows rather than
+by what hurts most today. Rejected: A first (defensible, but pays a rebuild
+premium later for no gain), and deferring C until a rebuild is needed anyway
+(that is how it stayed open for three reviews). Status: live.
+
+**2026-08-23-h — Should a dependency bump force a full re-extract?**
+Choice: yes — derive the extractor fingerprint from the installed
+pymupdf/pymupdf4llm versions. The hand-maintained `EXTRACTION_VERSION` was
+presumably chosen to avoid exactly this, and the concern is real at scale. It is
+still the wrong control point: a fingerprint that does not move when the output
+moves is a fingerprint that lies, and the revision system exists precisely so a
+rebuild happens in the background while the old revision keeps serving. If the
+cost bites, the answer is a tighter dependency pin so bumps are deliberate.
+Rejected: major.minor only (a patch release can change extraction output), and a
+doctor warning on version drift (keeps the reminder but leaves the fingerprint
+wrong, so anything reading it is still misled). Status: live.
 
 ## Design principles
 
