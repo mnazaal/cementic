@@ -353,7 +353,7 @@ def config_init(
     """Write an annotated default config to the user config directory."""
     path = default_config_path()
     if path.exists() and not force:
-        console.print(f"config already exists at {path} (use --force to overwrite)")
+        err_console.print(f"config already exists at {path} (use --force to overwrite)")
         raise typer.Exit(1)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(_DEFAULT_CONFIG_TOML, encoding="utf-8")
@@ -1123,7 +1123,7 @@ def _start_background_locked(directories: list[str], collection: str) -> None:
         if survivors:
             _terminate_managed(survivors)
             for managed in survivors:
-                console.print(f"- stopped {managed.name} (PID {managed.pid})")
+                err_console.print(f"- stopped {managed.name} (PID {managed.pid})")
         _get_supervisor_state_path().unlink(missing_ok=True)
         raise typer.Exit(1)
 
@@ -1457,7 +1457,7 @@ def start_embedding_runtime() -> None:
     """Start the configured embedding runtime service."""
     config = _get_config()
     if config.pipeline.embedding_provider != "llama-cpp":
-        console.print(
+        err_console.print(
             f"embedding start failed: unsupported provider "
             f"{config.pipeline.embedding_provider}"
         )
@@ -1775,7 +1775,7 @@ def reindex_collection_command(
         raise typer.Exit(1)
 
     if outcome.status == "no_active":
-        console.print("status: no active revision — nothing has been promoted yet")
+        err_console.print("status: no active revision — nothing has been promoted yet")
         raise typer.Exit(1)
     if outcome.status == "no_vectors":
         console.print("status: no vectors to index")

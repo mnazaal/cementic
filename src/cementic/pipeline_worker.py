@@ -138,16 +138,23 @@ def is_retryable_embed_error(error: BaseException) -> bool:
     ``collection promote``, and forcing past them silently omits the chunks from
     the published index. A transient server condition must not be recorded as a
     property of the documents.
+
+    Enumerating retryable exception types by name still missed two ordinary
+    llama.cpp failures: ``JSONDecodeError`` (raised by ``response.json()`` on a
+    truncated body -- not an ``HTTPError``) and ``ContentDecodingError`` (no
+    readable status). The predicate is inverted instead: any
+    ``requests.RequestException`` is retryable *unless* it carries a readable
+    HTTP status that is not in the retryable set -- a real 400/404 stays
+    terminal, everything else about the provider is retried.
     """
-    if isinstance(error, (requests.exceptions.ConnectionError, requests.exceptions.Timeout)):
-        return True
-    if isinstance(error, requests.exceptions.ChunkedEncodingError):
-        return True
+    if not isinstance(error, requests.exceptions.RequestException):
+        return False
     if isinstance(error, requests.exceptions.HTTPError):
         response = getattr(error, "response", None)
         status = getattr(response, "status_code", None)
-        return status in _RETRYABLE_HTTP_STATUSES
-    return False
+        if status is not None:
+            return status in _RETRYABLE_HTTP_STATUSES
+    return True
 
 
 def revision_is_complete(counts: PipelineCounts) -> bool:

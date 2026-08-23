@@ -2329,6 +2329,70 @@ class TestErrorStreamDiscipline:
         assert _DB_HINT in result.stderr
         assert result.stdout.strip() == ""
 
+    def test_config_init_clobber_refusal_is_on_stderr(self) -> None:
+        """Regression: this refusal printed with `console` (stdout)."""
+        target = default_config_path()
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("[pipeline]\n", encoding="utf-8")
+
+        result = runner.invoke(app, ["config", "init"])
+
+        assert result.exit_code == 1
+        assert "already exists" in result.stderr
+        assert "already exists" not in result.stdout
+
+    def test_embedding_start_unsupported_provider_is_on_stderr(self) -> None:
+        """Regression: this refusal printed with `console` (stdout)."""
+        with patch("cementic.cli._get_config") as mock_get_config:
+            mock_get_config.return_value.pipeline.embedding_provider = "not-llama-cpp"
+            result = runner.invoke(app, ["embedding", "start"])
+
+        assert result.exit_code == 1
+        assert "unsupported provider" in result.stderr
+        assert "unsupported provider" not in result.stdout
+
+    @patch("cementic.cli.get_session_factory")
+    @patch("cementic.cli.get_engine")
+    def test_collection_reindex_no_active_revision_is_on_stderr(
+        self, mock_get_engine, mock_get_session_factory
+    ) -> None:
+        """Regression: this refusal printed with `console` (stdout)."""
+        mock_session = MagicMock()
+        mock_session.__enter__.return_value = mock_session
+        mock_session.__exit__.return_value = False
+        mock_get_session_factory.return_value = lambda: mock_session
+
+        with patch("cementic.cli.reindex_collection", return_value=ReindexOutcome("no_active")):
+            result = runner.invoke(app, ["collection", "reindex", "research"])
+
+        assert result.exit_code == 1
+        assert "no active revision" in result.stderr
+        assert "no active revision" not in result.stdout
+
+    @patch("cementic.cli.spawn_detached")
+    def test_start_failed_startup_report_is_one_stream(self, mock_spawn, temp_dir: Path) -> None:
+        """The failed-start report used to split across streams: the header
+
+        ("cementic failed to start") on stderr, but "stopped <name> (PID n)"
+        on stdout. Composability (`| jq`, redirection) requires the whole
+        report to live on one stream.
+        """
+        mock_spawn.side_effect = [1111, 2222]
+        state_path = temp_dir / "supervisor.json"
+        dead = ManagedProcess("source-watcher", 1111, "/tmp/sw.log", None)
+
+        with (
+            patch("cementic.cli._get_supervisor_state_path", return_value=state_path),
+            patch("cementic.cli.Bootstrapper"),
+            patch("cementic.cli._wait_for_worker_startup", return_value=[dead]),
+            patch("cementic.cli._terminate_managed"),
+        ):
+            result = runner.invoke(app, ["start", str(temp_dir), "--collection", "test"])
+
+        assert result.exit_code == 1
+        assert "stopped pipeline-worker (PID 2222)" in result.stderr
+        assert "stopped pipeline-worker (PID 2222)" not in result.stdout
+
 
 class TestFilterCommands:
     """extract / chunk / embed stdin-stdout filters (Move 3)."""

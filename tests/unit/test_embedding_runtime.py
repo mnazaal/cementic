@@ -405,6 +405,28 @@ class TestDaemonLifecycle:
         command = mock_spawn.call_args[0][0]
         assert command[command.index("--verbose") + 1] == "true"
 
+    @patch("cementic.embedding_runtime.os.kill")
+    @patch("cementic.embedding_runtime._write_daemon_pid_file", side_effect=OSError("read-only"))
+    @patch("cementic.embedding_runtime.spawn_detached", return_value=4321)
+    def test_start_daemon_kills_the_child_when_the_pid_file_write_fails(
+        self, mock_spawn, mock_write, mock_kill, temp_dir
+    ) -> None:
+        """Regression: an unguarded `_write_daemon_pid_file` after
+
+        `spawn_detached` left the server running with a multi-GB model
+        resident and nothing recording its PID -- `embedding status` then
+        said "stopped" and `embedding stop` returned False forever.
+        """
+        config = Config()
+        config.llama_cpp.daemon_log_file = temp_dir / "daemon.log"
+        config.llama_cpp.daemon_pid_file = temp_dir / "daemon.pid"
+
+        with pytest.raises(OSError, match="read-only"):
+            _start_llama_cpp_daemon(config)
+
+        mock_kill.assert_called_once()
+        assert mock_kill.call_args.args[0] == 4321
+
 
 class TestAutostartChecksTheModelFirst:
     """Autostart must verify the model before spawning a server around it.

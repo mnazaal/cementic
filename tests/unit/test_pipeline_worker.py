@@ -235,9 +235,28 @@ class TestIsRetryableEmbedError:
         assert is_retryable_embed_error(ValueError("bad data")) is False
         assert is_retryable_embed_error(KeyError("embedding")) is False
 
-    def test_http_error_without_a_response_is_terminal(self) -> None:
-        """Defensive: HTTPError can be constructed without a response."""
-        assert is_retryable_embed_error(requests.exceptions.HTTPError()) is False
+    def test_http_error_without_a_response_is_retryable(self) -> None:
+        """No status can be read, so the failure must not be blamed on the texts."""
+        assert is_retryable_embed_error(requests.exceptions.HTTPError()) is True
+
+    def test_json_decode_error_is_retryable(self) -> None:
+        """requests.JSONDecodeError is not an HTTPError (its MRO runs through
+
+        InvalidJSONError -> RequestException -> OSError), so it fell through
+        every branch and was misclassified terminal. Raised by response.json()
+        on a truncated llama.cpp body.
+        """
+        error = requests.exceptions.JSONDecodeError("Expecting value", "garbled", 0)
+        assert is_retryable_embed_error(error) is True
+
+    def test_content_decoding_error_without_response_is_retryable(self) -> None:
+        """ContentDecodingError carries response=None, so the old status lookup
+
+        read None, which is not in the retryable-status set, and misclassified
+        terminal.
+        """
+        error = requests.exceptions.ContentDecodingError()
+        assert is_retryable_embed_error(error) is True
 
 
 class TestRevisionIsComplete:

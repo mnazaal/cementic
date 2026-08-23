@@ -908,7 +908,19 @@ def _start_llama_cpp_daemon(
     ]
     pid = spawn_detached(command, log_file)
     # llama_cpp.server does not write its own PID file; record it for teardown.
-    _write_daemon_pid_file(pid_file, pid)
+    try:
+        _write_daemon_pid_file(pid_file, pid)
+    except OSError:
+        # The daemon is already running -- a multi-GB model resident -- with
+        # nothing recording its PID (full/read-only data dir, EACCES). Leaving
+        # it would orphan it: `embedding status` would report "stopped" and
+        # `embedding stop` would return False forever with no way back to it.
+        # Killing it here is safer than a live daemon nothing can track.
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except OSError:  # pragma: no cover - best effort; the write failure wins
+            pass
+        raise
     return pid
 
 

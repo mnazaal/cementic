@@ -10,6 +10,7 @@ import sys
 import threading
 import time
 from collections.abc import Callable, Iterable
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -419,18 +420,44 @@ class SourceWatcher:
             self.state_manager.record_skipped(
                 file_path, f"registration failed: {error}", current_file=None
             )
+            self._record_error(error)
 
     def _on_file_deleted(self, file_path: str) -> None:
         try:
             self._mark_document_deleted(file_path)
         except Exception as error:
             self._logger.error("Failed to mark deleted %s: %s", file_path, error)
+            # Same reasoning as _on_file_detected above: without record_skipped
+            # the deleted file kept "existing" in search with nothing visible
+            # in `status` beyond a log line the user has to know to look for.
+            self.state_manager.record_skipped(file_path, f"deletion failed: {error}")
+            self._record_error(error)
 
     def _on_directory_deleted(self, dir_path: str) -> None:
         try:
             self._mark_documents_deleted_under(dir_path)
         except Exception as error:
             self._logger.error("Failed to mark directory deleted %s: %s", dir_path, error)
+            self.state_manager.record_skipped(dir_path, f"directory deletion failed: {error}")
+            self._record_error(error)
+
+    def _record_error(self, error: Exception) -> None:
+        """Publish an event-handler failure to the worker state file.
+
+        Mirrors ``PipelineWorker._record_loop_error``: without this the
+        watcher never wrote ``last_error`` at all, so the "last error" row
+        `cli.py` renders for it was permanently dead -- an operational
+        failure here was only visible in a log file the user has to know
+        about.
+        """
+        message = f"{type(error).__name__}: {error}"
+        try:
+            self.state_manager.update(
+                last_error=message[:500],
+                last_error_at=datetime.now(timezone.utc).isoformat(),
+            )
+        except Exception:  # pragma: no cover - state file must never mask the real error
+            self._logger.exception("Could not record source watcher error to the state file")
 
     def _publish_current_file(self, file_path: str) -> None:
         """Publish "now working on X", at most once per interval.

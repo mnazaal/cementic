@@ -349,3 +349,56 @@ class TestSourceWatcherStateManagement:
         assert path == str(tmp_path / "doc.md")
         assert "registration failed" in reason
         assert "db down" in reason
+
+    def test_file_deletion_failure_records_the_path(self, tmp_path):
+        """Regression: an exception in _mark_document_deleted was only logged
+
+        and dropped, unlike a registration failure three lines above it, which
+        already routed through record_skipped. A file that fails to be marked
+        deleted then kept matching searches with nothing visible in `status`.
+        """
+        daemon = SourceWatcher()
+
+        with patch.object(daemon, "_mark_document_deleted", side_effect=RuntimeError("db down")):
+            with patch.object(daemon.state_manager, "record_skipped") as mock_skip:
+                daemon._on_file_deleted(str(tmp_path / "doc.md"))
+
+        mock_skip.assert_called_once()
+        path, reason = mock_skip.call_args.args
+        assert path == str(tmp_path / "doc.md")
+        assert "deletion failed" in reason
+        assert "db down" in reason
+
+    def test_directory_deletion_failure_records_the_path(self, tmp_path):
+        """Same regression as the file-deletion path, for a moved-out directory."""
+        daemon = SourceWatcher()
+
+        with patch.object(
+            daemon, "_mark_documents_deleted_under", side_effect=RuntimeError("db down")
+        ):
+            with patch.object(daemon.state_manager, "record_skipped") as mock_skip:
+                daemon._on_directory_deleted(str(tmp_path / "sub"))
+
+        mock_skip.assert_called_once()
+        path, reason = mock_skip.call_args.args
+        assert path == str(tmp_path / "sub")
+        assert "directory deletion failed" in reason
+        assert "db down" in reason
+
+    def test_handler_failure_publishes_last_error(self, tmp_path):
+        """Regression: the watcher never wrote `last_error` at all, so the
+
+        "last error" row `cli.py:748-755` renders for it was permanently dead
+        -- an operational failure here was only visible in a log file the user
+        has to know to check.
+        """
+        daemon = SourceWatcher()
+        daemon.state_manager.state_path = tmp_path / "state.json"
+
+        with patch.object(daemon, "_register_document", side_effect=RuntimeError("db down")):
+            daemon._on_file_detected(str(tmp_path / "doc.md"))
+
+        state = daemon.state_manager.load()
+        assert state.last_error is not None
+        assert "db down" in state.last_error
+        assert state.last_error_at is not None
