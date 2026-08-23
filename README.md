@@ -569,6 +569,29 @@ tests/
 └── fixtures/             # generated PDF fixtures
 ```
 
+### Decisions worth knowing
+
+Choices that are not obvious from the code, and that someone is otherwise
+likely to reverse by accident.
+
+- **`notes/` is gitignored.** Code-review notes are working artifacts with one
+  reader; they stay on disk and in history up to `c7069e1`, and new ones need no
+  commit. `git show <rev>:notes/<file>` retrieves an old one.
+- **There is no backwards-compatibility obligation.** cementic has one user, so
+  a breaking CLI change is made outright rather than behind a deprecation alias
+  — `status --doctor` became `cementic doctor` with no alias kept. Weigh CLI
+  changes on whether they are right, not on who might be scripting them.
+- **Python 3.12+ is required, deliberately narrowed from 3.10.** The older
+  floor was an untested claim, and `config.py` carried a `tomli` fallback for it
+  that no tested interpreter ever executed. Deleting the branch, the dependency
+  and the claim beat adding CI jobs to exercise code nobody runs. Reopen only if
+  cementic must run somewhere that cannot get 3.12.
+
+Rationale for *code* decisions lives against the code instead — see
+`_reporting_db_errors`'s docstring, `EXTRACTION_VERSION` in `profiles.py`, and
+the deferred imports in `config.py`. A comment beside the thing it explains
+cannot drift from it; a separate register can.
+
 ### Measurements behind the defaults
 
 These are the evidence for values that are live today. Re-measure before

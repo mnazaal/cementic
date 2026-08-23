@@ -62,3 +62,26 @@ Remaining gaps, from the 2026-08-14 review:
   indexing need to run concurrently.
 - Evaluate lighter embedding providers if llama.cpp memory use is too high on
   small machines.
+
+## Parked, with a trigger
+
+Deliberately not done, each with the observable that should reopen it. Parked
+without a trigger is indistinguishable from forgotten, so if you add one here,
+give it a condition someone could actually notice.
+
+- **Collapse `config.py`'s remaining import cycles** into a dependency-free
+  module holding registry *names*, so `config` can validate against them without
+  importing the implementations. Three validators still use function-local
+  imports for this, and one reaches for a private symbol
+  (`_TASK_PREFIX_TOKEN_ALLOWANCE`). *Reopen when:* `config.py` is next open for
+  another reason — the change touches four modules and is not worth a slot on
+  its own.
+- **Restore support for Python older than 3.12.** *Reopen when:* cementic needs
+  to run somewhere that cannot get 3.12. Unlikely while `uv` installs one in a
+  single command, and the compatibility branch was deleted precisely because
+  nothing exercised it.
+- **The embedding throughput ceiling.** At the measured 1.4 s/chunk on CPU, the
+  ~2M-vector target corpus in README's measurements is roughly 780 hours of
+  embedding. *Reopen when:* a real indexing run makes that concrete — it is a
+  project-shaping constraint, not a defect, and it is what "evaluate lighter
+  embedding providers" above is actually for.

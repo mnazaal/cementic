@@ -708,98 +708,23 @@ decision on item 2. Batch 6: short once decided.
 
 ## Decision log
 
-Append-only. One entry per hard-to-reverse decision: the question a future
-reader would ask, the choice, the rejected alternatives, and a status.
+**Migrated 2026-08-23; this section is now a pointer.** The eight entries it held
+were three different kinds of thing, and keeping them together made a register
+that duplicated the code:
 
-**2026-08-23-a — Why is `notes/` gitignored rather than tracked?**
-Choice: untracked, kept on disk, history preserved (`c7069e1`). Code-review
-notes are working artifacts with one reader; tracking them meant a commit per
-review and 2034 lines of HTML in the tree. Rejected: keeping them tracked (they
-are not part of the shipped project) and deleting them outright (the resolution
-banners are the record of what each review closed). Consequence handled in Batch
-5: four `PLAN.md` links to them are now dead for a fresh clone. Status: live.
+- **Code decisions** — context manager over decorator, the narrowed
+  `EXTRACTION_VERSION`, the deferred imports — already live against the code they
+  explain (`_reporting_db_errors`'s docstring, `profiles.py`, `config.py`). A
+  comment beside the thing it explains cannot drift from it; a separate register
+  can, and these had already become copies.
+- **Project policy** — `notes/` gitignored, no backwards-compatibility
+  obligation, the 3.12 floor — moved to README's "Decisions worth knowing".
+- **Scheduling** — why Batch C ran before Batch A, why a characterization test
+  preceded the refactor — deliberately dropped. They were about sequencing one
+  piece of work and answer nothing six months out.
 
-**2026-08-23-b — Why collapse the `except typer.Exit` ladder into a context
-manager rather than a decorator?**
-Choice: context manager. The seven sites wrap a *region* inside the command
-body, not the whole command — several do work before and after the guarded
-region (`promote` reads outcome fields inside the session, then renders after
-it). A decorator would force that work into the guarded scope and change which
-exceptions the handler sees. Rejected: a decorator (wrong granularity), and
-leaving it alone (five verbatim copies of a four-line comment is the maintenance
-cost the collapse removes). Status: live.
-
-**2026-08-23-c — Why not fix the `config.py` import cycles now?**
-Choice: hoist only the two imports that break no cycle (`:665`, `:678`); leave
-the three real ones deferred. The durable fix is a dependency-free module of
-registry names, which touches `config`, `embedding_runtime`, `extract` and
-whatever imports them — a four-module change with its own risk, landing in the
-same batch as a 2138-line file split. Rejected: doing both in Batch 3 (two wide
-structural diffs at once is how a bisect stops being useful), and doing neither
-(the two gratuitous deferred imports each cost a reader a "why is this here?").
-Status: parked. *Revisit when:* Batch 3 has landed and `config.py` is next
-opened for any other reason — the same precondition the round-two review used
-for `connect_args`, which has since been met twice.
-
-**2026-08-23-d — Why is a characterization test (item 8) scheduled before the
-refactor rather than after?**
-Choice: before. The audit found the two halves of the suite never meet — a
-pipeline failure is never asserted against what `status` prints, and
-`cli.py:891,893` are uncovered by the entire suite. That is exactly the
-behaviour Batch 3's render split moves. Writing the test after the move would
-pin the new behaviour, not the old, which is the one thing a refactor's test
-must not do. Rejected: writing it after (pins the wrong thing) and skipping it
-(the "reports success, dropped the work" defect class is the project's recurring
-failure mode). Status: live.
-
-**2026-08-23-e — Should `cementic doctor` keep `status --doctor` as an alias?**
-Choice: no alias; remove the flag outright. The alias was recommended to avoid
-breaking scripts, then the user confirmed the package has exactly one user and no
-backwards-compatibility obligation — so the alias would protect nothing while
-doubling the surface the change was meant to reduce. Rejected: a hidden alias for
-one release (protects nobody here), and leaving `--doctor` in place (keeps the
-ignored-flags warning, which exists only because one command does two jobs).
-Status: live.
-
-**2026-08-23-f — Test Python 3.10/3.11, or drop them?**
-Choice: drop; `requires-python = ">=3.12"`. The earlier recommendation was the
-opposite — matrix the unit job — on the grounds that 3.10/3.11 were real
-capability and `config.py`'s `tomli` fallback was untested. The single-user fact
-inverts it: the versions are a claim nobody depends on, so the choice is between
-adding CI jobs to exercise a branch that will never run in anger, and deleting
-the branch, the `tomli` dependency and the claim together. Deleting wins on the
-project's own stated goal of stripping what can go while keeping functionality —
-and there is no functionality here, only an untested promise. Evidence gathered
-before deciding: `src/` and `tests/` compile clean under 3.10, no 3.11+ stdlib
-API is in use, and the lockfile resolves for `>=3.10`, so the claim was probably
-true — which is what makes deleting it safe rather than risky. Rejected: the unit
--job matrix (tests code nobody runs), and the full three-job matrix (triples the
-pgvectorscale-from-source job for nothing).
-*Revisit when:* cementic needs to run somewhere that cannot get Python 3.12 —
-unlikely while `uv` can install one anywhere in a single command.
-
-**2026-08-23-g — Why is Batch C scheduled before the item that has actually
-caused an outage?**
-Choice: fingerprints first, daemon reclaim second. Batch A closes the only one of
-the four that has already cost real time, so it looks like the obvious first
-move. But Batch C's cost is the one that changes: it forces a full rebuild, which
-is ~6 minutes at today's 274 chunks and days at the corpus size PLAN targets.
-Batch A costs the same whenever it is done. Scheduling by what grows rather than
-by what hurts most today. Rejected: A first (defensible, but pays a rebuild
-premium later for no gain), and deferring C until a rebuild is needed anyway
-(that is how it stayed open for three reviews). Status: live.
-
-**2026-08-23-h — Should a dependency bump force a full re-extract?**
-Choice: yes — derive the extractor fingerprint from the installed
-pymupdf/pymupdf4llm versions. The hand-maintained `EXTRACTION_VERSION` was
-presumably chosen to avoid exactly this, and the concern is real at scale. It is
-still the wrong control point: a fingerprint that does not move when the output
-moves is a fingerprint that lies, and the revision system exists precisely so a
-rebuild happens in the background while the old revision keeps serving. If the
-cost bites, the answer is a tighter dependency pin so bumps are deliberate.
-Rejected: major.minor only (a patch release can change extraction output), and a
-doctor warning on version drift (keeps the reminder but leaves the fingerprint
-wrong, so anything reading it is still misled). Status: live.
+The two parked items that had revisit conditions moved to `TODO.md`'s "Parked,
+with a trigger", because nothing here was watching for them.
 
 ## Design principles
 
@@ -1063,28 +988,20 @@ bug and is one, but the fix costs more than the defect:
   "correct the sentence in `TODO.md` claiming the build path already reconciles
   a changed method" — was itself stale: no such sentence exists in `TODO.md`.)*
 
-**Also still open, from the fourth review** — full detail and file:line in
-`notes/code-review-2026-08-14.html`, listed here so they are not buried:
+**Closed 2026-08-23 — the four fourth-review carry-overs.** All four are done;
+see the carry-overs plan of record above for what each fix was and how it was
+verified live.
 
-- `cementic start` reports success after a 2 s grace period, while the startup
-  path can fail up to `daemon_start_timeout_seconds` (120 s) later. The failure
-  reason goes only to a background log whose path is printed in the *other*
-  branch and appears nowhere in `status` or `doctor`.
-- An orphaned embedding daemon cannot be reclaimed once its pid record is lost:
-  `embedding stop` reports "already stopped" while the process holds the port.
-  Observed live on 2026-08-15 — this is what stalled a re-index for hours.
-  *Sixth review found one concrete cause:* `_write_daemon_pid_file` runs
-  unguarded straight after `spawn_detached` (`embedding_runtime.py:909-911`), so
-  a failed write orphans a daemon that is already serving. Batch 1 item 5 closes
-  that cause; the general item stays open, since a lost pid record has others
-  (crash between spawn and write, a wiped data dir).
-- Model identity is the *path string*, so `resolve_llama_model_path` trying cwd
-  first means indexing from two directories can silently mean two different
-  GGUF files under one fingerprint. Batch with the `verbose` change above, since
-  both force a re-embed.
-- `EXTRACTION_VERSION` is a hand-maintained integer, not the pymupdf/pymupdf4llm
-  versions that actually produce the Markdown, so a dependency bump changes
-  extraction output without moving the fingerprint.
+- `cementic start` reporting success after 2 s → Batch B (`ba3ac8a`): the fatal
+  reason now reaches `cementic status`, and the message no longer claims a
+  success two seconds of watching cannot establish.
+- The unreclaimable orphaned daemon → Batch A (`e5ba0b9`): recovery from `/proc`
+  by the spawned command line, which closes the general case rather than the one
+  cause Batch 1 fixed.
+- Model identity being the path string → Batch C (`77e0e3f`): identity is a
+  content digest.
+- `EXTRACTION_VERSION` hand-maintained → Batch C (`77e0e3f`): derived from the
+  installed extraction libraries.
 
 ## Road to v1
 
