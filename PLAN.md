@@ -209,7 +209,7 @@ running the CLI against the live corpus. The generalisable parts:
 
 ### Exit criteria
 
-- [x] Batch C (`aa1a3f9`, fixes in `65824df`): three fingerprint changes in one
+- [x] Batch C (`77e0e3f`, fixes in `65824df`): three fingerprint changes in one
       commit; rebuild verified live — remove, start, 274/274 embedded, promote,
       search, stop, with search scores identical to the pre-change revision, so
       identity changed and retrieval did not. The live run also found three
