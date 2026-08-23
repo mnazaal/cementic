@@ -137,6 +137,7 @@ markers = [
 [tool.coverage.run]
 source = ["cementic"]
 relative_files = true
+branch = true
 
 [tool.coverage.report]
 exclude_also = [

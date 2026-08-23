@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-import time
 from types import SimpleNamespace
 
 import pytest
+from sqlalchemy import event
+from sqlalchemy.engine import Engine
 from typer.testing import CliRunner
 
 from cementic import cli as cementic_cli
@@ -14,6 +15,30 @@ from cementic.status_service import WorkerStatus
 from tests.integration.test_pg_helpers import cleanup_pg_tables, seed_active_vector_collection
 
 runner = CliRunner()
+
+
+class _QueryCounter:
+    """Counts SELECT statements issued across all engines while registered.
+
+    Stands in for a wall-clock budget: a per-row (rather than per-collection)
+    query pattern -- the actual hazard a "this must stay fast" test guards
+    against -- shows up as an unbounded query count long before it shows up as
+    an unbounded clock, and unlike a clock this is immune to machine load.
+    """
+
+    def __init__(self) -> None:
+        self.select_count = 0
+
+    def __enter__(self) -> "_QueryCounter":
+        event.listen(Engine, "before_cursor_execute", self._on_execute)
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        event.remove(Engine, "before_cursor_execute", self._on_execute)
+
+    def _on_execute(self, conn, cursor, statement, *args, **kwargs) -> None:
+        if statement.lstrip().upper().startswith("SELECT"):
+            self.select_count += 1
 
 
 class FakeSearchEmbeddingClient:
@@ -56,12 +81,16 @@ def test_pg_cli_search_returns_real_results(
         lambda config_json, config=None: FakeSearchEmbeddingClient(),
     )
 
-    start = time.perf_counter()
-    result = runner.invoke(app, ["search", "neural", "-n", "1", "-c", "cli-cs"])
-    elapsed = time.perf_counter() - start
+    with _QueryCounter() as counter:
+        result = runner.invoke(app, ["search", "neural", "-n", "1", "-c", "cli-cs"])
 
     assert result.exit_code == 0, result.output
-    assert elapsed < 2.0
+    # Bounded well above the handful of per-collection queries a single-collection
+    # search actually issues: a per-row query pattern would blow straight through
+    # this even with the two rows seeded here.
+    assert counter.select_count < 30, (
+        f"search issued {counter.select_count} SELECTs -- looks like a per-row query pattern"
+    )
     assert "cli neural vector result" in result.output
     assert "cli biology result" not in result.output
     cleanup_pg_tables(pg_session)
@@ -108,12 +137,15 @@ def test_pg_cli_status_verbose_reports_real_collection(
     )
     monkeypatch.setattr("cementic.cli._load_supervisor_state", lambda: {"processes": []})
 
-    start = time.perf_counter()
-    result = runner.invoke(app, ["status", "--verbose", "-c", "cli-status"])
-    elapsed = time.perf_counter() - start
+    with _QueryCounter() as counter:
+        result = runner.invoke(app, ["status", "--verbose", "-c", "cli-status"])
 
     assert result.exit_code == 0, result.output
-    assert elapsed < 2.0
+    # Same bound and rationale as the search test above.
+    assert counter.select_count < 30, (
+        f"status --verbose issued {counter.select_count} SELECTs -- "
+        "looks like a per-row query pattern"
+    )
     assert "cli-status" in result.output
     assert "files:" in result.output
     assert "/docs/status.pdf" in result.output

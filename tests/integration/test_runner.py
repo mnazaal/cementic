@@ -18,7 +18,9 @@ class TestSourceWatcherCommand:
 
     @patch("cementic.runner.SourceWatcher")
     @patch("cementic.runner.Bootstrapper")
-    def test_success_path(self, mock_boot_cls, mock_watcher_cls, runner):
+    def test_keyboard_interrupt_during_start_stops_cleanly_with_exit_0(
+        self, mock_boot_cls, mock_watcher_cls, runner
+    ):
         """Bootstrap succeeds, watcher start called, KeyboardInterrupt stops."""
         mock_boot = MagicMock()
         mock_watcher = MagicMock()
@@ -73,7 +75,9 @@ class TestPipelineWorkerCommand:
 
     @patch("cementic.runner.PipelineWorker")
     @patch("cementic.runner.Bootstrapper")
-    def test_success_path(self, mock_boot_cls, mock_worker_cls, runner):
+    def test_keyboard_interrupt_during_start_stops_cleanly_with_exit_0(
+        self, mock_boot_cls, mock_worker_cls, runner
+    ):
         """Bootstrap succeeds, worker start called, KeyboardInterrupt stops."""
         mock_boot = MagicMock()
         mock_worker = MagicMock()
@@ -86,6 +90,30 @@ class TestPipelineWorkerCommand:
         mock_boot.ensure_for_index.assert_called_once()
         mock_worker.start.assert_called_once_with(collection="default")
         mock_worker.stop.assert_called_once()
+
+    @patch("cementic.runner.PipelineWorker")
+    @patch("cementic.runner.Bootstrapper")
+    def test_fatal_reason_after_start_returns_exits_1(self, mock_boot_cls, mock_worker_cls, runner):
+        """`start()` returning normally with `fatal_reason` set must exit 1.
+
+        Both tests above only ever exercised `start()` via a `KeyboardInterrupt`
+        side effect, so this guard (`runner.py`, the `if worker.fatal_reason:
+        raise typer.Exit(1)` after the try/except) was never reached by any
+        runner test: a startup failure that returns instead of raising --
+        already running, DB lock held, embedding runtime unreachable -- used to
+        be indistinguishable from success by exit code alone.
+        """
+        mock_boot = MagicMock()
+        mock_worker = MagicMock()
+        mock_boot_cls.return_value = mock_boot
+        mock_worker_cls.return_value = mock_worker
+        mock_worker.start.return_value = None
+        mock_worker.fatal_reason = "already running"
+
+        result = runner.invoke(app, ["pipeline-worker"])
+        assert result.exit_code == 1
+        mock_worker.start.assert_called_once_with(collection="default")
+        mock_worker.stop.assert_not_called()
 
     @patch("cementic.runner.PipelineWorker")
     @patch("cementic.runner.Bootstrapper")

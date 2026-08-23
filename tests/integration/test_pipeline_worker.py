@@ -7,13 +7,17 @@ Exercises extraction, chunking, embedding error paths and daemon lifecycle.
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
+from typer.testing import CliRunner
 
+from cementic import cli as cementic_cli
 from cementic import pipeline_worker as pipeline_worker_module
+from cementic.cli import app
 from cementic.config import Config
 from cementic.db import (
     Base,
@@ -34,6 +38,7 @@ from cementic.pipeline_worker import (
 )
 from cementic.revisions import promote_revision, requeue_interrupted_artifacts
 from cementic.source_watcher import SourceWatcher
+from cementic.status_service import WorkerStatus
 from cementic.vector_store import index_access_method, vector_index_name
 from tests.integration.test_pg_helpers import cleanup_pg_tables
 
@@ -564,6 +569,112 @@ class TestPipelineWorkerErrorPaths:
             assert all(
                 "lower pipeline.chunk_size" in (row.error_message or "") for row in failed
             )
+
+    @pytest.mark.pg
+    def test_status_verbose_reports_a_real_extraction_and_embedding_failure(
+        self, pg_setup, pg_config: Config, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A real pipeline failure must reach `cementic status --verbose` output.
+
+        `cli.py`'s per-file rendering (`(failed: N)` for embedding failures,
+        `| error: ...` for extraction/chunking failures) had no test driving a
+        real failure through to CLI output -- only `status_service`-level
+        assertions and `test_step_extract_error_yields_failed_status` above,
+        which stops at the DB row. Two documents are needed because
+        `load_file_progress` only ever sets one of the two fields per file:
+        `error_message` comes from a failed extraction/chunking, and
+        `embeddings_failed` only from a failed embedding of chunks that made it
+        past both of those.
+        """
+        config, session_factory, pdf_fixtures_dir = pg_setup
+        # pg_setup's config only knows the default DB url; point it at the same
+        # dedicated test database pg_engine/session_factory actually use, so the
+        # CLI (which builds its own engine from config.database.url) reads the
+        # rows this test just wrote instead of a different, unrelated database.
+        config.database.url_override = pg_config.database.url_override
+        collection = "test_status_verbose_real_failure"
+
+        pipeline, source_watcher = _setup_worker(config, session_factory, collection, monkeypatch)
+        pipeline.embedding_client = FakeEmbeddingClient()
+
+        extract_fail_path = str(pdf_fixtures_dir / "test_doc_a.pdf")
+        embed_fail_path = str(pdf_fixtures_dir / "test_doc_b.pdf")
+        source_watcher._register_document(extract_fail_path)
+        source_watcher._register_document(embed_fail_path)
+
+        with session_factory() as session:
+            doc = (
+                session.query(SourceDocument)
+                .filter_by(collection=collection, source_path=extract_fail_path)
+                .first()
+            )
+            assert doc is not None
+            # Corrupt the path after registration (hashing needs the real file),
+            # so extraction fails for this document alone.
+            doc.source_path = "/nonexistent/file.pdf"
+            session.commit()
+
+        revision = pipeline._ensure_target_revision()
+        # Each _step_* call advances one unit of work (the pattern
+        # _run_pipeline_until_idle above loops on), so both documents need
+        # looping to reach a stable extract+chunk state before the embedding
+        # client is swapped for the failing one.
+        for _ in range(20):
+            worked = pipeline._step_extract(revision)
+            worked = pipeline._step_chunk(revision) or worked
+            if not worked:
+                break
+
+        pipeline.embedding_client = FailingEmbeddingClient()
+        for _ in range(20):
+            if not pipeline._step_embed(revision):
+                break
+
+        with session_factory() as session:
+            failed_embeddings = session.query(ChunkEmbedding).filter_by(status="failed").count()
+            failed_extraction = (
+                session.query(ExtractedDocument).filter_by(status="failed").count()
+            )
+        assert failed_embeddings > 0, "setup did not produce a failed embedding"
+        assert failed_extraction > 0, "setup did not produce a failed extraction"
+
+        monkeypatch.setattr(cementic_cli, "_config", config)
+        # A real health object, not None: None now means the probe *failed*,
+        # which exits 1 rather than printing a summary two rows short.
+        monkeypatch.setattr(
+            "cementic.cli.check_health",
+            lambda config: SimpleNamespace(
+                db_reachable=True,
+                embedding_provider="llama-cpp",
+                embedding_healthy=True,
+                llama_daemon="running",
+            ),
+        )
+
+        def _stopped_worker() -> WorkerStatus:
+            return WorkerStatus(
+                state="stopped",
+                pid="N/A",
+                process="stopped",
+                current_file=None,
+                watched_directories=[],
+                processed_count=0,
+                failed_count=0,
+            )
+
+        monkeypatch.setattr(
+            "cementic.cli.load_worker_statuses",
+            lambda config: (_stopped_worker(), _stopped_worker()),
+        )
+        monkeypatch.setattr("cementic.cli._load_supervisor_state", lambda: {"processes": []})
+
+        cli_runner = CliRunner()
+        result = cli_runner.invoke(app, ["status", "--verbose", "-c", collection])
+
+        assert result.exit_code == 0, result.output
+        assert "extract=failed" in result.output
+        assert "| error: PDF not found" in result.output
+        assert "(failed: 2)" in result.output
 
 
 class TestTerminalFailuresAndDeletedDocs:

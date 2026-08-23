@@ -1323,6 +1323,28 @@ class TestBackgroundCommands:
 
     @patch("cementic.cli.get_session_factory")
     @patch("cementic.cli.get_engine")
+    def test_collection_reindex_force_flag_reaches_the_service(
+        self, mock_get_engine, mock_get_session_factory
+    ):
+        """The `--force` flag on the CLI must actually reach `reindex_collection`.
+
+        Only the default (``force is False``) was ever asserted; this is the
+        positive case, added to close that gap.
+        """
+        mock_session = MagicMock()
+        mock_session.__enter__.return_value = mock_session
+        mock_session.__exit__.return_value = False
+        mock_get_session_factory.return_value = lambda: mock_session
+
+        outcome = ReindexOutcome("reindexed", method="hnsw", previous_method="hnsw")
+        with patch("cementic.cli.reindex_collection", return_value=outcome) as mock_reindex:
+            result = runner.invoke(app, ["collection", "reindex", "research", "--force"])
+
+        assert result.exit_code == 0
+        assert mock_reindex.call_args.kwargs["force"] is True
+
+    @patch("cementic.cli.get_session_factory")
+    @patch("cementic.cli.get_engine")
     def test_collection_reindex_without_an_active_revision_fails(
         self, mock_get_engine, mock_get_session_factory
     ):
