@@ -3,40 +3,89 @@
 <!-- session-handoff:begin (2026-08-23) -->
 ## Where the work stands
 
-**v0.2.0 is shipped** — tag `v0.2.0` = merge commit `9c9273f` on `main`, pushed
-2026-08-18. The two plan-of-record sections that recorded it were dropped in the
-2026-08-23 compaction; `git log` and `CHANGELOG.md` carry that history, and the
-measurements worth keeping were harvested into "Measurements that justify
-current defaults" below.
+**Repo state.** On `main`, every `claude/*` branch merged, tree clean once the
+commit carrying this block lands (it is pending as this is written). v0.2.0
+remains the last tag, now ~40 commits behind `main`.
 
-**A sixth review ran 2026-08-23** — a full-codebase audit (CLI surface, call
-graph, error handling, coverage, FP/UNIX discipline, stale weight, docs drift),
-recorded in `notes/review-codebase.html`. `notes/` is gitignored as of
-`c7069e1`, so that note is local-only; its findings are carried into the plan
-of record directly below, which is the live plan.
+**Both plans of record below are CLOSED** — the sixth-review fixes (17 items)
+and the fourth-review carry-overs (4 items). There is no live execution order in
+this file; the next action is the entry point below, not a section further down.
 
-The audit's baseline: all six `./scripts/check.sh` gates green, mypy strict
-clean on 27 files, ruff clean, 93% line / **88% branch** coverage. One
-correctness bug, one dominant readability problem (`cli.py` at 2138 lines), and
-substantial doc drift including a 404ing install URL. All three are now
-addressed; `cli.py` is 1413 lines.
+*Committing here:* an agent must be on a `claude/*` branch — a hook rejects
+commits on `main` and rejects agents updating `main` at all, including
+`--ff-only` merges. Branch first, then hand the merge to the user.
 
-**Entry point:** nothing is pending. Every batch is closed; the plan can be
-deleted whenever `TODO.md`'s remaining features are what matters. Previously:
-Batch 6, the last one. Batches 1-5 are done (see Exit
-criteria). Both of Batch 6's decisions were made 2026-08-23 once the user
-confirmed the package has one user and no backwards-compatibility obligation:
-`status --doctor` becomes `cementic doctor` with no alias, and `requires-python`
-narrows to `>=3.12` so the `tomli` compatibility branch can be deleted rather
-than tested. Repo visibility gates nothing and is parked.
+**Entry point: the graduated soak — blocked on one thing.** cementic has only
+ever indexed 5 documents / 274 chunks, about 0.014% of the ~40k-paper target in
+"Scale context". Every scale-dependent choice rests on synthetic benchmarks.
+**The blocker is a corpus:** `~/projects/bibs/papers` holds 5 PDFs. Ask the user
+where their real collection is, then index ~100 papers (~5,000 chunks, ~2 h at
+the measured 1.4 s/chunk), measuring build time, ANN index build, and resident
+memory. That validates the scaling model or shows the target needs a different
+embedding story — at 1.4 s/chunk the full target is ~780 h, which is a
+project-shaping constraint, not a defect (parked in `TODO.md`).
 
-The live corpus is indexed and searchable at the shipped defaults: collection
-`test` (watching `~/projects/bibs/papers`), 5 documents, 274/274 chunks embedded
-at `chunk_size = 320`, 0 failed, revision `default-68e212bc-llama-cpp-12f77de0`
-active. Workers are stopped; nothing runs in the background.
+While it embeds, the useful parallel job is finishing the PLAN.md drain (below).
 
-**Verification:** `./scripts/check.sh` — all six gates (the sixth, `lockfile`,
-was added in `e5812cd`; several docs still say five, which is Batch 5).
+**Live state.** Workers stopped. The **embedding daemon is running, pid 93461** —
+deliberately left up so the next search is warm; `cementic embedding stop` if
+unwanted. Collection `test` is on revision 5,
+`default-68e212bc-llama-cpp-8720d1d0`, 274/274 embedded. That collection is a
+**testbed** (user, 2026-08-23): remove and rebuild it freely, no need to ask.
+
+**Corrections — where this file is still stale.** "Deliberately not done" lists
+two items this session actually closed: `verbose` in the embedding fingerprint
+(done in Batch C, `77e0e3f`) and GGUF-metadata model identity (partly superseded
+by the content digest). A register of deliberate non-decisions that lists done
+work misleads exactly the reader it exists to serve. Distrust that section until
+audited; the rest of the file was corrected this session.
+
+**PLAN.md is meant to be deleted at feature-completeness**, and is not yet
+drainable. Still unique to it: "Deliberately not done" (~165 lines, stale as
+above), the four design sections (Design principles, Scale context, Key seams,
+Pipeline as composable filters, ~180 lines), and "Road to v1". Everything else
+durable was moved out this session — measurements and policy decisions to
+README, parked items with triggers to `TODO.md`, code rationale left against the
+code where it cannot drift.
+
+**Deviations from plan, attributed.**
+- *User-directed:* fold `AGENTS.md` into README and delete it (against the
+  agent's recommendation — README is now the single source of truth for users
+  and developers both); gitignore `notes/`; narrow to Python 3.12+ rather than
+  add a CI matrix; drop the `status --doctor` deprecation alias. The last two
+  followed from "one user, no backwards-compatibility obligation".
+- *Agent-decided:* kept root `compose.yml`, which the plan wrongly listed for
+  deletion — it is the stack the pg fixture brings up; dropped three of Batch
+  4's duplication collapses as costing more readability than they saved; built
+  the Batch C rebuild alongside the old revision instead of `collection remove`
+  first, which exercised the versioning.
+
+**Environment quirks found this session.**
+- The pg integration fixture short-circuits when Postgres is already reachable,
+  so **no local run exercises `compose build`** — CI's `integration-pg` job is
+  what proves that path.
+- A zombie process keeps its `/proc/<pid>` directory, so `test -d /proc/<pid>`
+  is not a liveness check; read the state field. (Daemon recovery is safe from
+  this: a zombie's `cmdline` is empty and cannot be matched.)
+- `notes/review-codebase.html` (the sixth-review audit: CLI surface, call graph,
+  error handling, coverage, FP/UNIX discipline, stale weight, docs drift) was
+  written **after** `notes/` was gitignored, so it is in no git history — it
+  exists only on disk. It is the reasoning behind the 17 items; the commits are
+  the record of what was done about them.
+- **Green gates are not sufficient evidence here.** Five defects this session
+  were found by running the CLI against the live corpus while all six gates
+  passed — including search broken after promote, and unit tests writing into
+  `~/.local/share/cementic/`. End changes that touch workers, the daemon, or
+  profiles with a live run, not just `check.sh`.
+
+**Exit criteria — commands whose output confirms the above.**
+```bash
+git branch --show-current && git status --short     # main, empty
+git branch --format='%(refname:short)' | grep '^claude/'   # no unmerged branches
+./scripts/check.sh                                  # all six gates, exit 0
+cementic collection revisions test                  # revision 5 active
+cementic status                                     # workers stopped, embedding healthy
+```
 <!-- session-handoff:end -->
 
 ## Plan of record — fourth-review carry-overs (2026-08-23)
