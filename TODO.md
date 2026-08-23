@@ -1,6 +1,6 @@
 # Roadmap
 
-Baseline: `./scripts/check.sh` runs all five gates — ruff, mypy, unit,
+Baseline: `./scripts/check.sh` runs all six gates — lockfile, ruff, mypy, unit,
 integration, integration-pg — and reports a missing PostgreSQL as SKIPPED rather
 than passed. Use it rather than running the pieces by hand; the reason three PG
 tests once reached `main` red is that "I ran the tests" meant unit-only.
@@ -35,9 +35,10 @@ index, versioned revisions) are documented in [PLAN.md](PLAN.md).
 ## Test coverage / CI
 
 CI is done — `.github/workflows/ci.yml` runs unit, `integration -m "not pg"` and
-`integration -m pg` as separate jobs, the last against a service container. Keep
-it green with `./scripts/check.sh` before pushing. Remaining gaps, from the
-2026-08-14 review:
+`integration -m pg` as separate jobs; the last has no `services:` block, since
+the `pg_engine` fixture brings up `compose.yml`'s pgvector+vectorscale
+container itself. Keep it green with `./scripts/check.sh` before pushing.
+Remaining gaps, from the 2026-08-14 review:
 
 - Under Python 3.14, several unit tests leak sqlite3 connections (unclosed
   engines in test fixtures) and pytest 9's unraisable-exception hook escalates

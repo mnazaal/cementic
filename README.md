@@ -106,6 +106,13 @@ it; nothing needs to start the container itself anymore.
 
 ## Usage
 
+The commands below are shown in the order a fresh database needs them:
+`cementic start` creates the database schema as a side effect of the workers
+it spawns, so on a database with nothing indexed yet, `status`, `search`, and
+`collection list` all exit 1 (message: "nothing indexed yet — run
+`cementic start DIRECTORY -c COLLECTION` first") until `start` has run at
+least once.
+
 ```bash
 # Start watching a collection and building its target revision
 cementic start /path/to/pdfs --collection research
@@ -155,8 +162,8 @@ Useful flags beyond the above:
 | `-V`, `--version` | root | Print the version and exit |
 | `-v`, `--verbose` | `status` | Per-file pipeline progress, watched directories, worker PIDs |
 | `--json` | `status`, `search` | Machine-readable output (`search` emits JSONL, one object per line) |
-| `--doctor` | `status` | Read-only readiness diagnostics: config, database, extensions, model, daemon |
-| `-c`, `--collection` | `start`, `status`, `search` | Which collection to act on |
+| `--doctor` | `status` | Read-only readiness diagnostics: config, database, extensions, model, daemon, chunk budget |
+| `-c`, `--collection` | `start`, `status`, `search` | Which collection to act on. `search` accepts more than one — `-c work personal` or repeated `-c` — and searches all of them together |
 | `-n`, `--top-k`, `--limit` | `search` | Number of results, 1–50 |
 | `--force` | `stop` | SIGKILL workers that ignored the graceful stop, discarding in-progress work |
 | `-f`, `--force` | `collection promote` | Promote despite failed documents or chunks |
@@ -170,6 +177,22 @@ Naming a collection that does not exist is an error, not an empty result:
 and `search -c` each say so and exit non-zero. `collection remove` is the
 deliberate exception — removing something already gone reports `not found` and
 succeeds, so it stays safe to run twice.
+
+A collection name must start and end with a letter or digit, contain only
+letters, digits, hyphens, and underscores, and be 100 characters or fewer.
+Every command that takes `-c`/`--collection` enforces this and rejects the
+name up front rather than at the database.
+
+`search --json` emits one JSON object per line, each with the same six
+fields: `collection`, `source_path`, `content`, `score`, `distance`, and
+`score_kind`.
+
+A query is rejected before it reaches the embedding model if it is longer
+than 8,000 characters, or if its estimated token count exceeds the indexed
+model's context window; both surface as a "query too long" error.
+
+Searching collections indexed by different embedding models in one `-c a b`
+call is a hard error, not a merged ranking — see Known limitations.
 
 Exit codes follow one convention: **0** — the operation happened (including a
 no-op documented as safe, like removing an already-absent collection); **1** —
@@ -287,7 +310,7 @@ matching `CEMENTIC_*` variable (see [Environment variables](#environment-variabl
 | | `diskann_num_neighbors`, `diskann_search_list_size` | `50`, `100` | DiskANN build knobs |
 | | `diskann_query_rescore` | `50` | DiskANN query-time rescoring depth |
 | | `build_memory` | `2GB` | `maintenance_work_mem` for index builds only |
-| `llama_cpp` | `model_path` | bundled Nomic model | GGUF to load |
+| `llama_cpp` | `model_path` | Nomic model (downloaded on first use) | GGUF to load |
 | | `n_ctx` | `512` | Model context window. The default model's architecture caps at 512; raising it past what the model supports has no effect |
 | | `n_gpu_layers` | `0` | Layers offloaded to GPU |
 | | `embedding_dim` | `768` | Fallback only; the live model is probed |
@@ -297,7 +320,7 @@ matching `CEMENTIC_*` variable (see [Environment variables](#environment-variabl
 | | `llama_embed_timeout_seconds` | `120` | Per-request embedding timeout |
 | | `daemon_pid_file`, `daemon_log_file` | under the data dir | Daemon bookkeeping |
 | | `verbose` | `false` | Verbose llama.cpp logging |
-| `extraction` | `use_ocr` | `false` | OCR pages with no text layer (needs `rapidocr`) |
+| `extraction` | `use_ocr` | `false` | OCR pages with no text layer (`rapidocr` is a required dependency, always installed) |
 | | `backends` | registry default | Per-file-type extractor choice, e.g. `pdf = "pymupdf4llm"` |
 | `source_watcher` | `ignore_directories` | 16 names incl. `.git`, `node_modules`, `build`, `dist`, `venv`, `target` | Directory names skipped anywhere under a watched root. **Replaces** the defaults rather than adding to them; set `[]` to index everything |
 | | `state_path`, `log_file` | under the data dir | Watcher bookkeeping |
@@ -315,7 +338,8 @@ matching `CEMENTIC_*` variable (see [Environment variables](#environment-variabl
 embedding model's own tokenizer, and the two disagree — for the default model one
 tiktoken token is a median of 1.14 model tokens, p95 1.24, and up to 1.33 on
 English and source code. The runtime guard assumes an upper bound of 1.45, and
-`320 × 1.45 = 464` fits inside the 512-token window, so a full-size chunk never
+`(320 + 8) × 1.45 = 475.6` fits inside the 512-token window (the `+ 8` covers
+the task-prefix tokens added at embed time), so a full-size chunk never
 needs an exact-count round trip to the model. A
 chunk that exceeds the window is refused rather than embedded truncated, and
 shows up as a failed chunk in `cementic status`. If you change either value,
@@ -411,7 +435,9 @@ The default local setup is:
 - Postgres with `pgvector` + `vectorscale`, provisioned via the generated setup or your own Postgres
 - a shared persistent local `llama.cpp` server for indexing and interactive search, so the model stays loaded once
 
-When using Nomic v2 models, cementic automatically applies task prefixes:
+When the configured model is a member of the `nomic-embed-text` family (v1,
+v1.5, or v2 — matched on the model filename), cementic automatically applies
+task prefixes:
 
 - document embeddings: `search_document: ...`
 - query embeddings: `search_query: ...`
@@ -441,6 +467,11 @@ When using Nomic v2 models, cementic automatically applies task prefixes:
   health probe treats an unanswered embedding as legitimate load while a live
   worker is mid-batch; a daemon that wedges at exactly that moment is reported
   `busy` until the worker's claim times out, then `wedged`.
+- **Searching collections indexed by different embedding models refuses,
+  rather than merging results.** Distances from different models are not
+  comparable, so `cementic search "q" -c a b` errors out and names which
+  collection uses which model if `a` and `b` were built with different
+  models. Search each separately instead.
 
 ## Architecture
 
