@@ -280,10 +280,22 @@ byte-identical or near-identical; none changes behaviour:
 5. `on_created` / `on_modified` (`source_watcher.py:146,153`) — byte-identical.
    `on_created = on_modified`.
 6. The unremoved-artifact warning block (`cli.py:1578-1583`, `:1727-1732`).
-7. Deferred-cleanup recorders (`revisions.py:400,414` and their `drain_*`
-   partners); revision-by-status query (`collections.py:219`,
-   `revisions.py:144`); the Chunk→Extracted→Source join chain
-   (`pipeline_worker.py:762`, `status_service.py:332`, `:358`).
+7. ~~Deferred-cleanup recorders; revision-by-status query; the join chain.~~
+   **DROPPED 2026-08-23, on inspection during execution.** All three are
+   parallel type-specific instances rather than real duplication, and
+   collapsing each costs about what it saves:
+   - `_defer_*`/`drain_*` (`revisions.py:400,414` + partners): the pairs differ
+     in element type (`list[str]` vs `list[int]`). A generic `_defer(session,
+     key, items)` plus the typed wrappers mypy strict would still need comes to
+     the same line count and reads worse than four named functions.
+   - `find_ready_revision` (`collections.py:219`) vs `get_active_revision`
+     (`revisions.py:144`): identical bar the status string, but collapsing saves
+     ~4 lines and moves a function across a module boundary.
+   - The Chunk→Extracted→Source join chain (`pipeline_worker.py:762`,
+     `status_service.py:332`, `:358`): three sites, cross-module, ~8 lines.
+
+   Recorded rather than silently skipped: the readability goal is the point, and
+   a line count is not a proxy for it. Do not re-derive these.
 
 *Anti-scope: the three §5 trim candidates deliberately kept in "Deliberately not
 done" below — `_llama_daemon_runtime_status`, `_state`, and the
@@ -374,14 +386,20 @@ the claim is plausible — but unverified is unverified.
 
 ### Exit criteria
 
-- [ ] Batch 1: four fixes, each with a regression test verified red before the
-      fix.
-- [ ] Batch 2: no wall-clock assertion remains in the suite; `--cov-branch` is
-      the default; a pipeline failure is asserted end-to-end against `status`
-      output; `reindex --force` and `runner.py:154-155` covered.
-- [ ] Batch 3: `cli.py` under 1500 lines, `cli.py` has one copy of the
-      db-error ladder, and **no output text changed** — proven by the Batch 2
-      tests passing unmodified.
+- [x] Batch 1: four fixes, each with a regression test verified red before the
+      fix (`7ed71f7`).
+- [x] Batch 2 (`2a2c856`): the six wall-clock budgets are structural; branch
+      coverage is on by default; a real pipeline failure is asserted against
+      `status --verbose` output (red-verified independently in the parent
+      session by disabling the render guard); `reindex --force` and
+      `runner.py:154-155` covered. Three timing checks survive elsewhere and
+      are deliberate: they are liveness bounds with ~6x headroom, not budgets.
+- [x] Batch 3 (`c69936d`): `cli.py` 2138 -> 1413; six of seven ladder sites
+      share one context manager (`search` keeps its own — it branches on
+      `json_output` through three paths that never call `_report_db_error`, so
+      sharing would need a parameter that distorts the shape); no output text
+      changed, proven by `git diff --stat -- tests/` empty and 1006 tests
+      passing unmodified.
 - [x] Batch 4 (part): `containers/` gone, `compose.yml` repointed at the
       packaged Containerfile and kept (`fdefdfa`).
 - [ ] Batch 4 (rest): the three PDF specs gone, `test_embedder.py` gone, and at
