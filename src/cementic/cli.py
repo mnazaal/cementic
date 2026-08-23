@@ -1,40 +1,52 @@
 """CLI interface for cementic using Typer."""
 
-import inspect
 import json
 import os
 import shutil
 import sys
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Iterator
 from contextlib import contextmanager
-from dataclasses import asdict
 from importlib import resources
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
-from typing import Any, TypeVar, cast
+from typing import Any
 
-import click
 import typer
 from pydantic import ValidationError
 from pydantic_settings import SettingsError
 from rich.console import Console
 from rich.markup import escape
 from sqlalchemy.exc import InterfaceError, OperationalError, ProgrammingError
-from typer.core import TyperCommand, TyperGroup
 
+from cementic import render
 from cementic.bootstrap import Bootstrapper
 from cementic.chunk import chunk_text
-from cementic.collections import (
-    collection_exists,
-    delete_collection_records,
-    drop_orphan_vector_tables,
-    list_collection_revisions,
-    list_collections,
-    promote_ready_revision,
-    reindex_collection,
-    remove_artifacts,
-)
+
+# collection_callback: re-exported for the pre-split test suite, which imports
+# it straight from cementic.cli and calls it directly.
+from cementic.cli_collection import collection_app, collection_callback  # noqa: F401
+from cementic.cli_format import CementicTyper
+
+# delete_collection_records, drop_orphan_vector_tables, list_collection_revisions,
+# promote_ready_revision, reindex_collection and remove_artifacts are not called
+# from this module any more (their call sites moved to cli_collection.py) --
+# they stay imported here regardless, because cli_collection.py reads all of
+# these off the `cementic.cli` module object at call time (`cli.<name>`, not a
+# by-value import) so that `unittest.mock.patch("cementic.cli.<name>")` in the
+# pre-split test suite keeps intercepting them. The redundant `as <name>` on
+# each is mypy's explicit-re-export idiom (`strict` implies
+# `no_implicit_reexport`); without it mypy refuses cli_collection.py's
+# `cli.<name>` accesses even though they work at runtime. See
+# cli_collection.py's module docstring for the full rationale.
+from cementic.collections import collection_exists
+from cementic.collections import delete_collection_records as delete_collection_records
+from cementic.collections import drop_orphan_vector_tables as drop_orphan_vector_tables
+from cementic.collections import list_collection_revisions as list_collection_revisions
+from cementic.collections import list_collections as list_collections
+from cementic.collections import promote_ready_revision as promote_ready_revision
+from cementic.collections import reindex_collection as reindex_collection
+from cementic.collections import remove_artifacts as remove_artifacts
 from cementic.config import (
     Config,
     ConfigError,
@@ -44,7 +56,8 @@ from cementic.config import (
     get_config,
     resolve_config_path,
 )
-from cementic.db import get_engine, get_session_factory
+from cementic.db import get_engine as get_engine
+from cementic.db import get_session_factory as get_session_factory
 from cementic.doctor import collect_doctor_report
 from cementic.embedding_runtime import (
     create_provider,
@@ -61,7 +74,6 @@ from cementic.state import DaemonState, StateManager
 from cementic.status_service import (
     build_supervisor_status,
     check_health,
-    load_file_progress,
     load_pipeline_status,
     load_pipeline_status_bulk,
     load_worker_statuses,
@@ -81,68 +93,7 @@ from cementic.supervisor import (
 )
 from cementic.validation import validate_collection_name
 
-_CommandFn = TypeVar("_CommandFn", bound=Callable[..., Any])
-
-
-class _UpperFormatter(click.HelpFormatter):
-    """Plain help formatter that uppercases section headings (USAGE, OPTIONS, …).
-
-    Keeps the headings consistent with Click's uppercase usage metavars
-    (``[OPTIONS] COMMAND [ARGS]``).
-    """
-
-    def write_heading(self, heading: str) -> None:
-        super().write_heading(heading.upper())
-
-    def write_usage(self, prog: str, args: str = "", prefix: str | None = None) -> None:
-        super().write_usage(prog, args, prefix=(prefix or "Usage: ").upper())
-
-
-class _UpperContext(click.Context):
-    def make_formatter(self) -> click.HelpFormatter:
-        return _UpperFormatter(width=self.terminal_width, max_width=self.max_content_width)
-
-
-class _PlainEpilogMixin:
-    """Render the epilog at the base indent so its own headers line up with
-    USAGE/OPTIONS/COMMANDS (Click otherwise indents the whole epilog)."""
-
-    epilog: str | None
-
-    def format_epilog(self, ctx: click.Context, formatter: click.HelpFormatter) -> None:
-        if self.epilog:
-            formatter.write_paragraph()
-            formatter.write_text(inspect.cleandoc(self.epilog))
-
-
-class _UpperGroup(_PlainEpilogMixin, TyperGroup):
-    context_class = _UpperContext
-
-
-class _UpperCommand(_PlainEpilogMixin, TyperCommand):
-    context_class = _UpperContext
-
-
-class CementicTyper(typer.Typer):
-    """Typer app with plain, case-consistent help formatting."""
-
-    def __init__(self, *args: Any, **kwargs: Any) -> None:
-        kwargs.setdefault("rich_markup_mode", None)
-        kwargs.setdefault("add_completion", False)
-        kwargs.setdefault("no_args_is_help", True)
-        kwargs.setdefault("cls", _UpperGroup)
-        context_settings = cast(dict[str, Any], dict(kwargs.get("context_settings") or {}))
-        context_settings.setdefault("help_option_names", ["-h", "--help"])
-        kwargs["context_settings"] = context_settings
-        super().__init__(*args, **kwargs)
-
-    def command(self, *args: Any, **kwargs: Any) -> Callable[[_CommandFn], _CommandFn]:
-        kwargs.setdefault("cls", _UpperCommand)
-        return super().command(*args, **kwargs)
-
-
 app = CementicTyper(help="Index and semantically search document collections")
-collection_app = CementicTyper(help="Inspect and manage collections")
 embedding_app = CementicTyper(help="Manage embedding runtime service")
 config_app = CementicTyper(help="View and manage the config file")
 init_app = CementicTyper(help="Initialize local setup files")
@@ -279,57 +230,13 @@ def _get_config() -> Config:
     return _config
 
 
-_DEFAULT_CONFIG_TOML = """\
-# cementic configuration
-#
-# Precedence (low -> high): built-in defaults < this file < CEMENTIC_* env vars
-# < command-line flags. Every value below is optional; delete what you don't need.
+def _default_config_toml() -> str:
+    """The annotated default config, read from its packaged template file.
 
-[database]
-# Postgres with the pgvector and pgvectorscale extensions. Generate a local
-# setup with `cementic init postgres ./cementic-postgres`, then start it with
-# `docker compose up -d` (or `podman compose up -d`).
-host = "localhost"
-port = 5432
-name = "cementic"
-user = "cementic"
-# password = "cementic"   # override outside local development
-
-[pipeline]
-embedding_provider = "llama-cpp"
-# Counted with tiktoken, while llama_cpp.n_ctx (512) counts the model's own
-# tokens -- for the default model one of these is up to 1.33 of the other, so
-# chunk_size must stay well under n_ctx or chunks embed truncated. Re-measure
-# with scripts/measure_chunk_context_fit.py before raising it.
-chunk_size = 320
-chunk_overlap = 80
-
-[index]
-# ANN index: "hnsw" (lower latency, more RAM) or "diskann" (disk-resident, low RAM)
-method = "hnsw"
-# Keep scanning until top_k rows survive the filter, rather than stopping after
-# ef_search candidates. Leave on unless you are on pgvector older than 0.8,
-# where it is ignored anyway.
-hnsw_iterative_scan = "relaxed_order"
-# maintenance_work_mem for index builds only. PostgreSQL's 64MB default makes an
-# HNSW build spill to disk and slow sharply; lower this on a small server.
-build_memory = "2GB"
-
-[llama_cpp]
-# Spelled exactly as the built-in default: the model path string is part of the
-# embedding profile fingerprint, so writing "./models/..." here instead would
-# mint a second profile for the same file and re-embed the whole corpus.
-model_path = "models/nomic-embed-text-v2-moe.Q8_0.gguf"
-
-[extraction]
-use_ocr = false
-
-# Optional: choose a specific extractor per file type. Unset types use the
-# registry default. Keys are bare file types; values are registered extractor
-# names (currently: "pymupdf4llm" for pdf, "plaintext" for txt/md/markdown).
-[extraction.backends]
-# pdf = "pymupdf4llm"
-"""
+    Same `importlib.resources` pattern `init_postgres` below uses for its
+    template directory, applied to a single file instead of a tree.
+    """
+    return (resources.files("cementic") / "templates" / "config.toml").read_text(encoding="utf-8")
 
 
 @config_app.command("path", short_help="Print the active (or default) config path")
@@ -356,7 +263,7 @@ def config_init(
         err_console.print(f"config already exists at {path} (use --force to overwrite)")
         raise typer.Exit(1)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(_DEFAULT_CONFIG_TOML, encoding="utf-8")
+    path.write_text(_default_config_toml(), encoding="utf-8")
     console.print(f"wrote {path}")
 
 
@@ -596,14 +503,6 @@ def _get_supervisor_state_path() -> Path:
     return _get_data_dir() / "supervisor.json"
 
 
-@collection_app.callback(invoke_without_command=True)
-def collection_callback(ctx: typer.Context) -> None:
-    """Show collection subcommand help when no subcommand is provided."""
-    if ctx.invoked_subcommand is None:
-        typer.echo(ctx.get_help())
-        raise typer.Exit()
-
-
 def _build_collection_filters(
     option_collections: list[str] | None,
     trailing_collections: list[str] | None,
@@ -657,11 +556,33 @@ def _require_known_collection(session: Any, collection: str) -> None:
 def _report_db_error(error: Exception, action: str) -> None:
     """Print the right message for a failed database operation."""
     if _is_database_unavailable(error):
-        _print_database_unavailable(action)
+        render._print_database_unavailable(action, _DB_HINT)
     elif _is_schema_missing(error):
         err_console.print(_NO_SCHEMA_HINT)
     else:
         err_console.print(f"{action} failed: {error}")
+
+
+@contextmanager
+def _reporting_db_errors(action: str) -> Iterator[None]:
+    """Report a failed database operation the same way at every call site.
+
+    A context manager, not a decorator: several call sites do work before and
+    after the guarded region (reading outcome fields inside the session, then
+    rendering after it closes), and a decorator would pull that work inside the
+    guarded scope and change which exceptions it sees.
+
+    typer.Exit subclasses RuntimeError, so a bare `except Exception` here would
+    swallow a deliberate exit and re-report it as "<action> failed: 1" -- this
+    is the one place that has to get that re-raise right, instead of five.
+    """
+    try:
+        yield
+    except typer.Exit:
+        raise
+    except Exception as error:
+        _report_db_error(error, action)
+        raise typer.Exit(1)
 
 
 _DB_HINT = (
@@ -670,328 +591,9 @@ _DB_HINT = (
 )
 
 
-def _state(ok: bool, ok_word: str, bad_word: str) -> str:
-    """A status word, colored sparingly (rich drops color off-TTY / NO_COLOR)."""
-    return f"[green]{ok_word}[/green]" if ok else f"[red]{bad_word}[/red]"
-
-
-def _print_database_unavailable(action: str) -> None:
-    """Print a concise database-unavailable message with a recovery hint."""
-    err_console.print(f"{action}: database not reachable")
-    err_console.print(_DB_HINT)
-
-
 def _llama_daemon_runtime_status() -> str:
     """Return llama.cpp daemon runtime status."""
     return llama_daemon_status(_get_config())
-
-
-def _print_doctor_report(report: dict[str, Any]) -> None:
-    """Print read-only doctor diagnostics in a compact human format."""
-    doctor_status = "[green]ok[/green]" if report["ok"] else "[red]failed[/red]"
-    console.print(f"cementic doctor: {doctor_status}")
-    checks = report["checks"]
-    for name, payload in checks.items():
-        if name == "extensions":
-            console.print("extensions:")
-            for extension, extension_payload in payload.items():
-                console.print(
-                    f"  - {extension}: {extension_payload['status']} "
-                    f"({extension_payload['message']})"
-                )
-            continue
-        status_text = payload.get("status", "unknown")
-        message = payload.get("message")
-        console.print(f"{name}: {status_text}" + (f" — {message}" if message else ""))
-
-
-def _print_status_summary(
-    supervisor_collection: str,
-    directories: list[str],
-    source_watcher_status: Any,
-    pipeline_worker_status: Any,
-    health: Any,
-    verbose: bool,
-) -> None:
-    """Print the concise worker + health summary; full detail behind --verbose."""
-    source_running = source_watcher_status.process == "running"
-    pipeline_running = pipeline_worker_status.process == "running"
-    running = int(source_running) + int(pipeline_running)
-    if running == 2:
-        workers = "[green]running[/green]"
-    elif running == 0:
-        workers = "[red]stopped[/red]"
-    else:
-        workers = "[yellow]partial[/yellow]"
-    console.print(f"{'workers':<11} {workers}")
-    if health is None:
-        # Say the rows are missing rather than just omitting them: a summary two
-        # rows short reads as a complete report of a healthy system, and the
-        # explanation on stderr is lost to `2>/dev/null`.
-        console.print(f"{'database':<11} [red]unknown (health check failed)[/red]")
-        console.print(f"{'embedding':<11} [red]unknown (health check failed)[/red]")
-    else:
-        console.print(f"{'database':<11} {_state(health.db_reachable, 'reachable', 'unreachable')}")
-        if health.embedding_healthy:
-            embedding_text = "[green]healthy[/green]"
-        elif _get_config().llama_cpp.daemon_autostart:
-            # Same state `status --doctor` calls a warning: not running now, but
-            # cementic starts it on demand. Not an error.
-            embedding_text = "[yellow]stopped (autostarts when needed)[/yellow]"
-        else:
-            embedding_text = "[red]unhealthy[/red]"
-        console.print(f"{'embedding':<11} {embedding_text}")
-
-    # A worker looping on a permanent failure otherwise looks exactly like a
-    # healthy idle one, so this is headline information rather than --verbose
-    # detail: without it the only evidence is a log file the user must know about.
-    for label, worker in (
-        ("source watcher", source_watcher_status),
-        ("pipeline worker", pipeline_worker_status),
-    ):
-        if worker.last_error:
-            console.print(
-                f"{'last error':<11} [red]{escape(f'{label}: {worker.last_error}')}[/red]"
-            )
-
-    # Headline, not --verbose detail: a skipped file never becomes a document,
-    # so it is absent from every pipeline count. Without this a collection whose
-    # watcher dropped a directory of symlinks still reported 100% complete and
-    # promoted cleanly, with the only evidence a number behind --verbose and a
-    # log file the user is never pointed at.
-    if source_watcher_status.failed_count:
-        console.print(
-            f"{'skipped':<11} [yellow]{source_watcher_status.failed_count} file(s) not "
-            "indexed[/yellow]" + ("" if verbose else " (run with --verbose for paths)")
-        )
-
-    if not verbose:
-        return
-
-    console.print()
-    console.print(f"session collection: {supervisor_collection}")
-    if directories:
-        console.print("directories:")
-        for directory in directories:
-            console.print(f"- {directory}")
-    console.print(
-        f"source watcher: {source_watcher_status.process}, "
-        f"state={source_watcher_status.state}, pid={source_watcher_status.pid}, "
-        f"processed={source_watcher_status.processed_count}, "
-        f"failed={source_watcher_status.failed_count}"
-    )
-    if source_watcher_status.current_file is not None:
-        console.print(f"  current file: {source_watcher_status.current_file}")
-    if source_watcher_status.skipped_files:
-        console.print("  skipped files:")
-        for entry in source_watcher_status.skipped_files:
-            console.print(f"  - {escape(entry)}")
-        recorded = len(source_watcher_status.skipped_files)
-        if source_watcher_status.failed_count > recorded:
-            console.print(
-                f"  (showing the {recorded} most recent of "
-                f"{source_watcher_status.failed_count})"
-            )
-    console.print(
-        f"pipeline worker: {pipeline_worker_status.process}, "
-        f"state={pipeline_worker_status.state}, pid={pipeline_worker_status.pid}"
-    )
-    if pipeline_worker_status.current_file is not None:
-        console.print(f"  current file: {pipeline_worker_status.current_file}")
-    if pipeline_worker_status.current_activity:
-        console.print(f"  activity: {pipeline_worker_status.current_activity}")
-        console.print("  (no other work happens until this finishes)")
-    if health is not None and health.llama_daemon != "N/A":
-        console.print(f"embedding daemon: {health.llama_daemon}")
-
-
-def _in_flight_revision_text(ready_label: str | None, building_label: str | None) -> str:
-    """Render the not-yet-active revision under the status it is actually in.
-
-    (Both summary builders used to bucket ready and building together, so a
-    finished revision was reported as `building=...` -- hiding the one fact the
-    promote workflow turns on, that there is something ready to promote.)
-    """
-    # Labels are interpolated into a markup-enabled string, so escape them: a
-    # label containing a closing tag would raise MarkupError mid-render, and one
-    # containing an opening tag would be swallowed.
-    if ready_label:
-        return f"[green]ready={escape(ready_label)}[/green]"
-    return f"building={escape(building_label) if building_label else '-'}"
-
-
-def _print_collection_detail(
-    collection: str,
-    pipeline_status: Any,
-    verbose: bool,
-) -> None:
-    """Print a concise per-collection summary; per-file detail behind --verbose."""
-    ps = pipeline_status
-    console.print(f"{'collection':<11} {collection}")
-    console.print(f"{'documents':<11} {ps.documents:,}")
-    console.print(
-        f"{'extracted':<11} {ps.extracted_done:,}/{ps.documents:,} ({ps.extraction_pct}%)"
-    )
-    console.print(
-        f"{'chunked':<11} {ps.chunked_done:,}/{ps.extracted_done:,} ({ps.chunking_pct}%)"
-    )
-    # The denominator is chunks that exist *so far*, so mid-build this can read
-    # 100% while most documents have not been chunked yet. Say so rather than
-    # implying the collection is finished.
-    #
-    # total_chunks is final only once extraction has finished *and* chunking has
-    # caught up with it -- the same two clauses as the worker's own completeness
-    # check (pipeline_worker.revision_is_complete), so status and the worker
-    # cannot disagree about whether a collection is done. Comparing chunking to
-    # `documents` instead meant one document that failed to extract could never
-    # be chunked, pinning the caveat on a collection that was in fact finished;
-    # comparing to extracted_done alone would drop the caveat mid-extraction,
-    # while more chunks were still on the way.
-    extraction_complete = ps.extracted_done + ps.extracted_failed >= ps.documents
-    chunking_complete = extraction_complete and (
-        ps.chunked_done + ps.chunked_failed >= ps.extracted_done
-    )
-    embedded_suffix = "" if chunking_complete else " of chunks created so far"
-    console.print(
-        f"{'embedded':<11} {ps.done_embeddings:,}/{ps.total_chunks:,} "
-        f"({ps.embedding_pct}%{embedded_suffix})"
-    )
-    console.print(
-        f"{'revision':<11} active={ps.active_revision_label or '-'}  "
-        f"{_in_flight_revision_text(ps.ready_revision_label, ps.building_revision_label)}"
-    )
-    if ps.ready_revision_label:
-        console.print(
-            f"{'':<11} run `cementic collection promote {collection}` to serve it"
-        )
-    failures = []
-    if ps.extracted_failed:
-        failures.append(f"extract={ps.extracted_failed}")
-    if ps.chunked_failed:
-        failures.append(f"chunk={ps.chunked_failed}")
-    if ps.failed_embeddings:
-        failures.append(f"embed={ps.failed_embeddings}")
-    if failures:
-        console.print(f"{'failures':<11} {', '.join(failures)}")
-
-    if verbose and collection:
-        try:
-            files = load_file_progress(_get_config(), collection)
-            if not files:
-                console.print("files: none")
-                return
-            console.print("files:")
-            for f in files:
-                status_line = (
-                    f"- {f.source_path} | extract={f.extraction_status}"
-                    f" | chunk={f.chunking_status}"
-                    f" | embeddings={f.embeddings_done}/{f.embeddings_total}"
-                )
-                if f.embeddings_failed:
-                    status_line += f" (failed: {f.embeddings_failed})"
-                if f.error_message:
-                    status_line += f" | error: {f.error_message[:80]}"
-                console.print(status_line)
-        except Exception as error:
-            # This used to be swallowed at exit 0 (and the database-unavailable
-            # case printed nothing at all), so a truncated report read as the
-            # complete answer.
-            err_console.print(f"files: could not be listed: {error}")
-            raise typer.Exit(1)
-
-
-def _print_status_json(
-    supervisor_status: Any,
-    source_watcher_status: Any,
-    pipeline_worker_status: Any,
-    directories: list[str],
-    health: Any,
-    health_error: str | None,
-    collection: str | None,
-    verbose: bool,
-) -> bool:
-    """Print full status as JSON. Returns whether the pipeline section failed."""
-    output: dict[str, Any] = {
-        "supervisor": {
-            "state": supervisor_status.state,
-            "collection": supervisor_status.collection,
-            "directories": directories,
-        },
-        "source_watcher": {
-            "process": source_watcher_status.process,
-            "state": source_watcher_status.state,
-            "pid": source_watcher_status.pid,
-            "processed": source_watcher_status.processed_count,
-            "failed": source_watcher_status.failed_count,
-            "skipped_files": source_watcher_status.skipped_files,
-            "current_file": source_watcher_status.current_file,
-            "last_error": source_watcher_status.last_error,
-            "last_error_at": source_watcher_status.last_error_at,
-        },
-        "pipeline_worker": {
-            "process": pipeline_worker_status.process,
-            "state": pipeline_worker_status.state,
-            "pid": pipeline_worker_status.pid,
-            "current_file": pipeline_worker_status.current_file,
-            "last_error": pipeline_worker_status.last_error,
-            "last_error_at": pipeline_worker_status.last_error_at,
-            "current_activity": pipeline_worker_status.current_activity,
-        },
-    }
-
-    if health is not None:
-        output["health"] = {
-            "db_reachable": health.db_reachable,
-            "embedding_provider": health.embedding_provider,
-            "embedding_healthy": health.embedding_healthy,
-            "llama_daemon": health.llama_daemon,
-        }
-    elif health_error is not None:
-        # Same keys, nulled, plus the reason: replacing the whole object made
-        # `d["health"]["db_reachable"]` raise KeyError for a consumer that had
-        # no way to know the shape could change.
-        output["health"] = {
-            "db_reachable": None,
-            "embedding_provider": None,
-            "embedding_healthy": None,
-            "llama_daemon": None,
-            "error": health_error,
-        }
-
-    try:
-        with _db_session() as session:
-            if collection is None:
-                rows = list_collections(session)
-                status_by_collection = load_pipeline_status_bulk(
-                    _get_config(), [row.name for row in rows]
-                )
-                # asdict: PipelineStatus *is* the JSON contract, so a hand-kept
-                # key list here (which existed twice, identically) is a copy
-                # waiting to drift, not one that had already drifted.
-                output["collections"] = {
-                    row.name: asdict(status_by_collection[row.name]) for row in rows
-                }
-            else:
-                # Mirror _require_known_collection on the human path: a typo'd
-                # name otherwise produced a full zero-filled pipeline block at
-                # exit 0, indistinguishable from a real collection not started.
-                if not collection_exists(session, collection):
-                    raise ValueError(
-                        f"unknown collection: {collection}"
-                        " (check `cementic collection list`)"
-                    )
-                ps = load_pipeline_status(_get_config(), collection)
-                output["pipeline"] = {"collection": collection, **asdict(ps)}
-                if verbose:
-                    files = load_file_progress(_get_config(), collection)
-                    output["files"] = [asdict(f) for f in files]
-        failed = False
-    except Exception as error:
-        output["error"] = _NO_SCHEMA_HINT if _is_schema_missing(error) else str(error)
-        failed = True
-
-    typer.echo(json.dumps(output, indent=2, default=str))
-    return failed
 
 
 @app.command(
@@ -1205,7 +807,7 @@ def status(
         if json_output:
             typer.echo(json.dumps(report, indent=2, sort_keys=True))
         else:
-            _print_doctor_report(report)
+            render._print_doctor_report(report)
         if not report["ok"]:
             raise typer.Exit(1)
         return
@@ -1228,7 +830,11 @@ def status(
         health_error = str(error)
 
     if json_output:
-        failed = _print_status_json(
+        document = render.build_status_document(
+            _db_session,
+            _is_schema_missing,
+            _NO_SCHEMA_HINT,
+            _get_config(),
             supervisor_status,
             source_watcher_status,
             pipeline_worker_status,
@@ -1238,17 +844,19 @@ def status(
             collection,
             verbose,
         )
+        failed = render.print_status_document(document)
         if failed:
             raise typer.Exit(1)
         return
 
-    _print_status_summary(
+    render._print_status_summary(
         supervisor_status.collection,
         directories,
         source_watcher_status,
         pipeline_worker_status,
         health,
         verbose,
+        _get_config(),
     )
     if health is None and health_error is not None:
         err_console.print(f"health: unavailable ({health_error})")
@@ -1265,7 +873,7 @@ def status(
         # cementic could not reach; every other database-backed command exits 1.
         raise typer.Exit(1)
 
-    try:
+    with _reporting_db_errors("status"):
         with _db_session() as session:
             if collection is None:
                 rows = list_collections(session)
@@ -1298,12 +906,7 @@ def status(
             _require_known_collection(session, collection)
 
         pipeline_status = load_pipeline_status(_get_config(), collection)
-        _print_collection_detail(collection, pipeline_status, verbose)
-    except typer.Exit:
-        raise
-    except Exception as error:
-        _report_db_error(error, "status")
-        raise typer.Exit(1)
+        render._print_collection_detail(collection, pipeline_status, verbose, _get_config())
 
 
 @app.command(
@@ -1504,334 +1107,6 @@ def stop_embedding_runtime() -> None:
 def embedding_runtime_status() -> None:
     """Show configured embedding runtime service status."""
     console.print(f"embedding: {_llama_daemon_runtime_status()}")
-
-
-@collection_app.command(
-    "remove",
-    short_help="Delete a collection and its artifacts",
-    no_args_is_help=True,
-)
-def remove_collection(
-    collection: str = typer.Argument(..., help="Collection name to delete"),
-    force: bool = typer.Option(False, "--force", help="Skip confirmation prompt"),
-) -> None:
-    """Delete all documents and chunks belonging to a collection."""
-    collection = _validated_collection_name(collection)
-
-    if not force:
-        confirm = typer.confirm(f"Delete collection '{collection}' and all associated chunks?")
-        if not confirm:
-            raise typer.Abort()
-
-    try:
-        engine = get_engine(_get_config().database.url)
-        session_factory = get_session_factory(engine)
-
-        with session_factory() as session:
-            result = delete_collection_records(session, collection)
-            if result is None:
-                console.print(f"collection: {collection}")
-                console.print("status: not found")
-                return
-    except typer.Exit:
-        # typer.Exit subclasses RuntimeError, so the broad handler below
-        # would otherwise swallow a deliberate exit and re-report it as
-        # "failed: 1".
-        raise
-    except Exception as e:
-        _report_db_error(e, f"collection remove '{collection}'")
-        raise typer.Exit(1)
-
-    # The rows are committed by here, so the collection *is* deleted. Leftover
-    # artifacts/vector tables are reported as a warning rather than turning a
-    # successful delete into a reported failure.
-    console.print(f"collection: {collection}")
-    console.print("status: deleted")
-    console.print(f"documents: {result.deleted_docs}")
-    console.print(f"chunks: {result.deleted_chunks}")
-    # A running watcher re-registers the files it watches and resurrects the
-    # collection; the pipeline worker notices the deleted revision and exits on
-    # its next poll. Deleting is still allowed -- the rows cascade safely --
-    # but silently racing the watcher is not.
-    supervisor_state = _load_supervisor_state()
-    if supervisor_state.get("collection") == collection and any(
-        _is_managed_proc_alive(proc) for proc in _supervisor_processes(supervisor_state)
-    ):
-        console.print(
-            "warning: background workers are still watching this collection; "
-            "the watcher will re-register its files -- run `cementic stop` to stop them"
-        )
-    try:
-        unremoved = remove_artifacts(result.artifact_paths, config=_get_config())
-        drop_orphan_vector_tables(engine, result.vector_profile_ids)
-    except Exception as e:
-        # The delete is already committed, so this is a warning about leftovers
-        # on disk, not a failed removal. Exiting non-zero here contradicted both
-        # the comment above and the documented behaviour, and told scripts the
-        # collection had not been removed when it had.
-        console.print(f"warning: collection deleted but cleanup failed: {e}")
-        return
-    if unremoved:
-        # remove_artifacts has always returned the paths it could not remove;
-        # both callers threw the list away, so files left behind were reported
-        # only to a log file nobody is told about -- and the rows naming them
-        # are gone, so nothing can find them again.
-        console.print(f"warning: {len(unremoved)} artifact file(s) could not be removed:")
-        for path in unremoved[:5]:
-            console.print(f"  {path}")
-        if len(unremoved) > 5:
-            console.print(f"  ... and {len(unremoved) - 5} more")
-    console.print(f"vector_tables_dropped: {len(result.vector_profile_ids)}")
-
-
-@collection_app.command("list", short_help="List known collections")
-def list_collection_command() -> None:
-    """Show known collections."""
-    try:
-        with _db_session() as session:
-            rows = list_collections(session)
-
-        console.print("collections")
-        if not rows:
-            console.print("  (none)")
-            return
-
-        name_w = max(len(row.name) for row in rows)
-        doc_w = max(len(f"{row.documents:,}") for row in rows)
-        for row in rows:
-            console.print(
-                f"  {row.name:<{name_w}}   {row.documents:>{doc_w},} docs   "
-                f"active={row.active_revision_label or '-'}  "
-                f"{_in_flight_revision_text(row.ready_revision_label, row.building_revision_label)}"
-            )
-    except typer.Exit:
-        # typer.Exit subclasses RuntimeError, so the broad handler below
-        # would otherwise swallow a deliberate exit and re-report it as
-        # "failed: 1" -- which is what a bad CEMENTIC_CONFIG produced here.
-        raise
-    except Exception as error:
-        _report_db_error(error, "collection list")
-        raise typer.Exit(1)
-
-
-@collection_app.command(
-    "promote",
-    short_help="Promote a collection's ready revision to active",
-    no_args_is_help=True,
-)
-def promote_collection(
-    collection: str = typer.Argument(..., help="Collection name to promote"),
-    force: bool = typer.Option(
-        False,
-        "-f",
-        "--force",
-        help="Promote even if the ready revision built with failed documents or chunks",
-    ),
-) -> None:
-    """Promote the ready pipeline revision for one collection."""
-    collection = _validated_collection_name(collection)
-
-    try:
-        with _db_session() as session:
-            _require_known_collection(session, collection)
-            outcome = promote_ready_revision(
-                session, collection, config=_get_config(), force=force
-            )
-            # Read everything we need while the session is open. Not because
-            # attributes expire on commit -- the session factory sets
-            # expire_on_commit=False -- but because a lazy load after the
-            # session closes has no connection to load through.
-            status = outcome.status
-            counts = outcome.counts
-            unremoved = outcome.unremoved_artifacts
-            cleanup_error = outcome.cleanup_error
-            revision_label = (
-                outcome.revision.label or outcome.revision.id
-                if outcome.revision is not None
-                else None
-            )
-    except typer.Exit:
-        # typer.Exit subclasses RuntimeError, so the broad handler below
-        # would otherwise swallow a deliberate exit and re-report it as
-        # "failed: 1".
-        raise
-    except Exception as error:
-        _report_db_error(error, "collection promote")
-        raise typer.Exit(1)
-
-    if status != "promoted":
-        # A refusal is an error: exit 1 with nothing on stdout, per the stream
-        # convention in the README. These lines used to go to stdout, so
-        # `promote 2>errors.log || cat errors.log` printed nothing at all.
-        err_console.print(f"collection: {collection}")
-    else:
-        console.print(f"collection: {collection}")
-    if status == "no_ready":
-        err_console.print("status: no ready revision")
-        err_console.print("`cementic status -c` shows whether a build is still in progress")
-        # Exit 1 like every other promote that promoted nothing: this was the
-        # one no-op outcome that exited 0, so a script chaining
-        # `promote && search` proceeded as if a revision had been published.
-        raise typer.Exit(1)
-    if status == "lost_race":
-        err_console.print("status: another promote activated a revision first")
-        err_console.print(
-            "nothing was changed by this command; `cementic collection list` shows "
-            "which revision is active now"
-        )
-        raise typer.Exit(1)
-    if status == "empty":
-        err_console.print("status: nothing to promote (revision has no documents)")
-        err_console.print(
-            "promoting would retire the active revision and leave nothing searchable"
-        )
-        raise typer.Exit(1)
-    if status == "incomplete":
-        pending = []
-        if counts is not None:
-            not_extracted = counts.documents - counts.extracted_done - counts.extracted_failed
-            not_chunked = counts.extracted_done - counts.chunked_done - counts.chunked_failed
-            not_embedded = counts.total_chunks - counts.done_embeddings - counts.failed_embeddings
-            if not_extracted > 0:
-                pending.append(f"extract={not_extracted}")
-            if not_chunked > 0:
-                pending.append(f"chunk={not_chunked}")
-            if not_embedded > 0:
-                pending.append(f"embed={not_embedded}")
-        err_console.print(f"status: incomplete ({', '.join(pending)} pending)")
-        err_console.print(
-            "the revision took on new work after it was marked ready; "
-            "wait for `cementic status` to show it finished, or --force to publish it as-is"
-        )
-        raise typer.Exit(1)
-    if status == "blocked_by_failures":
-        parts = []
-        if counts is not None:
-            if counts.extracted_failed:
-                parts.append(f"extract={counts.extracted_failed}")
-            if counts.chunked_failed:
-                parts.append(f"chunk={counts.chunked_failed}")
-            if counts.failed_embeddings:
-                parts.append(f"embed={counts.failed_embeddings}")
-        err_console.print(f"status: blocked ({', '.join(parts)} failed)")
-        err_console.print("re-run with --force to promote anyway")
-        raise typer.Exit(1)
-    console.print("status: promoted")
-    console.print(f"revision: {revision_label}")
-    # Same contract as `collection remove`: the promote is committed, so
-    # leftover files are a warning, not a failure -- but they used to be
-    # discarded entirely here while remove reported them.
-    if cleanup_error is not None:
-        console.print(f"warning: promoted but cleanup failed: {cleanup_error}")
-    if unremoved:
-        console.print(f"warning: {len(unremoved)} artifact file(s) could not be removed:")
-        for path in unremoved[:5]:
-            console.print(f"  {path}")
-        if len(unremoved) > 5:
-            console.print(f"  ... and {len(unremoved) - 5} more")
-
-
-@collection_app.command(
-    "reindex",
-    short_help="Rebuild a collection's ANN index from current index config",
-    no_args_is_help=True,
-)
-def reindex_collection_command(
-    collection: str = typer.Argument(..., help="Collection name to reindex"),
-    force: bool = typer.Option(
-        False,
-        "-f",
-        "--force",
-        help="Rebuild even if the index method is unchanged (picks up hnsw_m and "
-        "ef_construction, which are fixed at build time)",
-    ),
-) -> None:
-    """Reconcile the active revision's ANN index with the current `[index]` config.
-
-    The index is built once, when a revision first completes, so editing
-    `index.method` afterwards otherwise had no effect and no way to ask for one.
-    """
-    collection = _validated_collection_name(collection)
-
-    try:
-        with _db_session() as session:
-            # Before the "this can take several minutes" line, so an unknown
-            # collection does not first announce work that will never start.
-            _require_known_collection(session, collection)
-            console.print(f"collection: {collection}")
-            console.print(
-                "building the index — this can take several minutes on a large corpus"
-            )
-            outcome = reindex_collection(
-                session, collection, config=_get_config(), force=force
-            )
-    except typer.Exit:
-        # typer.Exit subclasses RuntimeError, so the broad handler below
-        # would otherwise swallow a deliberate exit and re-report it as
-        # "failed: 1".
-        raise
-    except Exception as error:
-        _report_db_error(error, "collection reindex")
-        raise typer.Exit(1)
-
-    if outcome.status == "no_active":
-        err_console.print("status: no active revision — nothing has been promoted yet")
-        raise typer.Exit(1)
-    if outcome.status == "no_vectors":
-        console.print("status: no vectors to index")
-        return
-    if outcome.previous_method is None:
-        console.print(f"status: built ({outcome.method})")
-    elif outcome.previous_method == outcome.method:
-        console.print(f"status: rebuilt ({outcome.method})" if force else "status: unchanged")
-        if not force:
-            console.print(
-                f"the index is already {outcome.method}; --force rebuilds it anyway"
-            )
-    else:
-        console.print(f"status: rebuilt ({outcome.previous_method} -> {outcome.method})")
-
-
-@collection_app.command(
-    "revisions",
-    short_help="Show a collection's revision history",
-    no_args_is_help=True,
-)
-def list_collection_revision_command(
-    collection: str = typer.Argument(..., help="Collection name to inspect"),
-) -> None:
-    """Show revision history for one collection."""
-    collection = _validated_collection_name(collection)
-
-    try:
-        with _db_session() as session:
-            _require_known_collection(session, collection)
-            rows = list_collection_revisions(session, collection)
-            console.print(f"{'collection':<11} {collection}")
-            console.print("revisions")
-            if not rows:
-                console.print("  (none)")
-                return
-
-            id_w = max(len(str(row.id)) for row in rows)
-            status_w = max(len(row.status) for row in rows)
-            label_w = max(len(row.label or "-") for row in rows)
-            for row in rows:
-                console.print(
-                    f"  {row.id:>{id_w}}  {row.status:<{status_w}}  "
-                    f"{(row.label or '-'):<{label_w}}  "
-                    f"extract={row.extractor_profile.name} "
-                    f"chunk={row.chunk_profile.fingerprint[:8]} "
-                    f"embed={row.embedding_profile.provider}:{row.embedding_profile.fingerprint[:8]}"
-                )
-    except typer.Exit:
-        # typer.Exit subclasses RuntimeError, so the broad handler below
-        # would otherwise swallow a deliberate exit and re-report it as
-        # "failed: 1".
-        raise
-    except Exception as error:
-        _report_db_error(error, "collection revisions")
-        raise typer.Exit(1)
 
 
 @app.command(

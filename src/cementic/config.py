@@ -23,6 +23,9 @@ from pydantic_settings import (
 )
 from sqlalchemy.engine import URL, make_url
 
+from cementic.index_strategies import supported_index_methods
+from cementic.vector_store import HNSW_ITERATIVE_SCAN_MODES
+
 if sys.version_info >= (3, 11):
     import tomllib
 else:  # Python 3.10
@@ -662,8 +665,6 @@ class IndexConfig(_SectionSettings):
     def _validate_iterative_scan(cls, value: str) -> str:
         # Refused here rather than at the server: an invalid value aborts the
         # SET LOCAL, and with it the search query it was tuning.
-        from cementic.vector_store import HNSW_ITERATIVE_SCAN_MODES
-
         if value not in HNSW_ITERATIVE_SCAN_MODES:
             raise ValueError(
                 f"hnsw_iterative_scan must be one of: {', '.join(HNSW_ITERATIVE_SCAN_MODES)}"
@@ -675,8 +676,6 @@ class IndexConfig(_SectionSettings):
     def _validate_method(cls, value: str) -> str:
         # Ask the index-strategy registry rather than repeating its contents, so
         # adding a method stays a single-entry change as its module claims.
-        from cementic.index_strategies import supported_index_methods
-
         supported = supported_index_methods()
         if value not in supported:
             raise ValueError(f"index method must be one of: {', '.join(sorted(supported))}")

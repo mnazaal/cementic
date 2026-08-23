@@ -1,0 +1,49 @@
+# cementic configuration
+#
+# Precedence (low -> high): built-in defaults < this file < CEMENTIC_* env vars
+# < command-line flags. Every value below is optional; delete what you don't need.
+
+[database]
+# Postgres with the pgvector and pgvectorscale extensions. Generate a local
+# setup with `cementic init postgres ./cementic-postgres`, then start it with
+# `docker compose up -d` (or `podman compose up -d`).
+host = "localhost"
+port = 5432
+name = "cementic"
+user = "cementic"
+# password = "cementic"   # override outside local development
+
+[pipeline]
+embedding_provider = "llama-cpp"
+# Counted with tiktoken, while llama_cpp.n_ctx (512) counts the model's own
+# tokens -- for the default model one of these is up to 1.33 of the other, so
+# chunk_size must stay well under n_ctx or chunks embed truncated. Re-measure
+# with scripts/measure_chunk_context_fit.py before raising it.
+chunk_size = 320
+chunk_overlap = 80
+
+[index]
+# ANN index: "hnsw" (lower latency, more RAM) or "diskann" (disk-resident, low RAM)
+method = "hnsw"
+# Keep scanning until top_k rows survive the filter, rather than stopping after
+# ef_search candidates. Leave on unless you are on pgvector older than 0.8,
+# where it is ignored anyway.
+hnsw_iterative_scan = "relaxed_order"
+# maintenance_work_mem for index builds only. PostgreSQL's 64MB default makes an
+# HNSW build spill to disk and slow sharply; lower this on a small server.
+build_memory = "2GB"
+
+[llama_cpp]
+# Spelled exactly as the built-in default: the model path string is part of the
+# embedding profile fingerprint, so writing "./models/..." here instead would
+# mint a second profile for the same file and re-embed the whole corpus.
+model_path = "models/nomic-embed-text-v2-moe.Q8_0.gguf"
+
+[extraction]
+use_ocr = false
+
+# Optional: choose a specific extractor per file type. Unset types use the
+# registry default. Keys are bare file types; values are registered extractor
+# names (currently: "pymupdf4llm" for pdf, "plaintext" for txt/md/markdown).
+[extraction.backends]
+# pdf = "pymupdf4llm"
