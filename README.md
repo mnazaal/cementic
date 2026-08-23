@@ -517,6 +517,18 @@ mypy `strict` — so only what the tools cannot check is written down here:
   dependencies mocked. Prefer structural assertions over wall-clock budgets —
   timing assertions are load-sensitive and one of them used to fail under
   coverage instrumentation.
+- **Red-verify every regression test by breaking the fix.** A test that enters
+  below the real entry point can pass against the broken code it was written
+  for: one regression test called the fingerprint payload builder directly and
+  was green before the fix existed. Enter through the same path a user takes.
+- **Green gates are not sufficient evidence for worker, daemon or profile
+  changes.** One batch passed all six gates and still shipped three defects,
+  every one of them found by running the CLI against a real corpus — including
+  search broken after promote, and unit tests writing into
+  `~/.local/share/cementic/`. End such changes with a live run.
+- **Changing a shared blob means checking every reader.** Making the embedding
+  fingerprint path-independent silently made the daemon launch spec unusable,
+  because `config_json` was serving as both. Enumerate the callers first.
 
 ### Daemon architecture
 

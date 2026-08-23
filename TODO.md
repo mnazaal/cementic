@@ -23,6 +23,12 @@ index, versioned revisions) are documented in [PLAN.md](PLAN.md).
 - Enrich search results with document id and optional artifact path. (`collection`
   already ships — a result carries collection, source_path, content, score,
   distance and score_kind.)
+- Match database URLs with `make_url` rather than `startswith("postgresql://")`
+  (`db.py:316`). The current check skips the `gssencmode` connect-arg for
+  driver-qualified URLs like `postgresql+psycopg2://`, which a user setting
+  `CEMENTIC_DB_URL` may well write. Carried over from PLAN.md's "Deliberately
+  not done", where it was parked behind "only if `db.py` is open for another
+  reason" — a condition that has since been met twice.
 
 ## Images / multimodal
 
@@ -76,6 +82,11 @@ give it a condition someone could actually notice.
   (`_TASK_PREFIX_TOKEN_ALLOWANCE`). *Reopen when:* `config.py` is next open for
   another reason — the change touches four modules and is not worth a slot on
   its own.
+- **Publish the repo.** Nothing gates on it today; the install docs no longer
+  describe a command that cannot work. Publishing only changes whether a
+  `pipx install git+https://...` one-liner works for someone who is not the
+  author. *Reopen when:* you want to hand cementic to another person — at that
+  point README's install section goes back to the one-liner in the same commit.
 - **Restore support for Python older than 3.12.** *Reopen when:* cementic needs
   to run somewhere that cannot get 3.12. Unlikely while `uv` installs one in a
   single command, and the compatibility branch was deleted precisely because
