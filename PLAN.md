@@ -112,7 +112,10 @@ is a launch argument.
 
 **Exit:** one rebuild, verified end to end — remove, start, build, promote,
 search — against the live corpus, and `collection revisions` showing the new
-fingerprints.
+fingerprints. The `test` collection is a testbed rather than production data
+(user, 2026-08-23), so the rebuild is run directly rather than handed over. Note
+what it does and does not prove: at 274 chunks it establishes the pipeline is
+correct, not that it performs — that needs the graduated soak in "what's next".
 
 ### Batch A — the daemon's identity comes from the OS, not a file
 
