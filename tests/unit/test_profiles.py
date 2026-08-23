@@ -1,9 +1,12 @@
 """Tests for profile fingerprinting and resolution helpers."""
 
+from pathlib import Path
 from unittest.mock import MagicMock
 
 from cementic import profiles as profiles_module
 from cementic.config import Config
+from cementic.embedding_provider import EmbeddingFacts
+from cementic.embedding_runtime import runtime_spec_from_profile_json
 from cementic.profiles import (
     _fingerprint,
     _stable_json,
@@ -348,3 +351,65 @@ class TestTextPolicyIsPartOfEmbeddingIdentity:
         renamed = self._payload_for("models/renamed.gguf")
 
         assert _fingerprint(prefixed) != _fingerprint(renamed)
+
+
+def _llama_provider() -> MagicMock:
+    """A provider whose describe() looks like the llama.cpp one."""
+    provider = MagicMock()
+    provider.describe.return_value = EmbeddingFacts(
+        name="llama-cpp", embedding_dim=768, distance_metric="cosine"
+    )
+    return provider
+
+
+class TestStoredProfileCanRelaunchItsModel:
+    """The regression the live corpus caught and the suite did not.
+
+    `search` rebuilds a daemon launch spec from a stored profile's config_json.
+    When identity became a content digest, `model_identifier` became a basename
+    -- correct for the fingerprint, unusable as a path -- and every search after
+    promoting a new-scheme revision died with "Model path does not exist".
+    """
+
+    def test_stored_config_json_carries_a_resolvable_model_path(self, tmp_path) -> None:
+        """Goes through get_or_create_embedding_profile, not the payload builder.
+
+        An earlier version of this test called build_embedding_runtime_payload
+        directly and passed against the broken code, because the defect was that
+        get_or_create_embedding_profile stored the *other* payload.
+        """
+        model = tmp_path / "models" / "m.gguf"
+        model.parent.mkdir(parents=True)
+        model.write_bytes(b"gguf-bytes")
+
+        config = Config()
+        config.pipeline.embedding_provider = "llama-cpp"
+        config.llama_cpp.model_path = str(model)
+
+        session = MagicMock()
+        session.query().filter_by().first.return_value = None
+        captured: list[object] = []
+        session.add.side_effect = captured.append
+
+        get_or_create_embedding_profile(session, config, _llama_provider())
+
+        assert len(captured) == 1
+        spec = runtime_spec_from_profile_json(captured[0].config_json)
+        assert Path(spec.model_identifier) == model, (
+            "the stored profile must relaunch the model it was built with"
+        )
+        assert Path(spec.model_identifier).is_file()
+
+    def test_the_fingerprint_stays_path_independent(self, tmp_path):
+        """The launch path must not leak back into the identity, or the same
+        file under two paths forks into two profiles and re-embeds the corpus."""
+        digests = []
+        for directory in ("one", "two"):
+            model = tmp_path / directory / "m.gguf"
+            model.parent.mkdir(parents=True)
+            model.write_bytes(b"identical-bytes")
+            config = Config()
+            config.llama_cpp.model_path = str(model)
+            digests.append(_fingerprint(build_embedding_profile_payload(config, _llama_provider())))
+
+        assert digests[0] == digests[1]

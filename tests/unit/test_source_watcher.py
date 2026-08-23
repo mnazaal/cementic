@@ -402,3 +402,37 @@ class TestSourceWatcherStateManagement:
         assert state.last_error is not None
         assert "db down" in state.last_error
         assert state.last_error_at is not None
+
+
+class TestErrorStateIsRetracted:
+    """A published last_error must not outlive the condition that caused it."""
+
+    def test_a_clean_registration_clears_a_published_error(self, tmp_path):
+        """Regression: the watcher published last_error and never retracted it,
+        so `cementic status` reported one transient failure forever. Found by
+        running the CLI against the live corpus, not by the suite."""
+        watcher = SourceWatcher()
+        watcher.state_manager.state_path = tmp_path / "state.json"
+
+        with patch.object(watcher, "_register_document", side_effect=RuntimeError("db down")):
+            watcher._on_file_detected(str(tmp_path / "a.md"))
+        assert watcher.state_manager.load().last_error is not None
+
+        with patch.object(watcher, "_register_document"):
+            watcher._on_file_detected(str(tmp_path / "b.md"))
+
+        state = watcher.state_manager.load()
+        assert state.last_error is None
+        assert state.last_error_at is None
+
+    def test_a_clean_registration_does_not_write_when_nothing_was_reported(self, tmp_path):
+        """The retraction is gated: registering a file must not rewrite the
+        state file when no error is standing."""
+        watcher = SourceWatcher()
+        watcher.state_manager.state_path = tmp_path / "state.json"
+
+        with patch.object(watcher, "_register_document"):
+            with patch.object(watcher.state_manager, "update") as mock_update:
+                watcher._on_file_detected(str(tmp_path / "a.md"))
+
+        mock_update.assert_not_called()

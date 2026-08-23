@@ -196,6 +196,10 @@ class SourceWatcher:
         self.state_manager = StateManager(self.config.source_watcher.state_path)
         self._shutdown_event = threading.Event()
         self._shutdown_signal: int | None = None
+        #: Whether this process has published a last_error that is still
+        #: standing. Gates the retraction so a clean registration does not write
+        #: the state file on every single file it processes.
+        self._reported_error = False
         self.watcher: Any = None
         self._event_handler: DocumentEventHandler | None = None
         self._logger = self._setup_logging()
@@ -409,6 +413,11 @@ class SourceWatcher:
     def _on_file_detected(self, file_path: str) -> None:
         try:
             self._register_document(file_path)
+            # Mirrors the pipeline worker clearing last_error after a clean
+            # loop. Without it the watcher published errors and never retracted
+            # them, so one transient failure was reported by `cementic status`
+            # forever -- observed live 2026-08-23 against a healthy watcher.
+            self._clear_error()
         except Exception as error:
             self._logger.error("Failed to register %s: %s", file_path, error)
             # record_skipped, not a bare failed increment: the file never
@@ -438,6 +447,17 @@ class SourceWatcher:
             self.state_manager.record_skipped(dir_path, f"directory deletion failed: {error}")
             self._record_error(error)
 
+    def _clear_error(self) -> None:
+        """Retract a previously published error after a clean registration."""
+        if not self._reported_error:
+            return
+        try:
+            self.state_manager.update(last_error=None, last_error_at=None)
+        except Exception:  # pragma: no cover - never mask a successful register
+            self._logger.exception("Could not clear the source watcher error state")
+        else:
+            self._reported_error = False
+
     def _record_error(self, error: Exception) -> None:
         """Publish an event-handler failure to the worker state file.
 
@@ -453,6 +473,7 @@ class SourceWatcher:
                 last_error=message[:500],
                 last_error_at=datetime.now(timezone.utc).isoformat(),
             )
+            self._reported_error = True
         except Exception:  # pragma: no cover - state file must never mask the real error
             self._logger.exception("Could not record source watcher error to the state file")
 

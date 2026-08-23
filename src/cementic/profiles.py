@@ -227,6 +227,34 @@ def get_or_create_chunk_profile(session: Session, config: Config) -> ChunkProfil
     return profile
 
 
+def build_embedding_runtime_payload(
+    config: Config, provider: EmbeddingProvider | None = None
+) -> dict[str, object]:
+    """The profile payload plus enough to relaunch the model it names.
+
+    Split from ``build_embedding_profile_payload`` because the two answer
+    different questions and had been sharing one dict. The *fingerprint* must be
+    path-independent -- that is the whole point of identifying the model by
+    content digest, so the same file under two paths is one profile. The stored
+    ``config_json`` must be path-*dependent*, because ``search`` rebuilds a
+    daemon launch spec from it and needs a path that resolves.
+
+    Collapsing them meant the basename went into the launch spec, where
+    ``resolve_llama_model_path`` resolved it against the data dir root and
+    produced a file that does not exist -- so every search after promoting a
+    new-scheme revision died with "Model path does not exist". Found by running
+    the CLI against the live corpus; no unit test covered profile JSON reaching
+    a real daemon launch.
+    """
+    payload = build_embedding_profile_payload(config, provider)
+    spec = runtime_spec_from_config(config)
+    if spec.provider != "llama-cpp":
+        return payload
+    # Launch needs the resolved file, not the identity. The digest stays in the
+    # payload as the identity; this key is what makes the profile replayable.
+    return {**payload, "model_identifier": str(resolve_llama_model_path(spec.model_identifier))}
+
+
 def get_or_create_embedding_profile(
     session: Session, config: Config, provider: EmbeddingProvider | None = None
 ) -> EmbeddingProfile:
@@ -245,7 +273,7 @@ def get_or_create_embedding_profile(
             model_identifier=model_identifier,
             embedding_dim=embedding_dim,
             distance_metric=distance_metric,
-            config_json=_stable_json(payload),
+            config_json=_stable_json(build_embedding_runtime_payload(config, provider)),
         )
         session.add(profile)
         session.flush()

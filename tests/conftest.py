@@ -37,6 +37,27 @@ def _isolate_user_config(
     monkeypatch.setattr("cementic.config.user_config_dir", lambda *a, **k: str(empty))
 
 
+@pytest.fixture(autouse=True)
+def _isolate_user_data_dir(
+    monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory
+) -> None:
+    """Keep tests hermetic: never write into the developer's real data directory.
+
+    The config-file isolation above covers where settings are *read* from; this
+    covers where state, artifacts and the model cache are *written*. Without it
+    a test that constructs a real worker gets a StateManager pointed at
+    ``~/.local/share/cementic/``: a `SourceWatcher()` built in a unit test wrote
+    `last_error: "RuntimeError: db down"` into the live state file, where
+    `cementic status` then reported it as a real failure of a healthy watcher.
+    Found by running the CLI against the live corpus, not by the suite.
+
+    Defaults are derived from this directory, so it must be patched before any
+    Config is constructed -- hence autouse and session-independent.
+    """
+    data_dir = tmp_path_factory.mktemp("cementic-data")
+    monkeypatch.setattr("cementic.config.user_data_dir", lambda *a, **k: str(data_dir))
+
+
 @pytest.fixture
 def temp_dir() -> Generator[Path, None, None]:
     """Provide a temporary directory for tests."""
