@@ -25,6 +25,7 @@ from cementic.embedding_text import (
 )
 from cementic.filelock import file_lock
 from cementic.supervisor import (
+    find_pids_by_cmdline,
     is_managed_process_alive,
     process_start_token,
     spawn_detached,
@@ -133,7 +134,7 @@ def llama_cpp_runtime_fingerprint(
     """
     payload = json.dumps(
         {
-            "model_path": model_path,
+            "model_path": str(resolve_llama_model_path(model_path)),
             "n_ctx": n_ctx,
             # The batch size caps how many tokens the server will embed per
             # input, so it changes what the daemon does. It also has to be in
@@ -722,16 +723,107 @@ def _read_daemon_pid_file(pid_file: Path) -> tuple[int, str | None] | None:
     return None
 
 
-def _live_daemon_pid(config: Config) -> int | None:
-    """Return the daemon's PID if its pid-file names a still-alive process."""
+class AmbiguousDaemonPidsError(RuntimeError):
+    """More than one process matches this daemon's identity criteria.
+
+    Recovery never guesses which one to treat as *the* daemon -- it refuses
+    and names every candidate so a human can decide.
+    """
+
+    def __init__(self, pids: list[int]) -> None:
+        self.pids = sorted(pids)
+        joined = ", ".join(str(pid) for pid in self.pids)
+        super().__init__(
+            "found multiple processes matching this llama.cpp daemon's identity "
+            f"(pids: {joined}); refusing to guess which one to treat as the daemon"
+        )
+
+
+def _cmdline_has_adjacent_pair(cmdline: list[str], flag: str, value: str) -> bool:
+    """Whether ``flag`` is immediately followed by ``value`` somewhere in ``cmdline``."""
+    for i in range(len(cmdline) - 1):
+        if cmdline[i] == flag and cmdline[i + 1] == value:
+            return True
+    return False
+
+
+def _matches_llama_daemon_cmdline(cmdline: list[str], *, port: int, model_alias: str) -> bool:
+    """Whether ``cmdline`` is a process `_start_llama_cpp_daemon` could have spawned.
+
+    All three of the criteria below are required, mirroring the exact
+    arguments that command builds (see ``_start_llama_cpp_daemon``): running
+    llama.cpp's own server module, on our configured port, serving *this*
+    runtime's fingerprint as its ``--model_alias``. Matching the alias is what
+    proves the process is ours and current, not merely some llama.cpp server.
+    """
+    return (
+        _cmdline_has_adjacent_pair(cmdline, "-m", "llama_cpp.server")
+        and _cmdline_has_adjacent_pair(cmdline, "--port", str(port))
+        and _cmdline_has_adjacent_pair(cmdline, "--model_alias", model_alias)
+    )
+
+
+def _recover_daemon_pid(config: Config, pid_file: Path) -> int | None:
+    """Find a live daemon for the current config directly from the OS.
+
+    The pid file couldn't confirm one -- missing, unreadable, or naming a dead
+    process -- so this matches the exact command line `_start_llama_cpp_daemon`
+    spawns it with, uid-filtered to the current user. On a single match, the
+    pid file is rewritten so later calls don't repeat the scan: a recovery that
+    leaves the record missing fixes the symptom and keeps the defect.
+
+    Raises AmbiguousDaemonPidsError rather than ever guessing among more than
+    one match.
+    """
+    try:
+        port = config.llama_cpp.daemon_port
+        fingerprint = build_llama_cpp_client(config).expected_fingerprint
+    except Exception:
+        # Cannot determine the runtime this config expects to be serving --
+        # wrong/misconfigured provider, or (in tests) a config double that
+        # doesn't model this far. No expected identity means no match is
+        # possible; degrade to "not recoverable" rather than raising out of
+        # what used to be a side-effect-free pid-file read.
+        return None
+    candidates = find_pids_by_cmdline(
+        lambda cmdline: _matches_llama_daemon_cmdline(cmdline, port=port, model_alias=fingerprint)
+    )
+    if not candidates:
+        return None
+    if len(candidates) > 1:
+        raise AmbiguousDaemonPidsError(candidates)
+    pid = candidates[0]
+    try:
+        _write_daemon_pid_file(pid_file, pid)
+    except OSError:
+        pass  # recovered the identity even if we couldn't persist it
+    return pid
+
+
+def _live_daemon_pid_with_source(config: Config) -> tuple[int | None, bool]:
+    """Return ``(pid, recovered)``: the daemon's PID, and whether it took a
+    `/proc` recovery (missing/stale pid file) to find it.
+
+    Raises AmbiguousDaemonPidsError if recovery finds more than one candidate.
+    """
     pid_file = config.llama_cpp.daemon_pid_file
-    if pid_file is None or not pid_file.exists():
-        return None
-    record = _read_daemon_pid_file(pid_file)
-    if record is None:
-        return None
-    pid, token = record
-    return pid if is_managed_process_alive(pid, token) else None
+    if pid_file is not None and pid_file.exists():
+        record = _read_daemon_pid_file(pid_file)
+        if record is not None:
+            pid, token = record
+            if is_managed_process_alive(pid, token):
+                return pid, False
+    if pid_file is None:
+        return None, False
+    recovered_pid = _recover_daemon_pid(config, pid_file)
+    return recovered_pid, recovered_pid is not None
+
+
+def _live_daemon_pid(config: Config) -> int | None:
+    """Return the daemon's PID if its pid-file names a still-alive process, or
+    if a matching process can be recovered from `/proc` when it doesn't."""
+    pid, _recovered = _live_daemon_pid_with_source(config)
+    return pid
 
 
 def _daemon_pid_alive(config: Config) -> bool:
@@ -739,9 +831,21 @@ def _daemon_pid_alive(config: Config) -> bool:
 
 
 def llama_daemon_status(config: Config) -> str:
-    """Human-readable status of the llama.cpp daemon from its pid-file."""
-    pid = _live_daemon_pid(config)
-    return f"running, pid={pid}" if pid is not None else "stopped"
+    """Human-readable status of the llama.cpp daemon.
+
+    A missing or stale pid file is itself a fault worth seeing -- even once
+    it's survivable via `/proc` recovery -- so a recovered daemon is reported
+    as such rather than looking indistinguishable from the normal case.
+    """
+    try:
+        pid, recovered = _live_daemon_pid_with_source(config)
+    except AmbiguousDaemonPidsError as error:
+        return f"ambiguous: {error}"
+    if pid is None:
+        return "stopped"
+    if recovered:
+        return f"running, pid={pid} (recovered: pid file was missing or stale)"
+    return f"running, pid={pid}"
 
 
 def _stop_mismatched_llama_cpp_daemon(config: Config) -> None:
@@ -763,17 +867,27 @@ def _stop_mismatched_llama_cpp_daemon(config: Config) -> None:
 
 
 def stop_llama_cpp_runtime(config: Config) -> bool:
-    """Stop the configured llama.cpp daemon if a live PID file exists.
+    """Stop the configured llama.cpp daemon, recovering its pid record first if
+    it's missing or stale.
 
-    Runs under the same daemon file lock as start/autostart: unlocked, a stop
-    racing a concurrent autostart could kill the freshly started daemon or
-    unlink the pid file it had just written -- recreating exactly the orphan
-    (daemon holding the port with no record) the lock exists to prevent.
+    Without the recovery attempt, a lost pid record made this report "already
+    stopped" for a daemon that was still holding the port -- observed live,
+    where it stalled a re-index for hours. Runs under the same daemon file
+    lock as start/autostart: unlocked, a stop racing a concurrent autostart
+    could kill the freshly started daemon or unlink the pid file it had just
+    written -- recreating exactly the orphan the lock exists to prevent.
     """
     pid_file = config.llama_cpp.daemon_pid_file
-    if pid_file is None or not pid_file.exists():
+    if pid_file is None:
         return False
     with file_lock(_daemon_lock_path(config), timeout=_DAEMON_LOCK_TIMEOUT_SECONDS):
+        if _live_daemon_pid(config) is None:
+            # Nothing recorded and nothing recoverable -- genuinely stopped, or
+            # a stale record naming a dead process either way.
+            pid_file.unlink(missing_ok=True)
+            return False
+        # A recovery above already repaired the pid file, so it now names a
+        # confirmed-live process; proceed with the normal signal-and-wait path.
         return _stop_llama_cpp_runtime_locked(config, pid_file)
 
 

@@ -10,6 +10,7 @@ import requests
 from cementic.config import Config, resolve_llama_model_path
 from cementic.embedding_provider import EmbeddingProvider
 from cementic.embedding_runtime import (
+    AmbiguousDaemonPidsError,
     DaemonHealth,
     EmbeddingRuntimeSpec,
     RemoteEmbeddingClient,
@@ -17,6 +18,7 @@ from cementic.embedding_runtime import (
     _start_llama_cpp_daemon,
     _stop_mismatched_llama_cpp_daemon,
     _wait_for_daemon_ready,
+    build_llama_cpp_client,
     create_provider,
     get_llama_cpp_runtime_client,
     llama_cpp_runtime_fingerprint,
@@ -943,12 +945,17 @@ class TestDaemonPidFile:
         pid_file.write_text("not-a-pid")
         assert _read_daemon_pid_file(pid_file) is None
 
+    @patch("cementic.embedding_runtime.find_pids_by_cmdline", return_value=[])
     @patch("cementic.embedding_runtime.os.kill")
     @patch("cementic.embedding_runtime.is_managed_process_alive", return_value=False)
     def test_stop_does_not_kill_recycled_pid(
-        self, mock_alive, mock_kill, temp_dir
+        self, mock_alive, mock_kill, mock_scan, temp_dir
     ) -> None:
-        """A token mismatch (recycled PID) must not be signalled."""
+        """A token mismatch (recycled PID) must not be signalled.
+
+        No recoverable process either (the /proc scan is mocked empty here,
+        not the recovery path under test), so this is genuinely stopped.
+        """
         pid_file = temp_dir / "daemon.pid"
         pid_file.write_text(json.dumps({"pid": 4321, "start_token": "stale"}))
         config = Config()
@@ -958,7 +965,8 @@ class TestDaemonPidFile:
         mock_kill.assert_not_called()
         assert not pid_file.exists()
 
-    def test_status_stopped_when_no_pid_file(self, temp_dir) -> None:
+    @patch("cementic.embedding_runtime.find_pids_by_cmdline", return_value=[])
+    def test_status_stopped_when_no_pid_file(self, mock_scan, temp_dir) -> None:
         config = Config()
         config.llama_cpp.daemon_pid_file = temp_dir / "missing.pid"
         assert llama_daemon_status(config) == "stopped"
@@ -972,6 +980,181 @@ class TestDaemonPidFile:
         status = llama_daemon_status(config)
         assert "running" in status
         assert "4321" in status
+
+
+class TestDaemonRecoveryFromProc:
+    """Batch A: an orphaned daemon -- pid file missing or stale -- can be
+    recovered straight from the OS, by matching the exact command line
+    `_start_llama_cpp_daemon` spawns it with, and the pid file is repaired.
+
+    Fakes `/proc` under `tmp_path` (never spawns real processes) and always
+    goes through the real entry points (`llama_daemon_status`,
+    `stop_llama_cpp_runtime`): a test that called the recovery helper
+    directly would pass against the pre-fix code too, which is the exact
+    mistake Batch C made.
+    """
+
+    @staticmethod
+    def _write_daemon_entry(proc_root, pid: int, *, port: int, model_alias: str) -> None:
+        pid_dir = proc_root / str(pid)
+        pid_dir.mkdir(parents=True)
+        argv = [
+            "/usr/bin/python3",
+            "-m",
+            "llama_cpp.server",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            str(port),
+            "--model",
+            "/models/whatever.gguf",
+            "--model_alias",
+            model_alias,
+        ]
+        (pid_dir / "cmdline").write_bytes("\0".join(argv).encode("utf-8") + b"\0")
+
+    @staticmethod
+    def _config(temp_dir) -> Config:
+        config = Config()
+        config.llama_cpp.daemon_pid_file = temp_dir / "daemon.pid"
+        return config
+
+    def test_missing_pid_file_matching_process_is_recovered_and_pid_file_repaired(
+        self, temp_dir, tmp_path
+    ) -> None:
+        config = self._config(temp_dir)
+        fingerprint = build_llama_cpp_client(config).expected_fingerprint
+        self._write_daemon_entry(
+            tmp_path, 4242, port=config.llama_cpp.daemon_port, model_alias=fingerprint
+        )
+
+        assert not config.llama_cpp.daemon_pid_file.exists()
+        with patch("cementic.supervisor._PROC_ROOT", tmp_path):
+            status = llama_daemon_status(config)
+
+        assert "running, pid=4242" in status
+        assert "recovered" in status
+        record = json.loads(config.llama_cpp.daemon_pid_file.read_text())
+        assert record["pid"] == 4242
+
+    def test_missing_pid_file_process_on_a_different_port_is_not_matched(
+        self, temp_dir, tmp_path
+    ) -> None:
+        config = self._config(temp_dir)
+        fingerprint = build_llama_cpp_client(config).expected_fingerprint
+        self._write_daemon_entry(
+            tmp_path, 4242, port=config.llama_cpp.daemon_port + 1, model_alias=fingerprint
+        )
+
+        with patch("cementic.supervisor._PROC_ROOT", tmp_path):
+            status = llama_daemon_status(config)
+
+        assert status == "stopped"
+        assert not config.llama_cpp.daemon_pid_file.exists()
+
+    def test_missing_pid_file_process_with_a_different_model_alias_is_not_matched(
+        self, temp_dir, tmp_path
+    ) -> None:
+        config = self._config(temp_dir)
+        self._write_daemon_entry(
+            tmp_path,
+            4242,
+            port=config.llama_cpp.daemon_port,
+            model_alias="some-other-runtimes-fingerprint",
+        )
+
+        with patch("cementic.supervisor._PROC_ROOT", tmp_path):
+            status = llama_daemon_status(config)
+
+        assert status == "stopped"
+        assert not config.llama_cpp.daemon_pid_file.exists()
+
+    def test_two_matching_processes_refuses_and_names_both(self, temp_dir, tmp_path) -> None:
+        config = self._config(temp_dir)
+        fingerprint = build_llama_cpp_client(config).expected_fingerprint
+        self._write_daemon_entry(
+            tmp_path, 4242, port=config.llama_cpp.daemon_port, model_alias=fingerprint
+        )
+        self._write_daemon_entry(
+            tmp_path, 4343, port=config.llama_cpp.daemon_port, model_alias=fingerprint
+        )
+
+        with patch("cementic.supervisor._PROC_ROOT", tmp_path):
+            status = llama_daemon_status(config)
+
+        assert "ambiguous" in status
+        assert "4242" in status
+        assert "4343" in status
+        # Refusing means refusing: never write a pid file naming a guess.
+        assert not config.llama_cpp.daemon_pid_file.exists()
+
+    def test_ambiguous_recovery_raises_for_callers_that_decide_whether_to_spawn(
+        self, temp_dir, tmp_path
+    ) -> None:
+        """`_daemon_pid_alive` (used to decide whether to autostart a
+        competing daemon) must not silently pick one -- it has to raise."""
+        from cementic.embedding_runtime import _daemon_pid_alive
+
+        config = self._config(temp_dir)
+        fingerprint = build_llama_cpp_client(config).expected_fingerprint
+        self._write_daemon_entry(
+            tmp_path, 4242, port=config.llama_cpp.daemon_port, model_alias=fingerprint
+        )
+        self._write_daemon_entry(
+            tmp_path, 4343, port=config.llama_cpp.daemon_port, model_alias=fingerprint
+        )
+
+        with (
+            patch("cementic.supervisor._PROC_ROOT", tmp_path),
+            pytest.raises(AmbiguousDaemonPidsError),
+        ):
+            _daemon_pid_alive(config)
+
+    def test_no_proc_degrades_to_not_running_never_raises(self, temp_dir) -> None:
+        config = self._config(temp_dir)
+        with patch("cementic.supervisor._PROC_ROOT", temp_dir / "no-such-proc-here"):
+            status = llama_daemon_status(config)
+        assert status == "stopped"
+
+    def test_process_owned_by_another_uid_is_not_matched(self, temp_dir, tmp_path) -> None:
+        config = self._config(temp_dir)
+        fingerprint = build_llama_cpp_client(config).expected_fingerprint
+        self._write_daemon_entry(
+            tmp_path, 4242, port=config.llama_cpp.daemon_port, model_alias=fingerprint
+        )
+
+        with (
+            patch("cementic.supervisor._PROC_ROOT", tmp_path),
+            patch("cementic.supervisor.os.getuid", return_value=999999),
+        ):
+            status = llama_daemon_status(config)
+
+        assert status == "stopped"
+        assert not config.llama_cpp.daemon_pid_file.exists()
+
+    def test_stop_recovers_a_lost_pid_file_and_actually_stops_the_daemon(
+        self, temp_dir, tmp_path
+    ) -> None:
+        """The Batch A exit criterion: with the pid file deleted by hand,
+        `embedding stop` must actually stop the daemon rather than report
+        'already stopped'."""
+        config = self._config(temp_dir)
+        fingerprint = build_llama_cpp_client(config).expected_fingerprint
+        self._write_daemon_entry(
+            tmp_path, 4242, port=config.llama_cpp.daemon_port, model_alias=fingerprint
+        )
+
+        with (
+            patch("cementic.supervisor._PROC_ROOT", tmp_path),
+            patch("cementic.embedding_runtime.is_managed_process_alive", return_value=True),
+            patch("cementic.embedding_runtime.os.kill") as mock_kill,
+            patch("cementic.embedding_runtime.wait_for_exit", return_value=[]),
+        ):
+            stopped = stop_llama_cpp_runtime(config)
+
+        assert stopped is True
+        mock_kill.assert_any_call(4242, 15)  # signal.SIGTERM
+        assert not config.llama_cpp.daemon_pid_file.exists()
 
 
 def test_runtime_fingerprint_tracks_the_batch_size() -> None:
@@ -1109,3 +1292,37 @@ class TestProbeEmbedding:
             server.shutdown()
             server.server_close()
             thread.join(timeout=2)
+
+
+class TestRuntimeFingerprintIsPathSpellingIndependent:
+    """One model file must have one alias, however its path was written.
+
+    Indexing builds its runtime spec from config (a relative
+    `models/x.gguf`); search builds one from the stored profile, which carries
+    the resolved absolute path. Hashing the raw string gave the same file two
+    aliases, so each side saw the other's daemon as mismatched and restarted it
+    -- the same failure `embedding_dim` is excluded from this fingerprint for.
+    """
+
+    def test_relative_and_absolute_spellings_agree(self, tmp_path, monkeypatch) -> None:
+        model = tmp_path / "models" / "m.gguf"
+        model.parent.mkdir(parents=True)
+        model.write_bytes(b"gguf")
+        monkeypatch.chdir(tmp_path)
+
+        kwargs = {"n_ctx": 512, "n_batch": 512, "n_gpu_layers": 0, "verbose": False}
+        relative = llama_cpp_runtime_fingerprint(model_path="models/m.gguf", **kwargs)
+        absolute = llama_cpp_runtime_fingerprint(model_path=str(model), **kwargs)
+
+        assert relative == absolute
+
+    def test_genuinely_different_models_still_differ(self, tmp_path, monkeypatch) -> None:
+        for name in ("a.gguf", "b.gguf"):
+            (tmp_path / "models").mkdir(exist_ok=True)
+            (tmp_path / "models" / name).write_bytes(b"gguf")
+        monkeypatch.chdir(tmp_path)
+
+        kwargs = {"n_ctx": 512, "n_batch": 512, "n_gpu_layers": 0, "verbose": False}
+        assert llama_cpp_runtime_fingerprint(
+            model_path="models/a.gguf", **kwargs
+        ) != llama_cpp_runtime_fingerprint(model_path="models/b.gguf", **kwargs)

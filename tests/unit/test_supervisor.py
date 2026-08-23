@@ -5,6 +5,7 @@ from unittest.mock import patch
 
 from cementic.supervisor import (
     ManagedProcess,
+    find_pids_by_cmdline,
     force_kill,
     is_managed_process_alive,
     is_pid_running,
@@ -314,3 +315,65 @@ def test_a_genuinely_different_start_token_is_still_a_mismatch():
         patch("cementic.supervisor.process_start_token", return_value="other"),
     ):
         assert is_managed_process_alive(4321, "a-recorded-token") is False
+
+
+class TestFindPidsByCmdline:
+    """Tests for find_pids_by_cmdline: the /proc scan that lets a daemon be
+    recovered from the OS when its pid-file record is gone."""
+
+    @staticmethod
+    def _write_entry(proc_root: Path, pid: int, argv: list[str]) -> None:
+        pid_dir = proc_root / str(pid)
+        pid_dir.mkdir(parents=True)
+        (pid_dir / "cmdline").write_bytes("\0".join(argv).encode("utf-8") + b"\0")
+
+    def test_matches_by_predicate(self, tmp_path: Path) -> None:
+        self._write_entry(tmp_path, 111, ["python", "-m", "llama_cpp.server", "--port", "8083"])
+        self._write_entry(tmp_path, 222, ["other-process", "--flag"])
+        matches = find_pids_by_cmdline(lambda argv: "llama_cpp.server" in argv, proc_root=tmp_path)
+        assert matches == [111]
+
+    def test_no_match_returns_empty(self, tmp_path: Path) -> None:
+        self._write_entry(tmp_path, 111, ["other-process"])
+        matches = find_pids_by_cmdline(lambda argv: "llama_cpp.server" in argv, proc_root=tmp_path)
+        assert matches == []
+
+    def test_multiple_matches_all_returned(self, tmp_path: Path) -> None:
+        self._write_entry(tmp_path, 111, ["a", "match"])
+        self._write_entry(tmp_path, 222, ["b", "match"])
+        matches = find_pids_by_cmdline(lambda argv: "match" in argv, proc_root=tmp_path)
+        assert sorted(matches) == [111, 222]
+
+    def test_non_pid_directories_are_ignored(self, tmp_path: Path) -> None:
+        self_dir = tmp_path / "self"
+        self_dir.mkdir()
+        (self_dir / "cmdline").write_bytes(b"match\0")
+        matches = find_pids_by_cmdline(lambda argv: True, proc_root=tmp_path)
+        assert matches == []
+
+    def test_owner_uid_mismatch_is_excluded(self, tmp_path: Path) -> None:
+        """A process another user owns must never be returned, even if its
+        command line matches -- the match criteria alone are not enough."""
+        self._write_entry(tmp_path, 111, ["match"])
+        with patch("cementic.supervisor.os.getuid", return_value=999999):
+            matches = find_pids_by_cmdline(lambda argv: True, proc_root=tmp_path)
+        assert matches == []
+
+    def test_missing_proc_root_degrades_to_empty(self, tmp_path: Path) -> None:
+        matches = find_pids_by_cmdline(lambda argv: True, proc_root=tmp_path / "does-not-exist")
+        assert matches == []
+
+    def test_pid_dir_without_cmdline_is_skipped_not_raised(self, tmp_path: Path) -> None:
+        (tmp_path / "111").mkdir()
+        matches = find_pids_by_cmdline(lambda argv: True, proc_root=tmp_path)
+        assert matches == []
+
+    def test_patching_proc_root_redirects_the_default(self, tmp_path: Path) -> None:
+        """Callers that don't pass ``proc_root`` (every real caller) must still
+        be redirectable in tests by patching the module constant -- this is
+        the mechanism embedding_runtime's daemon-recovery tests rely on to
+        fake `/proc` while still calling through the real entry point."""
+        self._write_entry(tmp_path, 111, ["match"])
+        with patch("cementic.supervisor._PROC_ROOT", tmp_path):
+            matches = find_pids_by_cmdline(lambda argv: "match" in argv)
+        assert matches == [111]

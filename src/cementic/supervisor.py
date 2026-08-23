@@ -8,9 +8,15 @@ import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import cast
+from typing import Callable, cast
 
 SupervisorState = dict[str, object]
+
+#: Root of the `/proc` filesystem `find_pids_by_cmdline` scans. A module-level
+#: constant (rather than a hardcoded literal) so tests can point it at a fake
+#: tree under `tmp_path` while still exercising the real scan logic, the same
+#: way `Path.read_text` is patched to fake `/proc/<pid>/stat` above.
+_PROC_ROOT = Path("/proc")
 
 
 @dataclass
@@ -58,6 +64,66 @@ def _proc_stat_fields(pid: int) -> list[str] | None:
         return stat[stat.rindex(")") + 2 :].split()
     except ValueError:
         return None
+
+
+def _proc_cmdline(pid_dir: Path) -> list[str] | None:
+    """Argv of a `/proc/<pid>/cmdline` file as a list, or None.
+
+    ``cmdline`` is NUL-separated (not space-separated like ``stat``), so a
+    value containing a space -- a fingerprint hex digest never does, but a
+    filesystem path might -- is not split apart. Returns None on any platform
+    without `/proc`, an unreadable entry, or a process that's gone, mirroring
+    ``_proc_stat_fields``'s degrade rule.
+    """
+    try:
+        raw = (pid_dir / "cmdline").read_bytes()
+    except OSError:
+        return None
+    if not raw:
+        return None
+    return raw.decode("utf-8", errors="replace").rstrip("\0").split("\0")
+
+
+def find_pids_by_cmdline(
+    match: Callable[[list[str]], bool], *, proc_root: Path | None = None
+) -> list[int]:
+    """PIDs of *this user's* processes whose `/proc/<pid>/cmdline` satisfies ``match``.
+
+    Used to recover a daemon's identity from the OS when its pid-file record is
+    missing or stale, by matching the exact command line it was spawned with --
+    never by scanning for "whatever is on the port". A process owned by another
+    uid is never returned, even if its command line matches.
+
+    ``proc_root`` defaults to module-level ``_PROC_ROOT`` (looked up at call
+    time, not baked in as a default value) so tests can patch that constant and
+    still exercise this function through a real caller, without every caller
+    needing to thread a ``proc_root`` parameter through.
+
+    Degrades to ``[]`` on any platform without `/proc`, or when it can't be
+    listed -- exactly as ``_proc_stat_fields`` degrades to None. Never raises.
+    """
+    root = proc_root if proc_root is not None else _PROC_ROOT
+    try:
+        entries = os.listdir(root)
+    except OSError:
+        return []
+    my_uid = os.getuid()
+    matches: list[int] = []
+    for name in entries:
+        if not name.isdigit():
+            continue
+        pid_dir = root / name
+        cmdline = _proc_cmdline(pid_dir)
+        if cmdline is None or not match(cmdline):
+            continue
+        try:
+            owner_uid = pid_dir.stat().st_uid
+        except OSError:
+            continue
+        if owner_uid != my_uid:
+            continue
+        matches.append(int(name))
+    return matches
 
 
 def is_pid_running(pid: int) -> bool:
