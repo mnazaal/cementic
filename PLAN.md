@@ -124,48 +124,103 @@ holds the port while `embedding status` says "stopped" and `embedding stop`
 returns "already stopped"; the next autostart spawns a competitor that cannot
 bind. Observed live 2026-08-15, where it stalled a re-index for hours — the only
 one of the four that has already cost real time. Batch 1 (`7ed71f7`) closed one
-cause; a crash between spawn and write, a wiped data dir, or a hand-deleted file
-all still produce it.
+cause (an unguarded pid-file write); a crash between spawn and write, a wiped
+data dir, or a hand-deleted file all still produce it.
 
-Fix: stop treating the pid file as the sole source of truth. When it is missing
-or stale, recover the daemon from `/proc` by matching the command line cementic
-itself spawned — module, port, and resolved model path together. `supervisor.py`
-already reads `/proc/<pid>/stat` (`_proc_stat_fields`), so this extends an
-established idiom rather than adding one, and the project is Linux-first.
+**The match criterion is better than first planned.** `_start_llama_cpp_daemon`
+already spawns with `--model_alias <runtime fingerprint>`
+(`embedding_runtime.py:889-890`). That is not a model path or a port — it is the
+identity of the exact runtime configuration, which is the thing we actually want
+to recognise. So a recovered process can be identified as *ours and current*,
+rather than merely *a llama.cpp server*.
 
-`embedding status` then reports a recovered daemon rather than "stopped", and
-`embedding stop` can actually stop it.
+Match on all three, and refuse on anything less:
 
-*Anti-scope: match on the full expected command line, with the same rigour
-`process_start_token` applies to pid reuse. A loose match kills someone else's
-process. If the match is not certain, report the pid and refuse — never guess.*
+| | |
+|---|---|
+| `-m llama_cpp.server` in the command line | it is a llama.cpp server |
+| `--port <configured daemon port>` | it is on our port |
+| `--model_alias <expected runtime fingerprint>` | it serves *this* config |
+
+Plus a uid check: only ever consider processes this user owns. If more than one
+matches, report both pids and refuse — never guess which to signal.
+
+Implementation notes:
+- `supervisor.py` already reads `/proc/<pid>/stat` (`_proc_stat_fields`), so a
+  sibling that reads `/proc/<pid>/cmdline` belongs there, uid-filtered. Linux
+  only, which the project already is.
+- `_live_daemon_pid` (`embedding_runtime.py:725`) is the single funnel every
+  caller goes through — `llama_daemon_status`, `stop_llama_cpp_runtime`,
+  `_stop_mismatched_llama_cpp_daemon`, `_daemon_pid_alive`. Adding the fallback
+  there fixes all of them at once. Check that list is still complete before
+  changing it: Batch C's regression came from changing a shared blob without
+  checking every reader.
+- **Repair, do not merely observe.** On a successful recovery, write the pid file
+  back. Recovering on every call and leaving the file missing fixes the symptom
+  and keeps the defect.
+- `embedding status` should say the daemon was recovered rather than silently
+  looking normal — a missing pid file is still a fault worth seeing.
+
+*Anti-scope: no `psutil` dependency, no port-scanning to find a pid. The command
+line is the evidence, and `/proc` already carries it.*
 
 ### Batch B — `start` stops asserting what it has not observed
 
-**1. `cementic start` reports success after 2 s** while the startup path can fail
-for another 118. The reason reaches only a background log whose path is printed
-in the *other* branch, and neither `status` nor `doctor` surfaces it.
+**1. `cementic start` reports success after 2 s** (`_STARTUP_GRACE_SECONDS`,
+`cli.py:259`) while the startup path can fail for another 118
+(`daemon_start_timeout_seconds`). The reason reaches only a background log whose
+path is printed in the *other* branch, and neither `status` nor `doctor` shows it.
 
-Fix, in two halves. `runner.py`'s fatal paths currently print to stderr and exit;
-route them through the worker state file as well, so the reason survives where
-something can read it. Batch 1 gave the source watcher a `last_error` writer and
-`status` already renders that row, so the channel exists and is simply not
-connected on this path. Then make `start`'s message honest: it observed a
-process that had not died within two seconds, so it should say the workers were
-started and point at `cementic status` to confirm, rather than asserting success
-it cannot yet know.
+Two halves.
+
+**Make the reason visible where someone will look.** `worker_runtime.report_fatal`
+is already the single implementation both workers use for this; it logs and
+echoes to stderr but does not touch the state file. Give it the worker's state
+manager so a fatal reason lands in `last_error`, which `status` already renders.
+The channel and the renderer both exist — only the connection is missing.
+
+Retraction is already correct and must stay so: `pipeline_worker.py:416` clears
+`last_error` on a clean start, so a fixed problem stops being reported. Batch 1
+shipped the watcher's writer without its clearer and the result was one transient
+failure reported forever (fixed in `65824df`) — do not repeat that here.
+
+**Make the message honest.** `start` observed a process that had not died within
+two seconds. It should say the workers were started and point at
+`cementic status` to confirm, rather than asserting a success it cannot yet know.
 
 *Anti-scope: do not lengthen the grace period. Blocking `start` for two minutes
 to buy certainty is a worse trade than reporting honestly and letting `status`
-answer.*
+answer. And do not add a new state field — `last_error` is the existing one.*
+
+### Lessons from Batch C, carried into A and B
+
+Batch C was green on all six gates and still shipped three defects, all found by
+running the CLI against the live corpus. The generalisable parts:
+
+- **Changing a shared blob means checking every reader.** `config_json` was the
+  fingerprint payload; making the fingerprint path-independent silently made the
+  launch spec unusable. Batch A touches `_live_daemon_pid`, which has four
+  callers. Enumerate them first.
+- **A regression test must enter through the real entry point.** The first
+  version of Batch C's test called the payload builder directly and passed
+  against the broken code. Red-verify every regression test by breaking the fix.
+- **Every batch ends with a live run, not just a green suite.** Both A and B are
+  about behaviour that only appears against a real daemon and real workers.
 
 ### Exit criteria
 
-- [ ] Batch C: three fingerprint changes in one commit, one verified rebuild.
-- [ ] Batch A: a daemon with its pid file deleted is found, reported, and
-      stoppable; a non-matching process is never signalled.
-- [ ] Batch B: a worker that dies at t=30 s is visible in `cementic status`;
-      `start` no longer claims success it has not observed.
+- [x] Batch C (`aa1a3f9`, fixes in `65824df`): three fingerprint changes in one
+      commit; rebuild verified live — remove, start, 274/274 embedded, promote,
+      search, stop, with search scores identical to the pre-change revision, so
+      identity changed and retrieval did not. The live run also found three
+      defects the green suite did not; see "Lessons from Batch C" above.
+- [ ] Batch A: with the pid file deleted by hand, `embedding status` reports a
+      recovered daemon, `embedding stop` actually stops it, and the pid file is
+      rewritten. A llama.cpp server on another port, or serving another
+      `--model_alias`, is never signalled. Verified live, not only by tests.
+- [ ] Batch B: a worker made to fail after the 2 s grace shows its reason in
+      `cementic status`; a clean restart clears it; `start` no longer claims a
+      success it has not observed. Verified live.
 - [ ] All six `./scripts/check.sh` gates green at every commit.
 
 ## Plan of record — sixth-review fixes (2026-08-23)
