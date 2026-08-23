@@ -21,12 +21,12 @@ correctness bug, one dominant readability problem (`cli.py` at 2138 lines), and
 substantial doc drift including a 404ing install URL. All three are now
 addressed; `cli.py` is 1413 lines.
 
-**Entry point:** Batch 4's remaining weight removal, then Batch 6. Batches 1,
-2, 3 and 5 are done (see Exit criteria). Two decisions are still open and are
-recorded under Open risks: promoting `status --doctor` to `cementic doctor`, and
-whether Python 3.10/3.11 get a CI matrix or get dropped from `requires-python`.
-Repo visibility turned out not to gate anything — the install docs were fixed
-without it.
+**Entry point:** Batch 6, the last one. Batches 1-5 are done (see Exit
+criteria). Both of Batch 6's decisions were made 2026-08-23 once the user
+confirmed the package has one user and no backwards-compatibility obligation:
+`status --doctor` becomes `cementic doctor` with no alias, and `requires-python`
+narrows to `>=3.12` so the `tomli` compatibility branch can be deleted rather
+than tested. Repo visibility gates nothing and is parked.
 
 The live corpus is indexed and searchable at the shipped defaults: collection
 `test` (watching `~/projects/bibs/papers`), 5 documents, 274/274 chunks embedded
@@ -376,22 +376,69 @@ leaving the derivations here.
 
 ### Batch 6 — surface changes
 
-Both items are decisions before they are work; neither is scheduled until the
-user calls them. See Open risks.
+**Both decisions are made** (user, 2026-08-23): the package has exactly one user
+and carries no backwards-compatibility obligation. That settles both items and
+changes the shape of each — see decision log entries 2026-08-23-e and -f.
 
-**15. Promote `status --doctor` to `cementic doctor`.** The doctor path
-(`cli.py:1170-1211`) is 42 lines of a 162-line function sharing no data, no
-output shape and no control flow with `status`; it returns before touching
-anything else. The tell is `cli.py:1174-1186`, which exists only to warn that
-`-c` and `-v` are ignored — a warning needed only because one command does two
-jobs. README already treats it as a setup-time command (lines 67, 83, 87, before
-any indexing). Promoting it deletes that warning.
+**15. Promote `status --doctor` to `cementic doctor`.** The doctor path is ~45
+lines inside `status` that return early and share no data, output shape or
+control flow with it. The tell is the block whose only job is warning that `-c`
+and `-v` are ignored — needed solely because one command does two jobs. README
+treats it as a setup-time command already (lines 67, 83, 84, 87, all before
+anything is indexed).
 
-**16. Python 3.10 and 3.11 are claimed but never tested.**
-`requires-python = ">=3.10"` and the classifiers claim three versions; CI tests
-only 3.12. No 3.11+ syntax is in use (checked: no `datetime.UTC`, `Self`,
-`ExceptionGroup`, `except*`, `StrEnum`, `TaskGroup`), and mypy targets 3.10, so
-the claim is plausible — but unverified is unverified.
+No deprecation alias: with one user there is nothing to keep compatible, so the
+flag is removed outright rather than hidden.
+
+Touchpoints, inventoried:
+
+| Where | What |
+|---|---|
+| `cli.py` `status()` | the `doctor` option, the `if doctor:` block, the ignored-flags warning |
+| `cli.py:224` | `init postgres` next-steps prints `cementic status --doctor` |
+| `render.py:1` | module docstring names `status --doctor` |
+| `tests/unit/test_cli.py:749,766,789` | three `["status","--doctor",...]` invocations |
+| `tests/unit/test_cli.py:133` | asserts the `init postgres` next-steps string |
+| `tests/unit/test_cli.py:2840-2843` | tests the ignored-flags warning — **delete**, the warning ceases to exist |
+| `README.md:67,83,84,87,165` | setup flow and the flag table |
+| comments in `bootstrap.py:49`, `config.py:140,487,616`, `embedding_runtime.py:587`, `render.py:101` | prose references |
+
+`--json` must keep working (`cementic doctor --json`), and so must the
+broken-config path: `_get_config()` raising must still produce a failing report
+rather than dying with less output than plain `status`, which is the one thing
+doctor exists for. `tests/unit/test_cli.py:757` pins that; keep it, retargeted.
+
+*Anti-scope: move the command, do not touch `doctor.py` or what the report
+contains. No new checks, no output rewording.*
+
+**16. Narrow to Python 3.12+, deleting the compatibility branch.** The single-user
+fact inverts the earlier recommendation. `requires-python = ">=3.10"` is not
+capability anyone depends on — it is an untested claim — and the fix that deletes
+code beats the fix that tests it.
+
+Deletes:
+
+| | |
+|---|---|
+| `pyproject.toml:60` | `tomli>=2.0; python_version < '3.11'` runtime dep |
+| `pyproject.toml:71` | `tomli>=2.0` dev dep |
+| `config.py:31-34` | the `sys.version_info >= (3, 11)` branch, to one plain `import tomllib` |
+| `pyproject.toml:14-15` | the 3.10 and 3.11 classifiers |
+| `README.md:39,53` | the version claims |
+
+Plus `requires-python = ">=3.12"`, ruff `target-version = "py312"`, mypy
+`python_version = "3.12"`. The `else` branch being deleted is the TOML loader
+every command depends on and has **never executed on any tested interpreter** —
+CI has only ever run 3.12 — so this removes untested code rather than tested
+capability.
+
+**`uv lock` must be re-run**: changing `requires-python` changes resolution, and
+`check.sh`'s lockfile gate fails otherwise. That gate exists because exactly this
+class of miss shipped v0.2.0 red.
+
+*Anti-scope: do not adopt 3.11/3.12-only syntax in the same commit. Narrowing the
+floor and using the headroom are separate changes; mixing them makes the
+narrowing hard to revert.*
 
 ### Exit criteria
 
@@ -423,8 +470,11 @@ the claim is plausible — but unverified is unverified.
       text); every count in the list above corrected; `PLAN.md` 1498 -> 865 and
       `README.md` 506 -> 458, with the load-bearing measurements harvested
       rather than deleted.
-- [ ] Batch 6: executed or explicitly deferred with a reason recorded here.
-      Both items are decisions and neither has been made; see Open risks.
+- [ ] Batch 6: `cementic doctor` exists, `status --doctor` is gone along with
+      its ignored-flags warning, `--json` and the broken-config report still
+      work; `requires-python` is `>=3.12`, the `tomli` dep and the
+      `sys.version_info` branch are deleted, and `uv lock` re-run so the
+      lockfile gate passes.
 - [ ] All six `./scripts/check.sh` gates green at every commit.
 - [ ] No unmerged `claude/*` branch left behind.
 
@@ -434,26 +484,20 @@ decision on item 2. Batch 6: short once decided.
 
 ### Open risks
 
-1. **Repo visibility is unresolved and blocks item 2.**
-   `https://github.com/mnazaal/cementic` 404s anonymously, so the documented
-   install path cannot work for anyone. `PLAN.md:386-392` records that this
-   exact command could not be run at release time and it shipped anyway.
-   *Recommendation:* if the repo is meant to be public, publish it and re-verify
-   the install; if it is meant to stay private, delete the pipx/uv-tool
-   instructions from `README.md` and the URL from `cli.py:213`'s epilog, and
-   document install-from-source as the only path. Either is cheap; shipping a
-   404 as the first instruction is not.
-2. **`cementic doctor` is a CLI surface change** (item 15). Removing
-   `status --doctor` outright breaks anyone scripting it; keeping both doubles
-   the surface. *Recommendation:* add `cementic doctor`, keep `status --doctor`
-   as a hidden alias for one release, remove it at the next minor. Since the
-   project has one user and `Road to v1` names "config/CLI stability" as a v1
-   bar, doing it now is cheaper than doing it after v1.
-3. **Python 3.10/3.11 support is claimed, not tested** (item 16).
-   *Recommendation:* add both to the CI matrix — it is three lines of YAML and
-   the code already looks compatible — rather than narrowing
-   `requires-python`, which would be a real capability loss for a
-   plausible-but-unverified reason.
+1. **Repo visibility — parked, gates nothing.** It was recorded as blocking the
+   install-docs fix. It never did: the docs simply described a command that
+   cannot work, and that is fixed. Publishing only changes whether a
+   `pipx install git+https://...` one-liner works for someone who is not the
+   author. *Revisit when:* you want to hand cementic to another person — at that
+   point README's install section goes back to the one-liner in the same commit.
+2. ~~**`cementic doctor` is a CLI surface change.**~~ **Resolved
+   2026-08-23**: one user, no backwards-compatibility obligation, so the flag is
+   removed outright and no deprecation alias is kept. See decision log
+   2026-08-23-e.
+3. ~~**Python 3.10/3.11 support is claimed, not tested.**~~ **Resolved
+   2026-08-23**, in the opposite direction to the original recommendation:
+   narrow to 3.12+ and delete the compatibility branch rather than add CI jobs
+   to test it. See decision log 2026-08-23-f.
 4. **Batch 3 is a wide diff in the file with the lowest branch coverage.**
    `cli.py` is at 80%. Batch 2 is the mitigation and is a hard prerequisite, not
    a nicety. If Batch 2 slips, Batch 3 must slip with it.
@@ -508,6 +552,32 @@ pin the new behaviour, not the old, which is the one thing a refactor's test
 must not do. Rejected: writing it after (pins the wrong thing) and skipping it
 (the "reports success, dropped the work" defect class is the project's recurring
 failure mode). Status: live.
+
+**2026-08-23-e — Should `cementic doctor` keep `status --doctor` as an alias?**
+Choice: no alias; remove the flag outright. The alias was recommended to avoid
+breaking scripts, then the user confirmed the package has exactly one user and no
+backwards-compatibility obligation — so the alias would protect nothing while
+doubling the surface the change was meant to reduce. Rejected: a hidden alias for
+one release (protects nobody here), and leaving `--doctor` in place (keeps the
+ignored-flags warning, which exists only because one command does two jobs).
+Status: live.
+
+**2026-08-23-f — Test Python 3.10/3.11, or drop them?**
+Choice: drop; `requires-python = ">=3.12"`. The earlier recommendation was the
+opposite — matrix the unit job — on the grounds that 3.10/3.11 were real
+capability and `config.py`'s `tomli` fallback was untested. The single-user fact
+inverts it: the versions are a claim nobody depends on, so the choice is between
+adding CI jobs to exercise a branch that will never run in anger, and deleting
+the branch, the `tomli` dependency and the claim together. Deleting wins on the
+project's own stated goal of stripping what can go while keeping functionality —
+and there is no functionality here, only an untested promise. Evidence gathered
+before deciding: `src/` and `tests/` compile clean under 3.10, no 3.11+ stdlib
+API is in use, and the lockfile resolves for `>=3.10`, so the claim was probably
+true — which is what makes deleting it safe rather than risky. Rejected: the unit
+-job matrix (tests code nobody runs), and the full three-job matrix (triples the
+pgvectorscale-from-source job for nothing).
+*Revisit when:* cementic needs to run somewhere that cannot get Python 3.12 —
+unlikely while `uv` can install one anywhere in a single command.
 
 ## Design principles
 
