@@ -21,7 +21,9 @@ correctness bug, one dominant readability problem (`cli.py` at 2138 lines), and
 substantial doc drift including a 404ing install URL. All three are now
 addressed; `cli.py` is 1413 lines.
 
-**Entry point:** Batch 6, the last one. Batches 1-5 are done (see Exit
+**Entry point:** nothing is pending. Every batch is closed; the plan can be
+deleted whenever `TODO.md`'s remaining features are what matters. Previously:
+Batch 6, the last one. Batches 1-5 are done (see Exit
 criteria). Both of Batch 6's decisions were made 2026-08-23 once the user
 confirmed the package has one user and no backwards-compatibility obligation:
 `status --doctor` becomes `cementic doctor` with no alias, and `requires-python`
@@ -470,13 +472,15 @@ narrowing hard to revert.*
       text); every count in the list above corrected; `PLAN.md` 1498 -> 865 and
       `README.md` 506 -> 458, with the load-bearing measurements harvested
       rather than deleted.
-- [ ] Batch 6: `cementic doctor` exists, `status --doctor` is gone along with
-      its ignored-flags warning, `--json` and the broken-config report still
-      work; `requires-python` is `>=3.12`, the `tomli` dep and the
-      `sys.version_info` branch are deleted, and `uv lock` re-run so the
-      lockfile gate passes.
-- [ ] All six `./scripts/check.sh` gates green at every commit.
-- [ ] No unmerged `claude/*` branch left behind.
+- [x] Batch 6 (`86e6b72`): `cementic doctor` exists and is in root `--help`;
+      `status --doctor` now exits 2 as a usage error; `--json` emits all six
+      checks and the broken-config report still works, both byte-identical to
+      before. `requires-python` is `>=3.12`, `tomli` and the `sys.version_info`
+      branch are gone, `uv lock` re-resolved to 75 packages.
+- [x] All six `./scripts/check.sh` gates green at every commit.
+- [ ] No unmerged `claude/*` branch left behind — `claude/audit-followup` was
+      merged to `main` (fast-forward, 13 commits); `claude/batch6-surface-changes`
+      is outstanding.
 
 **Sizing.** Batch 1: one focused session. Batch 2: one session. Batch 3: one to
 two, mostly mechanical but wide. Batch 4: one. Batch 5: one, plus the user's
