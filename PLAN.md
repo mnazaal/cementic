@@ -226,15 +226,27 @@ batch — it touches four modules and wants its own commit and its own review.*
 
 ### Batch 4 — weight removal
 
-**11. Delete `containers/` and root `compose.yml`.**
-`containers/postgres-vectorscale/Containerfile` is **byte-identical** to
-`src/cementic/templates/postgres/Containerfile`; the quadlet unit and root
-`compose.yml` are near-duplicates of their `templates/postgres/` counterparts,
-differing only in comments. Three infra files maintained in two places, one
-already guaranteed to drift silently. Point the development workflow at
-`src/cementic/templates/postgres/` and delete the duplicates. Update any
-`compose.yml` reference in `README.md`, `TODO.md`, `AGENTS.md` and
-`scripts/check.sh`'s docstring in the same commit.
+**11. Delete the duplicated container build files. DONE (`fdefdfa`) — and the
+item as first written was wrong.**
+
+What was true: `containers/postgres-vectorscale/Containerfile` was
+byte-identical to `src/cementic/templates/postgres/Containerfile`, and
+`containers/quadlet/cementic-postgres.container` had no consumer at all
+(`scripts/verify_postgres_container.sh` reads the quadlet unit out of a
+*generated* `cementic init postgres` directory, not that one). Both deleted;
+`compose.yml` now builds from the packaged Containerfile, so the image the pg
+gate tests is the image a user gets.
+
+What was wrong: this item also called for deleting root `compose.yml` as a
+near-duplicate of the template's. It is not one. It is the stack the pg
+integration fixture brings up (`tests/integration/conftest.py:20`), and it
+differs from the template deliberately — no `restart: unless-stopped`, because
+the fixture tears it down. Deleting it would have broken the pg gate. Kept.
+
+Residual, not closed: the repoint is unverified locally, because
+`_compose_postgres` short-circuits when Postgres is already reachable, so no
+local run exercises `compose build`. CI's `integration-pg` job has no service
+container and will prove it.
 
 **12. Delete three orphan `PDF_SPECS` entries** (~103 lines) in
 `tests/fixtures/generate_pdfs.py`: `cs_neural_nets`, `bio_cell`, `hist_rome`. A
@@ -370,8 +382,10 @@ the claim is plausible — but unverified is unverified.
 - [ ] Batch 3: `cli.py` under 1500 lines, `cli.py` has one copy of the
       db-error ladder, and **no output text changed** — proven by the Batch 2
       tests passing unmodified.
-- [ ] Batch 4: `containers/` gone, the three PDF specs gone,
-      `test_embedder.py` gone, and at least collapses 1–5 landed.
+- [x] Batch 4 (part): `containers/` gone, `compose.yml` repointed at the
+      packaged Containerfile and kept (`fdefdfa`).
+- [ ] Batch 4 (rest): the three PDF specs gone, `test_embedder.py` gone, and at
+      least collapses 1–5 landed.
 - [ ] Batch 5: the install path works as written from a clean environment, or
       the README no longer claims it does; every count in the list above
       corrected.
