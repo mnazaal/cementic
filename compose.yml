@@ -13,14 +13,15 @@
 # Uses the same CEMENTIC_DB_* environment variables as the CLI, with
 # local-development defaults (user/db/password: cementic, port: 5432).
 #
-# The postgres service builds from containers/postgres-vectorscale/Containerfile.
+# The postgres service builds from the same Containerfile `cementic init
+# postgres` ships, so the image tested here is the image users get.
 # First build: docker compose build   (or: podman compose build)
 
 services:
   postgres:
     build:
       context: .
-      dockerfile: containers/postgres-vectorscale/Containerfile
+      dockerfile: src/cementic/templates/postgres/Containerfile
       args:
         POSTGRES_BASE_IMAGE: docker.io/postgres:18.3-bookworm
         PGVECTORSCALE_VERSION: "0.9.0"
