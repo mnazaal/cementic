@@ -49,7 +49,11 @@ from cementic.state import DaemonState, StateManager
 from cementic.storage import extracted_document_path, read_extracted_text, write_extracted_text
 from cementic.supervisor import is_managed_process_alive, process_start_token
 from cementic.vector_store import ensure_vector_table_schema, upsert_vectors
-from cementic.worker_runtime import report_fatal, setup_worker_logger
+from cementic.worker_runtime import (
+    handle_shutdown_signal,
+    report_fatal,
+    setup_worker_logger,
+)
 
 PIPELINE_WORKER_LOCK_NAMESPACE = 0xC3E17C
 
@@ -1003,16 +1007,7 @@ class PipelineWorker:
         return revision_is_complete(counts)
 
     def _handle_shutdown(self, signum: int, frame: object) -> None:
-        """Signal handler: set the shutdown flag and nothing else.
-
-        Python runs handlers on the main thread between bytecodes, so anything
-        that takes a lock the main thread may already hold deadlocks the process
-        -- and since this *is* the SIGTERM handler, a deadlocked process can then
-        only be killed with SIGKILL. `stop()` takes the state-file lock, so it
-        runs from `start()`'s `finally` instead.
-        """
-        self._shutdown_signal = signum
-        self._shutdown_event.set()
+        handle_shutdown_signal(self, signum, frame)
 
     def stop(self) -> None:
         self._shutdown_event.set()

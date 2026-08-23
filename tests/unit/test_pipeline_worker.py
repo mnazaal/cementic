@@ -33,6 +33,7 @@ from cementic.pipeline_worker import (
     is_retryable_embed_error,
     revision_is_complete,
 )
+from cementic.state import DaemonState
 
 
 def _count_queries(engine):
@@ -194,6 +195,12 @@ class TestPipelineWorkerStop:
         worker = PipelineWorker(config)
 
         worker.stop()
+
+        # stop() has two jobs: signal the loop, and record that it stopped.
+        # The signal half used to be asserted by test_embedder.py's
+        # test_stop_sets_shutdown, which was dropped as a duplicate of this
+        # test -- it was only a partial one.
+        assert worker._shutdown_event.is_set()
 
         # Verify state file was updated to STOPPED
         assert state_file.exists()
@@ -426,6 +433,49 @@ class TestPipelineWorkerStart:
                 with patch("cementic.pipeline_worker.create_tables"):
                     with patch("cementic.pipeline_worker.get_session_factory"):
                         worker.start("testcol")
+
+    @patch("cementic.pipeline_worker.requeue_interrupted_artifacts")
+    @patch("cementic.pipeline_worker.get_target_revision")
+    @patch("cementic.pipeline_worker.create_tables")
+    @patch("cementic.pipeline_worker.get_session_factory")
+    @patch("cementic.pipeline_worker.get_engine")
+    def test_start_sets_running_state(
+        self,
+        mock_get_engine,
+        mock_session_factory,
+        mock_create_tables,
+        mock_get_target,
+        mock_requeue,
+    ):
+        class StopLoopError(Exception):
+            pass
+
+        worker = PipelineWorker()
+        worker.state_manager.load = MagicMock(
+            return_value=SimpleNamespace(daemon_state=DaemonState.STOPPED, pid=None)
+        )
+        worker.state_manager.update = MagicMock()
+        worker._run_processing_loop = MagicMock(side_effect=StopLoopError)
+
+        mock_embedding_client = MagicMock()
+        worker._create_embedding_client = MagicMock(return_value=mock_embedding_client)
+        mock_session_factory.return_value = MagicMock()
+        # A real dimension: startup now refuses one the configured ANN index
+        # cannot handle, and a MagicMock is not comparable to the limit.
+        mock_get_target.return_value.embedding_profile.embedding_dim = 768
+
+        try:
+            worker.start(collection="research")
+        except StopLoopError:
+            pass
+
+        assert worker.collection == "research"
+        running_updates = [
+            call
+            for call in worker.state_manager.update.call_args_list
+            if call.kwargs.get("daemon_state") == DaemonState.RUNNING
+        ]
+        assert len(running_updates) == 1
 
 
 class TestFatalStartupReasonsReachTheBackgroundLog:
@@ -1048,6 +1098,47 @@ class TestSupersededChunksArePurged:
         session.commit()
 
         assert session.query(Chunk).count() == 0
+
+
+class TestEnsureTargetRevisionAndMarkReady:
+    """Tests for `_ensure_target_revision` and `_mark_revision_ready_if_complete`."""
+
+    def test_ensure_target_revision_commits(self):
+        worker = PipelineWorker()
+        mock_session = MagicMock()
+        mock_session.__enter__.return_value = mock_session
+        mock_session.__exit__.return_value = False
+        mock_session.get.return_value = None
+        worker.Session = MagicMock(return_value=mock_session)
+
+        with patch(
+            "cementic.pipeline_worker.get_target_revision", return_value=SimpleNamespace(
+                id=7, embedding_profile=SimpleNamespace(embedding_dim=768)
+            )
+        ) as mock_get_target:
+            revision_id = worker._ensure_target_revision()
+
+        assert revision_id == 7
+        mock_get_target.assert_called_once()
+        mock_session.commit.assert_called_once()
+
+    def test_mark_revision_ready_if_complete(self):
+        worker = PipelineWorker()
+        revision = SimpleNamespace(status="building")
+        mock_session = MagicMock()
+        mock_session.__enter__.return_value = mock_session
+        mock_session.__exit__.return_value = False
+        mock_session.get.return_value = revision
+        worker.Session = MagicMock(return_value=mock_session)
+
+        with patch.object(worker, "_revision_complete", return_value=True):
+            with patch("cementic.pipeline_worker.ensure_revision_ann_index") as mock_ensure_index:
+                with patch("cementic.pipeline_worker.mark_revision_ready") as mock_mark_ready:
+                    worker._mark_revision_ready_if_complete(3)
+
+        mock_ensure_index.assert_called_once_with(mock_session, revision, worker.config)
+        mock_mark_ready.assert_called_once_with(mock_session, revision)
+        mock_session.commit.assert_called_once()
 
 
 class TestIndexBuildIsVisible:

@@ -8,8 +8,9 @@ from __future__ import annotations
 
 import logging
 import sys
+import threading
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 
 def setup_worker_logger(name: str, log_file: Path | None, owner: str) -> logging.Logger:
@@ -30,6 +31,27 @@ def setup_worker_logger(name: str, log_file: Path | None, owner: str) -> logging
         logger.addHandler(handler)
     logger.propagate = False
     return logger
+
+
+class _ShutdownAware(Protocol):
+    """The pair of attributes a worker's signal handler reads and writes."""
+
+    _shutdown_signal: int | None
+    _shutdown_event: threading.Event
+
+
+def handle_shutdown_signal(worker: _ShutdownAware, signum: int, frame: object) -> None:
+    """Signal handler: set the shutdown flag and nothing else.
+
+    Python runs handlers on the main thread between bytecodes, so anything
+    that takes a lock the main thread may already hold deadlocks the process
+    -- and since this *is* the SIGTERM handler, a deadlocked process can then
+    only be killed with SIGKILL. `stop()` takes the state-file lock (and, for
+    the source watcher, joins the observer thread too), so it runs from
+    `start()`'s `finally` instead.
+    """
+    worker._shutdown_signal = signum
+    worker._shutdown_event.set()
 
 
 def report_fatal(logger: logging.Logger, message: str, *args: Any) -> str:

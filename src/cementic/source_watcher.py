@@ -24,7 +24,7 @@ from cementic.db import Chunk, SourceDocument, create_tables, get_engine, get_se
 from cementic.extract import supported_extensions
 from cementic.state import DaemonState, StateManager
 from cementic.supervisor import is_managed_process_alive, process_start_token
-from cementic.worker_runtime import report_fatal, setup_worker_logger
+from cementic.worker_runtime import handle_shutdown_signal, report_fatal, setup_worker_logger
 
 #: Minimum gap between "now working on X" state-file writes. Display only, so a
 #: little staleness is fine; the alternative is one full read-modify-write per
@@ -144,19 +144,16 @@ class DocumentEventHandler(FileSystemEventHandler):
             timer.cancel()
         self._timers.clear()
 
-    def on_created(self, event: FileSystemEvent) -> None:
-        if event.is_directory:
-            return
-        src_path = event.src_path.decode() if isinstance(event.src_path, bytes) else event.src_path
-        if self._should_process(src_path):
-            self._debounced_process(src_path)
-
     def on_modified(self, event: FileSystemEvent) -> None:
         if event.is_directory:
             return
         src_path = event.src_path.decode() if isinstance(event.src_path, bytes) else event.src_path
         if self._should_process(src_path):
             self._debounced_process(src_path)
+
+    # A creation and a modification are handled identically: both just need
+    # the (debounced) processing check re-run against the changed path.
+    on_created = on_modified
 
     def on_deleted(self, event: FileSystemEvent) -> None:
         src_path = event.src_path.decode() if isinstance(event.src_path, bytes) else event.src_path
@@ -628,16 +625,7 @@ class SourceWatcher:
             )
 
     def _handle_shutdown(self, signum: int, frame: object) -> None:
-        """Signal handler: set the shutdown flag and nothing else.
-
-        Python runs handlers on the main thread between bytecodes, so anything
-        that takes a lock the main thread may already hold deadlocks the process
-        -- and since this *is* the SIGTERM handler, a deadlocked process can then
-        only be killed with SIGKILL. `stop()` takes the state-file lock and joins
-        the observer thread, so it runs from `start()`'s `finally` instead.
-        """
-        self._shutdown_signal = signum
-        self._shutdown_event.set()
+        handle_shutdown_signal(self, signum, frame)
 
     def stop(self) -> None:
         self._shutdown_event.set()

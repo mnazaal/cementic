@@ -15,7 +15,6 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
 from typer.testing import CliRunner
 
-from cementic import cli as cementic_cli
 from cementic import pipeline_worker as pipeline_worker_module
 from cementic.cli import app
 from cementic.config import Config
@@ -638,7 +637,7 @@ class TestPipelineWorkerErrorPaths:
         assert failed_embeddings > 0, "setup did not produce a failed embedding"
         assert failed_extraction > 0, "setup did not produce a failed extraction"
 
-        monkeypatch.setattr(cementic_cli, "_config", config)
+        monkeypatch.setattr("cementic.cli_shared._config", config)
         # A real health object, not None: None now means the probe *failed*,
         # which exits 1 rather than printing a summary two rows short.
         monkeypatch.setattr(

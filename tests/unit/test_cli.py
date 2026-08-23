@@ -12,13 +12,14 @@ from typer import Context
 from typer.testing import CliRunner
 
 from cementic import cli as cementic_cli
+from cementic import cli_shared as cementic_cli_shared
 from cementic.cli import (
     _build_collection_filters,
     _get_data_dir,
     _supervisor_processes,
     app,
-    collection_callback,
 )
+from cementic.cli_collection import collection_callback
 from cementic.collections import PromotionOutcome, ReindexOutcome
 from cementic.config import Config, default_config_path
 from cementic.pipeline_worker import PipelineCounts
@@ -36,8 +37,15 @@ def _collection_exists_by_default():
     Most tests here drive the CLI against a mocked session whose `.query()` is
     stubbed for one specific call, so the real existence check cannot run
     against it. Tests covering the unknown-collection path patch this to False.
+
+    `collection_exists` is looked up from two places: `cementic.cli` (used
+    directly by `search`) and `cementic.cli_shared` (used by
+    `_require_known_collection`, shared with `cli_collection.py`).
     """
-    with patch("cementic.cli.collection_exists", return_value=True):
+    with (
+        patch("cementic.cli.collection_exists", return_value=True),
+        patch("cementic.cli_shared.collection_exists", return_value=True),
+    ):
         yield
 
 
@@ -85,7 +93,7 @@ class TestConfigCommands:
         assert forced.exit_code == 0
 
     def test_show_outputs_effective_json(self, tmp_path, monkeypatch) -> None:
-        monkeypatch.setattr(cementic_cli, "_config", None)  # reset cached singleton
+        monkeypatch.setattr("cementic.cli_shared._config", None)  # reset cached singleton
         cfg = tmp_path / "cementic.toml"
         cfg.write_text("[pipeline]\nchunk_size = 321\n")
         monkeypatch.setenv("CEMENTIC_CONFIG", str(cfg))
@@ -97,7 +105,7 @@ class TestConfigCommands:
         assert "database" in data
 
     def test_show_redacts_database_password(self, tmp_path, monkeypatch) -> None:
-        monkeypatch.setattr(cementic_cli, "_config", None)  # reset cached singleton
+        monkeypatch.setattr("cementic.cli_shared._config", None)  # reset cached singleton
         monkeypatch.delenv("CEMENTIC_CONFIG", raising=False)
         monkeypatch.setenv("CEMENTIC_DB_PASSWORD", "super-secret-pw")
 
@@ -226,8 +234,8 @@ class TestRootHelp:
     @patch("cementic.cli._llama_daemon_runtime_status", return_value="stopped")
     @patch("cementic.cli.list_collections", return_value=[])
     @patch("cementic.cli.check_health")
-    @patch("cementic.cli.get_session_factory")
-    @patch("cementic.cli.get_engine")
+    @patch("cementic.cli_shared.get_session_factory")
+    @patch("cementic.cli_shared.get_engine")
     @patch("cementic.cli.load_worker_statuses")
     @patch("cementic.cli._load_supervisor_state")
     @patch("cementic.cli.build_supervisor_status")
@@ -389,6 +397,7 @@ class TestStopFallsBackToWorkerStateFiles:
             patch("cementic.cli._load_supervisor_state", return_value={}),
             patch("cementic.cli._get_supervisor_state_path", return_value=tmp_path / "sup.json"),
             patch("cementic.cli.is_managed_process_alive", return_value=True),
+            patch("cementic.cli_shared.is_managed_process_alive", return_value=True),
             patch("cementic.cli.is_pid_running", return_value=False),
             patch("cementic.cli.os.kill") as mock_kill,
             patch("cementic.cli.wait_for_exit", return_value=[]),
@@ -588,8 +597,8 @@ class TestSearchCommand:
             ["collection", "reindex", "nosuch"],
         ],
     )
-    @patch("cementic.cli.get_session_factory")
-    @patch("cementic.cli.get_engine")
+    @patch("cementic.cli_shared.get_session_factory")
+    @patch("cementic.cli_shared.get_engine")
     def test_unknown_collection_is_an_error_not_an_empty_result(
         self, mock_get_engine, mock_get_session_factory, argv
     ):
@@ -611,7 +620,7 @@ class TestSearchCommand:
         # failed in CI where `status` exits at the db-unreachable gate before
         # the collection check it is about.
         with (
-            patch("cementic.cli.collection_exists", return_value=False),
+            patch("cementic.cli_shared.collection_exists", return_value=False),
             patch("cementic.cli.check_health", return_value=_healthy_health()),
         ):
             result = runner.invoke(app, argv)
@@ -619,8 +628,8 @@ class TestSearchCommand:
         assert result.exit_code == 1
         assert "unknown collection" in result.output
 
-    @patch("cementic.cli.get_session_factory")
-    @patch("cementic.cli.get_engine")
+    @patch("cementic.cli_shared.get_session_factory")
+    @patch("cementic.cli_shared.get_engine")
     def test_status_json_unknown_collection_has_no_pipeline_block(
         self, mock_get_engine, mock_get_session_factory
     ):
@@ -632,7 +641,7 @@ class TestSearchCommand:
         mock_session.__exit__.return_value = False
         mock_get_session_factory.return_value = lambda: mock_session
 
-        with patch("cementic.cli.collection_exists", return_value=False):
+        with patch("cementic.cli_shared.collection_exists", return_value=False):
             result = runner.invoke(app, ["status", "-c", "nosuch", "--json"])
 
         assert result.exit_code == 1
@@ -752,7 +761,7 @@ class TestBackgroundCommands:
         bad = tmp_path / "cementic.toml"
         bad.write_text("this is := not toml", encoding="utf-8")
         monkeypatch.setenv("CEMENTIC_CONFIG", str(bad))
-        monkeypatch.setattr(cementic_cli, "_config", None)
+        monkeypatch.setattr("cementic.cli_shared._config", None)
 
         result = runner.invoke(app, ["status", "--doctor", "--json"])
 
@@ -788,8 +797,8 @@ class TestBackgroundCommands:
     @patch("cementic.cli.check_health")
     @patch("cementic.cli.load_pipeline_status_bulk")
     @patch("cementic.cli.list_collections")
-    @patch("cementic.cli.get_session_factory")
-    @patch("cementic.cli.get_engine")
+    @patch("cementic.cli_shared.get_session_factory")
+    @patch("cementic.cli_shared.get_engine")
     @patch("cementic.cli.load_worker_statuses")
     @patch("cementic.cli._load_supervisor_state")
     @patch("cementic.cli.build_supervisor_status")
@@ -1248,8 +1257,8 @@ class TestBackgroundCommands:
         assert "collection: default" in result.output
         assert "documents will be indexed into 'default'" in result.output
 
-    @patch("cementic.cli.get_session_factory")
-    @patch("cementic.cli.get_engine")
+    @patch("cementic.cli_shared.get_session_factory")
+    @patch("cementic.cli_shared.get_engine")
     def test_collection_promote_command(self, mock_get_engine, mock_get_session_factory):
         revision = SimpleNamespace(collection="research", status="ready", label="rev-1")
         revision_query = MagicMock()
@@ -1261,7 +1270,9 @@ class TestBackgroundCommands:
         mock_get_session_factory.return_value = lambda: mock_session
 
         outcome = PromotionOutcome(status="promoted", revision=revision)
-        with patch("cementic.cli.promote_ready_revision", return_value=outcome) as mock_promote:
+        with patch(
+            "cementic.cli_collection.promote_ready_revision", return_value=outcome
+        ) as mock_promote:
             result = runner.invoke(app, ["collection", "promote", "research"])
 
         assert result.exit_code == 0
@@ -1273,8 +1284,8 @@ class TestBackgroundCommands:
         assert isinstance(kwargs["config"], Config)
         assert kwargs["force"] is False
 
-    @patch("cementic.cli.get_session_factory")
-    @patch("cementic.cli.get_engine")
+    @patch("cementic.cli_shared.get_session_factory")
+    @patch("cementic.cli_shared.get_engine")
     def test_collection_promote_warns_about_leftover_artifacts_at_exit_zero(
         self, mock_get_engine, mock_get_session_factory
     ):
@@ -1292,7 +1303,7 @@ class TestBackgroundCommands:
             unremoved_artifacts=["/artifacts/old.zst"],
             cleanup_error="DROP TABLE failed: disk error",
         )
-        with patch("cementic.cli.promote_ready_revision", return_value=outcome):
+        with patch("cementic.cli_collection.promote_ready_revision", return_value=outcome):
             result = runner.invoke(app, ["collection", "promote", "research"])
 
         assert result.exit_code == 0
@@ -1301,8 +1312,8 @@ class TestBackgroundCommands:
         assert "could not be removed" in result.output
         assert "/artifacts/old.zst" in result.output
 
-    @patch("cementic.cli.get_session_factory")
-    @patch("cementic.cli.get_engine")
+    @patch("cementic.cli_shared.get_session_factory")
+    @patch("cementic.cli_shared.get_engine")
     def test_collection_reindex_reports_the_method_change(
         self, mock_get_engine, mock_get_session_factory
     ):
@@ -1312,7 +1323,9 @@ class TestBackgroundCommands:
         mock_get_session_factory.return_value = lambda: mock_session
 
         outcome = ReindexOutcome("reindexed", method="diskann", previous_method="hnsw")
-        with patch("cementic.cli.reindex_collection", return_value=outcome) as mock_reindex:
+        with patch(
+            "cementic.cli_collection.reindex_collection", return_value=outcome
+        ) as mock_reindex:
             result = runner.invoke(app, ["collection", "reindex", "research"])
 
         assert result.exit_code == 0
@@ -1321,8 +1334,8 @@ class TestBackgroundCommands:
         assert "several minutes" in result.output
         assert mock_reindex.call_args.kwargs["force"] is False
 
-    @patch("cementic.cli.get_session_factory")
-    @patch("cementic.cli.get_engine")
+    @patch("cementic.cli_shared.get_session_factory")
+    @patch("cementic.cli_shared.get_engine")
     def test_collection_reindex_force_flag_reaches_the_service(
         self, mock_get_engine, mock_get_session_factory
     ):
@@ -1337,14 +1350,16 @@ class TestBackgroundCommands:
         mock_get_session_factory.return_value = lambda: mock_session
 
         outcome = ReindexOutcome("reindexed", method="hnsw", previous_method="hnsw")
-        with patch("cementic.cli.reindex_collection", return_value=outcome) as mock_reindex:
+        with patch(
+            "cementic.cli_collection.reindex_collection", return_value=outcome
+        ) as mock_reindex:
             result = runner.invoke(app, ["collection", "reindex", "research", "--force"])
 
         assert result.exit_code == 0
         assert mock_reindex.call_args.kwargs["force"] is True
 
-    @patch("cementic.cli.get_session_factory")
-    @patch("cementic.cli.get_engine")
+    @patch("cementic.cli_shared.get_session_factory")
+    @patch("cementic.cli_shared.get_engine")
     def test_collection_reindex_without_an_active_revision_fails(
         self, mock_get_engine, mock_get_session_factory
     ):
@@ -1354,14 +1369,16 @@ class TestBackgroundCommands:
         mock_session.__exit__.return_value = False
         mock_get_session_factory.return_value = lambda: mock_session
 
-        with patch("cementic.cli.reindex_collection", return_value=ReindexOutcome("no_active")):
+        with patch(
+            "cementic.cli_collection.reindex_collection", return_value=ReindexOutcome("no_active")
+        ):
             result = runner.invoke(app, ["collection", "reindex", "research"])
 
         assert result.exit_code == 1
         assert "no active revision" in result.output
 
-    @patch("cementic.cli.get_session_factory")
-    @patch("cementic.cli.get_engine")
+    @patch("cementic.cli_shared.get_session_factory")
+    @patch("cementic.cli_shared.get_engine")
     def test_collection_reindex_says_how_to_rebuild_an_unchanged_method(
         self, mock_get_engine, mock_get_session_factory
     ):
@@ -1373,15 +1390,15 @@ class TestBackgroundCommands:
         mock_get_session_factory.return_value = lambda: mock_session
 
         outcome = ReindexOutcome("reindexed", method="hnsw", previous_method="hnsw")
-        with patch("cementic.cli.reindex_collection", return_value=outcome):
+        with patch("cementic.cli_collection.reindex_collection", return_value=outcome):
             result = runner.invoke(app, ["collection", "reindex", "research"])
 
         assert result.exit_code == 0
         assert "status: unchanged" in result.output
         assert "--force" in result.output
 
-    @patch("cementic.cli.get_session_factory")
-    @patch("cementic.cli.get_engine")
+    @patch("cementic.cli_shared.get_session_factory")
+    @patch("cementic.cli_shared.get_engine")
     def test_collection_promote_blocked_by_failures(
         self, mock_get_engine, mock_get_session_factory
     ):
@@ -1401,7 +1418,7 @@ class TestBackgroundCommands:
         mock_get_session_factory.return_value = lambda: mock_session
 
         outcome = PromotionOutcome(status="blocked_by_failures", revision=revision, counts=counts)
-        with patch("cementic.cli.promote_ready_revision", return_value=outcome):
+        with patch("cementic.cli_collection.promote_ready_revision", return_value=outcome):
             result = runner.invoke(app, ["collection", "promote", "research"])
 
         assert result.exit_code == 1
@@ -1410,8 +1427,8 @@ class TestBackgroundCommands:
         assert "embed=1" in result.output
         assert "--force" in result.output
 
-    @patch("cementic.cli.get_session_factory")
-    @patch("cementic.cli.get_engine")
+    @patch("cementic.cli_shared.get_session_factory")
+    @patch("cementic.cli_shared.get_engine")
     def test_collection_promote_force_passes_through(
         self, mock_get_engine, mock_get_session_factory
     ):
@@ -1422,15 +1439,17 @@ class TestBackgroundCommands:
         mock_get_session_factory.return_value = lambda: mock_session
 
         outcome = PromotionOutcome(status="promoted", revision=revision)
-        with patch("cementic.cli.promote_ready_revision", return_value=outcome) as mock_promote:
+        with patch(
+            "cementic.cli_collection.promote_ready_revision", return_value=outcome
+        ) as mock_promote:
             result = runner.invoke(app, ["collection", "promote", "research", "--force"])
 
         assert result.exit_code == 0
         assert "status: promoted" in result.output
         assert mock_promote.call_args.kwargs["force"] is True
 
-    @patch("cementic.cli.get_session_factory")
-    @patch("cementic.cli.get_engine")
+    @patch("cementic.cli_shared.get_session_factory")
+    @patch("cementic.cli_shared.get_engine")
     def test_collection_revisions_command(self, mock_get_engine, mock_get_session_factory):
         extractor_profile = SimpleNamespace(name="pymupdf4llm")
         chunk_profile = SimpleNamespace(fingerprint="abcdef123456")
@@ -1462,8 +1481,8 @@ class TestBackgroundCommands:
         assert "extract=pymupdf4llm" in result.output
         assert "embed=llama-cpp:fedcba65" in result.output
 
-    @patch("cementic.cli.get_session_factory")
-    @patch("cementic.cli.get_engine")
+    @patch("cementic.cli_shared.get_session_factory")
+    @patch("cementic.cli_shared.get_engine")
     def test_collection_list_command(self, mock_get_engine, mock_get_session_factory):
         summary = SimpleNamespace(
             name="research",
@@ -1477,7 +1496,7 @@ class TestBackgroundCommands:
         mock_session.__exit__.return_value = False
         mock_get_session_factory.return_value = lambda: mock_session
 
-        with patch("cementic.cli.list_collections", return_value=[summary]) as mock_list:
+        with patch("cementic.cli_collection.list_collections", return_value=[summary]) as mock_list:
             result = runner.invoke(app, ["collection", "list"])
 
         assert result.exit_code == 0
@@ -1488,7 +1507,7 @@ class TestBackgroundCommands:
         assert "building=rev-2" in result.output
         mock_list.assert_called_once_with(mock_session)
 
-    @patch("cementic.cli.get_engine")
+    @patch("cementic.cli_shared.get_engine")
     def test_collection_list_shows_database_hint_when_database_unavailable(self, mock_get_engine):
         mock_get_engine.side_effect = OperationalError("statement", {}, Exception("down"))
 
@@ -1498,7 +1517,7 @@ class TestBackgroundCommands:
         assert "collection list: database not reachable" in result.output
         assert "cementic init postgres" in result.output
 
-    @patch("cementic.cli.get_engine")
+    @patch("cementic.cli_shared.get_engine")
     def test_collection_promote_shows_database_hint_when_database_unavailable(
         self, mock_get_engine
     ):
@@ -1514,8 +1533,8 @@ class TestBackgroundCommands:
 class TestCollectionCommands:
     """Test collection management commands."""
 
-    @patch("cementic.cli.get_session_factory")
-    @patch("cementic.cli.get_engine")
+    @patch("cementic.cli_collection.get_session_factory")
+    @patch("cementic.cli_collection.get_engine")
     def test_collection_remove_not_found(self, mock_get_engine, mock_get_session_factory):
         mock_session = MagicMock()
         mock_session.__enter__.return_value = mock_session
@@ -1523,15 +1542,15 @@ class TestCollectionCommands:
         mock_session.query.return_value.filter_by.return_value.all.return_value = []
         mock_get_session_factory.return_value = lambda: mock_session
 
-        with patch("cementic.cli.delete_collection_records", return_value=None):
+        with patch("cementic.cli_collection.delete_collection_records", return_value=None):
             result = runner.invoke(app, ["collection", "remove", "missing", "--force"])
 
         assert result.exit_code == 0
         assert "collection: missing" in result.output
         assert "status: not found" in result.output
 
-    @patch("cementic.cli.get_session_factory")
-    @patch("cementic.cli.get_engine")
+    @patch("cementic.cli_collection.get_session_factory")
+    @patch("cementic.cli_collection.get_engine")
     def test_collection_remove_warns_when_workers_still_running(
         self, mock_get_engine, mock_get_session_factory
     ):
@@ -1548,13 +1567,13 @@ class TestCollectionCommands:
 
         def invoke(supervisor_state):
             with (
-                patch("cementic.cli.delete_collection_records", return_value=deletion),
-                patch("cementic.cli.remove_artifacts", return_value=[]),
-                patch("cementic.cli.drop_orphan_vector_tables"),
+                patch("cementic.cli_collection.delete_collection_records", return_value=deletion),
+                patch("cementic.cli_collection.remove_artifacts", return_value=[]),
+                patch("cementic.cli_collection.drop_orphan_vector_tables"),
                 patch(
-                    "cementic.cli._load_supervisor_state", return_value=supervisor_state
+                    "cementic.cli_collection._load_supervisor_state", return_value=supervisor_state
                 ),
-                patch("cementic.cli._is_managed_proc_alive", return_value=True),
+                patch("cementic.cli_collection._is_managed_proc_alive", return_value=True),
             ):
                 return runner.invoke(app, ["collection", "remove", "mycol", "--force"])
 
@@ -1585,7 +1604,7 @@ class TestStatusCommand:
     """Test the status command."""
 
     @patch("cementic.status_service.get_engine")
-    @patch("cementic.cli.get_session_factory")
+    @patch("cementic.cli_shared.get_session_factory")
     @patch("cementic.status_service.is_managed_process_alive", return_value=False)
     @patch("cementic.embedding_runtime.get_llama_cpp_runtime_client")
     def test_status_no_collection_shows_health(
@@ -1634,6 +1653,7 @@ class TestStopCommand:
         )
         with (
             patch("cementic.cli._get_supervisor_state_path", return_value=state_path),
+            patch("cementic.cli_shared._get_supervisor_state_path", return_value=state_path),
             patch("cementic.cli._is_managed_proc_alive", return_value=True),
             patch("cementic.cli.os.kill"),
             patch("cementic.cli.wait_for_exit", return_value=[4321]),
@@ -1687,7 +1707,7 @@ class TestCliHelpers:
         mock_llama = MagicMock()
         mock_llama.daemon_pid_file = None
         mock_cfg.llama_cpp = mock_llama
-        with patch.object(cementic_cli, "_config", mock_cfg):
+        with patch.object(cementic_cli_shared, "_config", mock_cfg):
             assert cementic_cli._llama_daemon_runtime_status() == "stopped"
 
     def test_llama_daemon_runtime_status_pid_file_missing(self, tmp_path: Path):
@@ -1696,7 +1716,7 @@ class TestCliHelpers:
         mock_llama = MagicMock()
         mock_llama.daemon_pid_file = tmp_path / "nonexistent.pid"
         mock_cfg.llama_cpp = mock_llama
-        with patch.object(cementic_cli, "_config", mock_cfg):
+        with patch.object(cementic_cli_shared, "_config", mock_cfg):
             assert cementic_cli._llama_daemon_runtime_status() == "stopped"
 
     def test_llama_daemon_runtime_status_bad_pid_file(self, tmp_path: Path):
@@ -1707,7 +1727,7 @@ class TestCliHelpers:
         mock_llama = MagicMock()
         mock_llama.daemon_pid_file = pid_file
         mock_cfg.llama_cpp = mock_llama
-        with patch.object(cementic_cli, "_config", mock_cfg):
+        with patch.object(cementic_cli_shared, "_config", mock_cfg):
             assert cementic_cli._llama_daemon_runtime_status() == "stopped"
 
     @patch("cementic.cli.is_pid_running", return_value=False)
@@ -1719,7 +1739,7 @@ class TestCliHelpers:
         mock_llama = MagicMock()
         mock_llama.daemon_pid_file = pid_file
         mock_cfg.llama_cpp = mock_llama
-        with patch.object(cementic_cli, "_config", mock_cfg):
+        with patch.object(cementic_cli_shared, "_config", mock_cfg):
             assert cementic_cli._llama_daemon_runtime_status() == "stopped"
 
     def test_get_data_dir_runtime_error(self):
@@ -1731,7 +1751,7 @@ class TestCliHelpers:
         mock_pw.state_path = None
         mock_cfg.source_watcher = mock_sw
         mock_cfg.pipeline_worker = mock_pw
-        with patch.object(cementic_cli, "_config", mock_cfg):
+        with patch.object(cementic_cli_shared, "_config", mock_cfg):
             try:
                 _get_data_dir()
             except RuntimeError:
@@ -1758,7 +1778,7 @@ class TestCollectionCallback:
 class TestRemovePrompt:
     """Test remove collection without --force (confirm prompt)."""
 
-    @patch("cementic.cli.get_engine")
+    @patch("cementic.cli_collection.get_engine")
     def test_remove_without_force_aborts_on_no(self, mock_get_engine):
         """remove_collection aborts when user says no to confirm."""
         result = runner.invoke(app, ["collection", "remove", "mycol"], input="n\n")
@@ -1768,21 +1788,21 @@ class TestRemovePrompt:
 class TestCollectionCommandsEdgeCases:
     """Edge cases for collection commands."""
 
-    @patch("cementic.cli.get_session_factory")
-    @patch("cementic.cli.get_engine")
+    @patch("cementic.cli_shared.get_session_factory")
+    @patch("cementic.cli_shared.get_engine")
     def test_list_empty_collections(self, mock_get_engine, mock_get_session_factory):
         """list_collection_command prints 'none' when no collections."""
         mock_session = MagicMock()
         mock_session.__enter__.return_value = mock_session
         mock_get_session_factory.return_value = lambda: mock_session
-        with patch("cementic.cli.list_collections", return_value=[]):
+        with patch("cementic.cli_collection.list_collections", return_value=[]):
             result = runner.invoke(app, ["collection", "list"])
         assert result.exit_code == 0
         assert "(none)" in result.output
 
-    @patch("cementic.cli.list_collections", side_effect=ValueError("something broke"))
-    @patch("cementic.cli.get_session_factory")
-    @patch("cementic.cli.get_engine")
+    @patch("cementic.cli_collection.list_collections", side_effect=ValueError("something broke"))
+    @patch("cementic.cli_shared.get_session_factory")
+    @patch("cementic.cli_shared.get_engine")
     def test_list_generic_error(self, mock_get_engine, mock_get_session_factory, mock_list):
         """list_collection_command prints generic error and exits 1."""
         mock_session = MagicMock()
@@ -1792,8 +1812,8 @@ class TestCollectionCommandsEdgeCases:
         assert result.exit_code == 1
         assert "collection list failed" in result.output
 
-    @patch("cementic.cli.get_session_factory")
-    @patch("cementic.cli.get_engine")
+    @patch("cementic.cli_shared.get_session_factory")
+    @patch("cementic.cli_shared.get_engine")
     def test_promote_no_ready_revision(self, mock_get_engine, mock_get_session_factory):
         """Nothing was promoted, so the exit code says so.
 
@@ -1805,14 +1825,14 @@ class TestCollectionCommandsEdgeCases:
         mock_session.__enter__.return_value = mock_session
         mock_get_session_factory.return_value = lambda: mock_session
         outcome = PromotionOutcome(status="no_ready")
-        with patch("cementic.cli.promote_ready_revision", return_value=outcome):
+        with patch("cementic.cli_collection.promote_ready_revision", return_value=outcome):
             result = runner.invoke(app, ["collection", "promote", "mycol"])
         assert result.exit_code == 1
         assert "no ready revision" in result.output
 
-    @patch("cementic.cli.promote_ready_revision", side_effect=ValueError("boom"))
-    @patch("cementic.cli.get_session_factory")
-    @patch("cementic.cli.get_engine")
+    @patch("cementic.cli_collection.promote_ready_revision", side_effect=ValueError("boom"))
+    @patch("cementic.cli_shared.get_session_factory")
+    @patch("cementic.cli_shared.get_engine")
     def test_promote_generic_error(self, mock_get_engine, mock_get_session_factory, mock_promote):
         """promote_collection prints generic error and exits 1."""
         mock_session = MagicMock()
@@ -1826,24 +1846,24 @@ class TestCollectionCommandsEdgeCases:
 class TestListCollectionRevisionsEdgeCases:
     """Edge cases for revisions command."""
 
-    @patch("cementic.cli.get_session_factory")
-    @patch("cementic.cli.get_engine")
+    @patch("cementic.cli_shared.get_session_factory")
+    @patch("cementic.cli_shared.get_engine")
     def test_revisions_empty(self, mock_get_engine, mock_get_session_factory):
         """list_collection_revision_command shows 'none' for empty revisions."""
         mock_session = MagicMock()
         mock_session.__enter__.return_value = mock_session
         mock_get_session_factory.return_value = lambda: mock_session
-        with patch("cementic.cli.list_collection_revisions", return_value=[]):
+        with patch("cementic.cli_collection.list_collection_revisions", return_value=[]):
             result = runner.invoke(app, ["collection", "revisions", "mycol"])
         assert result.exit_code == 0
         assert "(none)" in result.output
 
     @patch(
-        "cementic.cli.list_collection_revisions",
+        "cementic.cli_collection.list_collection_revisions",
         side_effect=ValueError("boom"),
     )
-    @patch("cementic.cli.get_session_factory")
-    @patch("cementic.cli.get_engine")
+    @patch("cementic.cli_shared.get_session_factory")
+    @patch("cementic.cli_shared.get_engine")
     def test_revisions_generic_error(self, mock_get_engine, mock_get_session_factory, mock_list):
         """list_collection_revision_command prints generic error and exits 1."""
         mock_session = MagicMock()
@@ -1891,8 +1911,8 @@ class TestStatusSurfacesWorkerErrors:
             patch("cementic.cli.check_health") as mock_health,
             patch("cementic.cli.load_worker_statuses") as mock_workers,
             patch("cementic.cli._load_supervisor_state") as mock_state,
-            patch("cementic.cli.get_engine"),
-            patch("cementic.cli.get_session_factory"),
+            patch("cementic.cli_shared.get_engine"),
+            patch("cementic.cli_shared.get_session_factory"),
             patch("cementic.cli.list_collections", return_value=[]),
             patch("cementic.cli.load_pipeline_status_bulk", return_value={}),
         ):
@@ -1970,8 +1990,8 @@ class TestStatusEdgeCases:
     @patch("cementic.cli._load_supervisor_state")
     @patch("cementic.cli.build_supervisor_status")
     @patch("cementic.cli.list_collections", return_value=[])
-    @patch("cementic.cli.get_session_factory")
-    @patch("cementic.cli.get_engine")
+    @patch("cementic.cli_shared.get_session_factory")
+    @patch("cementic.cli_shared.get_engine")
     def test_status_command_health_exception_fallback(
         self,
         mock_get_engine,
@@ -2074,8 +2094,8 @@ class TestStatusEdgeCases:
                             embedding_healthy=True,
                             llama_daemon="running, pid=333",
                         )
-                        with patch("cementic.cli.get_session_factory") as mock_sf:
-                            with patch("cementic.cli.get_engine") as _mock_engine:
+                        with patch("cementic.cli_shared.get_session_factory") as mock_sf:
+                            with patch("cementic.cli_shared.get_engine") as _mock_engine:
                                 mock_session = MagicMock()
                                 mock_session.__enter__.return_value = mock_session
                                 mock_sf.return_value = lambda: mock_session
@@ -2142,8 +2162,8 @@ class TestStatusEdgeCases:
                             embedding_healthy=True,
                             llama_daemon="running, pid=333",
                         )
-                        with patch("cementic.cli.get_session_factory") as mock_sf:
-                            with patch("cementic.cli.get_engine") as _mock_engine:
+                        with patch("cementic.cli_shared.get_session_factory") as mock_sf:
+                            with patch("cementic.cli_shared.get_engine") as _mock_engine:
                                 mock_session = MagicMock()
                                 mock_session.__enter__.return_value = mock_session
                                 mock_sf.return_value = lambda: mock_session
@@ -2296,7 +2316,7 @@ class TestErrorStreamDiscipline:
         monkeypatch.setenv("CEMENTIC_CONFIG", str(bad))
         # _get_config caches process-wide; an earlier test's good config would
         # mask the broken file this test plants.
-        monkeypatch.setattr(cementic_cli, "_config", None)
+        monkeypatch.setattr("cementic.cli_shared._config", None)
 
         result = runner.invoke(app, ["search", "q", "--json"])
 
@@ -2304,8 +2324,8 @@ class TestErrorStreamDiscipline:
         assert result.stdout.strip() == ""
         assert "config error" in result.stderr
 
-    @patch("cementic.cli.get_session_factory")
-    @patch("cementic.cli.get_engine")
+    @patch("cementic.cli_shared.get_session_factory")
+    @patch("cementic.cli_shared.get_engine")
     def test_unknown_collection_error_is_on_stderr(
         self, mock_get_engine, mock_get_session_factory
     ):
@@ -2317,7 +2337,7 @@ class TestErrorStreamDiscipline:
         # Same live-Postgres trap as the unknown-collection test above:
         # check_health must be mocked or the db-unreachable gate exits first.
         with (
-            patch("cementic.cli.collection_exists", return_value=False),
+            patch("cementic.cli_shared.collection_exists", return_value=False),
             patch("cementic.cli.check_health", return_value=_healthy_health()),
         ):
             result = runner.invoke(app, ["status", "-c", "nosuch"])
@@ -2335,7 +2355,7 @@ class TestErrorStreamDiscipline:
         # used to split it mid-word.
         assert long_dir in result.stderr
 
-    @patch("cementic.cli.get_engine")
+    @patch("cementic.cli_shared.get_engine")
     def test_database_hint_is_one_unwrapped_stderr_line(self, mock_get_engine):
         from sqlalchemy.exc import OperationalError
 
@@ -2373,8 +2393,8 @@ class TestErrorStreamDiscipline:
         assert "unsupported provider" in result.stderr
         assert "unsupported provider" not in result.stdout
 
-    @patch("cementic.cli.get_session_factory")
-    @patch("cementic.cli.get_engine")
+    @patch("cementic.cli_shared.get_session_factory")
+    @patch("cementic.cli_shared.get_engine")
     def test_collection_reindex_no_active_revision_is_on_stderr(
         self, mock_get_engine, mock_get_session_factory
     ) -> None:
@@ -2384,7 +2404,9 @@ class TestErrorStreamDiscipline:
         mock_session.__exit__.return_value = False
         mock_get_session_factory.return_value = lambda: mock_session
 
-        with patch("cementic.cli.reindex_collection", return_value=ReindexOutcome("no_active")):
+        with patch(
+            "cementic.cli_collection.reindex_collection", return_value=ReindexOutcome("no_active")
+        ):
             result = runner.invoke(app, ["collection", "reindex", "research"])
 
         assert result.exit_code == 1
@@ -2663,8 +2685,8 @@ class TestRefusalsUseStderr:
     the human search results got an error sentence appended as a result row.
     """
 
-    @patch("cementic.cli.get_session_factory")
-    @patch("cementic.cli.get_engine")
+    @patch("cementic.cli_shared.get_session_factory")
+    @patch("cementic.cli_shared.get_engine")
     def test_promote_with_no_ready_revision_explains_itself_on_stderr(
         self, mock_engine, mock_session_factory
     ):
@@ -2674,9 +2696,9 @@ class TestRefusalsUseStderr:
         mock_session_factory.return_value = lambda: mock_session
 
         with (
-            patch("cementic.cli.collection_exists", return_value=True),
+            patch("cementic.cli_shared.collection_exists", return_value=True),
             patch(
-                "cementic.cli.promote_ready_revision",
+                "cementic.cli_collection.promote_ready_revision",
                 return_value=PromotionOutcome("no_ready"),
             ),
         ):
@@ -2686,8 +2708,8 @@ class TestRefusalsUseStderr:
         assert "no ready revision" in result.stderr
         assert result.stdout.strip() == ""
 
-    @patch("cementic.cli.get_session_factory")
-    @patch("cementic.cli.get_engine")
+    @patch("cementic.cli_shared.get_session_factory")
+    @patch("cementic.cli_shared.get_engine")
     def test_promote_reports_a_lost_race_in_words_not_a_raw_db_error(
         self, mock_engine, mock_session_factory
     ):
@@ -2699,9 +2721,9 @@ class TestRefusalsUseStderr:
         mock_session_factory.return_value = lambda: mock_session
 
         with (
-            patch("cementic.cli.collection_exists", return_value=True),
+            patch("cementic.cli_shared.collection_exists", return_value=True),
             patch(
-                "cementic.cli.promote_ready_revision",
+                "cementic.cli_collection.promote_ready_revision",
                 return_value=PromotionOutcome("lost_race"),
             ),
         ):

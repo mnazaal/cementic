@@ -40,3 +40,18 @@ class TestRunnerCommands:
         # Errors may occur due to mocks not being fully set up
         # We just verify the command runs and calls our mock
         assert mock_watcher.called or mock_cfg.called or mock_boot.called
+
+    def test_source_watcher_reports_a_broken_config_on_stderr(self, tmp_path, monkeypatch) -> None:
+        """`_load_config` was entirely untested before it shared `render_config_error`
+        with the CLI's `_get_config` -- this is the runner-side counterpart of
+        `test_cli.py::TestErrorStreamDiscipline::test_config_error_under_json_flag_keeps_stdout_clean`.
+        """
+        bad = tmp_path / "cementic.toml"
+        bad.write_text("this is := not toml", encoding="utf-8")
+        monkeypatch.setenv("CEMENTIC_CONFIG", str(bad))
+
+        result = runner.invoke(app, ["source-watcher", str(tmp_path)])
+
+        assert result.exit_code == 1
+        assert result.stdout.strip() == ""
+        assert "config error" in result.stderr

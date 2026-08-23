@@ -6,15 +6,13 @@ import typer
 from pydantic import ValidationError
 from pydantic_settings import SettingsError
 from rich.console import Console
-from rich.markup import escape
 
 from cementic.bootstrap import Bootstrapper
 from cementic.config import (
     Config,
     ConfigError,
-    format_config_error,
     get_config,
-    resolve_config_path,
+    render_config_error,
 )
 from cementic.pipeline_worker import PipelineWorker
 from cementic.source_watcher import SourceWatcher
@@ -38,22 +36,10 @@ def _load_config() -> Config:
     pydantic traceback there is a wall of text in the one place that is supposed
     to explain why indexing never started.
     """
-    # escape(): these messages quote section names like "[llama_cpp]", which rich
-    # would otherwise consume as markup.
     try:
         return get_config()
-    except ConfigError as error:
-        err_console.print(f"[red]config error: {escape(str(error))}[/red]")
-        raise typer.Exit(1)
-    except ValidationError as error:
-        detail = format_config_error(error, resolve_config_path())
-        err_console.print(f"[red]config error: {escape(detail)}[/red]")
-        raise typer.Exit(1)
-    except SettingsError as error:
-        # Parity with the CLI's _get_config: pydantic-settings raises this (a
-        # ValueError, not a ValidationError) for a non-JSON env value on a
-        # complex-typed field, which otherwise reached this log as a traceback.
-        err_console.print(f"[red]config error: {escape(str(error))}[/red]")
+    except (ConfigError, ValidationError, SettingsError) as error:
+        err_console.print(f"[red]{render_config_error(error)}[/red]")
         raise typer.Exit(1)
 
 

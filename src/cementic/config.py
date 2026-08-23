@@ -20,7 +20,9 @@ from pydantic_settings import (
     BaseSettings,
     PydanticBaseSettingsSource,
     SettingsConfigDict,
+    SettingsError,
 )
+from rich.markup import escape
 from sqlalchemy.engine import URL, make_url
 
 from cementic.index_strategies import supported_index_methods
@@ -324,6 +326,32 @@ def format_config_error(error: ValidationError, path: Path | None) -> str:
                 line += f" (in effect: {', '.join(active)})"
         lines.append(line)
     return "; ".join(lines)
+
+
+def render_config_error(error: Exception) -> str | None:
+    """Render a config-loading exception as one markup-escaped line, or None.
+
+    ``None`` means ``error`` is not one of the three exceptions
+    ``get_config()`` can raise -- ``ConfigError``, pydantic's
+    ``ValidationError``, or pydantic-settings' ``SettingsError`` -- so the
+    caller knows to let it propagate rather than mistaking "nothing to say"
+    for "no error". The CLI and the runner both caught the same three
+    exceptions and built the same "config error: ..." line from them; this is
+    that logic in one place. The CLI additionally prints a hint for
+    ``SettingsError`` (env vars that take a list or table must be JSON) that
+    the runner never carried, so callers still branch on
+    ``isinstance(error, SettingsError)`` for that hint rather than getting it
+    from here.
+    """
+    if isinstance(error, ConfigError):
+        detail = str(error)
+    elif isinstance(error, ValidationError):
+        detail = format_config_error(error, resolve_config_path())
+    elif isinstance(error, SettingsError):
+        detail = str(error)
+    else:
+        return None
+    return f"config error: {escape(detail)}"
 
 
 def _blaming_env_var(location: str, env_prefix: str | None) -> str | None:

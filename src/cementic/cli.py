@@ -5,59 +5,40 @@ import os
 import shutil
 import sys
 import time
-from collections.abc import Iterator
-from contextlib import contextmanager
 from importlib import resources
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Any
 
 import typer
-from pydantic import ValidationError
-from pydantic_settings import SettingsError
-from rich.console import Console
 from rich.markup import escape
-from sqlalchemy.exc import InterfaceError, OperationalError, ProgrammingError
 
 from cementic import render
 from cementic.bootstrap import Bootstrapper
 from cementic.chunk import chunk_text
-
-# collection_callback: re-exported for the pre-split test suite, which imports
-# it straight from cementic.cli and calls it directly.
-from cementic.cli_collection import collection_app, collection_callback  # noqa: F401
+from cementic.cli_collection import collection_app
 from cementic.cli_format import CementicTyper
-
-# delete_collection_records, drop_orphan_vector_tables, list_collection_revisions,
-# promote_ready_revision, reindex_collection and remove_artifacts are not called
-# from this module any more (their call sites moved to cli_collection.py) --
-# they stay imported here regardless, because cli_collection.py reads all of
-# these off the `cementic.cli` module object at call time (`cli.<name>`, not a
-# by-value import) so that `unittest.mock.patch("cementic.cli.<name>")` in the
-# pre-split test suite keeps intercepting them. The redundant `as <name>` on
-# each is mypy's explicit-re-export idiom (`strict` implies
-# `no_implicit_reexport`); without it mypy refuses cli_collection.py's
-# `cli.<name>` accesses even though they work at runtime. See
-# cli_collection.py's module docstring for the full rationale.
-from cementic.collections import collection_exists
-from cementic.collections import delete_collection_records as delete_collection_records
-from cementic.collections import drop_orphan_vector_tables as drop_orphan_vector_tables
-from cementic.collections import list_collection_revisions as list_collection_revisions
-from cementic.collections import list_collections as list_collections
-from cementic.collections import promote_ready_revision as promote_ready_revision
-from cementic.collections import reindex_collection as reindex_collection
-from cementic.collections import remove_artifacts as remove_artifacts
-from cementic.config import (
-    Config,
-    ConfigError,
-    config_path_error,
-    default_config_path,
-    format_config_error,
-    get_config,
-    resolve_config_path,
+from cementic.cli_shared import (
+    _DB_HINT,
+    _NO_SCHEMA_HINT,
+    _db_session,
+    _get_config,
+    _get_data_dir,
+    _get_supervisor_state_path,
+    _is_database_unavailable,
+    _is_managed_proc_alive,
+    _is_schema_missing,
+    _load_supervisor_state,
+    _report_db_error,
+    _reporting_db_errors,
+    _require_known_collection,
+    _supervisor_processes,
+    _validated_collection_name,
+    console,
+    err_console,
 )
-from cementic.db import get_engine as get_engine
-from cementic.db import get_session_factory as get_session_factory
+from cementic.collections import collection_exists, list_collections
+from cementic.config import config_path_error, default_config_path, resolve_config_path
 from cementic.doctor import collect_doctor_report
 from cementic.embedding_runtime import (
     create_provider,
@@ -83,15 +64,12 @@ from cementic.supervisor import (
     force_kill,
     is_managed_process_alive,
     is_pid_running,
-    load_supervisor_state,
     managed_process_pid,
-    managed_process_start_token,
     process_start_token,
     save_supervisor_state,
     spawn_detached,
     wait_for_exit,
 )
-from cementic.validation import validate_collection_name
 
 app = CementicTyper(help="Index and semantically search document collections")
 embedding_app = CementicTyper(help="Manage embedding runtime service")
@@ -101,40 +79,6 @@ app.add_typer(collection_app, name="collection")
 app.add_typer(embedding_app, name="embedding")
 app.add_typer(config_app, name="config")
 app.add_typer(init_app, name="init")
-# soft_wrap: off a TTY rich falls back to an 80-column hard wrap, which split
-# paths and aligned rows mid-word in piped or redirected output. Line breaking
-# belongs to the terminal or the consuming program, not to us.
-console = Console(soft_wrap=True)
-# Errors and diagnostics go here so a failure never pollutes the data on
-# stdout (which would otherwise be piped on as content, or break `--json | jq`).
-err_console = Console(stderr=True, soft_wrap=True)
-
-
-@contextmanager
-def _db_session() -> Iterator[Any]:
-    """One ORM session against the configured database.
-
-    The engine/session-factory ritual around every database command appeared
-    seven times; `collection remove` keeps its own copy because it needs the
-    engine again after the session closes.
-    """
-    engine = get_engine(_get_config().database.url)
-    session_factory = get_session_factory(engine)
-    with session_factory() as session:
-        yield session
-
-
-def _validated_collection_name(collection: str) -> str:
-    """validate_collection_name, rendered as a CLI error instead of a raise.
-
-    The five-line try/except around it used to appear at every command that
-    takes a collection name, verbatim.
-    """
-    try:
-        return validate_collection_name(collection)
-    except ValueError as e:
-        err_console.print(f"[red]Error: {e}[/red]")
-        raise typer.Exit(1)
 
 
 def _version_callback(value: bool) -> None:
@@ -189,45 +133,6 @@ def _root(
     builds a versioned extract -> chunk -> embed pipeline in Postgres (pgvector),
     then serves fast semantic search over the indexed chunks.
     """
-
-_config: Config | None = None
-
-
-def _get_config() -> Config:
-    """Lazy-load the config singleton, reporting config problems in one line.
-
-    Every command routes through here, so this is where a broken config stops
-    being a multi-screen pydantic traceback. A failed load is deliberately not
-    cached: fixing the file and re-running must work.
-    """
-    global _config
-    if _config is None:
-        try:
-            _config = get_config()
-        # escape(): these messages quote section names like "[llama_cpp]", which
-        # rich would otherwise consume as markup -- dropping the one detail the
-        # message exists to convey.
-        except ConfigError as error:
-            err_console.print(f"[red]config error: {escape(str(error))}[/red]")
-            raise typer.Exit(1)
-        except ValidationError as error:
-            detail = format_config_error(error, resolve_config_path())
-            err_console.print(f"[red]config error: {escape(detail)}[/red]")
-            raise typer.Exit(1)
-        except SettingsError as error:
-            # pydantic-settings JSON-parses complex-typed fields from the
-            # environment and raises SettingsError -- a ValueError, *not* a
-            # ValidationError -- so a plausible spelling like
-            # CEMENTIC_EXTRACT_BACKENDS=pdf=pymupdf4llm reached the user as a
-            # multi-screen traceback from every command.
-            err_console.print(f"[red]config error: {escape(str(error))}[/red]")
-            err_console.print(
-                "hint: settings that take a list or table are read from the "
-                "environment as JSON, e.g. CEMENTIC_EXTRACT_BACKENDS='{\"pdf\": "
-                "\"pymupdf4llm\"}'"
-            )
-            raise typer.Exit(1)
-    return _config
 
 
 def _default_config_toml() -> str:
@@ -319,19 +224,8 @@ def init_postgres(
     console.print("  cementic status --doctor")
 
 
-def _load_supervisor_state() -> dict[str, object]:
-    return load_supervisor_state(_get_supervisor_state_path())
-
-
 def _save_supervisor_state(state: dict[str, object]) -> None:
     save_supervisor_state(_get_supervisor_state_path(), state)
-
-
-def _supervisor_processes(state: dict[str, object]) -> list[dict[str, object]]:
-    processes = state.get("processes", [])
-    if not isinstance(processes, list):
-        return []
-    return [proc for proc in processes if isinstance(proc, dict)]
 
 
 def _known_collection_names(candidates: list[str]) -> set[str]:
@@ -360,12 +254,6 @@ def _unsearchable_message(unknown: list[str], unindexed: set[str]) -> str:
 def _stdin_is_a_terminal() -> bool:
     """Whether stdin is a terminal (a seam: test runners replace sys.stdin)."""
     return sys.stdin.isatty()
-
-
-def _is_managed_proc_alive(process: dict[str, object]) -> bool:
-    return is_managed_process_alive(
-        managed_process_pid(process), managed_process_start_token(process)
-    )
 
 
 _STARTUP_GRACE_SECONDS = 2.0
@@ -484,23 +372,9 @@ def _get_cli_version() -> str:
         return "unknown"
 
 
-def _get_data_dir() -> Path:
-    """Return cementic data directory path."""
-    state_path = _get_config().source_watcher.state_path or _get_config().pipeline_worker.state_path
-    if state_path is None:
-        raise RuntimeError("State path is not configured")
-    return state_path.parent
-
-
 def _get_start_lock_path() -> Path:
     """Lock file serialising `cementic start`'s check-then-spawn sequence."""
     return _get_data_dir() / "start.lock"
-
-
-
-def _get_supervisor_state_path() -> Path:
-    """Lazy supervisor state path."""
-    return _get_data_dir() / "supervisor.json"
 
 
 def _build_collection_filters(
@@ -519,76 +393,6 @@ def _build_collection_filters(
 
     merged = [*option_values, *trailing_values]
     return merged or None
-
-
-def _is_database_unavailable(error: Exception) -> bool:
-    """Return whether the error indicates an unreachable database."""
-    return isinstance(error, (OperationalError, InterfaceError))
-
-
-def _is_schema_missing(error: Exception) -> bool:
-    """Return whether the error means cementic's tables don't exist yet.
-
-    The schema is created by the pipeline worker on first `cementic start`, so a
-    reachable-but-empty database is the normal pre-first-run state, not a fault.
-    """
-    return isinstance(error, ProgrammingError) and "does not exist" in str(error.orig)
-
-
-_NO_SCHEMA_HINT = "nothing indexed yet — run `cementic start DIRECTORY -c COLLECTION` first"
-
-
-def _require_known_collection(session: Any, collection: str) -> None:
-    """Exit 1 with a clear message when a named collection does not exist.
-
-    "Does not exist" and "exists but has nothing to show" used to be
-    indistinguishable -- a zero-filled status report, an empty revision list, or
-    "no ready revision", each at exit 0 -- so a typo'd collection name read as a
-    real but idle one, and no script could tell the difference.
-    """
-    if collection_exists(session, collection):
-        return
-    err_console.print(f"collection: {collection}")
-    err_console.print("status: unknown collection (check `cementic collection list`)")
-    raise typer.Exit(1)
-
-
-def _report_db_error(error: Exception, action: str) -> None:
-    """Print the right message for a failed database operation."""
-    if _is_database_unavailable(error):
-        render._print_database_unavailable(action, _DB_HINT)
-    elif _is_schema_missing(error):
-        err_console.print(_NO_SCHEMA_HINT)
-    else:
-        err_console.print(f"{action} failed: {error}")
-
-
-@contextmanager
-def _reporting_db_errors(action: str) -> Iterator[None]:
-    """Report a failed database operation the same way at every call site.
-
-    A context manager, not a decorator: several call sites do work before and
-    after the guarded region (reading outcome fields inside the session, then
-    rendering after it closes), and a decorator would pull that work inside the
-    guarded scope and change which exceptions it sees.
-
-    typer.Exit subclasses RuntimeError, so a bare `except Exception` here would
-    swallow a deliberate exit and re-report it as "<action> failed: 1" -- this
-    is the one place that has to get that re-raise right, instead of five.
-    """
-    try:
-        yield
-    except typer.Exit:
-        raise
-    except Exception as error:
-        _report_db_error(error, action)
-        raise typer.Exit(1)
-
-
-_DB_HINT = (
-    "hint: run `cementic init postgres ./cementic-postgres` once and follow its README, "
-    "or set CEMENTIC_DB_URL to an existing Postgres with pgvector and pgvectorscale"
-)
 
 
 def _llama_daemon_runtime_status() -> str:

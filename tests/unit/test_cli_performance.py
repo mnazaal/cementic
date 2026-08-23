@@ -110,8 +110,8 @@ def test_search_command_calls_backend_search_exactly_once(mock_searcher_class: M
 
 @patch("cementic.cli._llama_daemon_runtime_status", return_value="stopped")
 @patch("cementic.cli.list_collections", return_value=[])
-@patch("cementic.cli.get_session_factory")
-@patch("cementic.cli.get_engine")
+@patch("cementic.cli_shared.get_session_factory")
+@patch("cementic.cli_shared.get_engine")
 @patch(
     "cementic.cli.check_health",
     # A real health object, not None: None now means the probe failed, which
@@ -176,9 +176,9 @@ def test_status_command_probes_health_and_workers_exactly_once(
     assert mock_workers.call_count == 1
 
 
-@patch("cementic.cli.list_collections", return_value=[])
-@patch("cementic.cli.get_session_factory")
-@patch("cementic.cli.get_engine")
+@patch("cementic.cli_collection.list_collections", return_value=[])
+@patch("cementic.cli_shared.get_session_factory")
+@patch("cementic.cli_shared.get_engine")
 def test_collection_list_queries_backend_exactly_once(
     mock_engine: MagicMock, mock_session_factory: MagicMock, mock_collections: MagicMock
 ) -> None:

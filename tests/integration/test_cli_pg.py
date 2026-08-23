@@ -9,7 +9,6 @@ from sqlalchemy import event
 from sqlalchemy.engine import Engine
 from typer.testing import CliRunner
 
-from cementic import cli as cementic_cli
 from cementic.cli import app
 from cementic.status_service import WorkerStatus
 from tests.integration.test_pg_helpers import cleanup_pg_tables, seed_active_vector_collection
@@ -75,7 +74,7 @@ def test_pg_cli_search_returns_real_results(
         chunks=[("cli biology result", [0.0, 1.0, 0.0, 0.0])],
     )
     pg_session.commit()
-    monkeypatch.setattr(cementic_cli, "_config", pg_config)
+    monkeypatch.setattr("cementic.cli_shared._config", pg_config)
     monkeypatch.setattr(
         "cementic.search._create_embedding_provider",
         lambda config_json, config=None: FakeSearchEmbeddingClient(),
@@ -108,7 +107,7 @@ def test_pg_cli_status_verbose_reports_real_collection(
         chunks=[("status vector result", [1.0, 0.0, 0.0, 0.0])],
     )
     pg_session.commit()
-    monkeypatch.setattr(cementic_cli, "_config", pg_config)
+    monkeypatch.setattr("cementic.cli_shared._config", pg_config)
     # A real health object, not None: None now means the probe *failed*, which
     # exits 1 rather than printing a summary two rows short.
     monkeypatch.setattr(
