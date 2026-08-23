@@ -4,7 +4,10 @@
 ## Where the work stands
 
 **v0.2.0 is shipped** — tag `v0.2.0` = merge commit `9c9273f` on `main`, pushed
-2026-08-18. The two plan-of-record sections below it are closed records.
+2026-08-18. The two plan-of-record sections that recorded it were dropped in the
+2026-08-23 compaction; `git log` and `CHANGELOG.md` carry that history, and the
+measurements worth keeping were harvested into "Measurements that justify
+current defaults" below.
 
 **A sixth review ran 2026-08-23** — a full-codebase audit (CLI surface, call
 graph, error handling, coverage, FP/UNIX discipline, stale weight, docs drift),
@@ -15,12 +18,15 @@ of record directly below, which is the live plan.
 The audit's baseline: all six `./scripts/check.sh` gates green, mypy strict
 clean on 27 files, ruff clean, 93% line / **88% branch** coverage. One
 correctness bug, one dominant readability problem (`cli.py` at 2138 lines), and
-substantial doc drift including a 404ing install URL.
+substantial doc drift including a 404ing install URL. All three are now
+addressed; `cli.py` is 1413 lines.
 
-**Entry point:** Batch 1, item 1 — widen `is_retryable_embed_error`. Three
-decisions need the user before their batches can run (repo visibility, `doctor`
-promotion, Python 3.10/3.11 support); all three are recorded under Open risks
-with a recommendation, and none blocks Batch 1.
+**Entry point:** Batch 4's remaining weight removal, then Batch 6. Batches 1,
+2, 3 and 5 are done (see Exit criteria). Two decisions are still open and are
+recorded under Open risks: promoting `status --doctor` to `cementic doctor`, and
+whether Python 3.10/3.11 get a CI matrix or get dropped from `requires-python`.
+Repo visibility turned out not to gate anything — the install docs were fixed
+without it.
 
 The live corpus is indexed and searchable at the shipped defaults: collection
 `test` (watching `~/projects/bibs/papers`), 5 documents, 274/274 chunks embedded
@@ -39,7 +45,8 @@ below it is closed record or deferral register.
 **Scope.** The 17-item ordered action list in `notes/review-codebase.html`,
 batched by dependency. Every file:line and every piece of evidence lives in that
 note; this section holds only execution order, decisions, anti-scope, and exit
-criteria — same division as the two closed plans below.
+criteria. File:line references throughout are as-audited (pre-refactor) and will
+not match `cli.py` after `c69936d`.
 
 **What this plan does not cover.** The four items under "Also still open, from
 the fourth review" near the bottom of this file stay open and unscheduled: the
@@ -74,8 +81,8 @@ as a decision rather than a miss.
 Dependencies that actually bind: **2 before 3** — you cannot safely restructure
 a 2138-line file behind 80% branch coverage and a test that fails under
 coverage instrumentation. **3 before 4**, so cleanup diffs never mix with
-refactor diffs (the same rule the fifth-review plan's batch 8 followed). Batches
-1, 5 and 6 are independent of the rest and of each other.
+refactor diffs. Batches 1, 5 and 6 are independent of the rest and of each
+other.
 
 ### Batch 1 — correctness
 
@@ -305,11 +312,13 @@ not bloat.*
 
 ### Batch 5 — doc truth
 
-**2. The install command 404s.** `README.md:31,33` give
-`pipx install "git+https://github.com/mnazaal/cementic.git@v0.2.0"`; `curl`
-returns HTTP 404 anonymously. The same dead URL is in `cli.py:213`'s root epilog
-— so it prints in `--help` — and in `pyproject.toml:79-81`. It is the first
-instruction a new user follows. **Needs the user's decision** (see Open risks).
+**2. The install command 404s. DONE — and it never needed the decision it was
+filed behind.** `README.md` gave `pipx install "git+https://github.com/...@v0.2.0"`,
+which 404s anonymously because the repo is private. This was recorded as blocked
+on a repo-visibility decision. It was not: the repo being private blocks nobody
+who already installs from source, and the defect was simply that the docs
+described a command that cannot work. README now documents clone-then-install and
+says why. Repo visibility remains a real question, but it gates nothing here.
 
 **14. Correct the counts and the wrong details.** All verified during the audit:
 
@@ -341,29 +350,25 @@ and the cold-start ordering (`create_tables` runs only inside the workers
 `cementic start` spawns, so `status`/`search`/`collection list` all exit 1 on a
 fresh database — verified live).
 
-**13. Compact `PLAN.md`.** ~763 of its 1013 lines are closed record. Live design
-content is Design principles (414-430), Scale context (431-455), Key seams
-(456-514), Pipeline as composable filters (515-539), plus the handoff block and
-this section — about 250 lines plus this plan. Candidates for removal, in order:
-the two closed plans of record (27-412, 386 lines, both fully ticked and
-recorded in commit history and `CHANGELOG.md`); the closed-branch review logs
-(607-872, 266 lines); the Deferred list (998-1013), which duplicates `TODO.md`
-in substance — two roadmaps, one of which nobody will update. Keep the 6-line
-measurement table from Superseded (873-905) and drop its surrounding 27 lines.
-Also fix `CLI surface` (540-556), which restates README with no added design
-content, and the four `notes/` links (35, 565-572, 981) that went dead when
-`notes/` was untracked in `c7069e1`.
+**13. Compact `PLAN.md` and `README.md`. DONE.**
 
-**Needs the user's confirmation before executing** — deleting 763 lines of
-record is not something to do on inference, and `research-plan` treats
-compaction as a separate confirmed pass.
+`PLAN.md` 1498 -> 865 lines. Dropped: the two closed plans of record, the
+per-branch "Fixed on `claude/*`" logs, the `Deferred` list (which duplicated
+`TODO.md` -- two roadmaps, one of which nobody updates), `CLI surface` (which
+restated README), and the narrative around the superseded ANN analysis.
 
-Separately, `README.md` (475 lines) carries developer content against the
-standing rule that README is user-facing: move the Architecture module list
-(445-464, duplicating `AGENTS.md`'s tree), the tokenizer-ratio derivation
-(312-327), and the `1454s vs 345s` index benchmark (349-352) into this file;
-merge `Development` (465-475) into `AGENTS.md`, where those instructions
-currently live and are wrong.
+Harvested first, into "Measurements that justify current defaults": the
+`1454 s at 64MB vs 345 s at 2GB` build-memory figure, the `EXPLAIN` plan-shape
+table behind the filter-column schema, the watchdog directory-move event table,
+the tokenizer-ratio derivation moved out of README, and the adversarial-review
+lesson. Deleting the closed sections wholesale would have destroyed the
+justification for two live defaults -- the numbers sat inside the branch logs.
+
+`README.md` 506 -> 458 lines. Removed the `Architecture` module list (duplicating
+`AGENTS.md`'s tree and Key seams above) and the `Development` section
+(contributor instructions belonging in `AGENTS.md`, and stale -- it listed five
+gates). Compressed the chunk-size and ANN-index sections to what a user acts on,
+leaving the derivations here.
 
 ### Batch 6 — surface changes
 
@@ -404,9 +409,11 @@ the claim is plausible — but unverified is unverified.
       packaged Containerfile and kept (`fdefdfa`).
 - [ ] Batch 4 (rest): the three PDF specs gone, `test_embedder.py` gone, and at
       least collapses 1–5 landed.
-- [ ] Batch 5: the install path works as written from a clean environment, or
-      the README no longer claims it does; every count in the list above
-      corrected.
+- [x] Batch 5: README no longer claims an install path that cannot work
+      (`dde9413` for the counts, plus the compaction commit for the install
+      text); every count in the list above corrected; `PLAN.md` 1498 -> 865 and
+      `README.md` 506 -> 458, with the load-bearing measurements harvested
+      rather than deleted.
 - [ ] Batch 6: executed or explicitly deferred with a reason recorded here.
 - [ ] All six `./scripts/check.sh` gates green at every commit.
 - [ ] No unmerged `claude/*` branch left behind.
@@ -491,393 +498,6 @@ pin the new behaviour, not the old, which is the one thing a refactor's test
 must not do. Rejected: writing it after (pins the wrong thing) and skipping it
 (the "reports success, dropped the work" defect class is the project's recurring
 failure mode). Status: live.
-
-## Plan of record — fifth-review fixes (2026-08-18)
-
-**Executed same day** — twelve fix/refactor/test commits on
-`claude/review-fixes-2026-08-17`, in the batch order below, every batch green
-under all five `./scripts/check.sh` gates (PG included). The note's resolution
-banner maps finding → commit; the deliberate exceptions are recorded there and
-under "Deliberately not done". Kept as the record of the decisions.
-
-Scope: close the fifth review, `notes/code-review-2026-08-17.html`.
-All file:line evidence lives in the note; this section holds only execution
-order, the decisions, and the exit criteria. Mechanics: one branch
-(`claude/review-fixes-2026-08-17`), conventional commits, one commit per
-finding-cluster with its regression test, each commit green under
-`./scripts/check.sh` — all five gates, PG included (that lesson is paid for).
-When done, the note gets a resolution banner mapping finding → commit, same
-shape as the 2026-08-14 note.
-
-### Order of attack
-
-`§` references are the note's sections.
-
-1. **Finish the five half-landed fixes (§1).** Each currently contradicts a
-   commit message or docstring that claims it done, so they go first:
-   - `status --json` on an unknown collection: validate before the JSON early
-     return; error to stderr, non-zero exit. Correct the README/CHANGELOG
-     "exits non-zero" claims in the same commit.
-   - The initial scan records skips: symlinks, walk errors, and registration
-     failures go through `record_skipped` exactly as live inotify events do.
-   - `stop`'s kill loop: `PermissionError` means alive-but-not-ours (mirror
-     `force_kill`'s reasoning); never clear supervisor/worker state while such
-     a pid remains; report it and exit non-zero.
-   - `CEMENTIC_CONFIG`: `expanduser` in `resolve_config_path`; `config path`
-     calls the existing `config_path_error` guard so an unusable value is
-     reported instead of silently masked by the fallback.
-   - `promote` prints the artifact-removal failure list (as `remove` already
-     does); `embed` rejects empty/whitespace `content`.
-2. **Worker/DB correctness (§2)**, in severity order:
-   - §2.1 `collection remove` vs a running worker. **Decision — recommended
-     mechanism:** the worker re-validates its cached revision id once per poll
-     cycle (one cheap SELECT) and exits cleanly when it is gone; `collection
-     remove` additionally warns when workers for that collection are running.
-     Rejected alternative: refusing removal while workers run — heavier UX,
-     and the delete itself is already cascade-safe; the defect is only the
-     zombie worker and the watcher resurrecting the collection.
-   - §2.7 search's `-c` fallback ranks revisions via `_searchable_revisions`
-     so there is one source of revision choice. Twice-derived carry; the
-     regression test pins building-vs-ready.
-   - §2.5 `IS DISTINCT FROM` semantics for `source_content_hash` in the claim
-     query, and write the hash on the failure path too, so a NULL row cannot
-     wedge a revision in `building`.
-   - §2.2 `SET LOCAL maintenance_work_mem`; delete the false "connection is
-     discarded" comment.
-   - §2.4 reset `skipped_files` on watcher restart; §2.6 drop whitespace-only
-     chunks before `chunk_index` assignment so indexes stay contiguous and
-     `total_chunks` honest; §2.3 a post-commit cleanup failure after a durable
-     promote is a warning, not "promote failed" exit 1.
-   - §2.8 partial unique index `ON pipeline_revisions (collection) WHERE
-     status = 'active'`, applied through the ensure-schema path (same
-     mechanism as `ensure_vector_table_schema` — `create_all` won't retrofit
-     it), plus promote re-reading status under `FOR UPDATE`.
-   - §2.9's smaller items ride along wherever their file is already open;
-     the directory-move blindness (unverified) gets a repro test first and a
-     fix only if it reproduces.
-3. **Error-stream and wrapping discipline (§4.2–4.3).** Mechanical, wide
-   blast radius, kept in its own commits: all human error text to stderr via
-   an `err_console`; `soft_wrap=True` so off-TTY output stops hard-wrapping
-   paths at 80 columns. Tests pipe the output and assert stream and absence
-   of mid-path wraps. This is what unblocks `--json | jq` composability.
-4. **Exit-code normalization (§4.1).** Adopt the convention most commands
-   already follow — 0 ok, 1 operation failed, 2 usage error (Click's own
-   parser errors) — and move the stragglers to it (`collection remove
-   <unknown>`, `promote` with no ready revision). An unknown *name* is an
-   operation failure, so it exits 1, not 2. Document the table in README.
-5. **Config/runtime hardening (§3.1–3.3, §3.5–3.6).** Bounds on numerics
-   (`n_ctx >= 1` closes the guard-disable hole; positive intervals and
-   timeouts; port ranges), the chunk_size↔n_ctx invariant enforced at config
-   validation against the *configured* values (today it is only tested at the
-   shipped defaults), env-vs-file attribution in config error messages,
-   `over_budget_reason` wired into worker failure rows and the query-side
-   message (which currently blames `pipeline.chunk_size` for a long query),
-   `runner.py` parity with the CLI's error handling (`RuntimeError`,
-   `SettingsError`), `embedding stop` under the daemon lock, autostart
-   failing fast on a definitive model mismatch instead of waiting 120 s, and
-   doctor's unreachable/false branches.
-6. **Bootstrap download (§3.4).** Third-time carry — **decision: fix now.**
-   Unique temp name, download performed under the daemon file lock (taken
-   before the download, not after), `requests` exceptions wrapped into the
-   normal error format. If overruled, the deferral gets written into
-   "Deliberately not done" with reasons, so it stops being re-derived.
-7. **CLI paper cuts (§4.4)**, batched by file: binary-stdin decode error in
-   `embed`, `chunk ""` falsy-check reading stdin, embed JSONL error line
-   attribution, `strict=True` on the zips, the wrong-noun messages
-   (`start <file>`, `extract <dir>`), `status -v` file-listing errors
-   surfaced, `check_health` crash no longer silently deleting the health
-   section, `current_file` included in `--json`.
-8. **Trimming (§5).** Last, so cleanup diffs never mix with behavior fixes:
-   the 17-key status dict ×2, engine/session boilerplate ×7, the
-   `validate_collection_name` wrapper ×9, the ~70 worker/watcher duplicated
-   lines, the bucketing loop ×2, the dead `session.commit()`, TOML parsed
-   once per `get_config()`, and the stale docstrings/comments — except those
-   an earlier batch already touches, which get fixed there.
-9. **Test and doc debt (§6–§7).** Regression tests for the three untested
-   fourth-review fixes (search-migration commit, `reindex --force`
-   failure-atomicity, embed input validation — the last largely produced by
-   batch 1), plus whatever README/CHANGELOG claims batches 1 and 4 have not
-   already corrected.
-
-### Out of scope here, tracked elsewhere
-
-- The chunk_size 320-vs-352 re-embed decision — handoff block above.
-- Environment, not code: the orphaned daemon observed on port 11555 (SIGTERM
-  it, per the handoff block's socket note), and the indexed corpus directory
-  no longer existing on disk (every current search result carries a dead
-  `source_path` — re-point or remove the collection).
-- The deferred-features list at the bottom of this document.
-
-### Exit criteria
-
-- Every §1–§7 finding is either fixed with a regression test or explicitly
-  moved to "Deliberately not done" with a reason.
-- Resolution banner in the 2026-08-17 note, finding → commit.
-- `./scripts/check.sh` green, PG gate included.
-- No unmerged `claude/*` branch left behind.
-
-Rough sizing: batches 1–4 are one focused session; 5–9 one to two more.
-
-## Plan of record — zero-rough-edges release (2026-08-19; shipped as v0.2.0)
-
-**Goal.** Ship a release with zero rough edges: every known defect either fixed
-with a regression test or documented as a limitation with recorded evidence,
-the one code path no test evidence covers exercised against the live system,
-and the release mechanics done. "Rough edge" is defined by the user's
-criterion: anything a real user would hit and be surprised by.
-
-**Re-versioned 2026-08-18: this shipped as `v0.2.0`, not `v1.0.0`.** The work
-is unchanged; the user judged the 1.0 stability promise premature after days of
-single-user use. The bar for a future v1 is recorded below ("Road to v1").
-
-**Where this starts from.** `main` at `c34b57f` — fifth review closed,
-adversarial re-review closed, all five `./scripts/check.sh` gates green.
-Working branch: `claude/v1-release`. Current version: `0.1.0b1`.
-
-**Decisions already settled** (user, 2026-08-18 — do not re-litigate):
-
-| Decision | Choice | Rejected alternative and why |
-|---|---|---|
-| chunk_size | Re-embed at the shipped **320** | Pinning 352 kept the old index but paid a tokenize round trip per chunk forever and left config diverged from the default |
-| Release form | **Annotated git tag** (`v0.2.0` after the re-version), no PyPI | PyPI needs an account, a free name, and a publish pipeline nobody has asked for |
-| Piped previews | **Full text kept** | Capping reintroduces the substring-grep breakage the review fixed |
-| Reopened defects | **Both fixed in v1** | Shipping known silent-failure modes contradicts the zero-rough-edges goal |
-| Corpus location | `~/projects/bibs/papers` (5 PDFs, verified readable) | Old `~/bibs/papers` exists but is outside the agent's reach |
-
-### Batch map
-
-Six batches. 1 and 2 are independent of each other and of the corpus; 3 needs
-the user present; 4–6 are cheap and sequential. Dependency: 5 must follow 1–4
-(it documents their outcomes); 6 is last by definition.
-
-| # | What | Kind | Needs user? |
-|---|---|---|---|
-| 1 | Two silent-degradation fixes | Code + tests | No |
-| 2 | §2.9 directory-move repro | Investigation, then code or docs | No |
-| 3 | Live-fire: remove → start at 320 → promote → search → stop | Operation | **Yes** (writes live state) |
-| 4 | Cold-start UX line in quickstart | Docs | No |
-| 5 | README walked cold + Known limitations section | Docs + verification | No |
-| 6 | Version bump, CHANGELOG cut, tag, install-from-tag check | Release | Tag push is user's |
-
-### Batch 1a — `check_health` must detect a wedged daemon
-
-**Symptom.** On 2026-08-15 a daemon answered `/v1/models` but hung every
-embedding request for 21 hours; `cementic status` said `embedding healthy` the
-whole time.
-
-**Why.** `check_health` (`status_service.py:399`) classifies via
-`probe_daemon(..., wait_seconds=0.0)` (`embedding_runtime.py:547`), which only
-does a `/v1/models` round trip. A wedged daemon still answers listings — the
-probe cannot see that the *embedding* path is dead.
-
-**Design constraint.** The daemon serializes requests behind one model lock, so
-a real embedding probe against a daemon mid-batch (30 s+ is normal) times out
-too — naive probing misreports *busy* as *wedged*. `status` must also never
-block long (that defect was already fixed once; do not reintroduce it).
-
-**Change.**
-- `probe_daemon` gains an opt-in second stage: after the model list answers
-  HEALTHY, issue a one-token `/v1/embeddings` request with a ~5 s budget.
-- On timeout/error, consult the pipeline worker's state file
-  (`current_activity` / `current_file`, `state.py:34–49`): a worker mid-embed
-  means the daemon is legitimately saturated → `BUSY` (healthy, as today).
-  No active worker and no answer → new `DaemonHealth.WEDGED` → unhealthy,
-  `llama_daemon` message "running but not answering embeddings".
-- `check_health` and `status --doctor` use the two-stage probe; `--doctor` may
-  spend a slightly larger budget. Total worst-case `status` latency stays
-  under ~7 s and only when the first stage said healthy.
-
-**Tests.** Fake daemon (local HTTP server) that answers `/v1/models` and hangs
-`/v1/embeddings`: with no worker activity → `status` reports unhealthy, exits
-per the health rules, within the budget. Same fake with a worker state file
-showing mid-embed activity → healthy/busy. Genuine fast fake → healthy.
-Falsify: revert the second stage, the wedged test must go red.
-
-**Files.** `embedding_runtime.py` (probe), `status_service.py` (wiring),
-`doctor.py` (budget), `tests/unit/test_status_service.py`,
-`tests/unit/test_embedding_runtime.py`.
-
-### Batch 1b — Nomic v1/v1.5 models must get task prefixes
-
-**Symptom.** Pointing `llama_cpp.model_path` at
-`models/nomic-embed-text-v1.5.f16.gguf` (which sits in this repo) silently
-disables the asymmetric `search_document:`/`search_query:` prefixes that v1 and
-v1.5 need exactly as v2 does. Retrieval degrades measurably; nothing errors.
-
-**Why.** `_NOMIC_V2_MARKER = "nomic-embed-text-v2"` (`embedding_text.py`)
-matches only v2 filenames. The wrong behaviour is *pinned by a test*
-(`test_embedding_text.py:24–26` asserts `"nomic-embed-text"` gets no prefix),
-so it reads as intentional.
-
-**Change.**
-- Widen the marker to the family: any model filename containing
-  `nomic-embed-text` selects the task-prefix policy. Rename the policy
-  constant accordingly (`NOMIC_V2_POLICY` → family name);
-  `describe_text_policy` keeps reporting the selection.
-- Bump `EMBEDDING_TEXT_FORMAT_VERSION` `"v1"` → `"v2"` (`profiles.py:22`):
-  v1/v1.5 vectors embedded under the old rule are unprefixed, and the version
-  exists precisely so old and new vectors never mix in one profile. **Impact
-  on the live index: none in effect** — the bump changes every profile
-  fingerprint, so the next `start` mints a new revision, but batch 3 rebuilds
-  from scratch anyway; do batch 1b before batch 3 so the rebuild happens once.
-- Retire the pinning test; replace with three: v1.5 filename gets prefixes,
-  v2 unchanged, non-Nomic unchanged.
-
-**Files.** `embedding_text.py`, `profiles.py`,
-`tests/unit/test_embedding_text.py`.
-
-**Known residual (documented, not fixed).** Matching on *filename* still
-mis-selects for a renamed GGUF; reading GGUF metadata is the real fix and
-stays deferred ("Deliberately not done", first review). v1 documents the
-filename convention in the README.
-
-### Batch 2 — §2.9 directory-move blindness: RESOLVED 2026-08-18
-
-**Measured** (watchdog inotify backend, scripted repro, no cementic):
-
-| Case | Events delivered | Handler coverage |
-|---|---|---|
-| A: `mv watch/sub watch/sub2` (within) | `DirMovedEvent` + per-file `FileMovedEvent`s | already covered (`on_moved` per file) |
-| B: `mv outside/new watch/new` (move in) | `DirCreatedEvent` + per-file `FileCreatedEvent`s | already covered (`on_created` per file) |
-| C: `mv watch/sub outside/` (move out) | **one `DirDeletedEvent`, no per-file deletions** | **was uncovered — fixed** |
-| D: `mv watch watch2` (root itself) | **nothing at all** | unfixable from inside the watch — documented |
-
-The review's "blind until restart" claim was therefore true for C and D, in the
-*stale-results* direction (documents under a moved-out directory stayed
-"present"; searches matched dead paths). The feared *silent non-indexing*
-direction (files entering unseen) does not occur — case B synthesizes per-file
-created events.
-
-**Fix (case C).** `on_deleted` no longer drops directory events: a
-`delete_directory_callback` marks every document under the vanished prefix
-deleted (trailing-separator match, so `/a/docs` never claims
-`/a/docs-archive`), reusing the same purge path as single-file deletion.
-Three tests: prefix delete, prefix-sibling safety, and end-to-end through a
-real observer (that one verified red with the wiring removed).
-
-**Documented limitation (case D).** inotify delivers nothing when the watched
-root itself is moved; the watcher cannot see it. Startup reconciliation repairs
-it on the next `cementic start`. Goes in README Known limitations (batch 5).
-
-### Batch 3 — live-fire validation (user present)
-
-The only remaining path with no evidence on the real system, and the execution
-of the 320 decision, in one pass. Also live-exercises this week's fixes on the
-start path: the index retrofit in `create_tables`, supervisor liveness, the
-worker's restructured embed transaction, promote.
-
-**Steps** (each with its expected outcome; stop and diagnose on any mismatch):
-1. `cementic status --doctor` → all ok/warning, no fail.
-2. `cementic collection remove test --force` → deleted; reports docs/chunks
-   removed and vector tables dropped.
-3. `cementic start ~/projects/bibs/papers -c test` → workers up;
-   `status` shows building revision, documents appearing.
-4. Wait ~7 min (5 PDFs, ~250 chunks at 320). `status -c test` → extraction,
-   chunking, embedding all complete, 0 failed.
-5. `cementic collection promote test` → promoted; revision label reported.
-6. `cementic search "language models" -n 3` → hits with **live** paths under
-   `~/projects/bibs/papers`, sensible scores.
-7. `cementic stop` → both workers stop; `status` shows stopped; exit 0.
-
-**Note.** Search is empty between steps 2 and 5 (~7 min) — accepted when the
-fresh-start route was chosen (no old revision to serve).
-
-**Failure rule.** Any step failing reopens code work before release; the fix
-gets a regression test and batch 3 restarts from step 1.
-
-### Batch 4 — cold-start UX (docs only)
-
-`search` autostarts the daemon; a cold model load blocks 30 s+ with a stderr
-notice. By design. Two doc changes: quickstart gains "run
-`cementic embedding start` once after install to pay the model load up front";
-the README documents autostart where `search` is introduced.
-
-### Batch 5 — README walked cold + Known limitations
-
-1. In a clean environment (fresh venv; container if Postgres setup is part of
-   the walk), follow README top to bottom **exactly as written** — install,
-   `init postgres`, config, start, promote, search. Every text/behaviour
-   mismatch is a defect: fix the text or the behaviour, nothing else.
-2. Add a **Known limitations** section (user-facing wording; reasons stay
-   here): one background session at a time (by design); ANN pre-filter recall
-   on shared vector tables; model identity matched by filename (batch 1b
-   residual); §2.9's verdict from batch 2; anything batch 3 surfaced and
-   deliberately did not fix.
-
-### Batch 6 — release mechanics
-
-1. `pyproject.toml` version `0.1.0b1` → `1.0.0`.
-2. CHANGELOG: cut `[Unreleased]` → `[1.0.0] — <date>`. (CHANGELOG.md stays:
-   the no-changelog default is for repos without external consumers, which
-   stops applying at a tagged release.)
-3. All five gates green at the release commit.
-4. Merge `claude/v1-release` → `main` (user), then annotated tag `v1.0.0` on
-   main, message = release highlights (user pushes tag).
-5. In a clean environment: `uv tool install git+<repo-url>@v1.0.0`, run the
-   quickstart's first commands. This is the last gate — it catches packaging
-   problems (missing files in the sdist, entry-point breakage) that no test
-   in the repo can.
-
-### Out of scope, tracked elsewhere
-
-- Everything in `TODO.md` (extractors, `cementic add`, multimodal, search
-  enrichment) — features, not edges; post-v1 by definition.
-- PyPI publication — revisit if anyone outside this machine wants
-  `pip install cementic`.
-- GGUF-metadata model identity (batch 1b residual), the kept §5 trims, the
-  TOML re-parse — reasons under "Deliberately not done".
-
-### Exit criteria (all must hold at the tagged commit)
-
-- [x] Five `./scripts/check.sh` gates green (last run: at the release commit).
-- [x] Batch 1a: wedged-daemon fake test red-green verified (04e974a).
-- [x] Batch 1b: v1.5 prefix test in place, pinning test retired, format
-      version bumped v1→v2 (9f1d148).
-- [x] Batch 2: §2.9 resolved — move-out case fixed with three tests (e2e one
-      verified red), root-move case documented with the measured evidence
-      table (b1999da).
-- [x] Batch 3: all seven steps passed against the live database 2026-08-18 —
-      remove (5 docs/249 chunks), rebuild 274/274 embedded 0 failed at 320,
-      revision `default-68e212bc-llama-cpp-12f77de0` promoted, search returns
-      live `~/projects/bibs/papers` paths, clean stop. The probe reported
-      `embedding healthy` *during* the build — the busy/wedged disambiguation
-      working live.
-- [x] README walked cold in a fresh venv (install, init postgres, doctor,
-      extract|chunk|embed): one mismatch found and fixed (missing C/C++
-      toolchain note); Known limitations section present (2a5428f).
-- [x] Version cut (re-versioned to 0.2.0), CHANGELOG cut. Remaining, in
-      order (user steps marked): merge `claude/v1-release` → `main` (user),
-      tag `v0.2.0` on main (user), `uv tool install` from the pushed tag in a
-      clean environment (agent can verify once the tag exists; install from
-      local source already verified at the release version).
-- [x] Tag pushed by the user 2026-08-18 (`v0.2.0` = merge commit `9c9273f`).
-      Install verified in a clean venv from the exact tagged tree
-      (`git archive v0.2.0`): reports 0.2.0, doctor ok. The literal
-      `uv tool install git+https://...@v0.2.0` could not run from the agent
-      sandbox (private repo, no agent credentials; the git+file:// route is
-      blocked by the ref-transaction guard) — the tagged *tree* installing
-      cleanly is the same evidence minus network transport. **Plan closed:
-      v0.2.0 shipped.**
-
-### Road to v1 (the user's bar, recorded 2026-08-18)
-
-All four must hold before a 1.0 tag; none is scheduled work yet:
-
-1. **Soak time under real use** — weeks of daily driving on the live corpus
-   without surprises. Confidence comes from use, not review passes.
-2. **More features first** — some of `TODO.md` belongs in a v1: more
-   extractors (`.docx`/`.html`/`.epub`), `cementic add`, richer search
-   output. Which subset is a decision for when v1 planning starts.
-3. **Config/CLI stability confidence** — the config schema and CLI surface
-   should stop moving; recent review cycles changed both repeatedly. A signal:
-   several consecutive releases with no breaking config/CLI change.
-4. **Multi-platform verification** — macOS (and possibly Windows) actually
-   tested rather than "best-effort", since the README ships install
-   instructions for them.
-
-**Sizing.** Batch 1: one focused session. Batch 2: ~1 h timebox plus fix time
-if it reproduces. Batch 3: ~30 min wall clock, mostly waiting. Batches 4–6:
-one short session combined.
 
 ## Design principles
 
@@ -1005,276 +625,58 @@ is the contract for the *text* extraction family, not a universal law; per-type
 backend choice is what raises text-extraction quality (e.g. docling/marker) where
 it matters.
 
-## CLI surface
+## Measurements that justify current defaults
 
-- Typer with plain, case-consistent help: `USAGE` / `OPTIONS` / `COMMANDS` /
-  `ARGUMENTS` uppercased to match the usage metavars, `EXAMPLES:` rendered at the
-  base indent; `-h`/`--help` on every command and subcommand; `-V`/`--version`.
-- Concise, aligned output for `status`, `collection list`, `collection
-  revisions`, and `search`; internals (PIDs, per-worker state, per-file progress)
-  live behind `--verbose`; `status --json` for machine consumption.
-- Configuration by TOML file, environment variables, or both. Precedence (low →
-  high): built-in defaults < config file < `CEMENTIC_*` env vars < command-line
-  flags. `cementic config init | path | show` manage it.
-- HNSW vs DiskANN is a serving choice exposed as `index.method` — HNSW (pgvector,
-  in-memory, lowest latency) vs DiskANN (pgvectorscale, disk-resident, low RAM at
-  scale). The method is applied when the index is built and takes effect on the
-  next rebuild; it never re-embeds.
+Harvested from closed review branches so the numbers outlive the logs. Each one
+is the evidence for a value or a design choice that is live today.
 
-## Review history and what is still open
+**Chunk size against the context window** (`pipeline.chunk_size = 320`,
+`llama_cpp.n_ctx = 512`). `chunk_size` counts tiktoken tokens; `n_ctx` counts the
+model's own. For the default model one tiktoken token is a median of 1.14 model
+tokens, p95 1.24, up to 1.33 on English and source code. The runtime guard
+assumes an upper bound of 1.45, and `(320 + 8) x 1.45 = 475.6` fits inside 512 —
+the `+ 8` being the task-prefix allowance. Re-measure with
+`scripts/measure_chunk_context_fit.py` before changing either value. A chunk that
+would exceed the window is refused, not truncated.
 
-**Everything found by the first five reviews is fixed and merged**, except the
-items under "Deliberately not done" below. The fifth pass (2026-08-17) was closed
-on 2026-08-18, and an adversarial re-review of those fixes followed the same day
-(see below). The notes are the record of what each found; this section keeps only
-the engineering *lessons and measurements* that have no other home, in the order
-they were learned.
+**ANN index build memory** (`index.build_memory = 2GB`). 100k x 768 is 293 MiB
+of graph against PostgreSQL's 64MB default, so the build spills to disk:
+**1454 s at 64MB against 345 s at 2GB**. Lower it on a memory-constrained server.
 
-`notes/` is gitignored as of `c7069e1`, so the files below are local to the
-working copy and are not in a fresh clone. They remain in history up to that
-commit; `git show <rev>:notes/<file>` retrieves any of them.
+**The ANN index was unreachable before the filter columns.** Measured with
+`EXPLAIN (ANALYZE)` against a real corpus, which is why the vector rows carry
+their own filter columns rather than joining:
 
-- `notes/code-review-2026-08-07.html` — first full pass.
-- `notes/code-review-2026-08-11.html` — third
-  pass, five unprimed reviewers, so its overlaps are independent re-derivations.
-- `notes/code-review-2026-08-14.html` — fourth
-  pass. Carries a resolution banner mapping every finding to the commit that
-  closed it, and a reconciliation of the two earlier notes, so a fifth review
-  starts from that rather than re-deriving.
-- `notes/code-review-2026-08-17.html` — fifth
-  pass, reviewing the fourth pass's fixes plus fresh eyes per subsystem. Headline
-  pattern: several fixes are correct on the path they touched and absent on an
-  adjacent path the same defect reaches (`status --json`, the initial scan,
-  `stop`'s kill loop, `config path`). **Closed 2026-08-18** on
-  `claude/review-fixes-2026-08-17`; the note carries a resolution banner mapping
-  finding → commit. Still open from it: §2.9's directory-move blindness
-  (unverified, needs a repro), the TOML re-parse, and three §5 trim candidates —
-  all under "Deliberately not done".
-- **Adversarial re-review of those fixes (2026-08-18)**, six reviewers primed to
-  refute, disjoint scopes, every claim re-verified in-parent before acting. It
-  found that the fixes had introduced six new defects of their own — a daemon
-  lock taken twice in one process (a deterministic 180 s hang on every
-  runtime-config change), a `chunk_size` validator that refused the value this
-  plan documents as the way to keep the live index, a partial unique index that
-  could not be built on the databases it existed to protect, an unguarded DDL
-  race between the two workers, `chunk ""` rejecting piped stdin, and a `"None"`
-  string in the machine-readable `status --json`. **Lesson: a fix reviewed only
-  by the pass that wrote it is unfinished.** The adversarial pass cost about as
-  much as the fifth review and found defects of the same severity, in code that
-  had just been written to close defects.
+| query | plan | time |
+|---|---|---|
+| bare KNN, 768-dim, 20k rows | `Index Scan using ...ann` | 2–6 ms |
+| cementic's search query, same data | top-N heapsort over a full nested loop | 25 ms |
+| cementic's search query, 8-dim, 60k rows | same, 60k per-row PK lookups | 83–90 ms |
 
-**Read the 2026-08-17 and 2026-08-14 notes before opening a new review.** Its most useful section
-is not the findings but the ledger of what the earlier passes found and never
-fixed — roughly fifteen items were re-derived independently three times before
-anyone acted on them.
+Every filter (`collection`, the profile ids) used to live on *joined* tables, so
+the planner drove from `chunked_documents` and probed the vector table by primary
+key. Search was exact but scaled linearly with the table.
 
-The 2026-08-11 pass re-confirmed ~20 findings independently (both blockers among
-them) and added: an unguarded `shutil.rmtree` in `init postgres --force`; a
-revision reaching `ready` with zero documents; failure counts laundered past the
-promote gate by a worker restart; `index.method` unreachable on a built system;
-`--n_batch` never passed, so raising `n_ctx` is a no-op; raw tracebacks on a
-malformed `CEMENTIC_DB_URL` in the three commands meant to explain it; and two
-CI marker holes that make a green run meaningless.
+**Directory moves under the watcher** (watchdog inotify backend, scripted repro):
 
-### Fixed on `claude/review-fixes-2026-08-11`
+| Case | Events delivered | Handler coverage |
+|---|---|---|
+| A: `mv watch/sub watch/sub2` (within) | `DirMovedEvent` + per-file `FileMovedEvent`s | already covered (`on_moved` per file) |
+| B: `mv outside/new watch/new` (move in) | `DirCreatedEvent` + per-file `FileCreatedEvent`s | already covered (`on_created` per file) |
+| C: `mv watch/sub outside/` (move out) | **one `DirDeletedEvent`, no per-file deletions** | **was uncovered — fixed** |
+| D: `mv watch watch2` (root itself) | **nothing at all** | unfixable from inside the watch — documented |
 
-Seven commits, each with regression tests; 635 unit tests, ruff and mypy strict
-all clean, and `uv lock --check` passes.
+Case C was the real gap and is fixed. Case D is unfixable from inside the watch —
+inotify delivers nothing when the watched root itself moves — and is documented
+in README's Known limitations; startup reconciliation repairs it.
 
-1. **CI honesty** — B1 (`uv lock`) and N17 (`pg` markers). The "not pg" job no
-   longer drags a 30-60min from-source Postgres build into a database-free job,
-   and the only end-to-end smoke test now runs somewhere.
-2. **Both data-destruction paths** — B2 (named volume in both `compose.yml`,
-   plus the generated README naming `down -v` as the destructive one) and N1
-   (`init postgres --force` overwrites template files in place instead of
-   `rmtree`-ing whatever it was pointed at).
-3. **What gets published** — N2 + N3 + H2 closed together: promotion re-checks
-   completeness against current counts, `revision_is_complete` requires
-   `documents > 0`, and nothing publishes an empty revision even under
-   `--force` (promotion retires the active one, so that removes coverage).
-4. **Silently wrong search answers** — C1.4 (chunk boundaries now align to whole
-   characters; concatenation of non-overlapping chunks became lossless),
-   C1.2 (freshness predicates, with the definition centralised beside the scope
-   builders as `CURRENT_CONTENT_SQL` — *since removed from `src/`; the freshness
-   join was replaced by deleting stale rows eagerly, and the constant now lives
-   in `tests/integration/test_pg_helpers.py` as a fixture invariant*),
-   C1.1 + N5 (query bounded in tokens
-   against the window; `--n_batch`/`--n_ubatch` now follow `n_ctx`), C1.3
-   (`ef_search` never below the requested `top_k`).
-5. **H4** — a `ready` revision reports as ready, and `status` names the promote
-   command for it.
-6. **Failure reporting** — N8 (`stop` exit codes), H3 (runner exit code on fatal
-   worker startup failure), H8 (`extract` catches `OSError`), plus the
-   undeclared `click` and `pymupdf` dependencies.
+**Review process.** An adversarial re-review of the fifth review's own fixes
+(2026-08-18, six reviewers primed to refute) found that those fixes had
+introduced six new defects of their own, of the same severity, in code just
+written to close defects. *Lesson: a fix reviewed only by the pass that wrote it
+is unfinished.*
 
-### Round-two review (2026-08-11, four reviewers)
-
-One reviewer re-read the batch above adversarially; three re-verified the open
-findings against the changed code. The batch had **two real defects and CI was
-red** — fixed on `claude/review-round-two`, see that commit. The lesson is
-recorded under "Environment facts" above: the unit suite is not the CI gate.
-
-Re-verification changed three findings materially, so the old descriptions
-should not be trusted:
-
-- `Path.exists()` does **not** swallow `PermissionError` on 3.12. The watcher's
-  mass-deletion trigger is an *unmounted* subdirectory (ENOENT); a permission
-  error instead kills the watcher with a traceback. Same fix, different symptom.
-- Mixed-model search does not break during any rebuild — a collection with an
-  active revision keeps working. It needs ≥2 collections with at least one never
-  promoted, and a `ready` revision poisons it indefinitely, not just mid-build.
-- The `pymupdf._get_layout` guard is **retracted**: the attribute is declared in
-  pymupdf 1.27.1, so the current code is correct.
-
-### Fixed on `claude/review-round-three`
-
-**All of items 1-9 below, plus the config leftovers and the opportunistic
-group**, each with regression tests. In order: empty extractions; the config
-diagnosability cluster (including the value-leak in error messages); provider
-failures reaching `status` with a capability startup gate; `~`/relative path
-handling; the daemon-probe consolidation; the watcher bundle; the per-file
-view's freshness predicates; the unindexable-dimension pre-flight; the
-task-prefix policy in the profile; doctor's model-path confinement; and
-`embedding stop`, OCR and page-chunk handling.
-
-**One of these forces a rebuild.** Recording the task-prefix policy changes
-every existing embedding-profile fingerprint, so the next `cementic start`
-builds a fresh revision and re-embeds once. That is the price of not silently
-mixing prefixed and unprefixed vectors in one table, and it is on its own commit.
-
-Two notes for whoever picks this up:
-
-- **Test fixtures were unrealistic, not the code.** Three `load_file_progress`
-  tests seeded artifact rows without the hashes the worker writes. Both step
-  functions set those on the *failure* path too (in `_step_extract`'s and
-  `_step_chunk`'s write-back blocks — line numbers have drifted since), so the
-  fixtures, not the new predicates, were wrong. Check that before assuming a
-  similar failure means a regression.
-- **A relative `artifacts_path` is still relative** — to where cementic was
-  started. Anchoring at load time removes the silent-no-op deletion, but it
-  cannot make a relative path mean the same thing from two directories. A real
-  mismatch is now refused rather than quietly succeeding.
-
-### Fixed on `claude/review-round-four`
-
-All four remaining items, plus one found while sizing them.
-
-1. **Pruning leaks** — the embedding delete was scoped through the *chunk*
-   profiles being removed, so a swap that changed only the model matched
-   nothing: the retired model kept every `chunk_embeddings` row and its whole
-   `embedding_vectors_p{id}` table, one full copy of the corpus per swap. Both
-   anticipated footguns were real and are handled — the droppable set is
-   re-queried globally, and the `DROP TABLE` is deferred past `commit()`
-   alongside the artifact removals. A third turned up: a profile another
-   collection still uses keeps its table, but this collection's vectors in it
-   have to go explicitly, because the `chunks_v2` cascade does not reach them
-   when the chunks themselves are untouched.
-2. **Every command paid ~0.5s warm / ~1.3s cold for a PDF layout model.** Not
-   on the list; found while checking whether a config validator could afford to
-   import the extractor registry. `cli` imports `extract`, which imported
-   `pymupdf.layout` (ONNX analyser + networkx) at module scope. Importing
-   `cementic.cli`: 1.9–3.4s before, 0.36s after. The existing runtime budgets
-   could not see it — they time dispatch, after the test module has already
-   imported the CLI — so the guard is structural instead.
-3. **`[extraction.backends]` validation**, mirroring `index.method`. Unknown
-   name and wrong file type are now separate messages.
-4. **Mixed-model search message** names each collection, its model and its
-   status. Kept as a refusal for both paths: scores from different models are
-   not comparable, so dropping the odd collection would produce a silently
-   meaningless ranking rather than a visible error.
-5. **`cementic collection reindex`**, with `--force` for the build-time knobs
-   (`hnsw_m`, `ef_construction`) that `CREATE INDEX IF NOT EXISTS` would
-   otherwise leave at their old values while reporting success.
-
-Two notes for whoever picks this up:
-
-- **Deferring the pymupdf import moved it inside test patch contexts.** The
-  first `import pymupdf.layout` runs an `activate()` that rebinds
-  `pymupdf4llm.to_markdown`, so a patch applied beforehand was silently
-  replaced mid-test — and only when no earlier test had already triggered the
-  import, making it look like flakiness. The extraction tests patch
-  `_get_pymupdf` now; do not go back to patching the real modules.
-- **Three PG search tests fail on `main` too** (`test_search_pg.py` ×2,
-  `test_cli_pg.py` ×1) — diagnosed and fixed since; see below.
-
-### Fixed on `claude/pg-correctness`
-
-**The three red PG tests were a regression of ours, not inherited.** `74942b4`
-added `CURRENT_CONTENT_SQL` to search's WHERE clause;
-`seed_active_vector_collection` had never set `source_file_hash`,
-`content_hash` or `source_content_hash`, so every seeded chunk failed
-`ed.source_file_hash = sd.file_hash` — `NULL = NULL` is not true — and search
-returned nothing. It merged because the unit and non-PG jobs were green and the
-PG job was not run locally.
-
-The production code was never implicated: `write_extracted_text` returns a hash
-or raises, so a `done` extraction always has one, and the live database has
-zero NULL hashes on `done` rows across 172 chunks.
-
-`scripts/check.sh` now runs all five gates in one command and reports a missing
-PostgreSQL as SKIPPED rather than passed.
-
-### Fixed on `claude/ann-filterable-vectors`
-
-**The ANN index is now reachable.** The filter columns (`collection`,
-`extractor_profile_id`, `chunk_profile_id`) live on `embedding_vectors_p*`, so
-the `WHERE` clause applies to the vector row and the planner can drive from the
-index scan. Same data, same index, 100k rows at 768 dimensions:
-
-| query shape | ANN used | results | time |
-|---|---|---|---|
-| filters on joined tables (before) | no | 10/10 | 407.6 ms |
-| filters on the vector row | yes | 10/10 | 1.0 ms |
-| filters on the vector row, 2% slice, `iterative_scan=off` | yes | **0/10** | 1.3 ms |
-| filters on the vector row, 2% slice, `relaxed_order` | yes | 10/10 | 15.3 ms |
-
-`hnsw.iterative_scan` landed with it, defaulting to `relaxed_order` and gated on
-pgvector ≥ 0.8 — row 3 is why. The gate is not optional: PostgreSQL accepts an
-unknown *qualified* setting as a placeholder until the defining module loads on
-that connection and rejects it with `InvalidName` afterwards, so behind a
-connection pool an ungated `SET` fails only on connections that had already run
-a vector query. (`SET LOCAL diskann.query_rescore` being accepted where
-pgvectorscale is absent is the same effect — not evidence it took effect.)
-
-**What the three columns cost.** They replace query-time freshness filtering
-with an invariant: stale vectors are deleted when they go stale. Re-chunking
-already did this via the `chunks_v2` cascade; two paths did not and now do —
-document deletion (`_purge_document_chunks`) and re-extraction that changes the
-content (`_purge_superseded_chunks`). The visible behaviour change: a document
-whose re-extraction succeeded but whose re-chunking has not run returns nothing
-rather than its previous contents.
-
-Existing vector tables are migrated in place by `ensure_vector_table_schema` —
-`ADD COLUMN`, backfill from the joins, then `SET NOT NULL`. No re-embedding.
-
-**No test reproduces the thin-slice recall failure**, deliberately. It needs
-~100k rows: below that the planner picks an exact sequential scan for a
-selective filter, which returns the right answer and would make the test pass
-for the wrong reason. Verified that trap directly — at 4k rows the `slice`
-query plans as a seq scan even with `enable_seqscan = off`. What CI does pin is
-that the ANN index *is* in the plan, which is the thing that regressed.
-
-### Fixed on `claude/index-build-stage-1`
-
-**The index build is faster, visible, and explicable.** `ensure_revision_ann_index`
-runs synchronously in `_mark_revision_ready_if_complete`, at the
-`building → ready` transition — *not* at promotion, as an earlier note here
-said.
-
-- `index.build_memory` (default 2GB) raises `maintenance_work_mem` on the
-  build's own connection. 100k × 768 is 293 MiB of graph against Postgres's
-  64MB default, so the build spilled: **1454 s at 64MB, 345 s at 2GB**.
-- The worker publishes `current_activity` around the build, because nothing can
-  be published from inside it. `cementic status` previously showed a running
-  worker, a `building` revision and no current file — identical to idle.
-- `cementic stop` waits 10 s and then *refuses* (it does not force-kill; the
-  5-second SIGKILL is `_terminate_managed`, used only on start-up rollback). The
-  worker cannot answer SIGTERM from inside `CREATE INDEX`, so that timeout was
-  guaranteed and read as a hang. Both the timeout and `--force` now say what is
-  running and that forcing discards it.
-
-Verified that a killed build loses everything: on a 40k table whose build takes
-135 s, killing the builder at ~34 s leaves only the primary-key index.
+## Design decisions and open items
 
 ### Decided — build the ANN index up front (2026-08-13)
 
@@ -1341,39 +743,6 @@ The same trap produced the original bug: `measure_chunk_context_fit.py` embedded
 `chunk[:len*0.75]` while printing the *full* chunk's token count beside an "ok"
 verdict, so the config comment citing it as proof of safety was citing a
 measurement that never tested the case it claimed.
-
-### Superseded
-
-**The ANN index is never used by cementic's search query.** *(Fixed above; kept
-because the measurements are the justification for the schema change.)* Measured
-with `EXPLAIN (ANALYZE)` against a real corpus:
-
-| query | plan | time |
-|---|---|---|
-| bare KNN, 768-dim, 20k rows | `Index Scan using ...ann` | 2–6 ms |
-| cementic's search query, same data | top-N heapsort over a full nested loop | 25 ms |
-| cementic's search query, 8-dim, 60k rows | same, 60k per-row PK lookups | 83–90 ms |
-
-Confirmed across 5k/20k/60k/100k rows, 8 and 768 dimensions, filters matching
-40 rows or every row, and with `enable_seqscan` both on and off. The planner
-always drives from `chunked_documents` and probes `embedding_vectors_p*` by
-primary key, because every filter (`collection`, the profile ids, the freshness
-predicates) lives on *joined* tables rather than on the vector table.
-
-Consequences, in order of importance:
-
-- Search is exact — so this is a scaling defect, not a correctness one. Results
-  are right, and were right before the freshness predicates too.
-- Search costs O(rows in the profile's vector table) per query, growing
-  linearly. (Superseded: the filter columns below made the ANN index reachable,
-  so search no longer scales with table size.)
-- `index.method`, `hnsw_m`, `ef_construction`, `hnsw_ef_search`, the DiskANN
-  knobs and `collection reindex` all maintain an index nothing reads.
-
-A no-schema-change alternative was considered and rejected: a materialised CTE
-doing the bare KNN first, then filtering. It takes the global top-N and filters
-afterwards, which is arithmetically the same as `iterative_scan=off` — it
-degrades to zero results in exactly the case that motivates it.
 
 ### Deliberately not done
 
@@ -1480,19 +849,23 @@ bug and is one, but the fix costs more than the defect:
   versions that actually produce the Markdown, so a dependency bump changes
   extraction output without moving the fingerprint.
 
-## Deferred
+## Road to v1
 
-- **Images / multimodal** — one new extractor (OCR/caption, or raw-image
-  passthrough) + one multimodal embedding provider. Both self-register; the
-  registries above mean nothing else changes. (A true vision embedder bypasses
-  the Markdown IR — the parallel path noted above.)
-- **More document types** (`.docx`, `.pptx`, `.html`, `.epub`) — one extractor
-  entry each.
-- `cementic add <path>` for direct one-off ingestion.
-- Optional Markdown artifact mirrors alongside the compressed pipeline artifacts.
-- Richer search-result metadata (document id, collection, artifact path).
-- Hybrid lexical + vector search (exact author names, acronyms, equation labels).
-- A multi-profile embedding daemon pool, if old-model search and new-model
-  indexing must run concurrently.
-- Lighter embedding providers if llama.cpp memory use is too high on small
-  machines.
+All four must hold before a 1.0 tag; none is scheduled work yet:
+
+1. **Soak time under real use** — weeks of daily driving on the live corpus
+   without surprises. Confidence comes from use, not review passes.
+2. **More features first** — some of `TODO.md` belongs in a v1: more
+   extractors (`.docx`/`.html`/`.epub`), `cementic add`, richer search
+   output. Which subset is a decision for when v1 planning starts.
+3. **Config/CLI stability confidence** — the config schema and CLI surface
+   should stop moving; recent review cycles changed both repeatedly. A signal:
+   several consecutive releases with no breaking config/CLI change.
+4. **Multi-platform verification** — macOS (and possibly Windows) actually
+   tested rather than "best-effort", since the README ships install
+   instructions for them.
+
+**Sizing.** Batch 1: one focused session. Batch 2: ~1 h timebox plus fix time
+if it reproduces. Batch 3: ~30 min wall clock, mostly waiting. Batches 4–6:
+one short session combined.
+

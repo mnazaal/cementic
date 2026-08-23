@@ -27,14 +27,14 @@ This keeps old search available while a new extractor, chunking policy, or embed
 ## Installation
 
 ```bash
-# From GitHub tag (Linux-first):
-pipx install "git+https://github.com/mnazaal/cementic.git@v0.2.0"
-# or:
-uv tool install "git+https://github.com/mnazaal/cementic.git@v0.2.0"
-
-# From source (development):
+git clone https://github.com/mnazaal/cementic.git
+cd cementic
 uv pip install -e ".[dev]"
 ```
+
+The repository is private, so installing straight from the URL
+(`pipx install git+https://...`) only works once you have access to it; clone
+first.
 
 cementic is verified for Linux with Python 3.10-3.12. macOS and Windows are
 best-effort until tested. Installing `llama-cpp-python[server]` builds llama.cpp
@@ -334,60 +334,44 @@ matching `CEMENTIC_*` variable (see [Environment variables](#environment-variabl
 
 ##### Chunk size and the context window
 
-`chunk_size` is counted with tiktoken while `n_ctx` is counted with the
-embedding model's own tokenizer, and the two disagree — for the default model one
-tiktoken token is a median of 1.14 model tokens, p95 1.24, and up to 1.33 on
-English and source code. The runtime guard assumes an upper bound of 1.45, and
-`(320 + 8) × 1.45 = 475.6` fits inside the 512-token window (the `+ 8` covers
-the task-prefix tokens added at embed time), so a full-size chunk never
-needs an exact-count round trip to the model. A
-chunk that exceeds the window is refused rather than embedded truncated, and
-shows up as a failed chunk in `cementic status`. If you change either value,
-re-measure first:
-
-```bash
-python scripts/measure_chunk_context_fit.py
-```
+`chunk_size` is counted with tiktoken; `n_ctx` is counted with the embedding
+model's own tokenizer, and the two disagree — so `chunk_size` must stay well
+under `n_ctx`. The shipped 320/512 pair has margin for the worst ratio measured
+plus the task prefix. A chunk that would exceed the window is refused rather
+than embedded truncated, and shows up as a failed chunk in `cementic status`.
+Raising either value without re-measuring risks silently truncated embeddings;
+the derivation and the measurement script are in PLAN.md.
 
 ### Choosing an ANN index (HNSW vs DiskANN)
 
 `index.method` selects how vectors are indexed for similarity search:
 
-- **`hnsw`** (default, pgvector) — graph index that lives in memory. Lowest query
-  latency; wants enough RAM to hold the index. Best when the index fits in RAM.
-- **`diskann`** (pgvectorscale) — disk-resident, compressed index. Much lower RAM
-  use at scale; trades some latency. Best when the index is large relative to RAM.
+- **`hnsw`** (default, pgvector) — graph index held in memory. Lowest query
+  latency; wants enough RAM to hold the index.
+- **`diskann`** (pgvectorscale) — disk-resident, compressed. Much lower RAM use
+  at scale, for some added latency.
 
-Search filters candidates (by collection and pipeline profile) *during* the index
-scan, so `index.hnsw_iterative_scan` — `relaxed_order` by default — keeps scanning
-until it has a full page rather than stopping after `hnsw_ef_search` candidates.
-Without it, a collection that holds a small share of a shared vector table can come
-back short, or empty. It needs pgvector 0.8 or newer and is ignored on older servers.
+At a few-million-vector scale HNSW usually wins latency and DiskANN wins memory.
+Both ship in the generated Postgres image.
 
-For a new HNSW collection — the default — the index is created up front on the
-still-empty vector table and maintained incrementally by every insert, so there is
-no build stall at the end and an interrupted run loses one batch rather than the
-whole build. DiskANN, and any build resumed over rows that already exist, instead
-build in bulk when the revision finishes. That bulk build occupies the pipeline
-worker — `cementic status` reports it under `activity:` — and is not resumable, so
-stopping partway through starts it over. `index.build_memory`
-(default `2GB`) raises `maintenance_work_mem` for the build only: PostgreSQL's 64MB
-default makes the graph spill to disk, which cost 1454s against 345s for 100k
-768-dimensional vectors. Lower it on a memory-constrained server.
-
-Both ship in the generated or provisioned Postgres image. The method is a *serving* choice:
-it is applied when a collection's vector index is built, and it never re-embeds. To
-change it on a collection that is already built, run:
+The method is a *serving* choice: it applies when a collection's vector index is
+built and never re-embeds. To change it on a collection that is already built:
 
 ```bash
 cementic collection reindex research
 ```
 
-That swaps the index in place (HNSW ↔ DiskANN) without touching the embeddings. The
-build-time knobs `hnsw_m` and `hnsw_ef_construction` are fixed into the index when it
-is created, so changing those needs `cementic collection reindex research --force`.
-Either way it can take several minutes on a large corpus. At a few-million-vector
-scale HNSW usually wins latency and DiskANN wins memory.
+That swaps the index in place without touching the embeddings. `hnsw_m` and
+`hnsw_ef_construction` are fixed into the index when it is created, so changing
+those needs `cementic collection reindex research --force`. Either way it can
+take several minutes on a large corpus, and `cementic status` reports it under
+`activity:`.
+
+`index.hnsw_iterative_scan` (`relaxed_order` by default) keeps the index scan
+going until it has a full page of results, rather than stopping after
+`hnsw_ef_search` candidates. Without it a collection holding a small share of a
+shared vector table can come back short, or empty. It needs pgvector 0.8+ and is
+ignored on older servers.
 
 ### Environment variables
 
@@ -472,35 +456,3 @@ task prefixes:
   comparable, so `cementic search "q" -c a b` errors out and names which
   collection uses which model if `a` and `b` were built with different
   models. Search each separately instead.
-
-## Architecture
-
-- `src/cementic/source_watcher.py`
-  - watches directories and registers source documents of any supported type
-- `src/cementic/extract.py`
-  - a content-type extractor registry that turns each document into Markdown/text
-- `src/cementic/pipeline_worker.py`
-  - builds extraction, chunking, and embedding artifacts for the target revision
-- `src/cementic/collections.py`
-  - handles collection deletion and revision promotion/history queries
-- `src/cementic/profiles.py`
-  - resolves immutable extractor, chunk, and embedding profiles
-- `src/cementic/revisions.py`
-  - manages target, ready, active, retired, and superseded revisions
-- `src/cementic/search.py`
-  - searches the active revision for the requested collection(s), falling back
-    to a ready or in-progress one where no revision has been promoted yet
-- `src/cementic/storage.py`
-  - stores extracted text as compressed artifacts on disk
-
-## Development
-
-```bash
-uv pip install -e ".[dev]"
-
-./scripts/check.sh    # every gate CI runs: ruff, mypy, unit, integration, integration-pg
-pytest tests/unit     # fast inner loop
-```
-
-`check.sh` is the gate to trust — it reports a missing PostgreSQL as SKIPPED
-rather than passed, which a bare `pytest` does not.
