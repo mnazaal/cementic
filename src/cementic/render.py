@@ -97,6 +97,16 @@ def _print_status_summary(
         console.print(f"{'database':<11} {_state(health.db_reachable, 'reachable', 'unreachable')}")
         if health.embedding_healthy:
             embedding_text = "[green]healthy[/green]"
+        elif health.llama_daemon.startswith("running"):
+            # Unhealthy *and* running is a different situation from not running,
+            # and check_health has already worked out which -- "serving a
+            # different model", or wedged with the restart command to fix it.
+            # Flattening both into the autostart line below said "stopped" about
+            # a live process and promised that starting it on demand would help,
+            # when a wrong-model daemon has to be restarted and a wedged one
+            # will not answer at all. The precise reason was computed and then
+            # discarded; only `--verbose` ever showed it.
+            embedding_text = f"[red]{escape(health.llama_daemon)}[/red]"
         elif config.llama_cpp.daemon_autostart:
             # Same state `cementic doctor` calls a warning: not running now, but
             # cementic starts it on demand. Not an error.
