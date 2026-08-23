@@ -1,29 +1,13 @@
 # Changelog
 
-## [Unreleased]
+Written at tag time, not during development: a handful of entries per release
+saying what mattered, out of however many commits happened.
 
-### Added
-
-- **`scripts/check.sh` gained a sixth gate, `lockfile`** (`uv lock --check`) —
-  the release bumped `pyproject.toml`'s version but not `uv.lock`, which pins
-  cementic's own version, so CI's `uv sync --locked` step failed on the
-  v0.2.0 merge while all five local gates stayed green. The new gate mirrors
-  CI and runs first, so a stale lockfile fails locally before it fails there.
-
-### Fixed
-
-- Two unit tests for unknown-collection `status` output depended on a live
-  local Postgres (they mocked the CLI's own engine seams but not
-  `status_service`'s), so they only passed on machines with Postgres
-  reachable at `127.0.0.1:5432` and failed in CI's db-unreachable path.
-
-### Docs
-
-- Recorded a Python 3.14 landmine: several unit tests leak `sqlite3`
-  connections, and pytest 9's unraisable-exception hook turns that into
-  GC-timing-dependent failures. Invisible on CI's pinned 3.12; noted in
-  `TODO.md` so the next Python upgrade doesn't rediscover it as a flaky
-  mystery.
+There is deliberately no `[Unreleased]` section. One existed and went 28 commits
+stale inside a single day, which is the failure mode this file has to avoid — a
+changelog that is 10% complete is worse than none, because it reads as
+authoritative. `git log --oneline <last-tag>..HEAD` is the source for the next
+release's entries; conventional-commit prefixes make it filterable.
 
 ## [0.2.0] — 2026-08-18
 
@@ -338,7 +322,7 @@
 - Enable required Postgres extensions during normal schema initialization with actionable failures
 - Document Linux-first beta setup, persistent Postgres service setup, and model auto-download behavior
 
-## [Unreleased pre-beta] — 2026-04-30
+## [Pre-beta] — 2026-04-30
 
 ### Initial Development
 
