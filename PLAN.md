@@ -41,7 +41,8 @@ was added in `e5812cd`; several docs still say five, which is Batch 5).
 
 ## Plan of record — fourth-review carry-overs (2026-08-23)
 
-**Status: LIVE.** The only live execution order in this file.
+**Status: CLOSED 2026-08-23** — all three batches done and verified live.
+Kept as the record of the decisions.
 
 **One defect, four faces.** The four items left open from the fourth review look
 unrelated and are not. In each, a cheap proxy stands in for the real thing, and
@@ -214,13 +215,23 @@ running the CLI against the live corpus. The generalisable parts:
       search, stop, with search scores identical to the pre-change revision, so
       identity changed and retrieval did not. The live run also found three
       defects the green suite did not; see "Lessons from Batch C" above.
-- [ ] Batch A: with the pid file deleted by hand, `embedding status` reports a
-      recovered daemon, `embedding stop` actually stops it, and the pid file is
-      rewritten. A llama.cpp server on another port, or serving another
-      `--model_alias`, is never signalled. Verified live, not only by tests.
-- [ ] Batch B: a worker made to fail after the 2 s grace shows its reason in
-      `cementic status`; a clean restart clears it; `start` no longer claims a
-      success it has not observed. Verified live.
+- [x] Batch A (`5c0f0f4`): verified live — pid file deleted by hand,
+      `embedding status` reported `running, pid=88794 (recovered: pid file was
+      missing or stale)` and rewrote the file; a wrong port and a wrong
+      `--model_alias` were both refused; `embedding stop` actually terminated
+      the recovered daemon (process state `Z`, port free). A zombie's cmdline is
+      empty, so recovery cannot falsely match one. Same commit fixes a
+      regression from `77e0e3f`: the runtime fingerprint hashed the model path
+      unresolved, so indexing and search computed different aliases for one file
+      and restarted each other's daemon.
+- [x] Batch B (`ba3ac8a`): verified live — with the daemon down and autostart
+      off, `cementic status` showed `last error  pipeline worker: Embedding
+      provider cannot embed: …` with its remediation, where previously that
+      reason reached only the background log; a clean start retracted it; the
+      new `start` message points at `status` instead of claiming success.
+      Caveat: that failure was fast enough that `start`'s own grace check also
+      caught it, so the reason reaching `status` is proven and the specific
+      >2 s window is not.
 - [ ] All six `./scripts/check.sh` gates green at every commit.
 
 ## Plan of record — sixth-review fixes (2026-08-23)
