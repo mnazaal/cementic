@@ -320,7 +320,11 @@ who already installs from source, and the defect was simply that the docs
 described a command that cannot work. README now documents clone-then-install and
 says why. Repo visibility remains a real question, but it gates nothing here.
 
-**14. Correct the counts and the wrong details.** All verified during the audit:
+**14. Correct the counts and the wrong details. DONE (`dde9413`).** All verified
+during the audit. Note the `AGENTS.md` items below were corrected there and then
+superseded: that file was folded into README's Development section and deleted,
+so README is now the single source of truth for contributors and agents both.
+
 
 - "five gates" → six, in 8 places: `TODO.md:3`, `CHANGELOG.md:24`,
   `PLAN.md:24,31,40,166,345,742`. `lockfile` was added in `e5812cd`.
@@ -518,28 +522,14 @@ failure mode). Status: live.
 
 ## Scale context
 
-The target is a large personal corpus (~40k papers and textbooks). At the
-measured **50 chunks per paper** that is ~2M vectors. The machinery is justified
-rather than over-engineered:
-
-- "Indexed" and "fast" are not in tension — indexing is the amortized one-time
-  cost; an ANN index keeps *queries* sub-second over millions of vectors.
-  Measured 2026-08-15: a warm search is **214 ms end to end, 197 ms of which is
-  embedding the query string** — a constant that does not grow with the corpus.
-  A bare KNN over 10k vectors is 5.6 ms. Query latency is not the scaling risk.
-- The scaling risks are the other two axes, and both bind earlier. **Embedding
-  throughput** measured 1.4 s/chunk on CPU, so 2M vectors is ~780 hours of
-  continuous embedding — "amortized one-time" is measured in weeks, not hours,
-  without a GPU. **Memory** binds before latency does: an HNSW index over 1M
-  768-dim vectors needs ~3 GB resident, against a dev machine with ~3 GB free,
-  which is the point of the `diskann` seam below.
-- Postgres + `pgvector` + `vectorscale`, with a per-embedding-profile vector
-  table and ANN index.
-- Versioned pipeline revisions: swap a model / chunking policy / extractor, build
-  a new revision in the background, and promote atomically — live search keeps
-  serving the old revision until then.
-- Batch embedding against a warm local llama.cpp server, so the model stays
-  loaded across both indexing and interactive search.
+The target is a large personal corpus (~40k papers and textbooks) at a measured
+50 chunks per paper — roughly 2M vectors. The numbers behind that (query
+latency, embedding throughput, HNSW memory) are in README's "Measurements behind
+the defaults"; the design consequence is everything under Key seams below:
+per-embedding-profile vector tables, a `diskann` seam for when memory binds
+before latency does, versioned revisions so a model or chunking change builds in
+the background and promotes atomically, and a warm llama.cpp server shared by
+indexing and search.
 
 ## Key seams (the pluggable registries)
 
@@ -624,57 +614,6 @@ today and can grow (b) as a separate extractor + provider pair. So "Markdown IR"
 is the contract for the *text* extraction family, not a universal law; per-type
 backend choice is what raises text-extraction quality (e.g. docling/marker) where
 it matters.
-
-## Measurements that justify current defaults
-
-Harvested from closed review branches so the numbers outlive the logs. Each one
-is the evidence for a value or a design choice that is live today.
-
-**Chunk size against the context window** (`pipeline.chunk_size = 320`,
-`llama_cpp.n_ctx = 512`). `chunk_size` counts tiktoken tokens; `n_ctx` counts the
-model's own. For the default model one tiktoken token is a median of 1.14 model
-tokens, p95 1.24, up to 1.33 on English and source code. The runtime guard
-assumes an upper bound of 1.45, and `(320 + 8) x 1.45 = 475.6` fits inside 512 —
-the `+ 8` being the task-prefix allowance. Re-measure with
-`scripts/measure_chunk_context_fit.py` before changing either value. A chunk that
-would exceed the window is refused, not truncated.
-
-**ANN index build memory** (`index.build_memory = 2GB`). 100k x 768 is 293 MiB
-of graph against PostgreSQL's 64MB default, so the build spills to disk:
-**1454 s at 64MB against 345 s at 2GB**. Lower it on a memory-constrained server.
-
-**The ANN index was unreachable before the filter columns.** Measured with
-`EXPLAIN (ANALYZE)` against a real corpus, which is why the vector rows carry
-their own filter columns rather than joining:
-
-| query | plan | time |
-|---|---|---|
-| bare KNN, 768-dim, 20k rows | `Index Scan using ...ann` | 2–6 ms |
-| cementic's search query, same data | top-N heapsort over a full nested loop | 25 ms |
-| cementic's search query, 8-dim, 60k rows | same, 60k per-row PK lookups | 83–90 ms |
-
-Every filter (`collection`, the profile ids) used to live on *joined* tables, so
-the planner drove from `chunked_documents` and probed the vector table by primary
-key. Search was exact but scaled linearly with the table.
-
-**Directory moves under the watcher** (watchdog inotify backend, scripted repro):
-
-| Case | Events delivered | Handler coverage |
-|---|---|---|
-| A: `mv watch/sub watch/sub2` (within) | `DirMovedEvent` + per-file `FileMovedEvent`s | already covered (`on_moved` per file) |
-| B: `mv outside/new watch/new` (move in) | `DirCreatedEvent` + per-file `FileCreatedEvent`s | already covered (`on_created` per file) |
-| C: `mv watch/sub outside/` (move out) | **one `DirDeletedEvent`, no per-file deletions** | **was uncovered — fixed** |
-| D: `mv watch watch2` (root itself) | **nothing at all** | unfixable from inside the watch — documented |
-
-Case C was the real gap and is fixed. Case D is unfixable from inside the watch —
-inotify delivers nothing when the watched root itself moves — and is documented
-in README's Known limitations; startup reconciliation repairs it.
-
-**Review process.** An adversarial re-review of the fifth review's own fixes
-(2026-08-18, six reviewers primed to refute) found that those fixes had
-introduced six new defects of their own, of the same severity, in code just
-written to close defects. *Lesson: a fix reviewed only by the pass that wrote it
-is unfinished.*
 
 ## Design decisions and open items
 

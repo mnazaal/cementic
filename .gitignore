@@ -16,5 +16,4 @@ dist/
 libpod/
 .DS_Store
 *.so
-AGENTS.md
 notes/

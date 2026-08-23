@@ -456,3 +456,165 @@ task prefixes:
   comparable, so `cementic search "q" -c a b` errors out and names which
   collection uses which model if `a` and `b` were built with different
   models. Search each separately instead.
+
+## Development
+
+Everything below is for working *on* cementic rather than with it. It is the
+single source of truth for contributors and coding agents alike — `AGENTS.md`
+used to hold a second copy and drifted from this one.
+
+### Commands
+
+```bash
+uv pip install -e ".[dev]"
+
+./scripts/check.sh          # the gate to trust — all six CI gates
+pytest tests/unit           # fast inner loop
+pytest tests/unit/test_extractors.py::test_extract_document_reads_plain_text -v
+pytest --cov=cementic       # branch coverage is on by default
+ruff check --fix src/ tests/
+ruff format src/ tests/
+mypy src/
+```
+
+`./scripts/check.sh` runs lockfile (`uv lock --check`), ruff, mypy, unit,
+integration, and integration-pg, and reports a missing PostgreSQL as SKIPPED
+rather than passed. `pytest -v && ruff check && mypy` looks like "all checks"
+but silently skips the PG-marked integration tests — precisely the gap that once
+let three PG tests reach `main` red. Use `check.sh` before pushing.
+
+The PG gate needs a Postgres with pgvector + vectorscale. The integration suite
+brings `compose.yml` up itself when a container engine is available, and leaves
+an already-running one alone.
+
+### Conventions
+
+Style is enforced mechanically — ruff (100 columns, import order, naming) and
+mypy `strict` — so only what the tools cannot check is written down here:
+
+- **Docstrings** are Google-style and short; type information lives in
+  annotations, not prose. Comments explain *why*, and several record a specific
+  past defect — those are load-bearing, not clutter.
+- **Errors.** Raise specific exceptions and let them bubble where a caller can
+  act. Human-facing error text goes to stderr via `err_console`; stdout carries
+  only the command's output, so `--json` stays parseable under `jq` even when
+  something fails. Every failure path exits non-zero.
+- **Database.** SQLAlchemy 2.0 ORM with `Mapped[]`, `select()` over raw SQL,
+  relationships with `back_populates`, indexes in `__table_args__`. Raw `text()`
+  is confined to what the ORM cannot model: per-profile vector DDL and KNN in
+  `vector_store.py`, ANN index DDL and extension setup in `db.py`, advisory
+  locks in `pipeline_worker.py`, and the probes in `doctor.py` /
+  `status_service.py`. Values are always bound; the only interpolated fragments
+  are identifiers computed from an int profile id, and settings a config
+  validator has already closed (`index.method`, `build_memory`).
+- **Config.** Pydantic `BaseSettings`, one env prefix per section
+  (`CEMENTIC_DB_`, …), sensible defaults, every field documented.
+- **CLI.** Help text and error messages are part of the product. A namespace
+  invoked without its subcommand prints focused help rather than a parser error.
+  Infrastructure failures name a next step. Commands taking a collection offer
+  both `--collection` and `-c`. Renaming a command means updating root help,
+  namespace help, and the partial-invocation tests.
+- **Tests.** `test_*.py` / `test_*`, fixtures from `conftest.py`, external
+  dependencies mocked. Prefer structural assertions over wall-clock budgets —
+  timing assertions are load-sensitive and one of them used to fail under
+  coverage instrumentation.
+
+### Daemon architecture
+
+The source watcher registers documents of any type the extractor registry
+handles. The pipeline worker builds extracted text, chunks, and embeddings for a
+revision. The embedding runtime is a warm local llama.cpp server shared by
+indexing and search. Both workers use SQLAlchemy sessions as context managers
+and publish state — PIDs, health, `last error` — through JSON files in
+`state.py`.
+
+### Module map
+
+```
+src/cementic/
+├── cli.py                # Typer CLI: commands + the extract|chunk|embed filters
+├── cli_collection.py     # `cementic collection` subcommands
+├── cli_format.py         # Click/Typer subclasses for plain, uppercase help
+├── cli_shared.py         # helpers shared by the CLI modules
+├── render.py             # status/doctor/collection output rendering
+├── source_watcher.py     # content-type-driven document watcher
+├── extract.py            # extractor registry (content type -> Markdown/text)
+├── chunk.py              # token-based text chunking
+├── embedding_runtime.py  # embedding provider registry + warm llama.cpp client
+├── embedding_provider.py # abstract base class for embedding providers
+├── embedding_text.py     # per-model query/document prompt formatting
+├── pipeline_worker.py    # builds extract/chunk/embed artifacts for a revision
+├── profiles.py           # immutable extractor/chunk/embedding profiles
+├── revisions.py          # target/building/ready/active/retired lifecycle
+├── index_strategies.py   # ANN index registry (hnsw/diskann) -> DDL
+├── vector_store.py       # per-profile vector tables + KNN SQL
+├── search.py             # semantic search over the active revision
+├── collections.py        # collection delete + revision promote/history
+├── config.py             # Pydantic settings (TOML + env + flags)
+├── db.py                 # SQLAlchemy models + engine/session
+├── storage.py            # compressed artifact storage
+├── status_service.py     # worker / health / pipeline status
+├── supervisor.py         # background process management
+├── runner.py             # internal background runner for both workers
+├── worker_runtime.py     # shared logging/shutdown plumbing for both workers
+├── state.py              # daemon state files
+├── bootstrap.py          # DB-reachable check + llama model download
+├── doctor.py             # read-only runtime diagnostics
+├── filelock.py           # advisory file locks (start, daemon autostart)
+├── validation.py         # collection-name validation
+└── templates/            # files `cementic init postgres` and `config init` copy out
+
+tests/
+├── unit/                 # mocked / SQLite
+├── integration/          # PostgreSQL + smoke tests
+└── fixtures/             # generated PDF fixtures
+```
+
+### Measurements behind the defaults
+
+These are the evidence for values that are live today. Re-measure before
+changing any of them.
+
+**Chunk size against the context window** (`pipeline.chunk_size = 320`,
+`llama_cpp.n_ctx = 512`). `chunk_size` counts tiktoken tokens; `n_ctx` counts the
+model's own. For the default model one tiktoken token is a median of 1.14 model
+tokens, p95 1.24, up to 1.33 on English and source code. The runtime guard
+assumes an upper bound of 1.45, and `(320 + 8) × 1.45 = 475.6` fits inside 512 —
+the `+ 8` being the task-prefix allowance. A chunk that would exceed the window
+is refused, not truncated. Re-measure with
+`scripts/measure_chunk_context_fit.py`.
+
+**ANN index build memory** (`index.build_memory = 2GB`). 100k × 768 is 293 MiB of
+graph against PostgreSQL's 64MB default, so the build spills to disk: **1454 s at
+64MB against 345 s at 2GB**.
+
+**Why vector rows carry their own filter columns.** Measured with
+`EXPLAIN (ANALYZE)` on a real corpus, back when every filter lived on a joined
+table:
+
+| query | plan | time |
+|---|---|---|
+| bare KNN, 768-dim, 20k rows | `Index Scan using ...ann` | 2–6 ms |
+| the search query, same data | top-N heapsort over a full nested loop | 25 ms |
+| the search query, 8-dim, 60k rows | same, 60k per-row PK lookups | 83–90 ms |
+
+The planner drove from `chunked_documents` and probed the vector table by
+primary key, so the ANN index was never used. Search was exact but scaled
+linearly with the table.
+
+**Scale target.** ~40k papers at a measured 50 chunks each is ~2M vectors. Query
+latency is not the binding constraint — a warm search is 214 ms end to end, 197
+of which is embedding the query string, a constant. The constraints are
+embedding throughput (1.4 s/chunk on CPU, so ~780 hours for 2M vectors without a
+GPU) and memory (an HNSW index over 1M 768-dim vectors needs ~3 GB resident),
+which is what the `diskann` seam exists for.
+
+**Directory moves under the watcher**, measured against watchdog's inotify
+backend:
+
+| case | events delivered | handled |
+|---|---|---|
+| rename inside the watched tree | `DirMovedEvent` + per-file events | yes |
+| move a directory in | `DirCreatedEvent` + per-file events | yes |
+| move a directory out | one `DirDeletedEvent`, no per-file events | yes, via prefix delete |
+| move the watched root itself | nothing at all | no — see Known limitations |
