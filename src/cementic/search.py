@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import dataclasses
+
 # mypy: disable-error-code="import-untyped"
 from typing import Any, TypedDict
 
@@ -347,4 +349,12 @@ class Searcher:
 
 def _create_embedding_provider(config_json: str, config: Config) -> Any:
     spec = runtime_spec_from_profile_json(config_json)
+    # `verbose` is a launch argument, not part of the embedding profile's
+    # identity (profiles.build_embedding_profile_payload deliberately leaves
+    # it out), so a stored profile's JSON no longer carries a meaningful
+    # value for it -- source it from the live config instead, the same place
+    # indexing's own runtime_spec_from_config reads it from, so a daemon
+    # started via search honours the current `llama_cpp.verbose` setting.
+    if spec.provider == "llama-cpp":
+        spec = dataclasses.replace(spec, verbose=config.llama_cpp.verbose)
     return create_provider(spec, config)

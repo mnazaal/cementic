@@ -2,6 +2,7 @@
 
 from unittest.mock import MagicMock
 
+from cementic import profiles as profiles_module
 from cementic.config import Config
 from cementic.profiles import (
     _fingerprint,
@@ -48,6 +49,55 @@ class TestBuildExtractorProfilePayload:
         assert payload["backends"] == {"pdf": "pdfplumber"}
         assert payload["use_ocr"] is True
         assert "version" in payload
+
+    def test_records_installed_extraction_library_versions(self) -> None:
+        """The Markdown is actually produced by pymupdf/pymupdf4llm, not the
+        hand-typed EXTRACTION_VERSION literal -- a dependency bump must move
+        the fingerprint on its own."""
+        config = Config()
+        payload = build_extractor_profile_payload(config)
+
+        libraries = payload["extraction_libraries"]
+        assert isinstance(libraries, dict)
+        assert "pymupdf4llm" in libraries
+        assert "pymupdf" in libraries
+        # Installed in this dev environment (pyproject.toml pins both), so a
+        # real version string, not a placeholder, should come back.
+        assert libraries["pymupdf4llm"]
+        assert libraries["pymupdf"]
+
+    def test_changed_pymupdf4llm_version_changes_the_fingerprint(
+        self, monkeypatch
+    ) -> None:
+        config = Config()
+        before = build_extractor_profile_payload(config)
+
+        real_version = profiles_module._package_version
+
+        def bumped_version(name: str) -> str:
+            if name == "pymupdf4llm":
+                return "999.999.999"
+            return real_version(name)
+
+        monkeypatch.setattr("cementic.profiles._package_version", bumped_version)
+        after = build_extractor_profile_payload(config)
+
+        assert _fingerprint(before) != _fingerprint(after)
+
+    def test_missing_package_does_not_crash_profile_construction(
+        self, monkeypatch
+    ) -> None:
+        from importlib.metadata import PackageNotFoundError
+
+        def raise_not_found(name: str) -> str:
+            raise PackageNotFoundError(name)
+
+        monkeypatch.setattr("cementic.profiles._package_version", raise_not_found)
+        config = Config()
+
+        payload = build_extractor_profile_payload(config)
+
+        assert payload["extraction_libraries"]["pymupdf4llm"] is None
 
 
 class TestBuildChunkProfilePayload:
@@ -143,6 +193,99 @@ class TestGetOrCreateChunkProfile:
         assert result is not None
         assert session.add.called
         assert session.flush.called
+
+
+class TestModelIdentityByContent:
+    """The embedding profile fingerprint must identify a model by content.
+
+    ``resolve_llama_model_path`` honours a relative path that exists from the
+    current directory, so the path *string* used to be what entered the
+    fingerprint -- two directories each holding a different GGUF at the same
+    relative path fingerprinted as "the same model".
+    """
+
+    def _payload_for(self, model_path, monkeypatch, cache_dir):
+        monkeypatch.setattr(
+            "cementic.model_digest.cementic_data_dir",
+            lambda *, ensure_exists=False: cache_dir,
+        )
+        config = Config()
+        config.pipeline.embedding_provider = "llama-cpp"
+        config.llama_cpp.model_path = str(model_path)
+        return build_embedding_profile_payload(config)
+
+    def test_two_different_files_at_the_same_relative_path_fingerprint_differently(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """The core defect, made unambiguous: same relative layout, different bytes."""
+        cache_dir = tmp_path / "cementic-data"
+        dir_a = tmp_path / "run-from-project-a" / "models"
+        dir_b = tmp_path / "run-from-project-b" / "models"
+        dir_a.mkdir(parents=True)
+        dir_b.mkdir(parents=True)
+        model_a = dir_a / "embed.gguf"
+        model_b = dir_b / "embed.gguf"
+        model_a.write_bytes(b"first model's bytes")
+        model_b.write_bytes(b"second model's different bytes")
+
+        payload_a = self._payload_for(model_a, monkeypatch, cache_dir)
+        payload_b = self._payload_for(model_b, monkeypatch, cache_dir)
+
+        assert _fingerprint(payload_a) != _fingerprint(payload_b)
+
+    def test_same_file_at_two_absolute_paths_fingerprints_identically(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """The converse: content identity must not depend on the directory."""
+        cache_dir = tmp_path / "cementic-data"
+        dir_1 = tmp_path / "one"
+        dir_2 = tmp_path / "two"
+        dir_1.mkdir()
+        dir_2.mkdir()
+        model_1 = dir_1 / "embed.gguf"
+        model_2 = dir_2 / "embed.gguf"
+        model_1.write_bytes(b"identical model bytes")
+        model_2.write_bytes(b"identical model bytes")
+
+        payload_1 = self._payload_for(model_1, monkeypatch, cache_dir)
+        payload_2 = self._payload_for(model_2, monkeypatch, cache_dir)
+
+        assert _fingerprint(payload_1) == _fingerprint(payload_2)
+
+    def test_payload_carries_a_content_digest_distinct_from_the_display_label(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        cache_dir = tmp_path / "cementic-data"
+        model = tmp_path / "embed.gguf"
+        model.write_bytes(b"some bytes")
+
+        payload = self._payload_for(model, monkeypatch, cache_dir)
+
+        assert payload["model_digest"]
+        assert payload["model_digest"] != payload["model_identifier"]
+
+
+class TestVerboseExcludedFromEmbeddingProfile:
+    """`verbose` is a launch argument, not part of what vectors mean.
+
+    It stays in embedding_runtime.llama_cpp_runtime_fingerprint (the runtime
+    alias), but two profiles that differ only in `verbose` must not fork the
+    corpus into two vector spaces.
+    """
+
+    def test_toggling_verbose_does_not_change_the_fingerprint(self) -> None:
+        config = Config()
+        config.pipeline.embedding_provider = "llama-cpp"
+        config.llama_cpp.model_path = "/models/test.gguf"
+        config.llama_cpp.verbose = False
+        payload_off = build_embedding_profile_payload(config)
+
+        config.llama_cpp.verbose = True
+        payload_on = build_embedding_profile_payload(config)
+
+        assert _fingerprint(payload_off) == _fingerprint(payload_on)
+        assert "verbose" not in payload_off
+        assert "verbose" not in payload_on
 
 
 class TestGetOrCreateEmbeddingProfile:

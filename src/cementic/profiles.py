@@ -4,16 +4,19 @@ from __future__ import annotations
 
 import json
 from hashlib import sha256
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as _package_version
 from typing import cast
 
 from sqlalchemy.orm import Session
 
 from cementic.chunk import TOKENIZER
-from cementic.config import Config
+from cementic.config import Config, resolve_llama_model_path
 from cementic.db import ChunkProfile, EmbeddingProfile, ExtractorProfile
 from cementic.embedding_provider import EmbeddingFacts, EmbeddingProvider
-from cementic.embedding_runtime import runtime_spec_from_config
+from cementic.embedding_runtime import EmbeddingRuntimeSpec, runtime_spec_from_config
 from cementic.embedding_text import describe_text_policy
+from cementic.model_digest import model_content_digest
 
 #: Identity of the embedding-input formatting rules in embedding_text.py. Bump
 #: this whenever those rules change: it is part of the embedding profile
@@ -33,7 +36,21 @@ EMBEDDING_TEXT_FORMAT_VERSION = "v2"
 # that previously contained U+FFFD now hold correct text), empty slices skipped,
 # and chunk_index made contiguous.
 CHUNKING_VERSION = "v3"
+#: Manual override for changes to cementic's *own* extraction wrapper code
+#: (extract.py) that are not a pymupdf/pymupdf4llm version bump -- e.g. a
+#: different `header`/`footer`/`page_chunks` call, or a change to how OCR is
+#: invoked. It deliberately does NOT track the libraries' own versions; those
+#: are recorded separately in "extraction_libraries" below and move the
+#: fingerprint on their own when either package is bumped, since a bump
+#: changes the Markdown pymupdf4llm produces whether or not this literal was
+#: remembered to be typed.
 EXTRACTION_VERSION = "v1"
+
+#: The installed packages that actually produce the extracted Markdown.
+#: pymupdf-layout is included because extract.py hard-requires it (it raises
+#: if `pymupdf._get_layout` is unavailable) for improved page layout analysis,
+#: not merely pulled in incidentally.
+_EXTRACTION_LIBRARY_NAMES = ("pymupdf4llm", "pymupdf", "pymupdf-layout")
 
 
 def _stable_json(payload: dict[str, object]) -> str:
@@ -44,12 +61,34 @@ def _fingerprint(payload: dict[str, object]) -> str:
     return sha256(_stable_json(payload).encode("utf-8")).hexdigest()
 
 
+def _installed_extraction_library_versions() -> dict[str, str | None]:
+    """Installed version of each extraction library, or None if not installed.
+
+    None rather than a raised exception: a bare `importlib.metadata.version()`
+    call raises `PackageNotFoundError` for an uninstalled optional package
+    (pymupdf-layout is required at runtime by extract.py, but profile
+    construction itself must never crash on what happens to be installed).
+    """
+    versions: dict[str, str | None] = {}
+    for name in _EXTRACTION_LIBRARY_NAMES:
+        try:
+            versions[name] = _package_version(name)
+        except PackageNotFoundError:
+            versions[name] = None
+    return versions
+
+
 def build_extractor_profile_payload(config: Config) -> dict[str, object]:
     """Build extractor profile payload from config.
 
     Records the extractor registry identity so adding or revving a content-type
     extractor re-versions the revision. Imported locally to keep this module's
     import graph free of the (heavier) extraction backend.
+
+    The Markdown is actually produced by pymupdf/pymupdf4llm, not by this
+    module's own code -- "extraction_libraries" records their installed
+    versions so a dependency bump moves the fingerprint on its own instead of
+    silently changing extraction output under an unchanged fingerprint.
     """
     from cementic.extract import extractor_registry_payload
 
@@ -58,6 +97,7 @@ def build_extractor_profile_payload(config: Config) -> dict[str, object]:
         "use_ocr": config.extraction.use_ocr,
         "version": EXTRACTION_VERSION,
         "extractors": extractor_registry_payload(),
+        "extraction_libraries": _installed_extraction_library_versions(),
     }
 
 
@@ -69,6 +109,37 @@ def build_chunk_profile_payload(config: Config) -> dict[str, object]:
         "tokenizer": TOKENIZER,
         "version": CHUNKING_VERSION,
     }
+
+
+def _model_identity(spec: EmbeddingRuntimeSpec) -> tuple[str, str]:
+    """(display label, content-identity digest) for one runtime spec's model.
+
+    Only llama-cpp resolves to a local file that can be hashed; a
+    hypothetical future non-file provider falls back to its raw identifier as
+    both, since there is nothing on disk to hash by.
+
+    The digest -- not the path string -- is what makes two profiles the same
+    or different: ``resolve_llama_model_path`` honours a relative path that
+    exists from the current directory, so two directories each holding a
+    different GGUF at the same relative path used to fingerprint as one
+    model. The label stays a plain basename (not the full resolved path) so
+    that the *same* file reached via two different absolute paths still
+    fingerprints identically -- only content and display name matter, not
+    where it happens to sit on disk.
+    """
+    if spec.provider != "llama-cpp":
+        return spec.model_identifier, spec.model_identifier
+
+    resolved = resolve_llama_model_path(spec.model_identifier)
+    digest = model_content_digest(spec.model_identifier)
+    if digest is None:
+        # Not downloaded yet, or a test/fixture path that never exists.
+        # Falling back to the resolved path keeps profile construction from
+        # crashing; production never reaches this branch because the daemon
+        # serving this model must already be running by the time a profile
+        # is resolved for real indexing or search.
+        digest = f"unreadable:{resolved}"
+    return resolved.name, digest
 
 
 def build_embedding_profile_payload(
@@ -91,14 +162,19 @@ def build_embedding_profile_payload(
             embedding_dim=spec.embedding_dim,
             distance_metric=spec.distance_metric,
         )
+    model_label, model_digest = _model_identity(spec)
     return {
         "provider": facts.name,
-        "model_identifier": spec.model_identifier,
+        "model_identifier": model_label,
+        "model_digest": model_digest,
         "embedding_dim": facts.embedding_dim,
         "distance_metric": facts.distance_metric,
         "n_ctx": spec.n_ctx,
         "n_gpu_layers": spec.n_gpu_layers,
-        "verbose": spec.verbose,
+        # `verbose` is deliberately absent: it is a launch argument (see
+        # embedding_runtime.llama_cpp_runtime_fingerprint, where it correctly
+        # stays), not a fact about the vectors this profile identifies.
+        # Toggling it must not fork the corpus into two vector spaces.
         "text_format_version": EMBEDDING_TEXT_FORMAT_VERSION,
         # The task-prefix policy is chosen from the model *filename*, so
         # renaming a GGUF (or mirroring it under another name) silently switches
@@ -107,6 +183,10 @@ def build_embedding_profile_payload(
         # vector spaces mixed in a single index, which is exactly what
         # text_format_version beside it exists to prevent. Recording it makes a
         # rename fork the profile and rebuild instead.
+        #
+        # Deliberately keyed off spec.model_identifier (the configured path),
+        # not the resolved/digest identity above: the prefix convention is a
+        # filename heuristic, unrelated to which bytes are on disk.
         "text_policy": describe_text_policy(spec.model_identifier),
     }
 

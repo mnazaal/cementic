@@ -12,6 +12,7 @@ from cementic.db import Base, PipelineRevision
 from cementic.search import (
     Searcher,
     SearchResult,
+    _create_embedding_provider,
     _distance_operator,
     _reject_query_over_context,
     _score_from_distance,
@@ -511,6 +512,47 @@ class TestQueryContextBound:
         _reject_query_over_context(query, 4096)
         with pytest.raises(ValueError, match="context window"):
             _reject_query_over_context(query, 256)
+
+
+class TestEmbeddingProviderVerboseComesFromLiveConfig:
+    """`verbose` was removed from the embedding profile fingerprint (it is a
+    launch argument, not a fact about the vectors), so a spec rebuilt from a
+    stored profile's JSON no longer carries a real value for it. Search must
+    source it from the current config instead of silently defaulting to
+    False regardless of what the user has configured -- otherwise a daemon
+    started via search never honours `llama_cpp.verbose`.
+    """
+
+    def test_verbose_is_taken_from_current_config_not_the_stored_profile(self):
+        config = Config()
+        config.llama_cpp.verbose = True
+        config_json = (
+            '{"provider": "llama-cpp", "model_identifier": "model.gguf", '
+            '"n_ctx": 512, "n_gpu_layers": 0, "embedding_dim": 768}'
+        )
+
+        with patch("cementic.search.create_provider") as mock_create_provider:
+            _create_embedding_provider(config_json, config)
+
+        (spec_arg, config_arg), _ = mock_create_provider.call_args
+        assert spec_arg.verbose is True
+        assert config_arg is config
+
+    def test_false_config_verbose_overrides_a_stale_true_in_the_profile(self):
+        """A profile built before this change may still carry `verbose: true`
+        in its stored JSON; live config must win regardless of direction."""
+        config = Config()
+        config.llama_cpp.verbose = False
+        config_json = (
+            '{"provider": "llama-cpp", "model_identifier": "model.gguf", '
+            '"n_ctx": 512, "n_gpu_layers": 0, "embedding_dim": 768, "verbose": true}'
+        )
+
+        with patch("cementic.search.create_provider") as mock_create_provider:
+            _create_embedding_provider(config_json, config)
+
+        (spec_arg, _config_arg), _ = mock_create_provider.call_args
+        assert spec_arg.verbose is False
 
 
 class TestEmptyQueryIsRejected:

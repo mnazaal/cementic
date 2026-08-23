@@ -9,7 +9,6 @@ needed.
 
 from __future__ import annotations
 
-import hashlib
 import logging
 import os
 from pathlib import Path
@@ -25,6 +24,7 @@ from cementic.config import (
 )
 from cementic.db import get_engine
 from cementic.filelock import file_lock
+from cementic.hashing import sha256_file
 
 _logger = logging.getLogger("cementic.bootstrap")
 
@@ -58,15 +58,6 @@ def llama_model_download_allowed(model_path: Path) -> bool:
     return True
 
 
-def _sha256_file(path: Path) -> str:
-    """Return the SHA-256 hex digest of a file."""
-    digest = hashlib.sha256()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
 def _ensure_sha256(path: Path, expected: str | None) -> None:
     """Validate a file checksum when an expected digest is configured.
 
@@ -75,7 +66,7 @@ def _ensure_sha256(path: Path, expected: str | None) -> None:
     """
     if not expected:
         return
-    actual = _sha256_file(path)
+    actual = sha256_file(path)
     if actual.lower() != expected.lower():
         raise RuntimeError(
             f"Checksum mismatch for {path}: expected {expected}, got {actual}. "
