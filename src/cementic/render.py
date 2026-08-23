@@ -1,4 +1,4 @@
-"""Rendering `cementic status`, `status --doctor`, and `--json` output.
+"""Rendering `cementic status`, `cementic doctor`, and `--json` output.
 
 Split out of cli.py. `_print_status_summary` and `_print_collection_detail`
 used to reach for the config singleton themselves, and `_print_status_json`
@@ -98,7 +98,7 @@ def _print_status_summary(
         if health.embedding_healthy:
             embedding_text = "[green]healthy[/green]"
         elif config.llama_cpp.daemon_autostart:
-            # Same state `status --doctor` calls a warning: not running now, but
+            # Same state `cementic doctor` calls a warning: not running now, but
             # cementic starts it on demand. Not an error.
             embedding_text = "[yellow]stopped (autostarts when needed)[/yellow]"
         else:

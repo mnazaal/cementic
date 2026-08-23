@@ -46,7 +46,7 @@ def llama_model_download_allowed(model_path: Path) -> bool:
     Auto-downloads are confined to the cementic data directory. Shared with the
     doctor so the two agree: doctor used to report a missing model as "cementic
     will download it automatically" for *any* path, including ones this refuses,
-    so `status --doctor` passed a config that `cementic start` then died on.
+    so `cementic doctor` passed a config that `cementic start` then died on.
 
     Deliberately does not create the data directory -- the doctor is read-only.
     """

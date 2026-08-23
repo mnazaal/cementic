@@ -130,7 +130,7 @@ class TestInitPostgresCommand:
         assert (target / "Containerfile").is_file()
         assert (target / "README.md").is_file()
         assert (target / "quadlet" / "cementic-postgres.container").is_file()
-        assert "cementic status --doctor" in result.output
+        assert "cementic doctor" in result.output
 
     def test_init_postgres_compose_persists_data_in_a_named_volume(self, tmp_path) -> None:
         """Without a named volume the database lives in the container's writable
@@ -746,7 +746,7 @@ class TestBackgroundCommands:
             },
         }
 
-        result = runner.invoke(app, ["status", "--doctor", "--json"])
+        result = runner.invoke(app, ["doctor", "--json"])
 
         assert result.exit_code == 1
         data = json.loads(result.stdout)
@@ -754,7 +754,7 @@ class TestBackgroundCommands:
         assert data["checks"]["database"]["message"] == "down"
 
     def test_status_doctor_still_reports_when_config_is_broken(self, tmp_path, monkeypatch):
-        """Regression: --doctor died on the config error with no report at all
+        """Regression: doctor died on the config error with no report at all
         -- the one command that exists to diagnose a broken setup produced
         *less* output than plain `status`. It now emits a failing report (valid
         JSON under --json) with the precise error on stderr."""
@@ -763,7 +763,7 @@ class TestBackgroundCommands:
         monkeypatch.setenv("CEMENTIC_CONFIG", str(bad))
         monkeypatch.setattr("cementic.cli_shared._config", None)
 
-        result = runner.invoke(app, ["status", "--doctor", "--json"])
+        result = runner.invoke(app, ["doctor", "--json"])
 
         assert result.exit_code == 1
         assert "config error" in result.stderr
@@ -786,7 +786,7 @@ class TestBackgroundCommands:
             },
         }
 
-        result = runner.invoke(app, ["status", "--doctor"])
+        result = runner.invoke(app, ["doctor"])
 
         assert result.exit_code == 0
         assert "cementic doctor: ok" in result.output
@@ -2835,11 +2835,3 @@ class TestFifthReviewSection41Leftovers:
             result = runner.invoke(app, ["search", "q", "-c", "persnal"])
 
         assert "no results" not in result.stdout
-
-    def test_doctor_says_when_it_is_ignoring_flags(self):
-        """`status --doctor -c typo -v` accepted both flags and used neither."""
-        result = runner.invoke(app, ["status", "--doctor", "-c", "anything", "-v"])
-
-        assert "ignored with --doctor" in result.stderr
-        assert "-c/--collection" in result.stderr
-        assert "-v/--verbose" in result.stderr

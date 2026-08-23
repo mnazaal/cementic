@@ -221,7 +221,7 @@ def init_postgres(
     console.print("  # or: podman compose up -d")
     console.print("")
     console.print("Then check readiness:")
-    console.print("  cementic status --doctor")
+    console.print("  cementic doctor")
 
 
 def _save_supervisor_state(state: dict[str, object]) -> None:
@@ -566,56 +566,8 @@ def status(
         "--json",
         help="Output status as JSON",
     ),
-    doctor: bool = typer.Option(
-        False,
-        "--doctor",
-        help="Run read-only runtime readiness diagnostics",
-    ),
 ) -> None:
     """Show background worker status and collection progress."""
-    if doctor:
-        # --doctor reports runtime readiness, which is not per-collection and has
-        # no verbose form. Silently ignoring these flags let `status --doctor -c
-        # typo -v` look like it had answered a question it never read.
-        ignored = [
-            flag
-            for flag, given in (
-                ("-c/--collection", collection),
-                ("-v/--verbose", verbose),
-            )
-            if given
-        ]
-        if ignored:
-            err_console.print(
-                f"note: {', '.join(ignored)} {'is' if len(ignored) == 1 else 'are'} "
-                "ignored with --doctor, which reports runtime readiness, not collections"
-            )
-        try:
-            report = collect_doctor_report(_get_config())
-        except typer.Exit:
-            # _get_config already printed the precise config error to stderr.
-            # A broken config is exactly what --doctor exists to diagnose, so
-            # emit the failing report it promises (--json consumers still get
-            # JSON) instead of dying with less output than plain `status`.
-            config_path = resolve_config_path()
-            report = {
-                "ok": False,
-                "checks": {
-                    "config": {
-                        "status": "fail",
-                        "path": str(config_path) if config_path is not None else None,
-                        "message": "config failed to load; the error is printed on stderr",
-                    }
-                },
-            }
-        if json_output:
-            typer.echo(json.dumps(report, indent=2, sort_keys=True))
-        else:
-            render._print_doctor_report(report)
-        if not report["ok"]:
-            raise typer.Exit(1)
-        return
-
     if collection is not None:
         collection = _validated_collection_name(collection)
 
@@ -711,6 +663,44 @@ def status(
 
         pipeline_status = load_pipeline_status(_get_config(), collection)
         render._print_collection_detail(collection, pipeline_status, verbose, _get_config())
+
+
+@app.command(
+    "doctor",
+    short_help="Run read-only runtime readiness diagnostics",
+)
+def doctor(
+    json_output: bool = typer.Option(
+        False,
+        "--json",
+        help="Output the report as JSON",
+    ),
+) -> None:
+    """Run read-only runtime readiness diagnostics."""
+    try:
+        report = collect_doctor_report(_get_config())
+    except typer.Exit:
+        # _get_config already printed the precise config error to stderr.
+        # A broken config is exactly what doctor exists to diagnose, so emit
+        # the failing report it promises (--json consumers still get JSON)
+        # instead of dying with less output than plain `status`.
+        config_path = resolve_config_path()
+        report = {
+            "ok": False,
+            "checks": {
+                "config": {
+                    "status": "fail",
+                    "path": str(config_path) if config_path is not None else None,
+                    "message": "config failed to load; the error is printed on stderr",
+                }
+            },
+        }
+    if json_output:
+        typer.echo(json.dumps(report, indent=2, sort_keys=True))
+    else:
+        render._print_doctor_report(report)
+    if not report["ok"]:
+        raise typer.Exit(1)
 
 
 @app.command(

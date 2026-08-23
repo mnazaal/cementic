@@ -77,7 +77,7 @@ def _daemon_state(config: Config) -> tuple[bool, str]:
     if health is DaemonHealth.BUSY:
         # Serializing every request behind one model lock means a daemon that is
         # busy indexing cannot answer; that is not the same as broken, and
-        # calling it broken made `status --doctor` exit non-zero mid-build.
+        # calling it broken made `cementic doctor` exit non-zero mid-build.
         return True, "running but busy (serving a request); not idle enough to answer /v1/models"
     if health is DaemonHealth.WRONG_MODEL:
         return False, "serving a different model than this config expects"
@@ -170,7 +170,7 @@ def collect_doctor_report(config: Config) -> dict[str, Any]:
 
     model_exists = model_path.is_file()
     # Promising a download this path forbids is worse than reporting nothing:
-    # `status --doctor` said ok and `cementic start` then died on it. The
+    # `cementic doctor` said ok and `cementic start` then died on it. The
     # confinement rule is the bootstrapper's own, shared rather than restated.
     model_downloadable = config.bootstrap.auto_download_llama_model and (
         llama_model_download_allowed(model_path)

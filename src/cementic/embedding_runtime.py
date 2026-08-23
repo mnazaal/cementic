@@ -584,7 +584,7 @@ def probe_daemon(
 
     One helper with an explicit budget, replacing three implementations that
     used three different probes and three different timeouts -- which is why
-    `status`, `--doctor` and `search` could each report something different
+    `status`, `doctor` and `search` could each report something different
     about the same daemon.
 
     ``wait_seconds=0`` costs one ``/v1/models`` round (a couple of seconds at

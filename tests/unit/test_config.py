@@ -137,7 +137,7 @@ class TestConfigFile:
 
         That is a ValueError, not an OSError, so it escaped both handlers and
         reached the user as a traceback from every command -- including
-        `status --doctor`, which exists to explain exactly this.
+        `cementic doctor`, which exists to explain exactly this.
         """
         bad = tmp_path / "latin1.toml"
         bad.write_bytes(b'[database]\nhost = "caf\xe9"\n')

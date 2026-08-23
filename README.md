@@ -36,7 +36,7 @@ The repository is private, so installing straight from the URL
 (`pipx install git+https://...`) only works once you have access to it; clone
 first.
 
-cementic is verified for Linux with Python 3.10-3.12. macOS and Windows are
+cementic is verified for Linux with Python 3.12. macOS and Windows are
 best-effort until tested. Installing `llama-cpp-python[server]` builds llama.cpp
 from source on platforms without a prebuilt wheel, which needs a C/C++ toolchain
 and can take a while; if CMake reports it cannot find a compiler named `cc`, set
@@ -50,7 +50,7 @@ enabled.
   easiest path is generating a local setup via `cementic init postgres`, then
   starting it with **Docker** or **Podman** (see Setup). cementic itself does
   not manage containers.
-- **Python 3.10+**
+- **Python 3.12+**
 - **8-16 GB RAM** recommended for the llama.cpp embedding backend (the model loads into memory)
 - **Disk space**: ~2 GB for the llama.cpp model, plus PostgreSQL data and artifact storage
 
@@ -64,7 +64,7 @@ copy-pasteable setup files.
 cementic init postgres ./cementic-postgres
 cd ./cementic-postgres
 docker compose up -d      # or: podman compose up -d
-cementic status --doctor
+cementic doctor
 ```
 
 You do **not** run Compose every time you use cementic. The generated Compose
@@ -80,7 +80,7 @@ extensions available.
 cementic connects to that database and, on first indexing/search run, validates
 or auto-downloads the configured `llama.cpp` model into the cementic user data
 directory when it is missing. Auto-download is the recommended path; use
-`cementic status --doctor` to check the resolved model path without downloading.
+`cementic doctor` to check the resolved model path without downloading.
 If Postgres is not reachable, doctor suggests generating the local setup or
 pointing cementic at your own Postgres.
 
@@ -161,8 +161,7 @@ Useful flags beyond the above:
 | --- | --- | --- |
 | `-V`, `--version` | root | Print the version and exit |
 | `-v`, `--verbose` | `status` | Per-file pipeline progress, watched directories, worker PIDs |
-| `--json` | `status`, `search` | Machine-readable output (`search` emits JSONL, one object per line) |
-| `--doctor` | `status` | Read-only readiness diagnostics: config, database, extensions, model, daemon, chunk budget |
+| `--json` | `status`, `doctor`, `search` | Machine-readable output (`search` emits JSONL, one object per line) |
 | `-c`, `--collection` | `start`, `status`, `search` | Which collection to act on. `search` accepts more than one — `-c work personal` or repeated `-c` — and searches all of them together |
 | `-n`, `--top-k`, `--limit` | `search` | Number of results, 1–50 |
 | `--force` | `stop` | SIGKILL workers that ignored the graceful stop, discarding in-progress work |

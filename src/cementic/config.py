@@ -4,6 +4,7 @@ import difflib
 import os
 import re
 import sys
+import tomllib
 from pathlib import Path
 from typing import Any, ClassVar
 
@@ -27,12 +28,6 @@ from sqlalchemy.engine import URL, make_url
 
 from cementic.index_strategies import supported_index_methods
 from cementic.vector_store import HNSW_ITERATIVE_SCAN_MODES
-
-if sys.version_info >= (3, 11):
-    import tomllib
-else:  # Python 3.10
-    import tomli as tomllib
-
 
 #: Directory names the watcher skips by default. Pointing `cementic start` at a
 #: project directory otherwise indexes every README and note inside dependency,
@@ -137,7 +132,7 @@ def config_file_error() -> str | None:
     Returns None both when there is no config file (nothing to load) and when
     one loaded cleanly; the distinction is ``resolve_config_path()``'s job.
 
-    Exists so `cementic status --doctor` can report an unusable config. A
+    Exists so `cementic doctor` can report an unusable config. A
     malformed or unreadable file is silently discarded and cementic runs on
     defaults -- the wrong database, the wrong model -- which is exactly the
     situation a diagnostic command must not describe as "ok".
@@ -484,7 +479,7 @@ class DatabaseConfig(_SectionSettings):
 
         Left to `url`, the parse failure surfaced from whichever command
         happened to touch the property first -- as a raw traceback out of
-        `status --doctor`, and out of the very error message `start` builds to
+        `cementic doctor`, and out of the very error message `start` builds to
         explain it. An empty value keeps meaning "unset", which the discrete
         host/port/name fields depend on.
         """
@@ -612,8 +607,8 @@ class PipelineConfig(_SectionSettings):
     def _validate_provider(cls, value: str) -> str:
         """Check the name against the registry, as `index.method` already does.
 
-        Unvalidated, a near-miss like "llama_cpp" loaded fine and `status
-        --doctor` reported ok, because doctor runs the llama.cpp checks
+        Unvalidated, a near-miss like "llama_cpp" loaded fine and `cementic
+        doctor` reported ok, because doctor runs the llama.cpp checks
         regardless; the first `cementic start` then died on it.
         """
         # Imported here, not at module scope: embedding_runtime imports config.

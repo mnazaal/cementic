@@ -98,7 +98,7 @@ class TestDaemonCheck:
 
     Regression: doctor used the /v1/models probe alone, which llama_cpp.server
     can block for the whole duration of an in-flight embedding batch. Running
-    `status --doctor` during indexing therefore said the daemon was unreachable,
+    `cementic doctor` during indexing therefore said the daemon was unreachable,
     and with autostart disabled exited non-zero.
     """
 

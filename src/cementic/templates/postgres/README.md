@@ -28,7 +28,7 @@ persistent database service.
 After it starts, check cementic readiness:
 
 ```bash
-cementic status --doctor
+cementic doctor
 ```
 
 Then use cementic normally:
@@ -151,7 +151,7 @@ docker compose down -v
   same `CEMENTIC_DB_PORT` for cementic.
 - Database unreachable: run `docker compose ps` / `podman compose ps`, inspect
   `docker compose logs postgres` / `podman compose logs postgres`, then rerun
-  `cementic status --doctor`.
+  `cementic doctor`.
 - Extension unavailable: rebuild the image with `docker compose build --no-cache`
   or `podman compose build --no-cache`.
 - Changed `.env`: recreate the container with `docker compose up -d --force-recreate`
