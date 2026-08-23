@@ -411,14 +411,20 @@ the claim is plausible — but unverified is unverified.
       passing unmodified.
 - [x] Batch 4 (part): `containers/` gone, `compose.yml` repointed at the
       packaged Containerfile and kept (`fdefdfa`).
-- [ ] Batch 4 (rest): the three PDF specs gone, `test_embedder.py` gone, and at
-      least collapses 1–5 landed.
+- [x] Batch 4 (rest) (`bf4d688`): the three PDF specs and `test_embedder.py`
+      gone (three of its five tests were not duplicates and moved rather than
+      being lost); `_handle_shutdown`, `on_created`/`on_modified`, the
+      config-error ladder and the unremoved-artifact block all collapsed. Same
+      commit removes `c69936d`'s deliberate wart: `cli_shared.py` now carries
+      the names both CLI modules need, so call sites are ordinary references
+      instead of `cli.<name>` attribute reads kept alive by mock targets.
 - [x] Batch 5: README no longer claims an install path that cannot work
       (`dde9413` for the counts, plus the compaction commit for the install
       text); every count in the list above corrected; `PLAN.md` 1498 -> 865 and
       `README.md` 506 -> 458, with the load-bearing measurements harvested
       rather than deleted.
 - [ ] Batch 6: executed or explicitly deferred with a reason recorded here.
+      Both items are decisions and neither has been made; see Open risks.
 - [ ] All six `./scripts/check.sh` gates green at every commit.
 - [ ] No unmerged `claude/*` branch left behind.
 
