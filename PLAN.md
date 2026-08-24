@@ -1,109 +1,97 @@
 # cementic — architecture & design
 
-<!-- session-handoff:begin (2026-08-23) -->
+<!-- session-handoff:begin (2026-08-24) -->
 ## Where the work stands
 
-**Repo state.** The commit carrying this block lands on `claude/plan-drain`,
-branched from `main` — it is pending as this is written, and **`main` has not
-been updated**: merging it is the user's call, since a hook rejects agents
-touching `main` at all. v0.2.0 remains the last tag, now ~40 commits behind.
+**Repo state.** On `claude/soak-measurements`, branched from `main`. `main`
+itself is 1 commit ahead of `origin/main` and unpushed — the previous session's
+doc-drain work, which the user merged. v0.2.0 is still the last tag, 35 commits
+behind. Pushing `main` and merging this branch are both the user's calls: a hook
+rejects agents touching `main` at all.
 
-**Both plans of record are closed and now deleted from this file** — the
-sixth-review fixes (17 items) and the fourth-review carry-overs (4 items).
-`git log -p PLAN.md` is their archive, and their reasoning is in the commit
-messages they cite. There is no live execution order here; the next action is
-the entry point below.
+*Committing here:* an agent must be on a `claude/*` branch (`AGENT_BRANCH_PREFIX=claude`).
+Branch first, then hand the merge to the user.
 
-*Committing here:* an agent must be on a `claude/*` branch — a hook rejects
-commits on `main` and rejects agents updating `main` at all, including
-`--ff-only` merges. Branch first, then hand the merge to the user.
+**Entry point: the soak is DONE and its numbers are in README. The open thread
+is what to do about indexing speed.** Collection `soak` — 153 papers, 178 MB,
+7,306 chunks — indexed clean (zero failures), was promoted, and searches
+correctly. Everything measured is written up in README's "Measurements behind
+the defaults"; the follow-on work is `TODO.md`'s "Cut indexing wall clock at
+corpus scale" under Later. Nothing is running and nothing is half-finished.
 
-**Entry point: the graduated soak is RUNNING — read its log first.** The
-corpus blocker is resolved: the user copied 153 papers (178 MB) to
-`~/projects/tmp/cementic-test-pdf`, and they are indexing into collection
-`soak`, 31× the largest corpus cementic had ever seen. Progress samples land
-once a minute in `~/.cache/cementic-soak/samples.jsonl` (docs, chunks,
-embeddings, per-process RSS); the pre-run snapshot is
-`~/.cache/cementic-soak/baseline.txt`, the sampler is
-`~/.cache/cementic-soak/sample.py`. Estimated ~4 h total.
+**What the soak established.** Full tables are in README; the load-bearing
+numbers, because a cold reader should not have to re-derive which constraint
+binds:
 
-**First soak finding, already in hand: extraction is a bottleneck nobody
-modelled.** 18 documents extracted in 4.6 min is 15.3 s/doc, and the pipeline
-worker burned 50 min of CPU in that 4.6 min — roughly 11 of 14 cores saturated.
-That projects to ~39 min of extraction for 153 papers before a single chunk is
-embedded, and ~170 h at the ~40k-paper target, on top of the ~780 h embedding
-figure. README's "Measurements behind the defaults" has no extraction-throughput
-number at all; add one when the run finishes, alongside the real chunks/paper
-ratio, ANN build time and peak resident memory.
+- Indexing: 10.2 s/doc extract, 814 ms/chunk embed, 47.8 chunks/paper, 2.08 h
+  total. Projects to ~113 h extract + ~432 h embed at the 40k-paper target.
+- **The stages do not overlap** — all extraction finishes before the first
+  chunk, all chunking before the first embedding — so those two projections add
+  rather than hide under each other. This is the finding with design
+  consequences, and it is why the throughput item moved off the parked list.
+- Search: 38.7 ms warm in-process, of which 35.3 ms is embedding the query and
+  2.6 ms is pgvector. Embedding-bound, not index-bound. The CLI's ~650 ms is
+  almost entirely Python import startup (`cementic --help` alone is 0.38 s,
+  SQLAlchemy pulled in via `cementic.render` → `cementic.collections`).
+- Recall@10 vs exact: mean 0.990, worst 0.900, 18/20 identical. `promote` took
+  0.7 s with no bulk index build, which is the up-front-index decision paying
+  off at corpus scale.
 
-**Live state.** Workers are **running** the soak (source watcher 865, pipeline
-worker 866, embedding daemon 870) with a Python sampler alongside them.
-`cementic stop` halts the indexing; the sampler is a separate process and must
-be killed on its own. Collection `soak` is mid-build with no active revision, so
-it is not searchable until `cementic collection promote soak`. Collection `test`
-is untouched: revision 5, `default-68e212bc-llama-cpp-8720d1d0`, 274/274
-embedded, and it is a **testbed** (user, 2026-08-23) — remove and rebuild it
-freely, no need to ask.
+**Corrections this session.**
+- README's `1.4 s/chunk`, `780 h`, `50 chunks/paper` and `197 ms` query-embedding
+  figures were all superseded by the run above. The 197 → 35 ms embedding gap is
+  **unexplained** — the old measurement's conditions are unrecorded, so README
+  marks it superseded rather than reconciled. Distrust other single-number
+  claims of that vintage.
+- The previous handoff's "extraction is 15.3 s/doc → ~170 h" came from an
+  18-document sample and was pessimistic; the full run gives 10.2 s/doc → ~113 h.
+- `TODO.md` listed `collection reindex --force` as untested through the CLI.
+  It was closed on 2026-08-23 by `2a2c856`, whose test docstring says so
+  outright (`tests/unit/test_cli.py:1366`). Removed.
+- The sibling coverage gap in that same list — no test connecting a pipeline
+  failure to what `cementic status` prints — was re-checked and **is still
+  real**. Left in place.
 
-**Corrections — "Deliberately not done" has now been audited.** The previous
-handoff flagged it as listing closed work as open, and it did: `verbose` in the
-embedding fingerprint was done in `77e0e3f`, and the bundled "model identity"
-item is half-closed (vector identity is a content digest; task-prefix selection
-is still a filename match, deliberately). Both are corrected in place. One
-audited claim turned out **accurate** — the fifth-review filename residual —
-because its containment (`text_policy` in the profile payload) landed
-2026-08-11, before that entry was written, not in `77e0e3f`. Two items whose
-parked triggers had already fired moved to `TODO.md`: the `make_url` database
-check (`db.py:316`) and publishing the repo.
+**Live state.** No workers running. The embedding daemon is **up and warm**
+(autostarted by the first search, ~1.1 GB resident); `cementic embedding stop`
+if you want the memory back. Collections: `soak` 153 docs, revision 6 active;
+`test` 5 docs, revision 5 active — `test` is a **testbed** (user, 2026-08-23),
+remove and rebuild it freely. Both share vector table `embedding_vectors_p5`
+(7,580 rows) because they share an embedding profile.
 
-**PLAN.md is meant to be deleted at feature-completeness.** It went 1093 → 413
-lines this session by deleting the two closed plans of record (user-authorised:
-git history is a sufficient record). Still unique to it: "Deliberately not done"
-(now audited), the four design sections (Design principles, Scale context, Key
-seams, Pipeline as composable filters), and "Road to v1". Everything else
-durable has been moved out — measurements and policy decisions to README, three
-testing conventions to README's Conventions, parked items with triggers to
-`TODO.md`, code rationale left against the code where it cannot drift.
+**Deviations from plan, attributed.** *Agent-decided:* the README write-up
+covers the whole soak, including the indexing-throughput table, though the user
+had approved only "promote and run the search measurements" — same write-up, and
+flagged to them at the time rather than done quietly.
 
-**Deviations from plan, attributed.**
-- *User-directed:* fold `AGENTS.md` into README and delete it (against the
-  agent's recommendation — README is now the single source of truth for users
-  and developers both); gitignore `notes/`; narrow to Python 3.12+ rather than
-  add a CI matrix; drop the `status --doctor` deprecation alias. The last two
-  followed from "one user, no backwards-compatibility obligation".
-- *Agent-decided:* kept root `compose.yml`, which the plan wrongly listed for
-  deletion — it is the stack the pg fixture brings up; dropped three of Batch
-  4's duplication collapses as costing more readability than they saved; built
-  the Batch C rebuild alongside the old revision instead of `collection remove`
-  first, which exercised the versioning.
-
-**Environment quirks found this session.**
+**Environment quirks — carried forward, still true.**
 - The pg integration fixture short-circuits when Postgres is already reachable,
   so **no local run exercises `compose build`** — CI's `integration-pg` job is
   what proves that path.
 - A zombie process keeps its `/proc/<pid>` directory, so `test -d /proc/<pid>`
-  is not a liveness check; read the state field. (Daemon recovery is safe from
-  this: a zombie's `cmdline` is empty and cannot be matched.)
-- `notes/review-codebase.html` (the sixth-review audit: CLI surface, call graph,
-  error handling, coverage, FP/UNIX discipline, stale weight, docs drift) was
-  written **after** `notes/` was gitignored, so it is in no git history — it
-  exists only on disk. It is the reasoning behind the 17 items; the commits are
-  the record of what was done about them.
-- **Green gates are not sufficient evidence here.** Five defects this session
-  were found by running the CLI against the live corpus while all six gates
-  passed — including search broken after promote, and unit tests writing into
-  `~/.local/share/cementic/`. End changes that touch workers, the daemon, or
-  profiles with a live run, not just `check.sh`.
+  is not a liveness check; read the state field.
+- `notes/review-codebase.html` (the sixth-review audit) was written after
+  `notes/` was gitignored, so it is in no git history — it exists only on disk.
+- **Green gates are not sufficient evidence here.** Five defects in the
+  2026-08-23 session were found by running the CLI against the live corpus while
+  all six gates passed. End changes that touch workers, the daemon, or profiles
+  with a live run, not just `check.sh`.
+
+**Found this session, worth knowing before you touch pgvector tuning:** on a
+fresh connection `SHOW hnsw.ef_search` errors as an unrecognized parameter and
+`SET hnsw.ef_search` is accepted as an inert placeholder, until some vector
+query loads pgvector's module on that connection. Run a throwaway vector query
+first or your tuning silently does nothing. This is the same trap
+`_iterative_scan_mode`'s docstring documents, met from the other side.
 
 **Exit criteria — commands whose output confirms the above.**
 ```bash
-git status --short                                  # empty
-cementic status -c soak -v                          # workers running, soak building
-tail -1 ~/.cache/cementic-soak/samples.jsonl        # newest progress sample
-cementic collection revisions test                  # revision 5 active
-./scripts/check.sh                                  # all six gates, exit 0 -- run
-                                                    # AFTER the soak, not during:
-                                                    # extraction saturates ~11 cores
+git status --short                            # empty
+git branch --show-current                     # claude/soak-measurements
+cementic status -c soak                       # workers stopped, 153 docs, 100% all stages
+cementic collection list                      # soak + test, both with an active revision
+cementic search "multiple kernel learning" -c soak -n 3   # 3 topically correct hits
+./scripts/check.sh                            # all six gates, exit 0 (~4 min)
 ```
 <!-- session-handoff:end -->
 
@@ -147,9 +135,10 @@ with a trigger", because nothing here was watching for them.
 ## Scale context
 
 The target is a large personal corpus (~40k papers and textbooks) at a measured
-50 chunks per paper — roughly 2M vectors. The numbers behind that (query
-latency, embedding throughput, HNSW memory) are in README's "Measurements behind
-the defaults"; the design consequence is everything under Key seams below:
+47.8 chunks per paper — roughly 1.9M vectors. The numbers behind that (query
+latency, embedding and extraction throughput, HNSW memory) are in README's
+"Measurements behind the defaults", re-measured 2026-08-24 on a 153-paper run;
+the design consequence is everything under Key seams below:
 per-embedding-profile vector tables, a `diskann` seam for when memory binds
 before latency does, versioned revisions so a model or chunking change builds in
 the background and promotes atomically, and a warm llama.cpp server shared by
