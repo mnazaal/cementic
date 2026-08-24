@@ -43,6 +43,7 @@ from cementic.revisions import (
     extracted_scope,
     get_target_revision,
     mark_revision_ready,
+    materialize_pending_embeddings,
     requeue_interrupted_artifacts,
 )
 from cementic.state import DaemonState, StateManager
@@ -382,6 +383,12 @@ class PipelineWorker:
         #: startup failure, so without this the runner exits 0 and any systemd
         #: unit or CI check keying on exit status concludes the worker is fine.
         self.fatal_reason: str | None = None
+        #: Whether chunks may exist with no embedding row for the target
+        #: profile. True at start (a resumed run, or a new embedding profile
+        #: whose chunks all predate it) and set again whenever chunking writes
+        #: more. Gates an O(n) sweep so an idle worker does not re-run it every
+        #: poll.
+        self._embeddings_need_materialising = True
 
     def _setup_logging(self) -> logging.Logger:
         return setup_worker_logger(
@@ -785,6 +792,10 @@ class PipelineWorker:
 
         try:
             self._write_back_chunks(extracted_id, chunked_id, chunk_items, status, error_message)
+            # New chunks have no embedding row yet, so the embed step must sweep
+            # for them before its next claim.
+            if status == "done":
+                self._embeddings_need_materialising = True
         except Exception as error:
             # Same stall as the extraction write-back: the claim is already
             # `processing`, and the chunk step re-claims the lowest-id row every
@@ -850,55 +861,52 @@ class PipelineWorker:
             extractor_profile_id = revision.extractor_profile_id
             chunk_profile_id = revision.chunk_profile_id
 
+            if self._embeddings_need_materialising:
+                added = materialize_pending_embeddings(session, self.collection, revision)
+                session.commit()
+                self._embeddings_need_materialising = False
+                if added:
+                    self._logger.info("Queued %s chunk(s) for embedding", added)
+
+            # No ORDER BY, deliberately. With one, PostgreSQL must read every
+            # pending row and top-N sort it before honouring the LIMIT, so the
+            # claim costs O(pending) -- 2.16M rows on the first batch of a bulk
+            # import. Without one the index scan stops at the first `batch_size`
+            # rows that pass the joins: 32 rows read, 356 buffers, flat for the
+            # whole run. A work queue has no use for a deterministic order.
             candidates = (
                 session.query(Chunk, ChunkEmbedding)
+                .join(ChunkEmbedding, ChunkEmbedding.chunk_id == Chunk.id)
                 .join(ChunkedDocument, Chunk.chunked_document_id == ChunkedDocument.id)
                 .join(
                     ExtractedDocument, ChunkedDocument.extracted_document_id == ExtractedDocument.id
                 )
                 .join(SourceDocument, Chunk.document_id == SourceDocument.id)
-                .outerjoin(
-                    ChunkEmbedding,
-                    (ChunkEmbedding.chunk_id == Chunk.id)
-                    & (ChunkEmbedding.embedding_profile_id == revision.embedding_profile_id),
-                )
                 .filter(
+                    ChunkEmbedding.embedding_profile_id == revision.embedding_profile_id,
+                    ChunkEmbedding.status.in_(["pending", "processing"]),
                     SourceDocument.collection == self.collection,
                     SourceDocument.status != "deleted",
                     ExtractedDocument.extractor_profile_id == revision.extractor_profile_id,
                     ChunkedDocument.chunk_profile_id == revision.chunk_profile_id,
                     ChunkedDocument.status == "done",
-                    # `processing` is re-picked deliberately, matching
-                    # _step_extract and _step_chunk. A row is claimed in one
-                    # transaction and written back in another, so a failure in
-                    # between would otherwise strand it as `processing` for the
-                    # life of the process -- `done + failed` could never reach
-                    # `total_chunks` and the revision would never complete.
-                    # One worker per collection holds the advisory lock and the
-                    # vector upsert is idempotent, so re-claiming is safe.
-                    (ChunkEmbedding.id.is_(None))
-                    | (ChunkEmbedding.status.in_(["pending", "processing"])),
                 )
-                .order_by(Chunk.id)
                 .limit(self.config.pipeline_worker.batch_size)
                 .all()
             )
 
+            # `processing` is re-claimed deliberately, matching _step_extract
+            # and _step_chunk. A row is claimed in one transaction and written
+            # back in another, so a failure in between would otherwise strand it
+            # as `processing` for the life of the process -- `done + failed`
+            # could never reach `total_chunks` and the revision would never
+            # complete. One worker per collection holds the advisory lock and
+            # the vector upsert is idempotent, so re-claiming is safe.
             claimed: list[tuple[int, str]] = []
             for chunk, existing in candidates:
-                if existing is None:
-                    existing = ChunkEmbedding(
-                        chunk_id=chunk.id,
-                        embedding_profile_id=revision.embedding_profile_id,
-                        status="processing",
-                    )
-                    session.add(existing)
-                    session.flush()
-                    claimed.append((chunk.id, chunk.content))
-                elif existing.status in ("pending", "processing"):
-                    existing.status = "processing"
-                    existing.error_message = None
-                    claimed.append((chunk.id, chunk.content))
+                existing.status = "processing"
+                existing.error_message = None
+                claimed.append((chunk.id, chunk.content))
 
             if not claimed:
                 session.commit()
