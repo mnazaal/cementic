@@ -74,6 +74,21 @@ around, since routing past a guard needs the user's say-so.
   accepted as an inert placeholder until a vector query loads pgvector's module.
 - Green gates are not sufficient evidence: end changes touching workers, the
   daemon, or profiles with a live run, not just `check.sh`.
+- **The real corpus has filenames containing shell metacharacters** — quotes at
+  minimum; a plain `find ... | xargs` over it dies with "unmatched single
+  quote". Any shell tooling written against
+  `/u/71/ibrahin1/data/Documents/Papers` needs `find -print0 | xargs -0`.
+  cementic itself is unaffected and this was checked, not assumed: there is no
+  `shell=True`, `os.system` or `os.popen` anywhere in `src/`, and
+  `spawn_detached` (`supervisor.py:229`) hands `subprocess.Popen` a `list[str]`
+  with watched directories passed after `--` (`cli.py:475`), so no path is ever
+  parsed by a shell.
+- The corpus path is two symlinks deep: `~/OneDrive/Material/Papers` →
+  `~/Documents/Papers` → `/u/71/ibrahin1/data/Documents/Papers`. It is local
+  ext4 on the same filesystem as `$HOME` (44 GiB, 88 GiB free), **not** a
+  network or cloud-placeholder mount — 50 PDFs read in 0.245 s. `du` without
+  `-L` reports 36 bytes and looks empty, which is the symlink, not the corpus.
+  Index the resolved path so a moved symlink cannot orphan every `source_path`.
 
 **Exit criteria — commands whose output confirms the above.**
 ```bash
