@@ -55,10 +55,6 @@ Remaining gaps, from the 2026-08-14 review:
   DB-row assertions and the status-rendering assertions never meet, which is how
   a whole class of "reports success, dropped the work" defects stayed invisible
   to a green suite.
-- `collection reindex --force` is never exercised through the CLI; only the
-  negative (`force is False`) is asserted, so the flag-to-kwarg wiring is
-  untested for the one flag README calls the only way to pick up changed
-  `hnsw_m` / `hnsw_ef_construction`.
 
 ## Later
 
@@ -68,6 +64,15 @@ Remaining gaps, from the 2026-08-14 review:
   indexing need to run concurrently.
 - Evaluate lighter embedding providers if llama.cpp memory use is too high on
   small machines.
+- **Cut indexing wall clock at corpus scale.** Measured 2026-08-24 on 153
+  papers: 814 ms/chunk to embed and 10.2 s/doc to extract, projecting to ~432 h
+  of embedding plus ~113 h of extraction for the ~40k-paper target — additive,
+  because the stages do not overlap. Numbers and method are in README's
+  "Measurements behind the defaults". Levers, in rough order of payoff: a GPU or
+  a lighter embedding provider, overlapping extraction with embedding, then a
+  faster PDF backend. Extraction already saturates ~11 of 14 cores, so it will
+  not parallelise away on this machine. Moved here from "Parked, with a trigger"
+  once the first real indexing run made the numbers concrete.
 
 ## Parked, with a trigger
 
@@ -91,8 +96,3 @@ give it a condition someone could actually notice.
   to run somewhere that cannot get 3.12. Unlikely while `uv` installs one in a
   single command, and the compatibility branch was deleted precisely because
   nothing exercised it.
-- **The embedding throughput ceiling.** At the measured 1.4 s/chunk on CPU, the
-  ~2M-vector target corpus in README's measurements is roughly 780 hours of
-  embedding. *Reopen when:* a real indexing run makes that concrete — it is a
-  project-shaping constraint, not a defect, and it is what "evaluate lighter
-  embedding providers" above is actually for.
