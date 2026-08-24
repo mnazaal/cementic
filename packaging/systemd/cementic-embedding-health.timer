@@ -1,0 +1,16 @@
+# Runs the embedding health probe every 10 minutes.
+#
+#   systemctl --user enable --now cementic-embedding-health.timer
+
+[Unit]
+Description=cementic embedding server health probe
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=10min
+# A resume looks like a long gap to the timer, so it fires shortly after wake,
+# which is exactly when a lost GPU context needs catching.
+Persistent=true
+
+[Install]
+WantedBy=timers.target

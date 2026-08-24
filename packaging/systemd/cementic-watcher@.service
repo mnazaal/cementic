@@ -1,0 +1,28 @@
+# cementic source watcher for one collection, as a systemd *user* service.
+#
+# The directories to watch are not in the unit, because they differ per
+# collection. Put them in ~/.config/cementic/<collection>.dirs as a single
+# whitespace-separated line, e.g.
+#
+#   echo /u/71/ibrahin1/data/Documents/Papers > ~/.config/cementic/papers.dirs
+#   systemctl --user enable --now cementic-watcher@papers.service
+#
+# systemd splits $CEMENTIC_DIRS on whitespace, so a directory path containing a
+# space will not work here -- pass it via `cementic start` instead. File names
+# inside the tree may contain anything; only the root path is affected.
+#
+# Logs:  journalctl --user -u cementic-watcher@papers -f
+
+[Unit]
+Description=cementic source watcher (%i)
+After=cementic-embedding.service
+
+[Service]
+WorkingDirectory=%h/projects/cementic
+EnvironmentFile=%h/.config/cementic/%i.dirs.env
+ExecStart=%h/projects/cementic/.venv/bin/python -m cementic.runner source-watcher --collection %i -- $CEMENTIC_DIRS
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=default.target

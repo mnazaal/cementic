@@ -1,0 +1,24 @@
+# cementic pipeline worker for one collection, as a systemd *user* service.
+#
+#   systemctl --user enable --now cementic-worker@papers.service
+#
+# %i is the collection name. Restarting is safe and is how a suspended or
+# killed run recovers: the worker re-queues anything left `processing` at
+# startup (revisions.requeue_interrupted_artifacts), every batch is committed,
+# and the vector upsert is idempotent. Worst case one batch of 32 is redone.
+#
+# Logs:  journalctl --user -u cementic-worker@papers -f
+
+[Unit]
+Description=cementic pipeline worker (%i)
+After=cementic-embedding.service
+Wants=cementic-embedding.service
+
+[Service]
+WorkingDirectory=%h/projects/cementic
+ExecStart=%h/projects/cementic/.venv/bin/python -m cementic.runner pipeline-worker --collection %i
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=default.target

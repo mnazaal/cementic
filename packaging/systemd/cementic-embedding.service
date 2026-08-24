@@ -1,0 +1,47 @@
+# llama.cpp embedding server on the Intel iGPU, as a systemd *user* service.
+#
+# cementic identifies its embedding server only by the model id at /v1/models,
+# so any OpenAI-compatible server carrying the right --alias will do. That is
+# how the GPU is reached without a code change; see README, "Running embeddings
+# on a GPU". Set llama_cpp.daemon_autostart = false so cementic does not spawn
+# its own CPU-only daemon alongside this one.
+#
+# Install:
+#   mkdir -p ~/.config/systemd/user
+#   cp packaging/systemd/cementic-*.service ~/.config/systemd/user/
+#   cp packaging/systemd/cementic-*.timer   ~/.config/systemd/user/
+#   # ALIAS below must equal the fingerprint cementic computes for your config:
+#   #   .venv/bin/python -c "from cementic.config import get_config; \
+#   #     from cementic.embedding_runtime import runtime_spec_from_config, \
+#   #     llama_cpp_runtime_fingerprint as f; c=get_config(); s=runtime_spec_from_config(c); \
+#   #     n=s.n_ctx or c.llama_cpp.n_ctx; \
+#   #     g=s.n_gpu_layers if s.n_gpu_layers is not None else c.llama_cpp.n_gpu_layers; \
+#   #     print(f(model_path=s.model_identifier,n_ctx=n,n_batch=n,n_gpu_layers=g,verbose=s.verbose))"
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now cementic-embedding.service
+#
+# Logs:  journalctl --user -u cementic-embedding -f
+
+[Unit]
+Description=cementic embedding server (llama.cpp, Vulkan)
+After=network-online.target
+
+[Service]
+# systemd expands variables in arguments but NOT in the executable path, so
+# the binary is spelled out. %h is the home directory.
+Environment=CEMENTIC_MODEL=%h/projects/cementic/models/nomic-embed-text-v2-moe.Q8_0.gguf
+Environment=CEMENTIC_ALIAS=4e24fc85fe46967661c6a12c3520527be6a9a38d8f93cc7b18eb46f267fc85c1
+Environment=LD_LIBRARY_PATH=%h/.cache/cementic-igpu/llama-b10605
+ExecStart=%h/.cache/cementic-igpu/llama-b10605/llama-server \
+  --host 127.0.0.1 --port 11555 \
+  --model ${CEMENTIC_MODEL} --alias ${CEMENTIC_ALIAS} \
+  --embeddings --ctx-size 512 --batch-size 512 --ubatch-size 512 \
+  --n-gpu-layers 99
+# always, not on-failure: a suspend that invalidates the Vulkan context can end
+# the process cleanly, and an unrestarted server leaves the worker waiting for
+# it indefinitely. An explicit `systemctl --user stop` still stops it.
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=default.target

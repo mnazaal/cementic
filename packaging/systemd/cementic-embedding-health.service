@@ -1,0 +1,18 @@
+# Restart the embedding server if it is alive but no longer embedding.
+#
+# `Restart=always` covers a server that dies. It does not cover one that
+# survives with a lost GPU context after suspend/resume: the port stays open,
+# /v1/models still answers, and only /v1/embeddings hangs -- the exact shape
+# that once held a daemon wedged for 21 hours while status read healthy. This
+# probes the path that matters and restarts on failure.
+
+[Unit]
+Description=cementic embedding server health probe
+
+[Service]
+Type=oneshot
+ExecStart=/bin/sh -c '\
+  curl -sf -m 90 -o /dev/null -X POST http://127.0.0.1:11555/v1/embeddings \
+    -H "Content-Type: application/json" \
+    -d "{\\"model\\":\\"4e24fc85fe46967661c6a12c3520527be6a9a38d8f93cc7b18eb46f267fc85c1\\",\\"input\\":\\"ping\\"}" \
+  || systemctl --user restart cementic-embedding.service'
