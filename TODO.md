@@ -64,15 +64,21 @@ Remaining gaps, from the 2026-08-14 review:
   indexing need to run concurrently.
 - Evaluate lighter embedding providers if llama.cpp memory use is too high on
   small machines.
-- **Cut indexing wall clock at corpus scale.** Measured 2026-08-24 on 153
-  papers: 814 ms/chunk to embed and 10.2 s/doc to extract, projecting to ~432 h
-  of embedding plus ~113 h of extraction for the ~40k-paper target — additive,
-  because the stages do not overlap. Numbers and method are in README's
-  "Measurements behind the defaults". Levers, in rough order of payoff: a GPU or
-  a lighter embedding provider, overlapping extraction with embedding, then a
-  faster PDF backend. Extraction already saturates ~11 of 14 cores, so it will
-  not parallelise away on this machine. Moved here from "Parked, with a trigger"
-  once the first real indexing run made the numbers concrete.
+- **Build llama-cpp-python with Vulkan** so the iGPU works under
+  `daemon_autostart` instead of needing an externally-run `llama-server`. The
+  external-server route needs no code change and is documented in README
+  ("Running embeddings on a GPU"); this is the tidy version of it. Blocked on
+  `glslc`, which is not packaged here and is not on PyPI — it needs shaderc
+  built from source. Worth it only once a real indexing run confirms the
+  measured 6.5× survives the serving path.
+- **Cut indexing wall clock at corpus scale.** Largely answered on 2026-08-24;
+  what remains is executing it. Against the real 22k-PDF corpus the two levers
+  that paid were the `pymupdf-raw` extractor (128 h → 0.5 h) and the iGPU
+  (~490 h → ~100–160 h), taking a projected 26 days to 4–7. Numbers in README's
+  "Measurements behind the defaults". Two levers that did **not** pay, so nobody
+  re-tries them: thread pinning (run-to-run spread on this machine reached 53%,
+  which swamps any thread-count effect) and overlapping the pipeline stages
+  (worth ~0.5 h once extraction is raw text, against a worker rearchitecture).
 
 ## Parked, with a trigger
 

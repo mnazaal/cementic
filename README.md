@@ -371,6 +371,42 @@ Prefer `pymupdf-raw` for bulk-importing a large born-digital corpus, where the
 difference is hours against days. Keep `pymupdf4llm` for scanned or
 table-heavy documents, which the measurement above does not cover.
 
+Extraction cost scales with pages, not documents: use **2.8 ms/page** for
+`pymupdf-raw` and **0.78 s/page** for `pymupdf4llm` when projecting. A per-document
+rate taken from short papers understates a corpus of longer ones by the ratio of
+their page counts.
+
+### Running embeddings on a GPU
+
+cementic identifies its embedding server only by the model id reported at
+`/v1/models`, and spawns `llama_cpp.server` merely as a convenience. Any
+OpenAI-compatible server that reports the expected fingerprint will do — so a
+GPU-enabled llama.cpp needs **no cementic code change**, just
+`llama_cpp.daemon_autostart = false` and a server started with
+`--alias <fingerprint>`. Print the fingerprint with
+`llama_cpp_runtime_fingerprint` (see `embedding_runtime.py`).
+
+Measured with upstream `llama-bench`, pp512, nomic-embed-text-v2-moe Q8_0, on an
+Intel Core Ultra 5 125U with its integrated Arc GPU via Vulkan:
+
+| arm | tok/s | vs pure CPU |
+|---|---|---|
+| `-dev none` (pure CPU) | 382 | 1.0× |
+| `-ngl 0` | 2,112 | 5.5× |
+| `-ngl 99` (full offload) | 2,468 | 6.5× |
+
+**`-ngl 0` is not a CPU baseline.** llama.cpp offloads large matmuls to any
+visible GPU backend by default (`--no-op-offload` defaults to `0`), so with a GPU
+present `ngl 0` is already GPU-assisted. Only `-dev none` measures the CPU.
+Reading `ngl 0` as the baseline made a 6.5× speedup look like 1.22×.
+
+Expect less end to end: through cementic's HTTP path the CPU arm reached ~281
+tok/s against a raw 382, so derate by roughly a quarter.
+
+`n_gpu_layers` is part of both the runtime fingerprint and the embedding
+profile, so changing it re-versions the corpus. Set it before a bulk import,
+not after.
+
 ### Choosing an ANN index (HNSW vs DiskANN)
 
 `index.method` selects how vectors are indexed for similarity search:
@@ -703,12 +739,28 @@ written, and all chunking before the first embedding, so wall clock is the sum
 of the stages rather than the longest one. Extraction is therefore its own
 budget line, not time hidden under embedding.
 
-**Scale target.** ~40k papers at a measured 47.8 chunks each is ~1.9M vectors.
-Projected from the run above, and additive because the stages are staged:
-~113 h of extraction plus ~432 h of embedding, so roughly 23 days on CPU. The
-binding constraints are embedding throughput and memory (an HNSW index over 1M
-768-dim vectors needs ~3 GB resident), which is what the `diskann` seam exists
-for. Query latency is not one of them.
+**Scale target, measured against the real corpus** (22,246 PDFs, 43.8 GiB,
+592,248 pages — median 20 pages, p99 178, max 1,083). At 3.65 chunks/page that
+is **~2.16M vectors**. Projected from the rates above, and additive because the
+stages are staged:
+
+| | pymupdf4llm + CPU | pymupdf-raw + iGPU |
+|---|---|---|
+| extraction | 128 h | **0.5 h** |
+| embedding | ~490 h | ~100–160 h |
+| **total** | **~26 days** | **~4–7 days** |
+
+Embedding is projected from the pipeline's own measured 814 ms/chunk rather than
+from `llama-bench`, since that rate already includes the serving path.
+
+Two constraints bind at this size and neither is query latency. **Memory:** an
+HNSW index over 2.16M × 768 vectors is ~6.5 GB resident, against 15 GB of RAM
+with ~5 GB free — which is what the `diskann` seam exists for. Prefer HNSW for
+the initial build anyway: it is maintained per insert and therefore resumable
+across a multi-day job, where DiskANN builds at the ready transition in one
+unresumable pass. `cementic collection reindex` switches method afterwards
+without re-embedding, so the decision is cheap to revisit. **Disk:** the
+database lands near 30 GB.
 
 **Search latency** (warm daemon, 7,580 vectors, `hnsw.ef_search = 40`):
 
