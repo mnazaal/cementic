@@ -16,7 +16,7 @@ import requests
 from sqlalchemy import and_, or_, select, text
 from sqlalchemy.orm import Session
 
-from cementic.chunk import chunk_text
+from cementic.chunk import TextChunk, chunk_text
 from cementic.config import Config, get_config
 from cementic.db import (
     Chunk,
@@ -587,6 +587,30 @@ class PipelineWorker:
             status = "failed"
             error_message = str(error)
 
+        try:
+            self._write_back_extraction(
+                extracted_id, file_hash, artifact_path, content_hash, status, error_message
+            )
+        except Exception as error:
+            # The claim was committed as `processing` above, so an escape here
+            # strands the row and `_step_extract` re-claims the same lowest-id
+            # document every pass -- nothing else in the collection is ever
+            # extracted. Stamp it terminal instead of letting it leak to the
+            # processing loop's back-off-and-retry.
+            self._fail_artifact(ExtractedDocument, extracted_id, error, "extraction")
+
+        self.state_manager.update(current_file=None)
+        return True
+
+    def _write_back_extraction(
+        self,
+        extracted_id: int,
+        file_hash: str | None,
+        artifact_path: Path,
+        content_hash: str | None,
+        status: str,
+        error_message: str | None,
+    ) -> None:
         with self.Session() as session:
             extracted = session.get(ExtractedDocument, extracted_id)
             # Deliberately no SourceDocument.status write here: per-artifact
@@ -614,8 +638,24 @@ class PipelineWorker:
                     _purge_all_chunks(session, extracted.id)
             session.commit()
 
-        self.state_manager.update(current_file=None)
-        return True
+    def _fail_artifact(
+        self, model: type[Any], artifact_id: int, error: Exception, stage: str
+    ) -> None:
+        """Stamp an artifact row terminal after its write-back failed.
+
+        A fresh session, because the one that raised is no longer usable. If
+        this write fails too the database is unreachable rather than hostile to
+        one document, which is exactly the case the loop's back-off handles, so
+        the error is re-raised rather than swallowed.
+        """
+        self._logger.exception("%s write-back failed; marking the artifact failed", stage)
+        with self.Session() as session:
+            artifact = session.get(model, artifact_id)
+            if artifact is None:
+                return
+            artifact.status = "failed"
+            artifact.error_message = str(error)
+            session.commit()
 
     def _step_chunk(self, revision_id: int) -> bool:
         with self.Session() as session:
@@ -716,12 +756,31 @@ class PipelineWorker:
             status = "failed"
             error_message = str(error)
 
+        try:
+            self._write_back_chunks(extracted_id, chunked_id, chunk_items, status, error_message)
+        except Exception as error:
+            # Same stall as the extraction write-back: the claim is already
+            # `processing`, and the chunk step re-claims the lowest-id row every
+            # pass. A chunk PostgreSQL refuses (the NUL case) otherwise pins the
+            # whole collection on one document indefinitely.
+            self._fail_artifact(ChunkedDocument, chunked_id, error, "chunk")
+
+        self.state_manager.update(current_file=None)
+        return True
+
+    def _write_back_chunks(
+        self,
+        extracted_id: int,
+        chunked_id: int,
+        chunk_items: list[TextChunk],
+        status: str,
+        error_message: str | None,
+    ) -> None:
         with self.Session() as session:
             extracted = session.get(ExtractedDocument, extracted_id)
             chunked = session.get(ChunkedDocument, chunked_id)
             if chunked is None:
-                self.state_manager.update(current_file=None)
-                return True
+                return
             if extracted is None:
                 # The extracted document vanished mid-chunk (a concurrent purge
                 # or deletion). Writing done/failed here would leave a NULL
@@ -730,8 +789,7 @@ class PipelineWorker:
                 # nothing any more; remove it.
                 session.delete(chunked)
                 session.commit()
-                self.state_manager.update(current_file=None)
-                return True
+                return
 
             session.query(Chunk).filter_by(chunked_document_id=chunked_id).delete(
                 synchronize_session=False
@@ -751,9 +809,6 @@ class PipelineWorker:
             chunked.status = status
             chunked.error_message = error_message
             session.commit()
-
-        self.state_manager.update(current_file=None)
-        return True
 
     def _step_embed(self, revision_id: int) -> bool:
         with self.Session() as session:

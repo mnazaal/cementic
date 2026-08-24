@@ -55,7 +55,15 @@ def chunk_text(
         raise ValueError("chunk_overlap must be smaller than chunk_size")
 
     encoding = tiktoken.get_encoding(TOKENIZER)
-    tokens = encoding.encode(text)
+    # `disallowed_special=()` because tiktoken otherwise refuses any text
+    # containing a literal control-token spelling -- `<|endoftext|>` and its
+    # siblings -- and raises instead of encoding. That string is ordinary prose
+    # in a corpus of NLP papers, and the raise is terminal for the document:
+    # the chunk step fails it, `requeue_interrupted_artifacts` re-queues it on
+    # the next start, and it fails again forever. Here the text is being
+    # measured for splitting, never fed to a model as control tokens, so
+    # treating the spelling as the bytes it literally is the correct reading.
+    tokens = encoding.encode(text, disallowed_special=())
 
     # Byte offset of every token boundary. The tokenizer is byte-level, so a
     # token slice can cut through a multi-byte character; decoding that slice

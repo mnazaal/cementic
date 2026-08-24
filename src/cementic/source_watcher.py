@@ -632,7 +632,14 @@ class SourceWatcher:
                 .filter(
                     SourceDocument.collection == self.collection,
                     SourceDocument.status != "deleted",
-                    SourceDocument.source_path.startswith(prefix + os.sep),
+                    # autoescape=True because `startswith` compiles to LIKE and
+                    # defaults to leaving the prefix raw: a directory named
+                    # `2024_papers` then also matches `2024-papers`, and one
+                    # containing `%` matches an arbitrary suffix. This query
+                    # feeds a hard delete of the matched documents' chunks and
+                    # vectors, so an over-match silently destroys a sibling
+                    # directory's index.
+                    SourceDocument.source_path.startswith(prefix + os.sep, autoescape=True),
                 )
                 .all()
             )

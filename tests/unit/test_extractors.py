@@ -157,6 +157,26 @@ def test_adding_one_registry_entry_is_all_it_takes(monkeypatch, config):
     assert handler._should_process("/some/file.xyz") is True
 
 
+class TestSpecialTokenSpellingsAreOrdinaryText:
+    """tiktoken refuses control-token spellings by default, which is terminal.
+
+    `<|endoftext|>` is ordinary prose in a corpus of NLP papers. Encoding it
+    raised, the chunk step failed the document, the next `cementic start`
+    re-queued it, and it failed again -- permanently un-indexable.
+    """
+
+    @pytest.mark.parametrize(
+        "literal",
+        ["<|endoftext|>", "<|fim_prefix|>", "<|endofprompt|>"],
+    )
+    def test_a_document_naming_a_special_token_still_chunks(self, literal):
+        from cementic.chunk import chunk_text
+
+        chunks = chunk_text(f"Models emit {literal} at the end of a sequence.")
+        assert chunks
+        assert literal in "".join(c.content for c in chunks)
+
+
 class TestNulBytesAreStrippedBeforeStorage:
     """PostgreSQL rejects NUL in a text column; extraction must not emit it.
 

@@ -110,6 +110,57 @@ def _seed_embedding_batch(session) -> int:
     return revision.id
 
 
+class TestWriteBackFailuresDoNotStallTheCollection:
+    """A claim is committed as `processing` before the write-back runs.
+
+    If the write-back raises, the row stays `processing`, the step re-claims the
+    same lowest-id artifact every pass, and every other document in the
+    collection waits behind it forever. Observed twice live: a chunk carrying a
+    NUL byte, then a chunk PostgreSQL otherwise refused.
+    """
+
+    def _worker(self, temp_dir: Path) -> PipelineWorker:
+        config = Config()
+        config.pipeline_worker.log_file = temp_dir / "worker.log"
+        config.pipeline_worker.state_path = temp_dir / "worker.json"
+        return PipelineWorker(config)
+
+    def test_a_failed_artifact_is_stamped_terminal(self, temp_dir: Path) -> None:
+        worker = self._worker(temp_dir)
+        artifact = MagicMock()
+        session = MagicMock()
+        session.__enter__.return_value = session
+        session.__exit__.return_value = False
+        session.get.return_value = artifact
+        with patch.object(worker, "Session", return_value=session):
+            worker._fail_artifact(ChunkedDocument, 7, ValueError("NUL"), "chunk")
+        assert artifact.status == "failed"
+        assert "NUL" in artifact.error_message
+        session.commit.assert_called_once()
+
+    def test_a_vanished_artifact_is_not_resurrected(self, temp_dir: Path) -> None:
+        """The row may have been purged while the step ran; do not recreate it."""
+        worker = self._worker(temp_dir)
+        session = MagicMock()
+        session.__enter__.return_value = session
+        session.__exit__.return_value = False
+        session.get.return_value = None
+        with patch.object(worker, "Session", return_value=session):
+            worker._fail_artifact(ChunkedDocument, 7, ValueError("gone"), "chunk")
+        session.commit.assert_not_called()
+
+    def test_an_unreachable_database_still_raises(self, temp_dir: Path) -> None:
+        """A failure to record the failure is not a per-document fact.
+
+        The loop's back-off is the right handler for a database that is down,
+        so this must not be swallowed into a silent skip.
+        """
+        worker = self._worker(temp_dir)
+        with patch.object(worker, "Session", side_effect=OSError("db down")):
+            with pytest.raises(OSError):
+                worker._fail_artifact(ChunkedDocument, 7, ValueError("x"), "chunk")
+
+
 class TestPipelineWorkerConstructor:
     """Tests for PipelineWorker.__init__ and basic properties."""
 
