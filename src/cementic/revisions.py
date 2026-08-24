@@ -273,6 +273,10 @@ def materialize_pending_embeddings(
             literal("pending"),
             literal(now),
             literal(now),
+            # Denormalised so the claim never joins; see ChunkEmbedding.
+            literal(collection),
+            ExtractedDocument.extractor_profile_id,
+            ChunkedDocument.chunk_profile_id,
         )
         .join(ChunkedDocument, Chunk.chunked_document_id == ChunkedDocument.id)
         .join(ExtractedDocument, ChunkedDocument.extracted_document_id == ExtractedDocument.id)
@@ -286,7 +290,16 @@ def materialize_pending_embeddings(
     )
     result = session.execute(
         insert(ChunkEmbedding).from_select(
-            ["chunk_id", "embedding_profile_id", "status", "created_at", "updated_at"],
+            [
+                "chunk_id",
+                "embedding_profile_id",
+                "status",
+                "created_at",
+                "updated_at",
+                "collection",
+                "extractor_profile_id",
+                "chunk_profile_id",
+            ],
             candidates,
         )
     )

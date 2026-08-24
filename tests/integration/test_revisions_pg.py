@@ -579,3 +579,58 @@ def test_materialize_pending_embeddings_skips_deleted_documents(pg_session) -> N
     pg_session.commit()
 
     assert materialize_pending_embeddings(pg_session, "materialise-deleted", revision) == 0
+
+
+def test_the_embedding_claim_never_scans_more_than_a_batch(pg_session) -> None:
+    """The claim must read `batch_size` rows however much of the corpus is done.
+
+    This is the property the whole denormalisation exists for, and it is easy to
+    lose: adding an ORDER BY makes PostgreSQL read every pending row and top-N
+    sort it before honouring the LIMIT, and putting a scope filter back on a
+    joined table makes it drive from the collection and walk the finished
+    prefix. Measured at 300k chunks / 90% embedded, the joined shape cost
+    1,895,124 buffers against 2,804 for this one.
+    """
+    cleanup_pg_tables(pg_session)
+    revision = seed_active_vector_collection(
+        pg_session,
+        collection="claimscan",
+        source_path="/docs/scan.pdf",
+        chunks=[(f"chunk {i}", [0.1] * VECTOR_DIM) for i in range(200)],
+    )
+    pg_session.commit()
+    pg_session.query(ChunkEmbedding).delete()
+    pg_session.commit()
+    materialize_pending_embeddings(pg_session, "claimscan", revision)
+    # Drive it to 90% done: the regime where a joined claim degrades worst.
+    done = [
+        row_id
+        for (row_id,) in pg_session.query(ChunkEmbedding.id).order_by(ChunkEmbedding.id).limit(180)
+    ]
+    pg_session.query(ChunkEmbedding).filter(ChunkEmbedding.id.in_(done)).update(
+        {"status": "done"}, synchronize_session=False
+    )
+    pg_session.commit()
+    pg_session.execute(text("ANALYZE chunk_embeddings"))
+
+    plan = "\n".join(
+        row[0]
+        for row in pg_session.execute(
+            text(
+                "EXPLAIN (ANALYZE, BUFFERS, TIMING OFF) "
+                "SELECT ce.chunk_id FROM chunk_embeddings ce "
+                "WHERE ce.embedding_profile_id = :m AND ce.status IN ('pending','processing') "
+                "AND ce.collection = :c AND ce.extractor_profile_id = :e "
+                "AND ce.chunk_profile_id = :k LIMIT 32"
+            ),
+            {
+                "m": revision.embedding_profile_id,
+                "c": "claimscan",
+                "e": revision.extractor_profile_id,
+                "k": revision.chunk_profile_id,
+            },
+        )
+    )
+    assert "Sort" not in plan, f"a sort defeats early termination:\n{plan}"
+    scanned = max(int(float(part.split()[0])) for part in plan.split("actual rows=")[1:])
+    assert scanned <= 32, f"claim read {scanned} rows for a 32-row batch:\n{plan}"

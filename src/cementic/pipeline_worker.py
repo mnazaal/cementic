@@ -874,22 +874,21 @@ class PipelineWorker:
             # import. Without one the index scan stops at the first `batch_size`
             # rows that pass the joins: 32 rows read, 356 buffers, flat for the
             # whole run. A work queue has no use for a deterministic order.
+            # Single table by design. With the scope filters on joined tables the
+            # planner drives from the collection, walks every finished chunk to
+            # reach the unfinished tail, and the claim costs O(corpus) per batch
+            # -- measured at 300k chunks / 90% embedded as 1,895,124 buffers
+            # against 2,804 here. Deleted documents need no filter: their chunks
+            # are removed outright and these rows go with them by cascade.
             candidates = (
                 session.query(Chunk, ChunkEmbedding)
                 .join(ChunkEmbedding, ChunkEmbedding.chunk_id == Chunk.id)
-                .join(ChunkedDocument, Chunk.chunked_document_id == ChunkedDocument.id)
-                .join(
-                    ExtractedDocument, ChunkedDocument.extracted_document_id == ExtractedDocument.id
-                )
-                .join(SourceDocument, Chunk.document_id == SourceDocument.id)
                 .filter(
                     ChunkEmbedding.embedding_profile_id == revision.embedding_profile_id,
                     ChunkEmbedding.status.in_(["pending", "processing"]),
-                    SourceDocument.collection == self.collection,
-                    SourceDocument.status != "deleted",
-                    ExtractedDocument.extractor_profile_id == revision.extractor_profile_id,
-                    ChunkedDocument.chunk_profile_id == revision.chunk_profile_id,
-                    ChunkedDocument.status == "done",
+                    ChunkEmbedding.collection == self.collection,
+                    ChunkEmbedding.extractor_profile_id == revision.extractor_profile_id,
+                    ChunkEmbedding.chunk_profile_id == revision.chunk_profile_id,
                 )
                 .limit(self.config.pipeline_worker.batch_size)
                 .all()

@@ -135,11 +135,32 @@ arithmetic, not measurement; the scale test below is what turns it into one.
    it) and after any chunk write-back. An in-process flag gates it so an idle
    worker does not re-run an O(n) statement every poll.
 
-**No schema change, and no migration.** `pending` is already a valid status and
-`ix_chunk_embeddings_profile_status` already exists. Databases written before
-this change get their rows from the first materialise pass. Rollback is a plain
-revert: the old claim query already treats a pre-existing `pending` row as
-claimable, so rows this change creates are harmless to the old code.
+**Revised 2026-08-24 after the scale test falsified the first design.** The
+original plan claimed no schema change was needed, on the strength of a 5-buffer
+measurement at 19,400 chunks. At 300,000 chunks the planner flips: with the
+scope filters on joined tables it drives from `source_documents`, checks
+embedding status last, and walks the finished prefix — 1,895,124 buffers at 90%
+embedded, growing 12.5x from the 10% mark. Materialising the rows was necessary
+but not sufficient.
+
+The fix is the one README already documents for the vector tables: put the
+filters on the row being scanned. `chunk_embeddings` gains `collection`,
+`extractor_profile_id` and `chunk_profile_id` plus a covering index, and the
+claim becomes single-table. Re-measured at 300,000 chunks: 17 / 806 / 1,997
+buffers at 10 / 50 / 90% embedded, with the driving scan reading exactly
+`batch_size` rows every time. Worst case ~18 ms, or about 20 minutes of claim
+time across the whole 22k-document import against ~170 hours before.
+
+Safe to denormalise because none of the three ever changes for a row: a chunk
+cannot move collection, and a deleted document's chunks — and these rows, by
+cascade — are removed outright rather than filtered at claim time, which is the
+same reasoning `_purge_document_chunks` already records for vectors.
+
+**So there is a migration**, though not a new mechanism:
+`ensure_chunk_embedding_filter_columns` is idempotent, adds the columns,
+backfills them with the join it exists to remove, and mirrors
+`ensure_vector_table_schema`. Rollback is still a plain revert — the columns are
+nullable and the old claim query ignores them.
 
 **Rejected alternatives.** Fixing only the planner misestimate (a query-shape
 change, much safer) halves the early-run cost and leaves the quadratic tail

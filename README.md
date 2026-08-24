@@ -786,6 +786,29 @@ and maintained per insert, `cementic collection promote` on the finished
 153-paper revision took 0.7 s — the payoff the build-order measurement above
 predicted, now observed on a real corpus.
 
+**Claiming embedding work at scale.** The embed step used to find its next
+batch with an anti-join — chunks with no row for this profile — which cannot be
+indexed. Cost then tracked corpus size rather than remaining work, because the
+scan walks the finished prefix to reach the unfinished tail. Measured on a
+synthetic 300,000-chunk collection with `scripts/measure_embedding_claim_scale.py`:
+
+| % embedded | joined claim | single-table claim |
+|---|---|---|
+| 10% | 151,392 buffers | **17** |
+| 50% | 903,930 buffers | **806** |
+| 90% | 1,895,124 buffers | **1,997** |
+
+`chunk_embeddings` carries `collection`, `extractor_profile_id` and
+`chunk_profile_id` for the same reason the vector rows carry their filters: on a
+joined table the planner drives from the collection and checks embedding status
+last. The driving scan now reads exactly `batch_size` rows at any completion
+level. Across a 22k-document import that is roughly 20 minutes of claim time
+rather than ~170 hours.
+
+Two things this depends on, both easy to lose and both pinned by a test: no
+`ORDER BY` (it makes PostgreSQL read every pending row and top-N sort before
+honouring the `LIMIT`), and no scope filter on a joined table.
+
 **Directory moves under the watcher**, measured against watchdog's inotify
 backend:
 

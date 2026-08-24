@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import ForeignKey, Index, Integer, String, Text, create_engine, inspect, text
+from sqlalchemy.engine import Connection
 from sqlalchemy.exc import IntegrityError, OperationalError, ProgrammingError
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship, sessionmaker
 
@@ -251,6 +252,18 @@ class ChunkEmbedding(Base):
     created_at: Mapped[datetime] = mapped_column(default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(default=utc_now, onupdate=utc_now)
 
+    # Denormalised claim filters, mirroring the vector tables' FILTER_COLUMNS and
+    # for the same reason: on a joined table the planner drives from the
+    # collection instead of the work queue, walks every finished chunk to reach
+    # the unfinished tail, and the claim costs O(corpus) per batch. Measured at
+    # 300k chunks, 90% embedded: 1,895,124 buffers joined against 2,804 here.
+    # Safe to denormalise because they never change for a row -- a chunk cannot
+    # move collection, and a deleted document's chunks (and these rows, by
+    # cascade) are removed outright rather than filtered at claim time.
+    collection: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    extractor_profile_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    chunk_profile_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
     chunk: Mapped[Chunk] = relationship(back_populates="embeddings")
     profile: Mapped[EmbeddingProfile] = relationship(back_populates="embeddings")
 
@@ -262,6 +275,15 @@ class ChunkEmbedding(Base):
             unique=True,
         ),
         Index("ix_chunk_embeddings_profile_status", "embedding_profile_id", "status"),
+        # Covers the whole claim predicate so it never leaves the index.
+        Index(
+            "ix_chunk_embeddings_claim",
+            "embedding_profile_id",
+            "status",
+            "collection",
+            "extractor_profile_id",
+            "chunk_profile_id",
+        ),
     )
 
 
@@ -374,10 +396,62 @@ _RETIRE_DUPLICATE_ACTIVES_DDL = (
 )
 
 
+#: Denormalised claim filters on ``chunk_embeddings``. Kept beside the migration
+#: that adds them, the way FILTER_COLUMNS sits beside the vector-table DDL.
+CHUNK_EMBEDDING_FILTER_COLUMNS = ("collection", "extractor_profile_id", "chunk_profile_id")
+
+
+def ensure_chunk_embedding_filter_columns(conn: Connection) -> None:
+    """Add and backfill the claim filters on an older ``chunk_embeddings``.
+
+    ``create_all`` creates tables but cannot alter one that already exists, and
+    cementic has no migration framework, so the upgrade lives next to the model
+    it mirrors -- exactly as ``ensure_vector_table_schema`` does for the vector
+    tables. Idempotent, and once migrated it costs one catalog lookup.
+
+    The backfill is the join this change exists to remove, run once instead of
+    once per batch.
+    """
+    existing = {
+        row[0]
+        for row in conn.execute(
+            text(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_name = 'chunk_embeddings'"
+            )
+        )
+    }
+    if set(CHUNK_EMBEDDING_FILTER_COLUMNS) <= existing:
+        return
+    conn.execute(
+        text(
+            "ALTER TABLE chunk_embeddings "
+            "ADD COLUMN IF NOT EXISTS collection VARCHAR(100), "
+            "ADD COLUMN IF NOT EXISTS extractor_profile_id INTEGER, "
+            "ADD COLUMN IF NOT EXISTS chunk_profile_id INTEGER"
+        )
+    )
+    conn.execute(
+        text(
+            "UPDATE chunk_embeddings ce SET collection = sd.collection, "
+            "extractor_profile_id = ed.extractor_profile_id, "
+            "chunk_profile_id = cd.chunk_profile_id "
+            "FROM chunks_v2 ch "
+            "JOIN chunked_documents cd ON ch.chunked_document_id = cd.id "
+            "JOIN extracted_documents ed ON cd.extracted_document_id = ed.id "
+            "JOIN source_documents sd ON ch.document_id = sd.id "
+            "WHERE ce.chunk_id = ch.id AND ce.collection IS NULL"
+        )
+    )
+
+
 def create_tables(engine: Engine) -> None:
     """Create all tables required by the versioned pipeline schema."""
     ensure_vector_extensions(engine)
     Base.metadata.create_all(engine)
+    if engine.dialect.name == "postgresql":
+        with engine.begin() as conn:
+            ensure_chunk_embedding_filter_columns(conn)
     with engine.begin() as conn:
         conn.execute(text(_RETIRE_DUPLICATE_ACTIVES_DDL))
     try:
