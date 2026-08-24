@@ -16,6 +16,7 @@ from cementic.extract import (
     extractor_for,
     extractor_registry_payload,
     normalize_backend_file_type,
+    strip_unstorable,
     supported_extensions,
 )
 from cementic.profiles import build_extractor_profile_payload
@@ -154,6 +155,41 @@ def test_adding_one_registry_entry_is_all_it_takes(monkeypatch, config):
     # the watcher picks it up with no change of its own
     handler = DocumentEventHandler(lambda _p: None)
     assert handler._should_process("/some/file.xyz") is True
+
+
+class TestNulBytesAreStrippedBeforeStorage:
+    """PostgreSQL rejects NUL in a text column; extraction must not emit it.
+
+    Found by a live 200-document run, not by this suite: the A/B that qualified
+    `pymupdf-raw` held vectors in numpy and never wrote chunk text to the
+    database, so it exercised every stage except the one that fails.
+    """
+
+    @pytest.mark.parametrize(
+        "raw, expected",
+        [
+            ("a\x00b", "ab"),
+            ("\x00leading", "leading"),
+            ("trailing\x00", "trailing"),
+            ("none here", "none here"),
+            ("keeps \t tabs \n and newlines", "keeps \t tabs \n and newlines"),
+        ],
+    )
+    def test_only_nul_is_removed(self, raw, expected):
+        assert strip_unstorable(raw) == expected
+
+    def test_dispatch_strips_what_an_extractor_emits(self, tmp_path, config):
+        """The guard sits at the dispatch, so every extractor inherits it."""
+        doc = tmp_path / "nul.txt"
+        doc.write_bytes(b"before\x00after")
+        assert "\x00" not in extract_document(str(doc), config)
+
+    def test_a_nul_only_document_is_still_an_empty_extraction(self, tmp_path, config):
+        """Stripping must not turn "no usable text" into a silent success."""
+        doc = tmp_path / "empty.txt"
+        doc.write_bytes(b"\x00\x00\x00")
+        with pytest.raises(ValueError, match="extracted no text"):
+            extract_document(str(doc), config)
 
 
 class TestRawPdfBackend:

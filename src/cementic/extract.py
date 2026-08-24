@@ -246,6 +246,26 @@ def extractor_for(path: str, config: Config) -> tuple[str, ExtractorFn] | None:
     return None
 
 
+def strip_unstorable(content: str) -> str:
+    """Remove characters PostgreSQL cannot hold in a text column (pure).
+
+    PostgreSQL rejects NUL (0x00) in `text`/`varchar` outright, so a document
+    carrying one takes down the write rather than the document: the pipeline
+    worker's chunk step raises `ValueError: A string literal cannot contain NUL
+    (0x00) characters`, retries, and the whole collection stalls on it.
+
+    20% of a 153-paper sample hit this via `pymupdf-raw` -- PDF text layers
+    carry stray NULs and `page.get_text()` passes them through, where
+    pymupdf4llm happens to filter them. Applied at the single dispatch rather
+    than in one extractor, because the constraint belongs to the storage
+    layer every extractor feeds, not to any one of them.
+
+    Only NUL is removed. Other control characters store fine, and stripping
+    them would be a content decision this function has no business making.
+    """
+    return content.replace("\x00", "")
+
+
 def extraction_is_empty(content: str) -> bool:
     """Whether an extraction produced nothing usable (pure)."""
     return not content.strip()
@@ -273,7 +293,7 @@ def extract_document(path: str, config: Config) -> str:
     if resolved is None:
         raise ValueError(f"no extractor for '{Path(path).suffix.lower() or '(none)'}'")
     _name, fn = resolved
-    content = fn(path, config)
+    content = strip_unstorable(fn(path, config))
     if extraction_is_empty(content):
         raise ValueError(_empty_extraction_reason(path, config))
     return content
