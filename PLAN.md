@@ -99,6 +99,84 @@ cementic search "multiple kernel learning" -c soak -n 3   # 3 topical hits
 ```
 <!-- session-handoff:end -->
 
+## Plan of record — index-driven embedding claims (2026-08-24)
+
+**Why.** `_step_embed` finds work with an anti-join (`ce.id IS NULL`) that
+cannot be indexed, and pays for it once per 32-chunk batch. Measured on this
+database:
+
+| case | buffers to claim one batch |
+|---|---|
+| `smoke`, 19,400 candidates, real query | 178,681 (165 ms) |
+| same, with the profile-id subselects removed | 2,400 |
+| `soak`, 7,306 chunks, all embedded — returns 0 rows | 64,536 |
+| proposed shape, index scan on `(embedding_profile_id, status)` | **5 (0.070 ms)** |
+
+Two separate faults. The profile-id subselects make the planner estimate 29
+rows where 19,400 match, so it chooses seq-scan-plus-sort and `LIMIT 32` cannot
+terminate early. Underneath that, the scan walks the completed prefix to reach
+the remaining tail, so cost grows with *corpus size* rather than remaining work
+— the `soak` row is the shape of the end of a run, ~8.8 buffers per corpus
+chunk per batch. Extrapolated to 2.16M chunks that is ~19M buffers per batch
+late in the run, against 128 MB `shared_buffers`. The 300× extrapolation is
+arithmetic, not measurement; the scale test below is what turns it into one.
+
+**Design.** Materialise instead of anti-join.
+
+1. Every in-scope chunk gets a `pending` `ChunkEmbedding` row from one
+   idempotent set-based statement — `INSERT ... SELECT ... ON CONFLICT
+   (chunk_id, embedding_profile_id) DO NOTHING`, riding the existing unique
+   index — rather than being created one at a time inside the claim.
+2. `_step_embed` then claims with `WHERE embedding_profile_id = :p AND status
+   IN ('pending','processing') ORDER BY id LIMIT :n`, which is an index scan on
+   `ix_chunk_embeddings_profile_status`. No join, no anti-join, flat cost.
+3. The materialise step runs when work can have appeared: at worker start
+   (covers a resumed run and a new embedding profile, whose chunks all predate
+   it) and after any chunk write-back. An in-process flag gates it so an idle
+   worker does not re-run an O(n) statement every poll.
+
+**No schema change, and no migration.** `pending` is already a valid status and
+`ix_chunk_embeddings_profile_status` already exists. Databases written before
+this change get their rows from the first materialise pass. Rollback is a plain
+revert: the old claim query already treats a pre-existing `pending` row as
+claimable, so rows this change creates are harmless to the old code.
+
+**Rejected alternatives.** Fixing only the planner misestimate (a query-shape
+change, much safer) halves the early-run cost and leaves the quadratic tail
+untouched — it treats the symptom that is cheap to see and not the one that
+ends the run. A partial index cannot express "has no row for this profile".
+A high-water-mark on chunk id skips rows that later return to `pending`, which
+is precisely how a retried chunk gets silently dropped.
+
+**Work items, in order.**
+
+1. `materialize_pending_embeddings(session, revision) -> int` in `revisions.py`,
+   scoped by `chunk_scope(revision)` + the revision's embedding profile.
+   Verified by a pg test: run twice, assert the second inserts 0 and the total
+   equals `total_chunks`.
+2. Replace the claim in `_step_embed`, preserving the deliberate re-claim of
+   `processing` rows and the batch semantics around it.
+3. Wire the trigger: call after `requeue_interrupted_artifacts` at start, set a
+   flag on a successful chunk write-back, consume it in `_step_embed`.
+4. **Scale test** — the check that would actually catch a regression here, and
+   which this codebase has never had: build a synthetic collection of a few
+   hundred thousand chunk rows, measure claim cost at 10%, 50% and 90%
+   complete, and assert it does not grow with the completed fraction.
+5. Record the measured before/after in README's "Measurements behind the
+   defaults".
+
+**Risks.** The claim path is where two stalls came from today, so item 2 is the
+one to review hardest. Correctness rests on one fact worth stating plainly:
+one worker per collection holds the advisory lock, so a `processing` row can be
+re-claimed without a second worker racing it — the same assumption the current
+code already documents. Chunk deletion and re-chunking need no new cleanup;
+`chunk_id` carries `ondelete="CASCADE"`, so purged chunks take their pending
+rows with them.
+
+**Falsification.** If the scale test shows claim cost rising with the completed
+fraction, the design is wrong and the work stops there rather than shipping on
+the strength of the 5-buffer measurement above.
+
 ## Decision log
 
 **Migrated 2026-08-23; this section is now a pointer.** The eight entries it held
