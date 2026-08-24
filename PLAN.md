@@ -1,97 +1,86 @@
 # cementic — architecture & design
 
-<!-- session-handoff:begin (2026-08-24) -->
+<!-- session-handoff:begin (2026-08-24b) -->
 ## Where the work stands
 
-**Repo state.** On `claude/soak-measurements`, branched from `main`. `main`
-itself is 1 commit ahead of `origin/main` and unpushed — the previous session's
-doc-drain work, which the user merged. v0.2.0 is still the last tag, 35 commits
-behind. Pushing `main` and merging this branch are both the user's calls: a hook
-rejects agents touching `main` at all.
+**Repo state.** On `claude/igpu-findings`, branched from `main`. `main` carries
+everything from earlier today (soak measurements, doc de-staling, the
+`pymupdf-raw` extractor) and is **6 commits ahead of `origin/main`, unpushed**.
+v0.2.0 is still the last tag. Pushing `main` and merging this branch are the
+user's calls: a hook rejects agents touching `main` at all, so commit on a
+`claude/*` branch (`AGENT_BRANCH_PREFIX=claude`) and hand over the merge.
 
-*Committing here:* an agent must be on a `claude/*` branch (`AGENT_BRANCH_PREFIX=claude`).
-Branch first, then hand the merge to the user.
+**Entry point: the bulk import is designed and unblocked; what remains is
+running it.** The corpus is real and surveyed: `~/OneDrive/Material/Papers`,
+22,246 PDFs, 43.8 GiB, 592,248 pages, **99.9% PDF** so no new extractor is
+needed. Projected ~2.16M chunks. The plan is in README's "Measurements behind
+the defaults" (scale-target table) and the GPU recipe is
+`~/.cache/cementic-igpu/RUNBOOK.md`. Next concrete action: a ~200-document smoke
+test with the Vulkan server, to confirm the measured 6.5× survives cementic's
+serving path, then the full import.
 
-**Entry point: the soak is DONE and its numbers are in README. The open thread
-is what to do about indexing speed.** Collection `soak` — 153 papers, 178 MB,
-7,306 chunks — indexed clean (zero failures), was promoted, and searches
-correctly. Everything measured is written up in README's "Measurements behind
-the defaults"; the follow-on work is `TODO.md`'s "Cut indexing wall clock at
-corpus scale" under Later. Nothing is running and nothing is half-finished.
+**Set these before indexing — each re-versions the corpus if changed after.**
+```
+extraction.backends.pdf     = "pymupdf-raw"     # 128 h -> 0.5 h on this corpus
+llama_cpp.n_gpu_layers      = 99
+llama_cpp.daemon_autostart  = false             # an external llama-server serves instead
+index.method                = "hnsw"            # keep; see below
+```
+Keep HNSW for the initial build even though ~2.16M × 768 needs ~6.5 GB against
+~5 GB free: HNSW is maintained per insert and so resumable across a multi-day
+job, where DiskANN builds in one unresumable pass at the ready transition.
+`collection reindex` switches method later without re-embedding.
 
-**What the soak established.** Full tables are in README; the load-bearing
-numbers, because a cold reader should not have to re-derive which constraint
-binds:
+**The load-bearing numbers a cold reader should not re-derive.**
+- Embedding on this hardware: pure CPU 382 tok/s, iGPU 2,468 tok/s (6.5×), but
+  cementic's HTTP path runs ~26% under raw, so derate. Projected ~100–160 h.
+- Extraction scales with **pages, not documents**: 2.8 ms/page raw,
+  0.78 s/page with pymupdf4llm.
+- `vectorscale 0.9.0` and `vector 0.8.3` are installed; both index methods work.
 
-- Indexing: 10.2 s/doc extract, 814 ms/chunk embed, 47.8 chunks/paper, 2.08 h
-  total. Projects to ~113 h extract + ~432 h embed at the 40k-paper target.
-- **The stages do not overlap** — all extraction finishes before the first
-  chunk, all chunking before the first embedding — so those two projections add
-  rather than hide under each other. This is the finding with design
-  consequences, and it is why the throughput item moved off the parked list.
-- Search: 38.7 ms warm in-process, of which 35.3 ms is embedding the query and
-  2.6 ms is pgvector. Embedding-bound, not index-bound. The CLI's ~650 ms is
-  almost entirely Python import startup (`cementic --help` alone is 0.38 s,
-  SQLAlchemy pulled in via `cementic.render` → `cementic.collections`).
-- Recall@10 vs exact: mean 0.990, worst 0.900, 18/20 identical. `promote` took
-  0.7 s with no bulk index build, which is the up-front-index decision paying
-  off at corpus scale.
+**Corrections — three things measured wrong earlier today, all now fixed in the
+docs. Distrust the reasoning style that produced them, not just the numbers.**
+- *"The iGPU is only 1.22×, not worth it."* Wrong: `-ngl 0` is not a CPU
+  baseline, because llama.cpp offloads big matmuls to any visible GPU by default.
+  Only `-dev none` measures CPU. The real figure is 6.5×.
+- *"Thread pinning is worth ~41%."* Noise. Re-running an identical config moved
+  53%. This machine's spread swamps differences under ~1.5×; interleave arms in
+  one invocation and never compare across runs.
+- *FLOP arithmetic assuming a 137M model.* It is `nomic-bert-moe`, 475M.
+- Also: the agent sandbox has **no `/dev/dri`**, so any GPU work must be run by
+  the user. Its CPU numbers are trustworthy (382 pure-CPU matched the user's).
 
-**Corrections this session.**
-- README's `1.4 s/chunk`, `780 h`, `50 chunks/paper` and `197 ms` query-embedding
-  figures were all superseded by the run above. The 197 → 35 ms embedding gap is
-  **unexplained** — the old measurement's conditions are unrecorded, so README
-  marks it superseded rather than reconciled. Distrust other single-number
-  claims of that vintage.
-- The previous handoff's "extraction is 15.3 s/doc → ~170 h" came from an
-  18-document sample and was pessimistic; the full run gives 10.2 s/doc → ~113 h.
-- `TODO.md` listed `collection reindex --force` as untested through the CLI.
-  It was closed on 2026-08-23 by `2a2c856`, whose test docstring says so
-  outright (`tests/unit/test_cli.py:1366`). Removed.
-- The sibling coverage gap in that same list — no test connecting a pipeline
-  failure to what `cementic status` prints — was re-checked and **is still
-  real**. Left in place.
+**Live state.** Nothing running; workers stopped, no external server, port 11555
+free. Collections `soak` (153 docs, revision 6 active) and `test` (5 docs,
+revision 5) both searchable and sharing vector table `embedding_vectors_p5`.
+`test` is a testbed — remove and rebuild freely. Note the `pymupdf-raw` commit
+re-versioned every extractor profile (`05e4c8a0` → `d18c0a0e`), so the next
+`cementic start` on either collection rebuilds it.
 
-**Live state.** No workers running. The embedding daemon is **up and warm**
-(autostarted by the first search, ~1.1 GB resident); `cementic embedding stop`
-if you want the memory back. Collections: `soak` 153 docs, revision 6 active;
-`test` 5 docs, revision 5 active — `test` is a **testbed** (user, 2026-08-23),
-remove and rebuild it freely. Both share vector table `embedding_vectors_p5`
-(7,580 rows) because they share an embedding profile.
+**Not in git:** `~/.cache/cementic-igpu/` (upstream llama.cpp b10605 Vulkan
+build, benchmark scripts, RUNBOOK.md), `~/.cache/cementic-corpus/survey.py` and
+its `survey.json`, `~/.cache/cementic-ab/` (the extractor A/B harness).
 
-**Deviations from plan, attributed.** *Agent-decided:* the README write-up
-covers the whole soak, including the indexing-throughput table, though the user
-had approved only "promote and run the search measurements" — same write-up, and
-flagged to them at the time rather than done quietly.
+**Deviations, attributed.** *Agent-decided:* used a prebuilt upstream llama.cpp
+release to measure the GPU rather than building llama-cpp-python with Vulkan —
+`glslc` is unavailable and measuring first was the cheaper order. *Blocked:* the
+branch-prefix hook rejects `git clone` (it creates a `main` ref); not worked
+around, since routing past a guard needs the user's say-so.
 
-**Environment quirks — carried forward, still true.**
-- The pg integration fixture short-circuits when Postgres is already reachable,
-  so **no local run exercises `compose build`** — CI's `integration-pg` job is
-  what proves that path.
-- A zombie process keeps its `/proc/<pid>` directory, so `test -d /proc/<pid>`
-  is not a liveness check; read the state field.
-- `notes/review-codebase.html` (the sixth-review audit) was written after
-  `notes/` was gitignored, so it is in no git history — it exists only on disk.
-- **Green gates are not sufficient evidence here.** Five defects in the
-  2026-08-23 session were found by running the CLI against the live corpus while
-  all six gates passed. End changes that touch workers, the daemon, or profiles
-  with a live run, not just `check.sh`.
-
-**Found this session, worth knowing before you touch pgvector tuning:** on a
-fresh connection `SHOW hnsw.ef_search` errors as an unrecognized parameter and
-`SET hnsw.ef_search` is accepted as an inert placeholder, until some vector
-query loads pgvector's module on that connection. Run a throwaway vector query
-first or your tuning silently does nothing. This is the same trap
-`_iterative_scan_mode`'s docstring documents, met from the other side.
+**Environment quirks — still true.**
+- The pg fixture short-circuits when Postgres is reachable, so no local run
+  exercises `compose build`; CI's `integration-pg` job proves that path.
+- On a fresh connection `SHOW hnsw.ef_search` errors and `SET hnsw.ef_search` is
+  accepted as an inert placeholder until a vector query loads pgvector's module.
+- Green gates are not sufficient evidence: end changes touching workers, the
+  daemon, or profiles with a live run, not just `check.sh`.
 
 **Exit criteria — commands whose output confirms the above.**
 ```bash
-git status --short                            # empty
-git branch --show-current                     # claude/soak-measurements
-cementic status -c soak                       # workers stopped, 153 docs, 100% all stages
-cementic collection list                      # soak + test, both with an active revision
-cementic search "multiple kernel learning" -c soak -n 3   # 3 topically correct hits
-./scripts/check.sh                            # all six gates, exit 0 (~4 min)
+git status --short                        # empty
+cementic status -c soak                   # workers stopped, 153 docs, 100%
+cementic search "multiple kernel learning" -c soak -n 3   # 3 topical hits
+./scripts/check.sh                        # six gates, exit 0 (~4 min)
 ```
 <!-- session-handoff:end -->
 
@@ -134,10 +123,10 @@ with a trigger", because nothing here was watching for them.
 
 ## Scale context
 
-The target is a large personal corpus (~40k papers and textbooks) at a measured
-47.8 chunks per paper — roughly 1.9M vectors. The numbers behind that (query
-latency, embedding and extraction throughput, HNSW memory) are in README's
-"Measurements behind the defaults", re-measured 2026-08-24 on a 153-paper run;
+The target is no longer an estimate: the corpus was surveyed on 2026-08-24 at
+22,246 PDFs / 592,248 pages, which at 3.65 chunks/page is **~2.16M vectors**.
+The numbers behind that (query latency, embedding and extraction throughput,
+GPU rates, HNSW memory) are in README's "Measurements behind the defaults";
 the design consequence is everything under Key seams below:
 per-embedding-profile vector tables, a `diskann` seam for when memory binds
 before latency does, versioned revisions so a model or chunking change builds in
