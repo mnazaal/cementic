@@ -407,6 +407,27 @@ tok/s against a raw 382, so derate by roughly a quarter.
 profile, so changing it re-versions the corpus. Set it before a bulk import,
 not after.
 
+### Running indexing as a background service
+
+`cementic start` spawns the watcher and worker as detached children of your
+shell, which is fine for a short build and wrong for one that spans days: a
+suspend that kills the embedding server leaves the worker waiting for it
+indefinitely, and nothing restarts either after a reboot.
+
+`packaging/systemd/` ships user units for that case — the embedding server, a
+per-collection watcher and worker, and a timer that restarts the server if
+`/v1/embeddings` stops answering. Installation is in each unit's header.
+Restarting is safe at any point: the worker re-queues anything left
+`processing` at startup, every batch is committed, and the vector upsert is
+idempotent, so an interrupted run loses at most one batch.
+
+Two things to know when running this way. Use `cementic start` **or** the units,
+never both — one worker per collection holds an advisory lock and the second
+will simply idle. And `cementic status` reports `workers stopped` under systemd,
+because that line reads state written only by `cementic start`; the progress
+counters beside it are still accurate, and
+`systemctl --user is-active cementic-worker@<collection>` is the real check.
+
 ### Choosing an ANN index (HNSW vs DiskANN)
 
 `index.method` selects how vectors are indexed for similarity search:
@@ -747,11 +768,14 @@ stages are staged:
 | | pymupdf4llm + CPU | pymupdf-raw + iGPU |
 |---|---|---|
 | extraction | 128 h | **0.5 h** |
-| embedding | ~490 h | ~100–160 h |
-| **total** | **~26 days** | **~4–7 days** |
+| embedding | ~490 h | **~108 h** |
+| **total** | **~26 days** | **~4.5 days** |
 
-Embedding is projected from the pipeline's own measured 814 ms/chunk rather than
-from `llama-bench`, since that rate already includes the serving path.
+The embedding figure is measured end to end, not projected: a 200-document run
+through the real pipeline — GPU server, HTTP, 32-chunk batches, index-driven
+claims — sustained **5.56 chunk/s**, which is 108 h for 2.16M chunks. The
+earlier 4–7 day range came from 4.27 chunk/s on the pre-denormalisation claim
+path.
 
 Two constraints bind at this size and neither is query latency. **Memory:** an
 HNSW index over 2.16M × 768 vectors is ~6.5 GB resident, against 15 GB of RAM

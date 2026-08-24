@@ -65,20 +65,22 @@ Remaining gaps, from the 2026-08-14 review:
 - Evaluate lighter embedding providers if llama.cpp memory use is too high on
   small machines.
 - **Build llama-cpp-python with Vulkan** so the iGPU works under
-  `daemon_autostart` instead of needing an externally-run `llama-server`. The
-  external-server route needs no code change and is documented in README
-  ("Running embeddings on a GPU"); this is the tidy version of it. Blocked on
-  `glslc`, which is not packaged here and is not on PyPI — it needs shaderc
-  built from source. Worth it only once a real indexing run confirms the
-  measured 6.5× survives the serving path.
-- **Cut indexing wall clock at corpus scale.** Largely answered on 2026-08-24;
-  what remains is executing it. Against the real 22k-PDF corpus the two levers
-  that paid were the `pymupdf-raw` extractor (128 h → 0.5 h) and the iGPU
-  (~490 h → ~100–160 h), taking a projected 26 days to 4–7. Numbers in README's
-  "Measurements behind the defaults". Two levers that did **not** pay, so nobody
-  re-tries them: thread pinning (run-to-run spread on this machine reached 53%,
-  which swamps any thread-count effect) and overlapping the pipeline stages
-  (worth ~0.5 h once extraction is raw text, against a worker rearchitecture).
+  `daemon_autostart` instead of an externally-run `llama-server`. Less pressing
+  than it looked: the external server needs no code change, is documented in
+  README ("Running embeddings on a GPU"), and is now supervised by the systemd
+  units, so the practical gap this would close is small. Blocked on `glslc`,
+  which is neither packaged here nor on PyPI — it needs shaderc from source.
+- ~~**Cut indexing wall clock at corpus scale.**~~ **Done 2026-08-24.** 26 days
+  → 4.5, by three changes: the `pymupdf-raw` extractor (128 h → 0.5 h), the
+  iGPU via an external llama-server (~490 h → ~108 h measured end to end), and
+  denormalising the embedding claim so it stays flat instead of degrading with
+  the completed fraction. Numbers in README's "Measurements behind the
+  defaults". Three levers that did **not** pay, so nobody re-tries them: thread
+  pinning (this machine's run-to-run spread reached 53%, which swamps any
+  thread-count effect), `batch_size = 128` (3.12 chunk/s against 32's 4.27,
+  though one sample each cannot separate that from noise — the point is there
+  was no gain), and overlapping the pipeline stages (worth ~0.5 h once
+  extraction is raw text, against a worker rearchitecture).
 
 ## Parked, with a trigger
 
