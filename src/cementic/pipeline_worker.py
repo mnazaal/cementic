@@ -131,6 +131,31 @@ class PipelineCounts:
 #: later is expected to succeed.
 _RETRYABLE_HTTP_STATUSES = frozenset({408, 425, 429, 500, 502, 503, 504})
 
+#: llama.cpp answers an input longer than the context window with HTTP 500 --
+#: the same status it uses for genuinely transient conditions -- so the status
+#: alone cannot tell "retry this" from "this text will never embed". The body
+#: is the only discriminator the server offers.
+_PERMANENT_INPUT_REJECTION_MARKERS = ("too large to process",)
+
+
+def _server_rejected_the_input(response: object) -> bool:
+    """Whether the server refused these texts rather than reporting its own state.
+
+    Retried as if transient, one over-long chunk re-claims itself every poll
+    forever: the batch is released to `pending`, the same lowest chunk ids come
+    back, and the collection never finishes. Observed live -- a 549-model-token
+    chunk pinned a 22k-document run at 608 embedded chunks indefinitely.
+
+    Matching on the message is unlovely, but the alternative is worse: the
+    status is shared with real transients, and treating every 500 as terminal
+    would stamp a whole batch failed whenever the daemon restarts.
+    """
+    body = getattr(response, "text", None)
+    if not isinstance(body, str):
+        return False
+    lowered = body.lower()
+    return any(marker in lowered for marker in _PERMANENT_INPUT_REJECTION_MARKERS)
+
 
 def is_retryable_embed_error(error: BaseException) -> bool:
     """Whether an embedding failure is about the provider, not the texts (pure).
@@ -157,6 +182,8 @@ def is_retryable_embed_error(error: BaseException) -> bool:
         response = getattr(error, "response", None)
         status = getattr(response, "status_code", None)
         if status is not None:
+            if _server_rejected_the_input(response):
+                return False
             return status in _RETRYABLE_HTTP_STATUSES
     return True
 

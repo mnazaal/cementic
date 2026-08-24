@@ -284,6 +284,33 @@ class TestIsRetryableEmbedError:
         """A 4xx about the request itself will not fix itself on retry."""
         assert is_retryable_embed_error(self._http_error(status)) is False
 
+    def _http_error_with_body(self, status: int, body: str) -> requests.exceptions.HTTPError:
+        response = requests.Response()
+        response.status_code = status
+        response._content = body.encode("utf-8")
+        return requests.exceptions.HTTPError(response=response)
+
+    def test_an_over_long_input_is_terminal_despite_being_a_500(self) -> None:
+        """llama.cpp reports an unembeddable input with a retryable status.
+
+        Observed live: a 549-model-token chunk pinned a 22k-document run at 608
+        embedded chunks. Released as transient, the same chunk is re-claimed
+        every poll and the collection never finishes, so the status has to be
+        read together with the body.
+        """
+        error = self._http_error_with_body(
+            500,
+            '{"error":{"code":500,"message":"input (547 tokens) is too large to '
+            'process. increase the physical batch size (current batch size: 512)",'
+            '"type":"server_error"}}',
+        )
+        assert is_retryable_embed_error(error) is False
+
+    def test_a_plain_500_is_still_retryable(self) -> None:
+        """The daemon restarting must not stamp a whole batch failed."""
+        error = self._http_error_with_body(500, '{"error":{"message":"model is loading"}}')
+        assert is_retryable_embed_error(error) is True
+
     def test_connection_and_timeout_remain_retryable(self) -> None:
         assert is_retryable_embed_error(requests.exceptions.ConnectionError()) is True
         assert is_retryable_embed_error(requests.exceptions.Timeout()) is True
