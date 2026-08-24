@@ -34,6 +34,18 @@ def _get_pymupdf() -> tuple[Any, Any]:
     return pymupdf, pymupdf4llm
 
 
+def _get_pymupdf_bare() -> Any:
+    """Import PyMuPDF *without* ``pymupdf.layout``.
+
+    Not a duplicate of ``_get_pymupdf``: the layout import is the entire cost
+    the raw backend exists to avoid, and it loads its ONNX model on import,
+    before any page is analysed.
+    """
+    import pymupdf
+
+    return pymupdf
+
+
 def _get_rapidocr_api() -> Any | None:
     """Lazily import RapidOCR API adapter."""
     try:
@@ -103,6 +115,31 @@ def extract_pdf_markdown(pdf_path: str, use_ocr: bool = True) -> str:
     return md_text
 
 
+def extract_pdf_text(pdf_path: str) -> str:
+    """Extract a PDF's text layer with no layout analysis.
+
+    Measured over 153 academic papers against the pymupdf4llm backend: 37 ms
+    per document against 10.2 s, and 5 s of CPU in total against 4.3 core-hours
+    -- the difference being an ONNX layout model run over every page. It is
+    also the more predictable of the two: the worst document here took 0.54 s,
+    where the layout path spends 42 s on a four-page paper.
+
+    What it gives up is Markdown structure -- headings, tables, header/footer
+    stripping. ``chunk_text`` reads none of that: it slices a fixed token
+    window regardless. On 38 metadata-title queries the two backends landed
+    within one document of each other (n is small; that rules out a large
+    quality gap, not a small one), so pymupdf4llm remains the default and this
+    is the cheap path for a born-digital corpus.
+    """
+    path = Path(pdf_path)
+    if not path.exists():
+        raise FileNotFoundError(f"PDF not found: {pdf_path}")
+
+    pymupdf = _get_pymupdf_bare()
+    with pymupdf.open(str(path)) as document:
+        return "\n".join(page.get_text() for page in document)
+
+
 @dataclass(frozen=True)
 class ExtractorSpec:
     """Self-describing identity of an extractor (mirrors EmbeddingRuntimeSpec)."""
@@ -120,6 +157,10 @@ def _pdf_extractor(path: str, config: Config) -> str:
     return extract_pdf_markdown(path, use_ocr=config.extraction.use_ocr)
 
 
+def _raw_pdf_extractor(path: str, config: Config) -> str:
+    return extract_pdf_text(path)
+
+
 def _plaintext_extractor(path: str, config: Config) -> str:
     return Path(path).read_text(encoding="utf-8")
 
@@ -130,6 +171,13 @@ _EXTRACTORS: dict[str, tuple[ExtractorSpec, ExtractorFn]] = {
     "pymupdf4llm": (
         ExtractorSpec(name="pymupdf4llm", version=1, extensions=(".pdf",)),
         _pdf_extractor,
+    ),
+    # Order matters: `extractor_for` falls back to the first entry handling a
+    # suffix, so this must stay below pymupdf4llm to leave the .pdf default
+    # alone. Selected with `[extraction.backends] pdf = "pymupdf-raw"`.
+    "pymupdf-raw": (
+        ExtractorSpec(name="pymupdf-raw", version=1, extensions=(".pdf",)),
+        _raw_pdf_extractor,
     ),
     "plaintext": (
         ExtractorSpec(name="plaintext", version=1, extensions=(".txt", ".md", ".markdown")),

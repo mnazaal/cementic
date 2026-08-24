@@ -47,9 +47,13 @@ CHUNKING_VERSION = "v3"
 EXTRACTION_VERSION = "v1"
 
 #: The installed packages that actually produce the extracted Markdown.
-#: pymupdf-layout is included because extract.py hard-requires it (it raises
-#: if `pymupdf._get_layout` is unavailable) for improved page layout analysis,
-#: not merely pulled in incidentally.
+#: pymupdf-layout is included because the pymupdf4llm backend requires it (it
+#: raises if `pymupdf._get_layout` is unavailable) for improved page layout
+#: analysis, not merely pulled in incidentally. It stays listed even though the
+#: pymupdf-raw backend never loads it: which backend produced a revision's text
+#: is recorded by "backends" in the payload, so a raw-backend revision is
+#: already distinct from a pymupdf4llm one, and pinning the version here costs
+#: only a rebuild that a layout-model upgrade should cause anyway.
 _EXTRACTION_LIBRARY_NAMES = ("pymupdf4llm", "pymupdf", "pymupdf-layout")
 
 

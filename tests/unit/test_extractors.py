@@ -156,6 +156,50 @@ def test_adding_one_registry_entry_is_all_it_takes(monkeypatch, config):
     assert handler._should_process("/some/file.xyz") is True
 
 
+class TestRawPdfBackend:
+    """The layout-free PDF backend, selected with `pdf = "pymupdf-raw"`."""
+
+    def test_it_does_not_take_the_pdf_default_from_pymupdf4llm(self, config):
+        """Two entries now claim .pdf, and `extractor_for` takes the first.
+
+        Registry order is therefore load-bearing: inserting pymupdf-raw above
+        pymupdf4llm would silently re-point every unconfigured corpus at a
+        different extractor.
+        """
+        assert extractor_for("/docs/a.pdf", config)[0] == "pymupdf4llm"
+
+    def test_config_selects_it(self):
+        config = Config(extraction=ExtractionConfig(backends={"pdf": "pymupdf-raw"}))
+        assert extractor_for("/docs/a.pdf", config)[0] == "pymupdf-raw"
+
+    def test_it_never_loads_the_layout_model(self, config):
+        """The ONNX layout import is the whole cost this backend avoids.
+
+        `_get_pymupdf` imports pymupdf.layout; the raw path must not reach it,
+        so going through it would make the backend pointless while still
+        passing every output-shaped assertion.
+        """
+        config = Config(extraction=ExtractionConfig(backends={"pdf": "pymupdf-raw"}))
+        with patch.object(extract_mod, "_get_pymupdf") as layout_import:
+            with patch.object(extract_mod, "_get_pymupdf_bare") as bare:
+                doc = bare.return_value.open.return_value.__enter__.return_value
+                page = type("P", (), {"get_text": lambda self: "text"})()
+                doc.__iter__ = lambda self: iter([page])
+                with patch.object(Path, "exists", return_value=True):
+                    assert extract_document("/docs/a.pdf", config) == "text"
+        layout_import.assert_not_called()
+
+    def test_a_missing_file_is_reported_as_such(self, config):
+        config = Config(extraction=ExtractionConfig(backends={"pdf": "pymupdf-raw"}))
+        with pytest.raises(FileNotFoundError):
+            extract_document("/docs/definitely-absent.pdf", config)
+
+    def test_selecting_it_reversions_the_extractor_profile(self, config):
+        """Switching backend must not reuse text produced by the other one."""
+        raw = Config(extraction=ExtractionConfig(backends={"pdf": "pymupdf-raw"}))
+        assert build_extractor_profile_payload(raw) != build_extractor_profile_payload(config)
+
+
 class TestEmptyExtractionIsAFailure:
     """An empty extraction must not be recorded as a successful one.
 

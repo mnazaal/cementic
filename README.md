@@ -320,7 +320,7 @@ matching `CEMENTIC_*` variable (see [Environment variables](#environment-variabl
 | | `daemon_pid_file`, `daemon_log_file` | under the data dir | Daemon bookkeeping |
 | | `verbose` | `false` | Verbose llama.cpp logging |
 | `extraction` | `use_ocr` | `false` | OCR pages with no text layer (`rapidocr` is a required dependency, always installed) |
-| | `backends` | registry default | Per-file-type extractor choice, e.g. `pdf = "pymupdf4llm"` |
+| | `backends` | registry default | Per-file-type extractor choice, e.g. `pdf = "pymupdf-raw"`. PDFs: `pymupdf4llm` (default, Markdown structure via an ONNX layout model) or `pymupdf-raw` (text layer only, ~275× faster — see "Choosing a PDF extractor") |
 | `source_watcher` | `ignore_directories` | 16 names incl. `.git`, `node_modules`, `build`, `dist`, `venv`, `target` | Directory names skipped anywhere under a watched root. **Replaces** the defaults rather than adding to them; set `[]` to index everything |
 | | `state_path`, `log_file` | under the data dir | Watcher bookkeeping |
 | `pipeline_worker` | `batch_size` | `32` | Chunks per embedding request (1–128) |
@@ -341,6 +341,35 @@ than embedded truncated, and shows up as a failed chunk in `cementic status`.
 Raising either value without re-measuring risks silently truncated embeddings;
 the derivation is under "Measurements behind the defaults" below, and the
 script is `scripts/measure_chunk_context_fit.py`.
+
+### Choosing a PDF extractor
+
+`[extraction.backends] pdf = "..."` picks how PDFs become text. Both produce the
+input to the same chunker.
+
+- **`pymupdf4llm`** (default) — Markdown with headings, tables, and
+  header/footer stripping, using an ONNX page-layout model.
+- **`pymupdf-raw`** — the PDF's text layer, nothing else.
+
+Measured over 153 born-digital academic papers:
+
+| | pymupdf4llm | pymupdf-raw |
+|---|---|---|
+| whole corpus | 25.9 min wall, ~4.3 core-hours | **5.6 s wall, 5.0 s CPU** |
+| per document | 10.2 s | **37 ms** |
+| worst single document | 42 s (a 4-page paper) | **0.54 s** (44 pages) |
+| chunks produced | 2,588 (60-doc sample) | 2,792 — 7.9% more, mostly boilerplate the layout model strips |
+| known-item retrieval, 38 title queries | R@1 0.895, R@5 0.921 | R@1 0.868, R@5 0.921 |
+
+The retrieval difference is one document out of 38, which this sample cannot
+distinguish from noise — it rules out a large quality gap, not a small one.
+That is the reason `pymupdf4llm` remains the default despite costing ~3,000×
+the CPU: the structure it produces is real, even though `chunk_text` slices a
+fixed token window and reads none of it.
+
+Prefer `pymupdf-raw` for bulk-importing a large born-digital corpus, where the
+difference is hours against days. Keep `pymupdf4llm` for scanned or
+table-heavy documents, which the measurement above does not cover.
 
 ### Choosing an ANN index (HNSW vs DiskANN)
 
