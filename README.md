@@ -339,7 +339,8 @@ under `n_ctx`. The shipped 320/512 pair has margin for the worst ratio measured
 plus the task prefix. A chunk that would exceed the window is refused rather
 than embedded truncated, and shows up as a failed chunk in `cementic status`.
 Raising either value without re-measuring risks silently truncated embeddings;
-the derivation and the measurement script are in PLAN.md.
+the derivation is under "Measurements behind the defaults" below, and the
+script is `scripts/measure_chunk_context_fit.py`.
 
 ### Choosing an ANN index (HNSW vs DiskANN)
 
@@ -636,12 +637,73 @@ The planner drove from `chunked_documents` and probed the vector table by
 primary key, so the ANN index was never used. Search was exact but scaled
 linearly with the table.
 
-**Scale target.** ~40k papers at a measured 50 chunks each is ~2M vectors. Query
-latency is not the binding constraint — a warm search is 214 ms end to end, 197
-of which is embedding the query string, a constant. The constraints are
-embedding throughput (1.4 s/chunk on CPU, so ~780 hours for 2M vectors without a
-GPU) and memory (an HNSW index over 1M 768-dim vectors needs ~3 GB resident),
-which is what the `diskann` seam exists for.
+Moving those filters onto `embedding_vectors_p*` made the index reachable, and
+is also the measurement behind `index.hnsw_iterative_scan`. Same data, same
+index, 100k rows at 768 dimensions:
+
+| query shape | ANN used | results | time |
+|---|---|---|---|
+| filters on joined tables (before) | no | 10/10 | 407.6 ms |
+| filters on the vector row | yes | 10/10 | 1.0 ms |
+| filters on the vector row, 2% slice, `iterative_scan=off` | yes | **0/10** | 1.3 ms |
+| filters on the vector row, 2% slice, `relaxed_order` | yes | 10/10 | 15.3 ms |
+
+The 0/10 row is why `relaxed_order` is the default: once the planner really
+drives from the ANN index, a collection holding a thin slice of a shared vector
+table post-filters its way to an empty result. Reproducing it needs ~100k rows,
+which is why `tests/integration/test_search_ann_pg.py` asserts the planner's
+choice rather than this recall failure.
+
+**Indexing throughput on a real corpus** (2026-08-24, 153 papers / 178 MB into
+one collection, 14-core CPU, no GPU). This is the first run at a size worth
+projecting from; the per-stage numbers replace earlier estimates taken from
+5-document samples.
+
+| stage | wall clock | rate |
+|---|---|---|
+| extract (pymupdf4llm, 153 PDFs) | 25.9 min | 10.2 s/doc, ~11 of 14 cores busy |
+| chunk (7,306 chunks) | < 1 min | 47.8 chunks/paper |
+| embed (7,306 chunks) | 1.65 h | 814 ms/chunk |
+| **total to 100%** | **2.08 h** | zero extract or embed failures |
+
+Peak resident memory: pipeline worker 3.5 GB, llama.cpp daemon 1.1 GB, watcher
+75 MB.
+
+**The stages do not overlap.** All extraction finishes before the first chunk is
+written, and all chunking before the first embedding, so wall clock is the sum
+of the stages rather than the longest one. Extraction is therefore its own
+budget line, not time hidden under embedding.
+
+**Scale target.** ~40k papers at a measured 47.8 chunks each is ~1.9M vectors.
+Projected from the run above, and additive because the stages are staged:
+~113 h of extraction plus ~432 h of embedding, so roughly 23 days on CPU. The
+binding constraints are embedding throughput and memory (an HNSW index over 1M
+768-dim vectors needs ~3 GB resident), which is what the `diskann` seam exists
+for. Query latency is not one of them.
+
+**Search latency** (warm daemon, 7,580 vectors, `hnsw.ef_search = 40`):
+
+| step | time |
+|---|---|
+| embed the query string | 35.3 ms |
+| pgvector kNN, top-10 | 2.6 ms (0.3 ms in-engine) |
+| **`Searcher.search()` total** | **38.7 ms** |
+| CLI end to end | ~650 ms — the rest is interpreter and import startup |
+| first query after a cold start | 6.2 s, loading the model |
+
+Search is embedding-bound, not index-bound. An earlier reading of this section
+put the embedding step at 197 ms; re-measured on the corpus above it is 35 ms,
+so treat the old figure as superseded rather than reconciled.
+
+**ANN recall against exact search** (same corpus, 20 queries, top-10): mean
+0.990, worst 0.900, 18 of 20 identical to the exact ranking. The ANN query is
+8.9× faster than the exact one (2.7 ms against 24.1 ms), and the HNSW index is
+29 MB over 7,580 × 768.
+
+**Promotion does no index build.** Because the HNSW index is created up front
+and maintained per insert, `cementic collection promote` on the finished
+153-paper revision took 0.7 s — the payoff the build-order measurement above
+predicted, now observed on a real corpus.
 
 **Directory moves under the watcher**, measured against watchdog's inotify
 backend:

@@ -7,7 +7,7 @@ filters sat on the vector row. Exact, but linear in corpus size.
 
 These tests are small -- the planner's choice, not its speed, is what regressed,
 and that is visible with a forced plan on a few thousand rows. The timing
-evidence lives in PLAN.md.
+evidence is in README's "Measurements behind the defaults".
 """
 
 from __future__ import annotations
@@ -223,7 +223,8 @@ def test_search_returns_a_full_page_through_the_ann_path(
     it needs roughly 100k rows, because below that the planner picks an exact
     sequential scan for a selective filter -- which returns the right answer and
     would make the test pass for the wrong reason. The measurement (0 of 10
-    with the setting off, 10 of 10 with it on) is recorded in PLAN.md.
+    with the setting off, 10 of 10 with it on) is in README's "Measurements
+    behind the defaults".
     """
     cleanup_pg_tables(pg_session)
     _seed_shared_vector_table(pg_session)

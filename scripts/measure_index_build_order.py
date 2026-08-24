@@ -12,7 +12,7 @@ Run against the *test* database, never a real one:
     PYTHONPATH=. python scripts/measure_index_build_order.py
 
 Two traps, both of which produced wrong numbers before they were understood
-(see PLAN.md, "Still open — a decision, with the measurements taken"):
+(see PLAN.md, "Decided — build the ANN index up front"):
 
 1. Vectors must be clustered. Uniformly random unit vectors in 768 dimensions
    sit at near-identical distances from any query, so the "true" nearest
