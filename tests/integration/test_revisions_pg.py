@@ -24,6 +24,7 @@ from cementic.revisions import (
     ensure_revision_ann_index,
     ensure_revision_ann_index_up_front,
     ensure_revision_vector_table,
+    materialize_pending_embeddings,
 )
 from cementic.vector_store import (
     FILTER_COLUMNS,
@@ -514,3 +515,67 @@ def test_migrating_an_already_current_table_is_a_no_op(pg_engine, pg_session) ->
             text(f"SELECT count(*) FROM {vector_table_name(profile_id)}")
         ).scalar() == 1
     cleanup_pg_tables(pg_session)
+
+
+def test_materialize_pending_embeddings_is_idempotent(pg_session) -> None:
+    """Callers run it whenever work might have appeared, so a no-op must be free.
+
+    It replaces an anti-join that ran once per 32-chunk batch and cost 178,681
+    buffers; the whole point is that it can be called liberally and settles to
+    inserting nothing.
+    """
+    cleanup_pg_tables(pg_session)
+    revision = seed_active_vector_collection(
+        pg_session,
+        collection="materialise",
+        source_path="/docs/a.pdf",
+        chunks=[(f"chunk {i}", [0.1] * VECTOR_DIM) for i in range(5)],
+    )
+    pg_session.commit()
+    # The fixture seeds finished embeddings; clear them so there is work to find.
+    pg_session.query(ChunkEmbedding).delete()
+    pg_session.commit()
+
+    added = materialize_pending_embeddings(pg_session, "materialise", revision)
+    pg_session.commit()
+    assert added == 5
+    assert {status for (status,) in pg_session.query(ChunkEmbedding.status).all()} == {"pending"}
+
+    again = materialize_pending_embeddings(pg_session, "materialise", revision)
+    pg_session.commit()
+    assert again == 0
+    assert pg_session.query(ChunkEmbedding).count() == 5
+
+
+def test_materialize_pending_embeddings_leaves_finished_work_alone(pg_session) -> None:
+    """A row that already exists must not be reset to pending and re-embedded."""
+    cleanup_pg_tables(pg_session)
+    revision = seed_active_vector_collection(
+        pg_session,
+        collection="materialise-done",
+        source_path="/docs/b.pdf",
+        chunks=[(f"chunk {i}", [0.1] * VECTOR_DIM) for i in range(3)],
+    )
+    pg_session.commit()
+
+    added = materialize_pending_embeddings(pg_session, "materialise-done", revision)
+    pg_session.commit()
+    assert added == 0
+    assert {status for (status,) in pg_session.query(ChunkEmbedding.status).all()} == {"done"}
+
+
+def test_materialize_pending_embeddings_skips_deleted_documents(pg_session) -> None:
+    """A document the watcher marked deleted is not work, and must not be queued."""
+    cleanup_pg_tables(pg_session)
+    revision = seed_active_vector_collection(
+        pg_session,
+        collection="materialise-deleted",
+        source_path="/docs/c.pdf",
+        chunks=[(f"chunk {i}", [0.1] * VECTOR_DIM) for i in range(4)],
+    )
+    pg_session.commit()
+    pg_session.query(ChunkEmbedding).delete()
+    pg_session.query(SourceDocument).update({"status": "deleted"}, synchronize_session=False)
+    pg_session.commit()
+
+    assert materialize_pending_embeddings(pg_session, "materialise-deleted", revision) == 0

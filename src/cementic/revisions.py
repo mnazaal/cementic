@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, cast
 
-from sqlalchemy import func, select, text
+from sqlalchemy import func, insert, literal, select, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
@@ -20,6 +20,7 @@ from cementic.db import (
     PipelineRevision,
     SourceDocument,
     ensure_embedding_ann_index,
+    utc_now,
 )
 from cementic.embedding_provider import EmbeddingProvider
 from cementic.index_strategies import IndexParams
@@ -228,6 +229,68 @@ def mark_revision_ready(session: Session, revision: PipelineRevision) -> None:
     if revision.status == "building":
         revision.status = "ready"
         session.flush()
+
+
+def materialize_pending_embeddings(
+    session: Session, collection: str, revision: PipelineRevision
+) -> int:
+    """Give every in-scope chunk a ``pending`` embedding row. Returns rows added.
+
+    The embed step used to discover its work with an anti-join -- chunks with no
+    row for this profile -- which cannot be indexed, so it paid to find the
+    boundary once per 32-chunk batch. Measured here: 178,681 buffers to claim
+    one batch, and 64,536 buffers to return *nothing* against a collection that
+    was already finished, because the scan walks the completed prefix to reach
+    the remaining tail. Cost tracked corpus size rather than remaining work.
+
+    Materialising the rows up front moves that anti-join out of the batch loop
+    and into one statement per chunking wave, after which the claim is an index
+    scan on ``ix_chunk_embeddings_profile_status`` (5 buffers).
+
+    Idempotent, so callers may run it whenever work might have appeared. The
+    ``NOT EXISTS`` is what makes it so; the unique index on
+    ``(chunk_id, embedding_profile_id)`` is the backstop, and one worker per
+    collection holds the advisory lock, so there is no second writer to race.
+
+    A new embedding profile is the case that makes this a query rather than a
+    write at chunk time: its chunks all predate it, so they must be picked up
+    here rather than when they were chunked.
+    """
+    profile_id = revision.embedding_profile_id
+    already_present = (
+        select(ChunkEmbedding.id)
+        .where(
+            ChunkEmbedding.chunk_id == Chunk.id,
+            ChunkEmbedding.embedding_profile_id == profile_id,
+        )
+        .exists()
+    )
+    now = utc_now()
+    candidates = (
+        select(
+            Chunk.id,
+            literal(profile_id),
+            literal("pending"),
+            literal(now),
+            literal(now),
+        )
+        .join(ChunkedDocument, Chunk.chunked_document_id == ChunkedDocument.id)
+        .join(ExtractedDocument, ChunkedDocument.extracted_document_id == ExtractedDocument.id)
+        .join(SourceDocument, Chunk.document_id == SourceDocument.id)
+        .where(
+            SourceDocument.collection == collection,
+            SourceDocument.status != "deleted",
+            *chunk_scope(revision),
+            ~already_present,
+        )
+    )
+    result = session.execute(
+        insert(ChunkEmbedding).from_select(
+            ["chunk_id", "embedding_profile_id", "status", "created_at", "updated_at"],
+            candidates,
+        )
+    )
+    return cast(int, getattr(result, "rowcount", 0)) or 0
 
 
 def requeue_interrupted_artifacts(
