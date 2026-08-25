@@ -467,7 +467,17 @@ class TestFatalStartupReasonReachesTheStateFile:
         assert "already running" in state.last_error
         assert state.last_error_at is not None
 
-    def test_a_clean_start_after_a_failed_one_clears_last_error(self, tmp_path):
+    @patch("cementic.source_watcher.create_tables")
+    @patch("cementic.source_watcher.get_session_factory")
+    @patch("cementic.source_watcher.get_engine")
+    def test_a_clean_start_after_a_failed_one_clears_last_error(
+        self, mock_get_engine, mock_session_factory, mock_create_tables, tmp_path
+    ):
+        """The clean start is the first one in this file to get *past* the
+        already-running check, so it is the first to reach the database. Unit
+        tests have no server: patch the engine seam, as the sibling start test
+        does, or this passes only on a developer machine with the container up.
+        """
         state_path = tmp_path / "state.json"
         stale = SourceWatcher()
         stale.state_manager.state_path = state_path
