@@ -133,9 +133,20 @@ class TestWriteBackFailuresDoNotStallTheCollection:
         session.__exit__.return_value = False
         session.get.return_value = artifact
         with patch.object(worker, "Session", return_value=session):
-            worker._fail_artifact(ChunkedDocument, 7, ValueError("NUL"), "chunk")
+            worker._fail_artifact(
+                ChunkedDocument,
+                7,
+                ValueError("NUL"),
+                "chunk",
+                scope_hash_field="source_content_hash",
+                scope_hash="abc123",
+            )
         assert artifact.status == "failed"
         assert "NUL" in artifact.error_message
+        # The scoping hash must be stamped with the status: without it the
+        # claim query re-selects the row (hash IS DISTINCT FROM source) and the
+        # hash-scoped revision counts see neither done nor failed.
+        assert artifact.source_content_hash == "abc123"
         session.commit.assert_called_once()
 
     def test_a_vanished_artifact_is_not_resurrected(self, temp_dir: Path) -> None:
@@ -146,7 +157,14 @@ class TestWriteBackFailuresDoNotStallTheCollection:
         session.__exit__.return_value = False
         session.get.return_value = None
         with patch.object(worker, "Session", return_value=session):
-            worker._fail_artifact(ChunkedDocument, 7, ValueError("gone"), "chunk")
+            worker._fail_artifact(
+                    ChunkedDocument,
+                    7,
+                    ValueError("gone"),
+                    "chunk",
+                    scope_hash_field="source_content_hash",
+                    scope_hash="h",
+                )
         session.commit.assert_not_called()
 
     def test_an_unreachable_database_still_raises(self, temp_dir: Path) -> None:
@@ -158,7 +176,14 @@ class TestWriteBackFailuresDoNotStallTheCollection:
         worker = self._worker(temp_dir)
         with patch.object(worker, "Session", side_effect=OSError("db down")):
             with pytest.raises(OSError):
-                worker._fail_artifact(ChunkedDocument, 7, ValueError("x"), "chunk")
+                worker._fail_artifact(
+                    ChunkedDocument,
+                    7,
+                    ValueError("x"),
+                    "chunk",
+                    scope_hash_field="source_content_hash",
+                    scope_hash="h",
+                )
 
 
 class TestPipelineWorkerConstructor:
@@ -877,6 +902,60 @@ class TestStepExtractSelectionIsBounded:
         assert small == large
 
 
+class TestFailArtifactStampsTheScopingHash:
+    """`_fail_artifact` must stamp the claim-scoping hash with the status.
+
+    Without it the failed row still matches the claim query's
+    ``hash IS DISTINCT FROM source`` disjunct -- re-claimed (and re-extracted)
+    every pass -- while the hash-scoped revision counts see neither done nor
+    failed, so the revision never settles. The missing-artifact branch in
+    `_step_chunk` stamps the hash for exactly this reason; this pins the
+    write-back-failure path to the same invariant, through the real claim query.
+    """
+
+    def test_a_write_back_failure_is_not_reclaimed_forever(self, temp_dir: Path) -> None:
+        engine = create_engine("sqlite:///:memory:")
+        Base.metadata.create_all(engine)
+        session_factory = sessionmaker(bind=engine, expire_on_commit=False)
+        collection = "failstamp"
+        with session_factory() as session:
+            revision_id, pending_id = _seed_extract_selection_data(session, collection, 0)
+
+        config = Config()
+        config.pipeline_worker.log_file = temp_dir / "worker.log"
+        worker = PipelineWorker(config)
+        worker.Session = session_factory
+        worker.collection = collection
+
+        with (
+            patch("cementic.pipeline_worker.extract_document", return_value="content"),
+            patch("cementic.pipeline_worker.write_extracted_text", return_value="content-hash"),
+            patch.object(
+                worker, "_write_back_extraction", side_effect=RuntimeError("injected")
+            ),
+            patch.object(worker.state_manager, "update"),
+        ):
+            assert worker._step_extract(revision_id) is True
+
+        with session_factory() as session:
+            extracted = (
+                session.query(ExtractedDocument).filter_by(document_id=pending_id).one()
+            )
+            assert extracted.status == "failed"
+            # The stamp that keeps the row out of the claim query and inside
+            # the failure counts.
+            assert extracted.source_file_hash == "pending-hash"
+
+        # The second pass must find nothing to claim: a re-claim here is the
+        # stall this class exists to prevent.
+        with (
+            patch("cementic.pipeline_worker.extract_document", return_value="content"),
+            patch("cementic.pipeline_worker.write_extracted_text", return_value="content-hash"),
+            patch.object(worker.state_manager, "update"),
+        ):
+            assert worker._step_extract(revision_id) is False
+
+
 def _seed_chunk_selection_data(session, collection: str, n_already_done: int) -> tuple[int, int]:
     """Seed N already-chunked documents plus one pending; return (revision_id, pending_id)."""
     extractor = ExtractorProfile(name="x", fingerprint=f"ext-{collection}", config_json="{}")
@@ -1289,7 +1368,10 @@ class TestEnsureTargetRevisionAndMarkReady:
 
         mock_ensure_index.assert_called_once_with(mock_session, revision, worker.config)
         mock_mark_ready.assert_called_once_with(mock_session, revision)
-        mock_session.commit.assert_called_once()
+        # Two commits: one ends the counts' read transaction before the index
+        # build (which runs DDL on its own connections while this session
+        # would otherwise idle in transaction), one lands mark_revision_ready.
+        assert mock_session.commit.call_count == 2
 
 
 class TestIndexBuildIsVisible:

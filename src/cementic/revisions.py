@@ -51,7 +51,12 @@ class RevisionPrunePlan:
 
 
 def _revision_prune_plan(revisions: Sequence[PipelineRevision]) -> RevisionPrunePlan:
-    """Plan which revision history can be removed without DB or file I/O."""
+    """Plan which revision history can be removed without DB or file I/O.
+
+    ``revisions`` must be ordered newest-first (id descending), as
+    ``prune_collection_history`` queries it: "the most recent retired
+    revision" is simply ``retired[0]``.
+    """
     retired = [revision for revision in revisions if revision.status == "retired"]
     keep_retired_id = retired[0].id if retired else None
 

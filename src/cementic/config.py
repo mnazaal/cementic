@@ -238,9 +238,13 @@ def config_file_problems() -> list[str]:
     problems: list[str] = []
     for key, value in parsed.items():
         if key in sections:
-            unknown_keys = sorted(set(value) - _valid_keys(sections[key])) if isinstance(
-                value, dict
-            ) else []
+            if not isinstance(value, dict):
+                # `database = 5` names a real section but is not a table; the
+                # TOML source drops it silently -- the exact silent-drop
+                # failure this function exists to report.
+                problems.append(f"[{key}] must be a table of settings, not a bare value")
+                continue
+            unknown_keys = sorted(set(value) - _valid_keys(sections[key]))
             problems.extend(
                 f"[{key}] has no setting {name!r}{_suggest(name, _valid_keys(sections[key]))}"
                 for name in unknown_keys
@@ -428,6 +432,12 @@ class _SectionedTomlSource(PydanticBaseSettingsSource):
 
 class _SectionSettings(BaseSettings):
     """Base for config sections: env > config-file section > defaults."""
+
+    # Typo rejection relies on extra="forbid". The locked pydantic-settings
+    # defaults to it, but the pin is only ">=2.0" and early 2.x defaulted to
+    # "ignore" -- make the load-bearing behaviour explicit. Subclass
+    # model_configs merge with this one, so each section's env_prefix stays.
+    model_config = SettingsConfigDict(extra="forbid")
 
     #: TOML table this section reads from (e.g. "database").
     _toml_section: ClassVar[str] = ""

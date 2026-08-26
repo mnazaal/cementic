@@ -173,7 +173,9 @@ class TestGetOrCreateExtractorProfile:
         result = get_or_create_extractor_profile(session, config)
         assert result is not None
         assert session.add.called
-        assert session.flush.called
+        # The insert rides a SAVEPOINT so a concurrent worker resolving the
+        # same fingerprint cannot kill this one with a unique-violation.
+        assert session.begin_nested.called
 
 
 class TestGetOrCreateChunkProfile:
@@ -195,7 +197,9 @@ class TestGetOrCreateChunkProfile:
         result = get_or_create_chunk_profile(session, config)
         assert result is not None
         assert session.add.called
-        assert session.flush.called
+        # The insert rides a SAVEPOINT so a concurrent worker resolving the
+        # same fingerprint cannot kill this one with a unique-violation.
+        assert session.begin_nested.called
 
 
 class TestModelIdentityByContent:

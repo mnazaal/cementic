@@ -412,7 +412,9 @@ class PipelineWorker:
             and state.pid
             and is_managed_process_alive(state.pid, state.start_token)
         ):
-            self._fatal("Pipeline worker already running with PID %s", state.pid)
+            self._fatal(
+                "Pipeline worker already running with PID %s", state.pid, publish=False
+            )
             return
 
         engine = get_engine(self.config.database.url)
@@ -474,8 +476,10 @@ class PipelineWorker:
             finally:
                 self.stop()
 
-    def _fatal(self, message: str, *args: Any) -> None:
-        self.fatal_reason = report_fatal(self._logger, self.state_manager, message, *args)
+    def _fatal(self, message: str, *args: Any, publish: bool = True) -> None:
+        self.fatal_reason = report_fatal(
+            self._logger, self.state_manager, message, *args, publish=publish
+        )
 
     def _run_processing_loop(self, revision_id: int) -> None:
         reported_error = False
@@ -631,7 +635,14 @@ class PipelineWorker:
             # document every pass -- nothing else in the collection is ever
             # extracted. Stamp it terminal instead of letting it leak to the
             # processing loop's back-off-and-retry.
-            self._fail_artifact(ExtractedDocument, extracted_id, error, "extraction")
+            self._fail_artifact(
+                ExtractedDocument,
+                extracted_id,
+                error,
+                "extraction",
+                scope_hash_field="source_file_hash",
+                scope_hash=file_hash,
+            )
 
         self.state_manager.update(current_file=None)
         return True
@@ -673,7 +684,14 @@ class PipelineWorker:
             session.commit()
 
     def _fail_artifact(
-        self, model: type[Any], artifact_id: int, error: Exception, stage: str
+        self,
+        model: type[Any],
+        artifact_id: int,
+        error: Exception,
+        stage: str,
+        *,
+        scope_hash_field: str,
+        scope_hash: str | None,
     ) -> None:
         """Stamp an artifact row terminal after its write-back failed.
 
@@ -681,12 +699,21 @@ class PipelineWorker:
         this write fails too the database is unreachable rather than hostile to
         one document, which is exactly the case the loop's back-off handles, so
         the error is re-raised rather than swallowed.
+
+        The scoping hash is stamped alongside the status, for the same reason
+        the missing-artifact branch in ``_step_chunk`` stamps it: the claim
+        queries re-select any row whose hash ``IS DISTINCT FROM`` the source's,
+        and the revision counts only see hash-matched rows. Without it a row
+        failed here was re-claimed every pass -- re-running the expensive stage
+        each time -- while counted by neither ``done`` nor ``failed``, so the
+        revision could never settle.
         """
         self._logger.exception("%s write-back failed; marking the artifact failed", stage)
         with self.Session() as session:
             artifact = session.get(model, artifact_id)
             if artifact is None:
                 return
+            setattr(artifact, scope_hash_field, scope_hash)
             artifact.status = "failed"
             artifact.error_message = str(error)
             session.commit()
@@ -801,7 +828,14 @@ class PipelineWorker:
             # `processing`, and the chunk step re-claims the lowest-id row every
             # pass. A chunk PostgreSQL refuses (the NUL case) otherwise pins the
             # whole collection on one document indefinitely.
-            self._fail_artifact(ChunkedDocument, chunked_id, error, "chunk")
+            self._fail_artifact(
+                ChunkedDocument,
+                chunked_id,
+                error,
+                "chunk",
+                scope_hash_field="source_content_hash",
+                scope_hash=extracted.content_hash,
+            )
 
         self.state_manager.update(current_file=None)
         return True
@@ -913,19 +947,27 @@ class PipelineWorker:
 
             session.commit()
 
+        # Publish what this step is doing. Extract, chunk and the index build
+        # all write current_file/current_activity; the embed step wrote
+        # neither, so during the phase that saturates the daemon the
+        # busy-vs-wedged probe (_worker_load_explains_slow_embeddings) found no
+        # explanation and `status`/`doctor` advised restarting a healthy daemon
+        # mid-import -- observed live at 17% of a 2.16M-chunk build.
+        self.state_manager.update(current_activity=f"embedding {len(claimed)} chunk(s)")
+
         provider = self.embedding_client
-        texts = (
-            [provider.format_document(content) for _, content in claimed]
-            if provider is not None
-            else []
-        )
+        if provider is None:
+            # Set in start() before the loop and never unset, so None here is a
+            # programming error. The old fallback (empty texts -> length
+            # mismatch) silently stamped the whole batch terminally failed.
+            raise RuntimeError("Embedding provider is not initialised")
+        texts = [provider.format_document(content) for _, content in claimed]
         # Message stamped on any row that ends up without a vector: the batch-wide
         # exception if the whole call failed, or a per-row note if the batch
         # succeeded but an individual embedding came back missing.
         embeddings: list[list[float] | None]
         try:
-            raw = provider.embed_batch(texts) if provider is not None else []
-            embeddings = list(raw)
+            embeddings = list(provider.embed_batch(texts))
         except Exception as error:
             if is_retryable_embed_error(error):
                 self._release_after_provider_failure(error, claimed, profile_id)
@@ -1000,6 +1042,7 @@ class PipelineWorker:
         except Exception:
             self._release_claimed_embeddings([chunk_id for chunk_id, _ in claimed], profile_id)
             raise
+        self.state_manager.update(current_activity=None)
         return True
 
     def _release_after_provider_failure(
@@ -1023,6 +1066,9 @@ class PipelineWorker:
         """
         self._logger.error("Embedding provider unavailable: %s", error)
         self._release_claimed_embeddings([chunk_id for chunk_id, _ in claimed], profile_id)
+        # The batch is no longer being embedded: leaving the activity published
+        # would keep explaining daemon slowness with work that is not happening.
+        self.state_manager.update(current_activity=None)
         try:
             self.embedding_client = self._create_embedding_client()
         except Exception as restart_error:
@@ -1030,7 +1076,7 @@ class PipelineWorker:
         raise error
 
     def _embed_individually(
-        self, provider: EmbeddingProvider | None, texts: list[str], batch_error: Exception
+        self, provider: EmbeddingProvider, texts: list[str], batch_error: Exception
     ) -> tuple[list[list[float] | None], str]:
         """Re-embed a failed batch one text at a time.
 
@@ -1040,8 +1086,6 @@ class PipelineWorker:
         the other chunks in the index. A retryable error here re-raises so the
         caller's release-and-back-off path still applies.
         """
-        if provider is None:
-            return [None for _ in texts], str(batch_error)
         results: list[list[float] | None] = []
         for text_value in texts:
             try:
@@ -1070,6 +1114,11 @@ class PipelineWorker:
                 return
             if not self._revision_complete(session, revision):
                 return
+            # End the read transaction the counts opened: the index build below
+            # runs DDL on its own engine connections while this session would
+            # otherwise sit idle-in-transaction for the whole build, pinning
+            # xmin and holding back vacuum right when a bulk import needs it.
+            session.commit()
             # The build occupies this loop for minutes at a time -- tens of
             # minutes on a large corpus -- while writing nothing else, so
             # `cementic status` would otherwise show a running worker with no

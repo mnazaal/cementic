@@ -58,7 +58,11 @@ def handle_shutdown_signal(worker: _ShutdownAware, signum: int, frame: object) -
 
 
 def report_fatal(
-    logger: logging.Logger, state_manager: StateManager, message: str, *args: Any
+    logger: logging.Logger,
+    state_manager: StateManager,
+    message: str,
+    *args: Any,
+    publish: bool = True,
 ) -> str:
     """Log a fatal startup reason, echo it to stderr, publish it, and return it.
 
@@ -73,10 +77,18 @@ def report_fatal(
     it to `last_error` puts it in the one place `cementic status` already
     renders. A failure to write it must not mask the fatal reason itself, so
     it is logged and swallowed rather than raised.
+
+    ``publish=False`` is for the already-running fatal specifically: that
+    state file belongs to the *running* worker, whose clear paths are gated on
+    its own in-process flags -- a losing duplicate start writing ``last_error``
+    there left `cementic status` reporting a healthy worker with a standing
+    error until the next restart.
     """
     logger.error(message, *args)
     rendered = message % args if args else message
     print(rendered, file=sys.stderr, flush=True)
+    if not publish:
+        return rendered
     try:
         state_manager.update(
             last_error=rendered[:500],

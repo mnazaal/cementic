@@ -38,7 +38,7 @@ def write_extracted_text(path: Path, content: str) -> str:
     the database. The pid suffix keeps two workers from writing the same temp.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
-    if path.exists() and path.is_symlink():
+    if path.is_symlink():
         raise ValueError(f"Refusing to write through symlink: {path}")
     tmp_path = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     try:

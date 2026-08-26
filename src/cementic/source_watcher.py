@@ -229,7 +229,9 @@ class SourceWatcher:
             and state.pid
             and is_managed_process_alive(state.pid, state.start_token)
         ):
-            self._fatal("Source watcher already running with PID %s", state.pid)
+            self._fatal(
+                "Source watcher already running with PID %s", state.pid, publish=False
+            )
             return
 
         engine = get_engine(self.config.database.url)
@@ -274,8 +276,10 @@ class SourceWatcher:
             # the watcher is RUNNING.
             self.stop()
 
-    def _fatal(self, message: str, *args: Any) -> None:
-        self.fatal_reason = report_fatal(self._logger, self.state_manager, message, *args)
+    def _fatal(self, message: str, *args: Any, publish: bool = True) -> None:
+        self.fatal_reason = report_fatal(
+            self._logger, self.state_manager, message, *args, publish=publish
+        )
 
     def _start_watcher(self, directories: list[str]) -> None:
         observer = Observer()

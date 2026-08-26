@@ -287,6 +287,11 @@ class TestPipelineWorkerErrorPaths:
         collection = "test_blank_chunks"
 
         pipeline, source_watcher = _setup_worker(config, session_factory, collection, monkeypatch)
+        # Embeddings are not this test's concern. _step_embed raises on a
+        # None provider now, and a *working* one would need the
+        # Postgres-only vector tables -- a failing provider reproduces the
+        # old outcome (chunks stamped failed, no vector writes) explicitly.
+        pipeline.embedding_client = FailingEmbeddingClient()
         pdf_path = str(pdf_fixtures_dir / "test_doc_a.pdf")
         source_watcher._register_document(pdf_path)
 
@@ -363,6 +368,11 @@ class TestPipelineWorkerErrorPaths:
         collection = "test_null_hash"
 
         pipeline, source_watcher = _setup_worker(config, session_factory, collection, monkeypatch)
+        # Embeddings are not this test's concern. _step_embed raises on a
+        # None provider now, and a *working* one would need the
+        # Postgres-only vector tables -- a failing provider reproduces the
+        # old outcome (chunks stamped failed, no vector writes) explicitly.
+        pipeline.embedding_client = FailingEmbeddingClient()
         source_watcher._register_document(str(pdf_fixtures_dir / "test_doc_a.pdf"))
         revision = pipeline._ensure_target_revision()
         _run_pipeline_until_idle(pipeline, revision)
@@ -397,6 +407,11 @@ class TestPipelineWorkerErrorPaths:
         collection = "test_failed_reextract"
 
         pipeline, source_watcher = _setup_worker(config, session_factory, collection, monkeypatch)
+        # Embeddings are not this test's concern. _step_embed raises on a
+        # None provider now, and a *working* one would need the
+        # Postgres-only vector tables -- a failing provider reproduces the
+        # old outcome (chunks stamped failed, no vector writes) explicitly.
+        pipeline.embedding_client = FailingEmbeddingClient()
         pdf_path = str(pdf_fixtures_dir / "test_doc_a.pdf")
         source_watcher._register_document(pdf_path)
 

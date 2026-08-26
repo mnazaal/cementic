@@ -449,9 +449,14 @@ class TestFatalStartupReasonReachesTheStateFile:
     previously reported nowhere `status` or `doctor` look. Regression:
     `report_fatal` logged and echoed to stderr but never touched the state
     file.
+
+    The one exception is the already-running fatal: that state file belongs to
+    the *running* worker, whose clear paths are gated on its own in-process
+    flags, so a losing duplicate start publishing there left `status`
+    reporting a healthy worker with a standing error until the next restart.
     """
 
-    def test_already_running_failure_lands_in_last_error(self, tmp_path):
+    def test_already_running_failure_is_not_published_to_the_live_worker(self, tmp_path):
         watcher = SourceWatcher()
         watcher.state_manager.state_path = tmp_path / "state.json"
         watcher.state_manager.update(
@@ -462,10 +467,13 @@ class TestFatalStartupReasonReachesTheStateFile:
 
         watcher.start([str(tmp_path)], collection="c")
 
+        # The loser still reports the reason (runner exit code, stderr) --
+        # just not into the state file the running worker owns.
+        assert watcher.fatal_reason is not None
+        assert "already running" in watcher.fatal_reason
         state = watcher.state_manager.load()
-        assert state.last_error is not None
-        assert "already running" in state.last_error
-        assert state.last_error_at is not None
+        assert state.last_error is None
+        assert state.last_error_at is None
 
     @patch("cementic.source_watcher.create_tables")
     @patch("cementic.source_watcher.get_session_factory")
@@ -481,17 +489,15 @@ class TestFatalStartupReasonReachesTheStateFile:
         state_path = tmp_path / "state.json"
         stale = SourceWatcher()
         stale.state_manager.state_path = state_path
+        # A previous run's published fatal (any publishing fatal; the
+        # already-running one deliberately does not publish).
         stale.state_manager.update(
-            daemon_state=DaemonState.RUNNING,
-            pid=os.getpid(),
-            start_token=process_start_token(os.getpid()),
+            daemon_state=DaemonState.STOPPED,
+            pid=None,
+            last_error="injected fatal from a previous run",
+            last_error_at="2026-01-01T00:00:00+00:00",
         )
-        stale.start([str(tmp_path)], collection="c")
         assert stale.state_manager.load().last_error is not None
-
-        # The stale run is done publishing; mark it stopped, as `cementic stop`
-        # would, so the next start is not itself refused as a duplicate.
-        stale.state_manager.update(daemon_state=DaemonState.STOPPED, pid=None)
 
         watch_dir = tmp_path / "watched"
         watch_dir.mkdir()

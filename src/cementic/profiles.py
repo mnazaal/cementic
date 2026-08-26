@@ -8,6 +8,7 @@ from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as _package_version
 from typing import cast
 
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from cementic.chunk import TOKENIZER
@@ -209,13 +210,22 @@ def get_or_create_extractor_profile(session: Session, config: Config) -> Extract
     fingerprint = _fingerprint(payload)
     profile = session.query(ExtractorProfile).filter_by(fingerprint=fingerprint).first()
     if profile is None:
-        profile = ExtractorProfile(
-            fingerprint=fingerprint,
-            name=_extractor_profile_name(payload),
-            config_json=_stable_json(payload),
-        )
-        session.add(profile)
-        session.flush()
+        # Query-then-insert can race another worker resolving the same
+        # fingerprint (two collections' systemd units share one config); the
+        # flush loser used to die at startup with a raw unique-violation.
+        # SAVEPOINT, not rollback: the caller may hold other pending state.
+        try:
+            with session.begin_nested():
+                profile = ExtractorProfile(
+                    fingerprint=fingerprint,
+                    name=_extractor_profile_name(payload),
+                    config_json=_stable_json(payload),
+                )
+                session.add(profile)
+        except IntegrityError:
+            profile = (
+                session.query(ExtractorProfile).filter_by(fingerprint=fingerprint).one()
+            )
     return profile
 
 
@@ -225,9 +235,15 @@ def get_or_create_chunk_profile(session: Session, config: Config) -> ChunkProfil
     fingerprint = _fingerprint(payload)
     profile = session.query(ChunkProfile).filter_by(fingerprint=fingerprint).first()
     if profile is None:
-        profile = ChunkProfile(fingerprint=fingerprint, config_json=_stable_json(payload))
-        session.add(profile)
-        session.flush()
+        # Same fingerprint race as get_or_create_extractor_profile above.
+        try:
+            with session.begin_nested():
+                profile = ChunkProfile(
+                    fingerprint=fingerprint, config_json=_stable_json(payload)
+                )
+                session.add(profile)
+        except IntegrityError:
+            profile = session.query(ChunkProfile).filter_by(fingerprint=fingerprint).one()
     return profile
 
 
@@ -271,14 +287,20 @@ def get_or_create_embedding_profile(
     distance_metric = str(payload["distance_metric"])
     profile = session.query(EmbeddingProfile).filter_by(fingerprint=fingerprint).first()
     if profile is None:
-        profile = EmbeddingProfile(
-            fingerprint=fingerprint,
-            provider=provider_name,
-            model_identifier=model_identifier,
-            embedding_dim=embedding_dim,
-            distance_metric=distance_metric,
-            config_json=_stable_json(build_embedding_runtime_payload(config, provider)),
-        )
-        session.add(profile)
-        session.flush()
+        # Same fingerprint race as get_or_create_extractor_profile above.
+        try:
+            with session.begin_nested():
+                profile = EmbeddingProfile(
+                    fingerprint=fingerprint,
+                    provider=provider_name,
+                    model_identifier=model_identifier,
+                    embedding_dim=embedding_dim,
+                    distance_metric=distance_metric,
+                    config_json=_stable_json(build_embedding_runtime_payload(config, provider)),
+                )
+                session.add(profile)
+        except IntegrityError:
+            profile = (
+                session.query(EmbeddingProfile).filter_by(fingerprint=fingerprint).one()
+            )
     return profile
