@@ -39,7 +39,9 @@ def _get_pymupdf_bare() -> Any:
 
     Not a duplicate of ``_get_pymupdf``: the layout import is the entire cost
     the raw backend exists to avoid, and it loads its ONNX model on import,
-    before any page is analysed.
+    before any page is analysed. The ``Any`` return is load-bearing under
+    strict mypy -- pymupdf is untyped, and this seam is also what the
+    never-loads-the-layout-model test patches.
     """
     import pymupdf
 

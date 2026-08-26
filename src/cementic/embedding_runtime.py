@@ -106,7 +106,9 @@ def runtime_spec_from_profile_json(config_json: str) -> EmbeddingRuntimeSpec:
         distance_metric=str(payload.get("distance_metric", "cosine")),
         n_ctx=int(n_ctx) if n_ctx is not None else None,
         n_gpu_layers=int(n_gpu_layers) if n_gpu_layers is not None else None,
-        verbose=bool(payload.get("verbose", False)),
+        # No `verbose` here: Batch C removed it from the profile payload (it is
+        # a launch argument, not an identity fact); search overrides it from
+        # live config either way.
     )
 
 

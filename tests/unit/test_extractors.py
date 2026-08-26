@@ -172,7 +172,9 @@ class TestSpecialTokenSpellingsAreOrdinaryText:
     def test_a_document_naming_a_special_token_still_chunks(self, literal):
         from cementic.chunk import chunk_text
 
-        chunks = chunk_text(f"Models emit {literal} at the end of a sequence.")
+        chunks = chunk_text(
+            f"Models emit {literal} at the end of a sequence.", chunk_size=320, chunk_overlap=80
+        )
         assert chunks
         assert literal in "".join(c.content for c in chunks)
 

@@ -65,22 +65,6 @@ def create_table_sql(profile_id: int, dim: int) -> str:
     )
 
 
-def add_filter_columns_sql(profile_id: int) -> list[str]:
-    """DDL adding the filter columns to a table created before they existed.
-
-    Nullable at first: the table already has rows, and NOT NULL without a
-    default would be rejected. ``backfill_filter_columns_sql`` fills them and
-    ``enforce_filter_columns_sql`` then tightens the constraint, so a row that
-    could not be resolved never becomes silently unsearchable.
-    """
-    table = vector_table_name(profile_id)
-    return [
-        f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS collection TEXT",
-        f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS extractor_profile_id INTEGER",
-        f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS chunk_profile_id INTEGER",
-    ]
-
-
 def backfill_filter_columns_sql(profile_id: int) -> str:
     """Populate the filter columns from the joins they replace.
 
@@ -346,34 +330,13 @@ def upsert_vectors(
     conn.execute(text(upsert_sql(profile_id)), params)
 
 
-def vector_table_columns(conn: Connection, profile_id: int) -> set[str]:
-    """Column names present on a profile's vector table (empty if absent)."""
-    rows = conn.execute(
-        text(
-            "SELECT column_name FROM information_schema.columns "
-            "WHERE table_name = :name AND table_schema = ANY (current_schemas(false))"
-        ),
-        {"name": vector_table_name(profile_id)},
-    ).all()
-    return {str(row[0]) for row in rows}
-
-
 def ensure_vector_table_schema(conn: Connection, profile_id: int, dim: int) -> None:
-    """Create the vector table, or bring an older one up to the current shape.
+    """Create the vector table if it does not exist yet.
 
-    cementic has no migration framework -- ``create_all`` cannot alter an
-    existing table, and these per-profile tables are not part of its metadata
-    at all -- so the upgrade lives here, next to the DDL it mirrors. It is
-    idempotent and, once migrated, costs one catalog lookup.
+    Until 2026-08 this also migrated pre-denormalisation tables (adding,
+    backfilling and enforcing the filter columns). Every database in existence
+    has run that migration, so the shim was deleted rather than carried;
+    ``create_table_sql`` creates a fresh table in its final shape.
     """
-    existing = vector_table_columns(conn, profile_id)
-    if not existing:
+    if not vector_table_exists(conn, profile_id):
         conn.execute(text(create_table_sql(profile_id, dim)))
-        return
-    if set(FILTER_COLUMNS) <= existing:
-        return
-    for statement in add_filter_columns_sql(profile_id):
-        conn.execute(text(statement))
-    conn.execute(text(backfill_filter_columns_sql(profile_id)))
-    for statement in enforce_filter_columns_sql(profile_id):
-        conn.execute(text(statement))

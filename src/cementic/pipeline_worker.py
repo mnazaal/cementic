@@ -211,13 +211,6 @@ def revision_failure_total(counts: PipelineCounts) -> int:
     return counts.extracted_failed + counts.chunked_failed + counts.failed_embeddings
 
 
-def compute_revision_counts(
-    session: Session, collection: str, revision: PipelineRevision
-) -> PipelineCounts:
-    """Public accessor for a revision's current progress counts."""
-    return _compute_revision_counts(session, collection, revision)
-
-
 def _purge_all_chunks(session: Session, extracted_document_id: int) -> None:
     """Drop every chunk of a document whose current content is unknown.
 
@@ -270,7 +263,7 @@ def _purge_superseded_chunks(
     )
 
 
-def _compute_revision_counts(
+def compute_revision_counts(
     session: Session, collection: str, revision: PipelineRevision
 ) -> PipelineCounts:
     """Query the database for current revision progress counts."""
@@ -1141,7 +1134,7 @@ class PipelineWorker:
             session.commit()
 
     def _revision_complete(self, session: Session, revision: PipelineRevision) -> bool:
-        counts = _compute_revision_counts(session, self.collection, revision)
+        counts = compute_revision_counts(session, self.collection, revision)
         return revision_is_complete(counts)
 
     def _handle_shutdown(self, signum: int, frame: object) -> None:

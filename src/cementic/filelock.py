@@ -20,17 +20,11 @@ from __future__ import annotations
 
 import contextlib
 import errno
+import fcntl
 import os
 import time
 from collections.abc import Iterator
 from pathlib import Path
-
-try:  # pragma: no cover - platform dependent
-    import fcntl
-
-    _HAVE_FLOCK = True
-except ImportError:  # pragma: no cover - non-POSIX
-    _HAVE_FLOCK = False
 
 
 class LockUnavailableError(RuntimeError):
@@ -42,14 +36,10 @@ def file_lock(path: Path, *, timeout: float | None = None) -> Iterator[None]:
     """Hold an exclusive advisory lock on ``path`` for the duration of the block.
 
     ``timeout=None`` blocks until the lock is available; ``timeout=0`` fails
-    immediately with :class:`LockUnavailableError`. On a platform without ``flock``
-    this is a no-op, which restores the previous (unsynchronised) behaviour
-    rather than refusing to run.
+    immediately with :class:`LockUnavailableError`. POSIX-only by design: the
+    old non-POSIX fallback was a silent no-op lock, a failure mode worse than
+    the ImportError this now raises on such a platform.
     """
-    if not _HAVE_FLOCK:  # pragma: no cover - non-POSIX
-        yield
-        return
-
     path.parent.mkdir(parents=True, exist_ok=True)
     handle = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
     try:

@@ -32,10 +32,8 @@ class TextChunk:
 
 def chunk_text(
     text: str,
-    # Match the shipped config defaults: 512/128 was exactly the pairing the
-    # config module documents as unsafe against the default model's window.
-    chunk_size: int = 320,
-    chunk_overlap: int = 80,
+    chunk_size: int,
+    chunk_overlap: int,
 ) -> list[TextChunk]:
     """Chunk text into overlapping segments using tiktoken.
 

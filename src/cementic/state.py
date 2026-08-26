@@ -1,5 +1,6 @@
 """Persistent worker state management."""
 
+import dataclasses
 import json
 import os
 import threading
@@ -61,73 +62,25 @@ class WorkerState:
 
     @classmethod
     def from_dict(cls, data: dict[str, object]) -> "WorkerState":
-        """Create from dictionary."""
-        normalized = dict(data)
-        raw_daemon_state = normalized.get("daemon_state", DaemonState.STOPPED)
+        """Create from a dict, keeping only known fields.
 
-        if isinstance(raw_daemon_state, DaemonState):
-            daemon_state_value = raw_daemon_state
-        elif isinstance(raw_daemon_state, str):
-            try:
-                daemon_state_value = DaemonState(raw_daemon_state)
-            except ValueError:
-                daemon_state_value = DaemonState.STOPPED
-        else:
-            daemon_state_value = DaemonState.STOPPED
-
-        raw_watched_directories = normalized.get("watched_directories", [])
-        watched_directories: list[str] = []
-        if isinstance(raw_watched_directories, list):
-            watched_directories = [str(path) for path in raw_watched_directories]
-
-        raw_current_file = normalized.get("current_file")
-        current_file = str(raw_current_file) if raw_current_file is not None else None
-
-        raw_last_updated = normalized.get("last_updated", datetime.now(timezone.utc).isoformat())
-        last_updated = str(raw_last_updated)
-
-        raw_processed_count = normalized.get("processed_count", 0)
-        processed_count = raw_processed_count if isinstance(raw_processed_count, int) else 0
-
-        raw_failed_count = normalized.get("failed_count", 0)
-        failed_count = raw_failed_count if isinstance(raw_failed_count, int) else 0
-
-        raw_pid = normalized.get("pid")
-        pid = raw_pid if isinstance(raw_pid, int) else None
-
-        raw_start_token = normalized.get("start_token")
-        start_token = raw_start_token if isinstance(raw_start_token, str) else None
-
-        raw_last_error = normalized.get("last_error")
-        last_error = str(raw_last_error) if raw_last_error is not None else None
-
-        raw_last_error_at = normalized.get("last_error_at")
-        last_error_at = str(raw_last_error_at) if raw_last_error_at is not None else None
-
-        raw_current_activity = normalized.get("current_activity")
-        current_activity = (
-            str(raw_current_activity) if raw_current_activity is not None else None
-        )
-
-        raw_skipped = normalized.get("skipped_files", [])
-        skipped_files = (
-            [str(entry) for entry in raw_skipped] if isinstance(raw_skipped, list) else []
-        )
-
-        return cls(
-            daemon_state=daemon_state_value,
-            watched_directories=watched_directories,
-            processed_count=processed_count,
-            failed_count=failed_count,
-            current_file=current_file,
-            last_updated=last_updated,
-            pid=pid,
-            start_token=start_token,
-            last_error=last_error,
-            last_error_at=last_error_at,
-            current_activity=current_activity,
-            skipped_files=skipped_files,
-        )
+        The file is written only by this codebase, atomically, and ``load()``
+        already answers any unusable file with a default ``WorkerState`` -- so
+        per-field type coercion here amounted to ~70 lines defending against a
+        hand-mangled file. Only the liveness-critical fields keep a type check
+        (a non-int pid must not reach ``os.kill``); everything else is display.
+        """
+        names = {f.name for f in dataclasses.fields(cls)}
+        kwargs: dict[str, Any] = {key: value for key, value in data.items() if key in names}
+        try:
+            kwargs["daemon_state"] = DaemonState(kwargs.get("daemon_state"))
+        except ValueError:
+            kwargs["daemon_state"] = DaemonState.STOPPED
+        if not isinstance(kwargs.get("pid"), int):
+            kwargs["pid"] = None
+        if not isinstance(kwargs.get("start_token"), str):
+            kwargs["start_token"] = None
+        return cls(**kwargs)
 
 
 class StateManager:
@@ -174,47 +127,19 @@ class StateManager:
         tmp_path.write_text(json.dumps(state.to_dict(), indent=2), encoding="utf-8")
         os.replace(tmp_path, self.state_path)
 
-    def update(
-        self,
-        daemon_state: Any = UNSET,
-        watched_directories: Any = UNSET,
-        processed_count: Any = UNSET,
-        failed_count: Any = UNSET,
-        current_file: Any = UNSET,
-        pid: Any = UNSET,
-        start_token: Any = UNSET,
-        last_error: Any = UNSET,
-        last_error_at: Any = UNSET,
-        current_activity: Any = UNSET,
-        skipped_files: Any = UNSET,
-    ) -> WorkerState:
-        """Update specific fields and save."""
+    def update(self, **changes: Any) -> WorkerState:
+        """Update the given fields and save; an absent keyword means unchanged.
+
+        Unknown names raise: with ``Any``-typed values the old 11-parameter
+        UNSET chain bought no type safety, only ~40 lines -- but a typo'd field
+        silently creating a dead attribute would be worse than either.
+        """
         with self._lock:
             state = self.load()
-
-            if daemon_state is not UNSET:
-                state.daemon_state = daemon_state
-            if watched_directories is not UNSET:
-                state.watched_directories = watched_directories
-            if processed_count is not UNSET:
-                state.processed_count = processed_count
-            if failed_count is not UNSET:
-                state.failed_count = failed_count
-            if current_file is not UNSET:
-                state.current_file = current_file
-            if pid is not UNSET:
-                state.pid = pid
-            if start_token is not UNSET:
-                state.start_token = start_token
-            if last_error is not UNSET:
-                state.last_error = last_error
-            if last_error_at is not UNSET:
-                state.last_error_at = last_error_at
-            if current_activity is not UNSET:
-                state.current_activity = current_activity
-            if skipped_files is not UNSET:
-                state.skipped_files = skipped_files
-
+            for name, value in changes.items():
+                if not hasattr(state, name):
+                    raise TypeError(f"WorkerState has no field {name!r}")
+                setattr(state, name, value)
             self.save(state)
             return state
 

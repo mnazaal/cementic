@@ -27,13 +27,11 @@ from cementic.revisions import (
     materialize_pending_embeddings,
 )
 from cementic.vector_store import (
-    FILTER_COLUMNS,
     create_table_sql,
     ensure_vector_table_schema,
     index_access_method,
     upsert_vectors,
     vector_index_name,
-    vector_table_columns,
     vector_table_exists,
     vector_table_name,
 )
@@ -444,52 +442,6 @@ def test_force_rebuilds_even_when_the_method_is_unchanged(
     reindex_collection(pg_session, "forced", config=pg_config, force=True)
 
     assert _relfilenode() != before
-    cleanup_pg_tables(pg_session)
-
-
-@pytest.mark.pg
-def test_an_old_vector_table_is_migrated_without_re_embedding(pg_engine, pg_session) -> None:
-    """A table created before the filter columns must gain them from its own rows.
-
-    cementic has no migration framework, and these per-profile tables are not in
-    `Base.metadata` at all, so the upgrade has to happen where the DDL lives.
-    Re-embedding instead would cost hours on a large corpus for data already
-    present in the joins.
-    """
-    cleanup_pg_tables(pg_session)
-    revision = seed_active_vector_collection(
-        pg_session,
-        collection="legacy",
-        source_path="/docs/legacy.pdf",
-        chunks=[("legacy text", [1.0, 0.0, 0.0, 0.0])],
-    )
-    pg_session.commit()
-    profile_id = revision.embedding_profile_id
-    table = vector_table_name(profile_id)
-
-    # Reduce the table to its pre-migration shape, keeping the vectors.
-    with pg_engine.begin() as conn:
-        for column in FILTER_COLUMNS:
-            conn.execute(text(f"ALTER TABLE {table} DROP COLUMN {column}"))
-    with pg_engine.connect() as conn:
-        assert not set(FILTER_COLUMNS) & vector_table_columns(conn, profile_id)
-        before = conn.execute(text(f"SELECT count(*) FROM {table}")).scalar()
-
-    with pg_engine.begin() as conn:
-        ensure_vector_table_schema(conn, profile_id, VECTOR_DIM)
-
-    with pg_engine.connect() as conn:
-        assert set(FILTER_COLUMNS) <= vector_table_columns(conn, profile_id)
-        row = conn.execute(
-            text(
-                f"SELECT collection, extractor_profile_id, chunk_profile_id FROM {table}"
-            )
-        ).one()
-        # Every vector survived: the upgrade is an UPDATE, not a rebuild.
-        assert conn.execute(text(f"SELECT count(*) FROM {table}")).scalar() == before
-    assert row.collection == "legacy"
-    assert row.extractor_profile_id == revision.extractor_profile_id
-    assert row.chunk_profile_id == revision.chunk_profile_id
     cleanup_pg_tables(pg_session)
 
 
