@@ -17,6 +17,7 @@ from cementic.db import (
     get_engine,
     get_session_factory,
 )
+from cementic.embedding_runtime import DaemonHealth
 from cementic.revisions import (
     BUILDING_STATUSES,
     bucket_revisions_by_status,
@@ -97,6 +98,9 @@ class HealthStatus:
     embedding_provider: str
     embedding_healthy: bool
     llama_daemon: str
+    #: The probe's classification; None means the probe itself failed and
+    #: ``llama_daemon`` carries the reason.
+    llama_daemon_health: DaemonHealth | None = None
 
 
 @dataclass(frozen=True)
@@ -409,39 +413,43 @@ def check_health(config: Config) -> HealthStatus:
 
     embedding_provider = config.pipeline.embedding_provider
 
-    llama_daemon = "N/A"
-    if embedding_provider == "llama-cpp":
-        from cementic.embedding_runtime import llama_daemon_status
+    from cementic.embedding_runtime import llama_daemon_status
 
-        llama_daemon = llama_daemon_status(config)
+    llama_daemon = llama_daemon_status(config)
 
     # One quick probe, no waiting. This used to build the client through
     # `create_provider`, whose own busy-poll blocks for up to two minutes -- and
     # then the result was overridden from the pid file anyway, which was already
     # known above. A status read must not wait out an in-flight batch.
-    embedding_healthy = False
-    if embedding_provider == "llama-cpp":
-        from cementic.embedding_runtime import (
-            EMBED_PROBE_SECONDS,
-            DaemonHealth,
-            build_llama_cpp_client,
-            probe_daemon,
-        )
+    from cementic.embedding_runtime import (
+        EMBED_PROBE_SECONDS,
+        build_llama_cpp_client,
+        describe_daemon_health,
+        probe_daemon,
+    )
 
-        try:
-            health = probe_daemon(
-                build_llama_cpp_client(config),
-                config,
-                wait_seconds=0.0,
-                # The second stage exercises the embedding path itself: the
-                # model list is served without the model lock, so on its own it
-                # called a daemon healthy that had answered no embedding for 21
-                # hours. Costs up to EMBED_PROBE_SECONDS, and only when the
-                # first stage already said healthy.
-                embed_probe_seconds=EMBED_PROBE_SECONDS,
-            )
-        except Exception:
-            health = DaemonHealth.DOWN
+    embedding_healthy = False
+    llama_daemon_health: DaemonHealth | None
+    try:
+        health = probe_daemon(
+            build_llama_cpp_client(config),
+            config,
+            wait_seconds=0.0,
+            # The second stage exercises the embedding path itself: the
+            # model list is served without the model lock, so on its own it
+            # called a daemon healthy that had answered no embedding for 21
+            # hours. Costs up to EMBED_PROBE_SECONDS, and only when the
+            # first stage already said healthy.
+            embed_probe_seconds=EMBED_PROBE_SECONDS,
+        )
+    except Exception as error:
+        # Keep the reason instead of flattening to DOWN: an ambiguous-PID
+        # refusal used to render as a benign "stopped (autostarts when
+        # needed)" -- for a state where autostart raises the same refusal.
+        llama_daemon = f"unknown ({error})"
+        llama_daemon_health = None
+    else:
+        llama_daemon_health = health
         # BUSY counts as healthy: the process is confirmed alive and merely
         # mid-batch. WRONG_MODEL does not -- the daemon answered, and what it
         # serves is not what this config asks for. Treating that as healthy is
@@ -450,27 +458,15 @@ def check_health(config: Config) -> HealthStatus:
         # it answers listings but no embeddings, with no worker load to explain
         # the silence.
         embedding_healthy = health in (DaemonHealth.HEALTHY, DaemonHealth.BUSY)
-        if health is DaemonHealth.WRONG_MODEL:
-            llama_daemon = "running, serving a different model"
-        elif health is DaemonHealth.WEDGED:
-            llama_daemon = (
-                "running but not answering embeddings; restart it with "
-                "`cementic embedding stop && cementic embedding start`"
-            )
-    else:
-        try:
-            from cementic.embedding_runtime import create_provider, runtime_spec_from_config
-
-            client = create_provider(runtime_spec_from_config(config), config, autostart=False)
-            embedding_healthy = client.health_check()
-        except Exception:
-            embedding_healthy = False
+        if health in (DaemonHealth.WRONG_MODEL, DaemonHealth.WEDGED):
+            llama_daemon = describe_daemon_health(health)
 
     return HealthStatus(
         db_reachable=db_reachable,
         embedding_provider=embedding_provider,
         embedding_healthy=embedding_healthy,
         llama_daemon=llama_daemon,
+        llama_daemon_health=llama_daemon_health,
     )
 
 

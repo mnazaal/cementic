@@ -22,6 +22,7 @@ from cementic.cli import (
 from cementic.cli_collection import collection_callback
 from cementic.collections import PromotionOutcome, ReindexOutcome
 from cementic.config import Config, default_config_path
+from cementic.embedding_runtime import DaemonHealth
 from cementic.pipeline_worker import PipelineCounts, PipelineWorker
 from cementic.state import StateManager
 from cementic.status_service import WorkerStatus
@@ -2054,6 +2055,7 @@ class TestStatusExitCodes:
             embedding_provider="llama-cpp",
             embedding_healthy=False,
             llama_daemon="stopped",
+            llama_daemon_health=DaemonHealth.DOWN,
         )
 
         result = runner.invoke(app, ["status"])

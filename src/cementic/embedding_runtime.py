@@ -305,9 +305,6 @@ class RemoteEmbeddingClient(EmbeddingProvider):
             return False
         return True
 
-    def health_check(self) -> bool:
-        return self.matches_expected_runtime()
-
     def count_model_tokens(self, text: str) -> int | None:
         """Tokens in ``text`` per the *model's own* tokenizer, or None if unsupported.
 
@@ -574,8 +571,31 @@ class DaemonHealth(str, Enum):
 EMBED_PROBE_SECONDS = 5.0
 
 
+def describe_daemon_health(health: DaemonHealth) -> str:
+    """One shared human message per daemon state.
+
+    `status` and `doctor` each kept their own mapping around identical
+    ``probe_daemon`` calls; a drift there means the two commands describe the
+    same daemon differently -- the exact defect ``probe_daemon`` was built to
+    end. The DOWN text is deliberately bare: whether "stopped" is fine or a
+    fault depends on ``daemon_autostart``, which is the caller's context.
+    """
+    if health is DaemonHealth.HEALTHY:
+        return "reachable"
+    if health is DaemonHealth.BUSY:
+        return "running but busy (serving a request); not idle enough to answer /v1/models"
+    if health is DaemonHealth.WRONG_MODEL:
+        return "serving a different model than this config expects"
+    if health is DaemonHealth.WEDGED:
+        return (
+            "running but not answering embeddings; restart it with "
+            "`cementic embedding stop && cementic embedding start`"
+        )
+    return "stopped"
+
+
 def probe_daemon(
-    client: EmbeddingProvider,
+    client: RemoteEmbeddingClient,
     config: Config,
     *,
     wait_seconds: float = 0.0,
@@ -600,9 +620,6 @@ def probe_daemon(
     a worker's batch legitimately holds the model lock for tens of seconds,
     and misreporting that as a wedge would page the user during every index.
     """
-    if not isinstance(client, RemoteEmbeddingClient):
-        return DaemonHealth.HEALTHY if client.health_check() else DaemonHealth.DOWN
-
     served = client.probe_served_runtime()
     if served is True:
         if embed_probe_seconds <= 0 or client.probe_embedding(embed_probe_seconds):

@@ -8,7 +8,6 @@ import pytest
 import requests
 
 from cementic.config import Config, resolve_llama_model_path
-from cementic.embedding_provider import EmbeddingProvider
 from cementic.embedding_runtime import (
     AmbiguousDaemonPidsError,
     DaemonHealth,
@@ -44,35 +43,6 @@ class TestRemoteEmbeddingClient:
             host="localhost", port=8081, embedding_dim=384, expected_fingerprint="abc"
         )
         assert client.base_url == "http://localhost:8081"
-
-    @patch("cementic.embedding_runtime.requests.get")
-    def test_health_check_matches_served_model(self, mock_get) -> None:
-        mock_resp = MagicMock()
-        mock_resp.json.return_value = {"data": [{"id": "abc"}]}
-        mock_get.return_value = mock_resp
-
-        client = RemoteEmbeddingClient(
-            host="localhost", port=8081, embedding_dim=384, expected_fingerprint="abc"
-        )
-        assert client.health_check() is True
-
-    @patch("cementic.embedding_runtime.requests.get")
-    def test_health_check_mismatch(self, mock_get) -> None:
-        mock_resp = MagicMock()
-        mock_resp.json.return_value = {"data": [{"id": "wrong"}]}
-        mock_get.return_value = mock_resp
-
-        client = RemoteEmbeddingClient(
-            host="localhost", port=8081, embedding_dim=384, expected_fingerprint="abc"
-        )
-        assert client.health_check() is False
-
-    @patch("cementic.embedding_runtime.requests.get", side_effect=requests.ConnectionError)
-    def test_health_check_connection_error(self, mock_get) -> None:
-        client = RemoteEmbeddingClient(
-            host="localhost", port=8081, embedding_dim=384, expected_fingerprint="abc"
-        )
-        assert client.health_check() is False
 
     @patch("cementic.embedding_runtime.requests.post")
     def test_embed_single(self, mock_post) -> None:
@@ -920,11 +890,6 @@ class TestProbeDaemon:
 
         assert probe_daemon(client, Config()) is DaemonHealth.HEALTHY
         client.probe_embedding.assert_not_called()
-
-    def test_a_non_remote_provider_degrades_to_its_own_check(self) -> None:
-        client = MagicMock(spec=EmbeddingProvider)
-        client.health_check.return_value = False
-        assert probe_daemon(client, Config()) is DaemonHealth.DOWN
 
 
 class TestDaemonPidFile:

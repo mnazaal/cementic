@@ -541,7 +541,10 @@ class TestCheckHealth:
         config.pipeline.embedding_provider = "llama-cpp"
         mock_conn = MagicMock()
         mock_engine.return_value.connect.return_value.__enter__.return_value = mock_conn
-        mock_client.return_value.health_check.return_value = True
+        client = MagicMock(spec=RemoteEmbeddingClient)
+        client.probe_served_runtime.return_value = True
+        client.probe_embedding.return_value = True
+        mock_client.return_value = client
 
         result = check_health(config)
         assert result.embedding_provider == "llama-cpp"
@@ -713,13 +716,25 @@ class TestCheckHealth:
                 result = check_health(config)
                 assert result.llama_daemon == "stopped"
 
-    def test_health_llama_daemon_na_for_non_llama_provider(self) -> None:
-        config = Config()
-        config.pipeline.embedding_provider = "other"
+    @patch("cementic.status_service.get_engine")
+    @patch("cementic.embedding_runtime.build_llama_cpp_client")
+    def test_a_failed_probe_keeps_its_reason(self, mock_client, mock_engine) -> None:
+        """Regression: any probe exception was flattened to DOWN, so an
+        ambiguous-PID refusal rendered as a benign "stopped (autostarts when
+        needed)" -- for a state where autostart raises the same refusal."""
+        from cementic.embedding_runtime import AmbiguousDaemonPidsError
 
-        with patch("cementic.status_service.get_engine"):
-            result = check_health(config)
-            assert result.llama_daemon == "N/A"
+        mock_conn = MagicMock()
+        mock_engine.return_value.connect.return_value.__enter__.return_value = mock_conn
+        client = MagicMock(spec=RemoteEmbeddingClient)
+        client.probe_served_runtime.side_effect = AmbiguousDaemonPidsError([111, 222])
+        mock_client.return_value = client
+
+        result = check_health(Config())
+
+        assert result.embedding_healthy is False
+        assert result.llama_daemon_health is None
+        assert "111, 222" in result.llama_daemon
 
 
 class TestLoadFileProgress:

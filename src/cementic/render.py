@@ -22,6 +22,7 @@ from rich.markup import escape
 
 from cementic.collections import collection_exists, list_collections
 from cementic.config import Config
+from cementic.embedding_runtime import DaemonHealth
 from cementic.status_service import (
     load_file_progress,
     load_pipeline_status,
@@ -97,15 +98,14 @@ def _print_status_summary(
         console.print(f"{'database':<11} {_state(health.db_reachable, 'reachable', 'unreachable')}")
         if health.embedding_healthy:
             embedding_text = "[green]healthy[/green]"
-        elif health.llama_daemon.startswith("running"):
-            # Unhealthy *and* running is a different situation from not running,
-            # and check_health has already worked out which -- "serving a
-            # different model", or wedged with the restart command to fix it.
-            # Flattening both into the autostart line below said "stopped" about
-            # a live process and promised that starting it on demand would help,
-            # when a wrong-model daemon has to be restarted and a wedged one
-            # will not answer at all. The precise reason was computed and then
-            # discarded; only `--verbose` ever showed it.
+        elif health.llama_daemon_health is not DaemonHealth.DOWN:
+            # Unhealthy and not plainly stopped: wrong model, wedged, or a
+            # probe that itself failed (llama_daemon_health None -- e.g. an
+            # ambiguous-PID refusal, which autostart would hit identically).
+            # check_health has already worked out the reason; dispatching on
+            # the enum rather than prefix-matching the prose keeps a reworded
+            # message from silently falling to the benign autostart line
+            # below, which promises a repair that cannot happen here.
             embedding_text = f"[red]{escape(health.llama_daemon)}[/red]"
         elif config.llama_cpp.daemon_autostart:
             # Same state `cementic doctor` calls a warning: not running now, but

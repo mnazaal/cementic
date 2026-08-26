@@ -4,7 +4,7 @@ from unittest.mock import MagicMock, patch
 
 from cementic.config import Config
 from cementic.doctor import _daemon_state, collect_doctor_report
-from cementic.embedding_runtime import DaemonHealth
+from cementic.embedding_runtime import AmbiguousDaemonPidsError, DaemonHealth
 
 
 def _config_with_model_path(tmp_path, exists: bool):
@@ -25,7 +25,7 @@ class TestConfigCheck:
     that was not being used.
     """
 
-    @patch("cementic.doctor._daemon_state", return_value=(True, "reachable"))
+    @patch("cementic.doctor._daemon_state", return_value=(True, True, "reachable"))
     @patch("cementic.doctor.get_engine")
     def test_malformed_config_file_fails_the_check(
         self, mock_get_engine, mock_daemon, tmp_path, monkeypatch
@@ -41,7 +41,7 @@ class TestConfigCheck:
         assert "malformed TOML" in report["checks"]["config"]["message"]
         assert report["ok"] is False
 
-    @patch("cementic.doctor._daemon_state", return_value=(True, "reachable"))
+    @patch("cementic.doctor._daemon_state", return_value=(True, True, "reachable"))
     @patch("cementic.doctor.get_engine")
     def test_valid_config_file_passes(
         self, mock_get_engine, mock_daemon, tmp_path, monkeypatch
@@ -55,7 +55,7 @@ class TestConfigCheck:
 
         assert report["checks"]["config"]["status"] == "ok"
 
-    @patch("cementic.doctor._daemon_state", return_value=(True, "reachable"))
+    @patch("cementic.doctor._daemon_state", return_value=(True, True, "reachable"))
     @patch("cementic.doctor.get_engine")
     def test_no_config_file_is_not_a_failure(
         self, mock_get_engine, mock_daemon, tmp_path
@@ -69,7 +69,7 @@ class TestConfigCheck:
 
 
 class TestExtensionFailureIsNotADatabaseFailure:
-    @patch("cementic.doctor._daemon_state", return_value=(True, "reachable"))
+    @patch("cementic.doctor._daemon_state", return_value=(True, True, "reachable"))
     @patch("cementic.doctor._extension_check", side_effect=RuntimeError("permission denied"))
     @patch("cementic.doctor.get_engine")
     def test_extension_inspection_failure_keeps_database_ok(
@@ -104,14 +104,68 @@ class TestDaemonCheck:
 
     @patch("cementic.doctor.probe_daemon", return_value=DaemonHealth.BUSY)
     def test_busy_daemon_is_healthy(self, mock_probe) -> None:
-        healthy, message = _daemon_state(Config())
+        healthy, repairable, message = _daemon_state(Config())
         assert healthy is True
         assert "busy" in message
 
     @patch("cementic.doctor.probe_daemon", return_value=DaemonHealth.DOWN)
     def test_dead_daemon_is_not_healthy(self, mock_probe) -> None:
-        healthy, _message = _daemon_state(Config())
+        healthy, repairable, _message = _daemon_state(Config())
         assert healthy is False
+        # A stopped daemon is exactly what autostart repairs.
+        assert repairable is True
+
+    @patch("cementic.doctor.probe_daemon", return_value=DaemonHealth.WEDGED)
+    @patch("cementic.doctor.get_engine")
+    def test_a_wedged_daemon_fails_even_with_autostart(
+        self, mock_get_engine, mock_probe, tmp_path
+    ) -> None:
+        """Autostart cannot repair a wedge: the daemon still answers /v1/models
+        with the expected fingerprint, so the resolver returns it unrepaired.
+        Excusing every unhealthy state behind autostart let a wedged daemon
+        pass `doctor` at ok -- the state behind the 21-hour incident."""
+        mock_get_engine.side_effect = Exception("no db in this test")
+        config = _config_with_model_path(tmp_path, exists=True)
+        assert config.llama_cpp.daemon_autostart is True
+
+        report = collect_doctor_report(config)
+
+        assert report["checks"]["daemon"]["status"] == "fail"
+        assert "not answering embeddings" in report["checks"]["daemon"]["message"]
+        assert report["ok"] is False
+
+    @patch("cementic.doctor.probe_daemon", return_value=DaemonHealth.WRONG_MODEL)
+    @patch("cementic.doctor.get_engine")
+    def test_a_wrong_model_daemon_is_a_warning_with_autostart(
+        self, mock_get_engine, mock_probe, tmp_path
+    ) -> None:
+        """Unlike a wedge, a mismatch is repairable: autostart stops the stale
+        daemon and spawns the configured model on the next embedding use."""
+        mock_get_engine.side_effect = Exception("no db in this test")
+        config = _config_with_model_path(tmp_path, exists=True)
+
+        report = collect_doctor_report(config)
+
+        assert report["checks"]["daemon"]["status"] == "warning"
+
+    @patch(
+        "cementic.doctor.probe_daemon",
+        side_effect=AmbiguousDaemonPidsError([111, 222]),
+    )
+    @patch("cementic.doctor.get_engine")
+    def test_ambiguous_daemon_pids_fail_the_check_instead_of_crashing(
+        self, mock_get_engine, mock_probe, tmp_path
+    ) -> None:
+        """The diagnostic tool must report the pathological state, not die of
+        it: probe recovery refuses to guess between candidate processes, and
+        that refusal used to escape `doctor` as a raw traceback."""
+        mock_get_engine.side_effect = Exception("no db in this test")
+        config = _config_with_model_path(tmp_path, exists=True)
+
+        report = collect_doctor_report(config)
+
+        assert report["checks"]["daemon"]["status"] == "fail"
+        assert "111, 222" in report["checks"]["daemon"]["message"]
 
     @patch("cementic.doctor.probe_daemon", return_value=DaemonHealth.DOWN)
     @patch("cementic.doctor.get_engine")

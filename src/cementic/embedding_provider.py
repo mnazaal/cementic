@@ -73,15 +73,6 @@ class EmbeddingProvider(ABC):
         """
         pass
 
-    @abstractmethod
-    def health_check(self) -> bool:
-        """Check if the embedding provider is available and working.
-
-        Returns:
-            True if healthy, False otherwise
-        """
-        pass
-
     @property
     @abstractmethod
     def embedding_dim(self) -> int:

@@ -4,14 +4,21 @@ from types import SimpleNamespace
 
 from cementic import render
 from cementic.config import Config
+from cementic.embedding_runtime import DaemonHealth
 
 
-def _health(*, healthy: bool, llama_daemon: str) -> SimpleNamespace:
+def _health(
+    *,
+    healthy: bool,
+    llama_daemon: str,
+    llama_daemon_health: DaemonHealth | None = DaemonHealth.DOWN,
+) -> SimpleNamespace:
     return SimpleNamespace(
         db_reachable=True,
         embedding_provider="llama-cpp",
         embedding_healthy=healthy,
         llama_daemon=llama_daemon,
+        llama_daemon_health=llama_daemon_health,
     )
 
 
@@ -50,7 +57,13 @@ class TestEmbeddingRowDistinguishesRunningFromStopped:
     """
 
     def test_a_wrong_model_daemon_is_not_called_stopped(self) -> None:
-        output = _summary(_health(healthy=False, llama_daemon="running, serving a different model"))
+        output = _summary(
+            _health(
+                healthy=False,
+                llama_daemon="serving a different model than this config expects",
+                llama_daemon_health=DaemonHealth.WRONG_MODEL,
+            )
+        )
         assert "serving a different model" in output
         assert "stopped (autostarts when needed)" not in output
 
@@ -59,7 +72,9 @@ class TestEmbeddingRowDistinguishesRunningFromStopped:
             "running but not answering embeddings; restart it with "
             "`cementic embedding stop && cementic embedding start`"
         )
-        output = _summary(_health(healthy=False, llama_daemon=wedged))
+        output = _summary(
+            _health(healthy=False, llama_daemon=wedged, llama_daemon_health=DaemonHealth.WEDGED)
+        )
         assert "not answering embeddings" in output
         assert "cementic embedding stop" in output
 
@@ -73,6 +88,26 @@ class TestEmbeddingRowDistinguishesRunningFromStopped:
         assert "unhealthy" in output
 
     def test_a_healthy_daemon_is_unchanged(self) -> None:
-        output = _summary(_health(healthy=True, llama_daemon="running, pid=1234"))
+        output = _summary(
+            _health(
+                healthy=True,
+                llama_daemon="running, pid=1234",
+                llama_daemon_health=DaemonHealth.HEALTHY,
+            )
+        )
         assert "healthy" in output
         assert "serving a different model" not in output
+
+    def test_a_failed_probe_is_not_promised_an_autostart(self) -> None:
+        """llama_daemon_health None means the probe itself failed (e.g. an
+        ambiguous-PID refusal). Autostart hits the same refusal, so the yellow
+        autostart line would promise a repair that cannot happen."""
+        output = _summary(
+            _health(
+                healthy=False,
+                llama_daemon="unknown (found multiple processes ...)",
+                llama_daemon_health=None,
+            )
+        )
+        assert "unknown (found multiple processes" in output
+        assert "stopped (autostarts when needed)" not in output

@@ -16,8 +16,10 @@ from cementic.config import (
 from cementic.db import REQUIRED_DB_EXTENSIONS, get_engine
 from cementic.embedding_runtime import (
     EMBED_PROBE_SECONDS,
+    AmbiguousDaemonPidsError,
     DaemonHealth,
     build_llama_cpp_client,
+    describe_daemon_health,
     probe_daemon,
 )
 
@@ -56,37 +58,42 @@ def _extension_check(conn: Any, name: str) -> dict[str, Any]:
     }
 
 
-def _daemon_state(config: Config) -> tuple[bool, str]:
-    """Return (healthy, message) for the embedding daemon.
+def _daemon_state(config: Config) -> tuple[bool, bool, str]:
+    """Return (healthy, autostart_repairable, message) for the embedding daemon.
 
     Shares one probe with `cementic status`, rather than the bare reachability
     check this used to do. That check asked only whether *something* answered on
     the port, so any llama.cpp server -- serving any model -- reported as ok,
     and the two commands could describe the same daemon differently.
     """
-    health = probe_daemon(
-        build_llama_cpp_client(config),
-        config,
-        wait_seconds=0.0,
-        # Same second stage as `cementic status`: the model list is served
-        # without the model lock, so it cannot see a dead embedding path.
-        embed_probe_seconds=EMBED_PROBE_SECONDS,
-    )
-    if health is DaemonHealth.HEALTHY:
-        return True, "reachable"
-    if health is DaemonHealth.BUSY:
-        # Serializing every request behind one model lock means a daemon that is
+    try:
+        health = probe_daemon(
+            build_llama_cpp_client(config),
+            config,
+            wait_seconds=0.0,
+            # Same second stage as `cementic status`: the model list is served
+            # without the model lock, so it cannot see a dead embedding path.
+            embed_probe_seconds=EMBED_PROBE_SECONDS,
+        )
+    except AmbiguousDaemonPidsError as error:
+        # The diagnostic tool must report the pathological state, not die of
+        # it with a traceback. Not repairable by autostart either: recovery
+        # refuses to guess between the candidate processes.
+        return False, False, str(error)
+    if health in (DaemonHealth.HEALTHY, DaemonHealth.BUSY):
+        # BUSY: serializing every request behind one model lock means a daemon
         # busy indexing cannot answer; that is not the same as broken, and
         # calling it broken made `cementic doctor` exit non-zero mid-build.
-        return True, "running but busy (serving a request); not idle enough to answer /v1/models"
+        return True, True, describe_daemon_health(health)
     if health is DaemonHealth.WRONG_MODEL:
-        return False, "serving a different model than this config expects"
+        # Autostart does repair a mismatch: the stale daemon is stopped and
+        # the configured model spawned on the next embedding use.
+        return False, True, describe_daemon_health(health)
     if health is DaemonHealth.WEDGED:
-        return False, (
-            "running but not answering embeddings; restart it with "
-            "`cementic embedding stop && cementic embedding start`"
-        )
-    return False, ""
+        # Autostart cannot repair a wedge: the daemon still answers /v1/models
+        # with the expected fingerprint, so the resolver returns it as-is.
+        return False, False, describe_daemon_health(health)
+    return False, True, ""
 
 
 def collect_doctor_report(config: Config) -> dict[str, Any]:
@@ -196,11 +203,14 @@ def collect_doctor_report(config: Config) -> dict[str, Any]:
         ),
     }
 
-    daemon_healthy, daemon_message = _daemon_state(config)
+    daemon_healthy, daemon_repairable, daemon_message = _daemon_state(config)
     daemon_autostart = config.llama_cpp.daemon_autostart
-    daemon_ok = daemon_healthy or daemon_autostart
+    # Autostart only excuses states it can actually repair. Excusing every
+    # unhealthy state let a wedged daemon pass `doctor` at ok -- the exact
+    # state behind the 21-hour incident the two-stage probe exists to catch.
+    daemon_ok = daemon_healthy or (daemon_autostart and daemon_repairable)
     checks["daemon"] = {
-        "status": "ok" if daemon_healthy else "warning" if daemon_autostart else "fail",
+        "status": "ok" if daemon_healthy else "warning" if daemon_ok else "fail",
         "reachable": daemon_healthy,
         "autostart": daemon_autostart,
         "message": (
@@ -234,13 +244,6 @@ def _chunk_budget_check(config: Config) -> dict[str, Any]:
 
     chunk_size = config.pipeline.chunk_size
     n_ctx = config.llama_cpp.n_ctx
-    if config.pipeline.embedding_provider != "llama-cpp":
-        return {
-            "status": "ok",
-            "chunk_size": chunk_size,
-            "message": f"not checked for provider {config.pipeline.embedding_provider}",
-        }
-
     worst_case = (chunk_size + _TASK_PREFIX_TOKEN_ALLOWANCE) * _TOKEN_RATIO_UPPER_BOUND
     fast_path = worst_case <= n_ctx
     largest_fast = int(n_ctx / _TOKEN_RATIO_UPPER_BOUND) - _TASK_PREFIX_TOKEN_ALLOWANCE
