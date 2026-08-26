@@ -55,3 +55,56 @@ class TestRunnerCommands:
         assert result.exit_code == 1
         assert result.stdout.strip() == ""
         assert "config error" in result.stderr
+
+
+class TestRunnerErrorExits:
+    """The one-line stderr reasons that land in the background log.
+
+    `cementic start` points the user at that log; each of these paths used to
+    be uncovered, so a regression back to a raw traceback (or a zero exit)
+    would pass the suite.
+    """
+
+    def test_source_watcher_rejects_an_invalid_collection_name(self) -> None:
+        result = runner.invoke(app, ["source-watcher", "/tmp/x", "-c", "bad name!"])
+        assert result.exit_code == 1
+        assert "Collection name" in result.stderr
+
+    def test_pipeline_worker_rejects_an_invalid_collection_name(self) -> None:
+        result = runner.invoke(app, ["pipeline-worker", "-c", "bad name!"])
+        assert result.exit_code == 1
+        assert "Collection name" in result.stderr
+
+    @patch("cementic.runner.get_config")
+    @patch("cementic.runner.Bootstrapper")
+    @patch("cementic.runner.SourceWatcher")
+    def test_source_watcher_startup_runtime_error_is_one_stderr_line(
+        self, mock_watcher, mock_boot, mock_cfg
+    ) -> None:
+        mock_watcher.return_value.start.side_effect = RuntimeError("no watchable directories")
+        result = runner.invoke(app, ["source-watcher", "/tmp/x"])
+        assert result.exit_code == 1
+        assert "Source watcher failed: no watchable directories" in result.stderr
+
+    @patch("cementic.runner.get_config")
+    @patch("cementic.runner.Bootstrapper")
+    @patch("cementic.runner.PipelineWorker")
+    def test_pipeline_worker_startup_runtime_error_is_one_stderr_line(
+        self, mock_worker, mock_boot, mock_cfg
+    ) -> None:
+        mock_worker.return_value.start.side_effect = RuntimeError("unindexable dimension")
+        mock_worker.return_value.fatal_reason = None
+        result = runner.invoke(app, ["pipeline-worker"])
+        assert result.exit_code == 1
+        assert "Pipeline worker failed: unindexable dimension" in result.stderr
+
+    @patch("cementic.runner.get_config")
+    @patch("cementic.runner.Bootstrapper")
+    @patch("cementic.runner.SourceWatcher")
+    def test_bootstrap_failure_is_one_stderr_line(
+        self, mock_watcher, mock_boot, mock_cfg
+    ) -> None:
+        mock_boot.return_value.ensure_for_convert.side_effect = RuntimeError("db unreachable")
+        result = runner.invoke(app, ["source-watcher", "/tmp/x"])
+        assert result.exit_code == 1
+        assert "Bootstrap failed: db unreachable" in result.stderr

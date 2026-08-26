@@ -511,3 +511,63 @@ class TestFatalStartupReasonReachesTheStateFile:
         state = watcher.state_manager.load()
         assert state.last_error is None
         assert state.last_error_at is None
+
+
+class TestRegistrationGuardsAreCounted:
+    """The `_register_document` rejection guards must reach `record_skipped`.
+
+    The guards' own comment records the defect: rejections were logged at
+    ERROR but touched no counter, so `status --verbose` read "processed=N,
+    failed=0" while an arbitrary number of documents had been silently
+    dropped. The scan-walk and handler paths were pinned; the registration
+    guards themselves were not.
+    """
+
+    def _watcher(self, tmp_path, root):
+        watcher = SourceWatcher()
+        watcher.state_manager.state_path = tmp_path / "state.json"
+        watcher._watched_roots = [root]
+        return watcher
+
+    def test_a_symlink_is_skipped_and_counted(self, tmp_path):
+        root = tmp_path / "root"
+        root.mkdir()
+        target = root / "real.md"
+        target.write_text("content")
+        link = root / "link.md"
+        link.symlink_to(target)
+        watcher = self._watcher(tmp_path, root)
+
+        watcher._register_document(str(link))
+
+        state = watcher.state_manager.load()
+        assert state.failed_count == 1
+        assert any("symlink" in entry for entry in state.skipped_files)
+
+    def test_a_file_outside_the_watched_roots_is_skipped_and_counted(self, tmp_path):
+        root = tmp_path / "root"
+        root.mkdir()
+        outside = tmp_path / "elsewhere.md"
+        outside.write_text("content")
+        watcher = self._watcher(tmp_path, root)
+
+        watcher._register_document(str(outside))
+
+        state = watcher.state_manager.load()
+        assert state.failed_count == 1
+        assert any("outside watched roots" in entry for entry in state.skipped_files)
+
+    def test_an_oversized_file_is_skipped_and_counted(self, tmp_path):
+        root = tmp_path / "root"
+        root.mkdir()
+        big = root / "big.pdf"
+        big.touch()
+        # Sparse: past the 512 MiB guard without writing a byte of data.
+        os.truncate(big, 513 * 1024 * 1024)
+        watcher = self._watcher(tmp_path, root)
+
+        watcher._register_document(str(big))
+
+        state = watcher.state_manager.load()
+        assert state.failed_count == 1
+        assert any("too large" in entry for entry in state.skipped_files)

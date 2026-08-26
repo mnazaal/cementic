@@ -2917,3 +2917,84 @@ class TestFifthReviewSection41Leftovers:
             result = runner.invoke(app, ["search", "q", "-c", "persnal"])
 
         assert "no results" not in result.stdout
+
+
+class TestPromoteIncompleteArithmetic:
+    """The one refusal branch that computes numbers.
+
+    empty/blocked/no-ready are pinned elsewhere; this branch derives three
+    pending counts, and wrong arithmetic here prints confidently wrong numbers
+    while still exiting 1 -- invisible to any exit-code assertion.
+    """
+
+    @patch("cementic.cli_shared.get_session_factory")
+    @patch("cementic.cli_shared.get_engine")
+    def test_pending_counts_are_derived_per_stage(
+        self, mock_get_engine, mock_get_session_factory
+    ):
+        revision = SimpleNamespace(collection="research", status="ready", label="rev-1")
+        counts = PipelineCounts(
+            documents=5,
+            extracted_done=3,
+            extracted_failed=1,
+            chunked_done=2,
+            chunked_failed=0,
+            total_chunks=10,
+            done_embeddings=6,
+            failed_embeddings=1,
+        )
+        mock_session = MagicMock()
+        mock_session.__enter__.return_value = mock_session
+        mock_session.__exit__.return_value = False
+        mock_get_session_factory.return_value = lambda: mock_session
+
+        outcome = PromotionOutcome(status="incomplete", revision=revision, counts=counts)
+        with patch("cementic.cli_collection.promote_ready_revision", return_value=outcome):
+            result = runner.invoke(app, ["collection", "promote", "research"])
+
+        assert result.exit_code == 1
+        assert "status: incomplete" in result.output
+        assert "extract=1" in result.output  # 5 docs - 3 done - 1 failed
+        assert "chunk=1" in result.output  # 3 extracted - 2 chunked - 0 failed
+        assert "embed=3" in result.output  # 10 chunks - 6 done - 1 failed
+        assert "--force" in result.output
+
+
+class TestStopEpermWorkers:
+    """EPERM proves the process exists and is not ours to signal.
+
+    Folding it into "already gone" made stop print "cleared stale state" and
+    delete the state files of workers that kept indexing; and advising
+    --force would send the user at a retry guaranteed to fail the same way.
+    """
+
+    def test_unsignalable_workers_are_reported_not_cleared(self, tmp_path):
+        state_path = tmp_path / "supervisor.json"
+        state_path.write_text(
+            json.dumps(
+                {
+                    "collection": "papers",
+                    "directories": [],
+                    "processes": [
+                        {"name": "pipeline-worker", "pid": 4321, "start_token": "tok"}
+                    ],
+                }
+            )
+        )
+        with (
+            patch("cementic.cli._get_supervisor_state_path", return_value=state_path),
+            patch("cementic.cli_shared._get_supervisor_state_path", return_value=state_path),
+            patch("cementic.cli._is_managed_proc_alive", return_value=True),
+            patch("cementic.cli.os.kill", side_effect=PermissionError("not permitted")),
+            patch("cementic.cli.wait_for_exit", return_value=[]),
+            patch("cementic.cli._pipeline_worker_activity", return_value=None),
+        ):
+            result = runner.invoke(app, ["stop"])
+
+        assert result.exit_code == 1
+        assert "permission denied" in result.stderr
+        assert "still running" in result.stderr
+        # Only a timed-out process can be helped by --force; advising it for an
+        # EPERM-only remainder sends the user at a guaranteed-identical failure.
+        assert "use --force" not in result.stderr
+        assert state_path.exists()
