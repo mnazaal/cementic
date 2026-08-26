@@ -126,8 +126,6 @@ addopts = ["--strict-markers", "--strict-config"]
 filterwarnings = ["error"]
 markers = [
     "pg: tests requiring a running PostgreSQL container (podman compose up -d)",
-    "container: tests requiring podman for container start/stop",
-    "daemon: tests requiring a real daemon subprocess",
 ]
 
 [tool.coverage.run]

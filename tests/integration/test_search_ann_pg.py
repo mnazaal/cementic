@@ -39,7 +39,7 @@ from cementic.vector_store import (
     vector_index_name,
     vector_table_name,
 )
-from tests.integration.test_pg_helpers import _fake_hash, cleanup_pg_tables
+from tests.integration.pg_helpers import _fake_hash, cleanup_pg_tables
 
 DIM = 16
 CROWD = 4_000

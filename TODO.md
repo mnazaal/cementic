@@ -44,17 +44,11 @@ CI is done — `.github/workflows/ci.yml` runs unit, `integration -m "not pg"` a
 `integration -m pg` as separate jobs; the last has no `services:` block, since
 the `pg_engine` fixture brings up `compose.yml`'s pgvector+vectorscale
 container itself. Keep it green with `./scripts/check.sh` before pushing.
-Remaining gaps, from the 2026-08-14 review:
 
-- Under Python 3.14, several unit tests leak sqlite3 connections (unclosed
-  engines in test fixtures) and pytest 9's unraisable-exception hook escalates
-  the ResourceWarnings to failures with a GC-timing-dependent failing set.
-  Invisible on CI's pinned 3.12; found by a CI-simulation audit 2026-08-18.
-  Close the engines (`engine.dispose()` in fixtures) before any 3.14 upgrade.
-- No test connects a pipeline failure to what `cementic status` prints. The
-  DB-row assertions and the status-rendering assertions never meet, which is how
-  a whole class of "reports success, dropped the work" defects stayed invisible
-  to a green suite.
+Both gaps the 2026-08-14 review recorded here are closed: the 3.14 sqlite
+engine leak (autouse dispose fixture, `tests/unit/conftest.py`) and the
+missing pipeline-failure-to-status connection
+(`test_status_verbose_reports_a_real_extraction_and_embedding_failure`).
 
 ## Later
 

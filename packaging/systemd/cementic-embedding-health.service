@@ -11,8 +11,12 @@ Description=cementic embedding server health probe
 
 [Service]
 Type=oneshot
+# The alias comes from the same file the server reads, so the probe cannot
+# post a stale model id after a fingerprint change. systemd expands
+# ${CEMENTIC_ALIAS} before the shell sees the command.
+EnvironmentFile=%h/.config/cementic/embedding.env
 ExecStart=/bin/sh -c '\
   curl -sf -m 90 -o /dev/null -X POST http://127.0.0.1:11555/v1/embeddings \
     -H "Content-Type: application/json" \
-    -d "{\\"model\\":\\"4e24fc85fe46967661c6a12c3520527be6a9a38d8f93cc7b18eb46f267fc85c1\\",\\"input\\":\\"ping\\"}" \
+    -d "{\\"model\\":\\"${CEMENTIC_ALIAS}\\",\\"input\\":\\"ping\\"}" \
   || systemctl --user restart cementic-embedding.service'

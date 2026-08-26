@@ -34,9 +34,9 @@ hnsw_iterative_scan = "relaxed_order"
 build_memory = "2GB"
 
 [llama_cpp]
-# Spelled exactly as the built-in default: the model path string is part of the
-# embedding profile fingerprint, so writing "./models/..." here instead would
-# mint a second profile for the same file and re-embed the whole corpus.
+# Model identity is the file's content digest, so any spelling of the path
+# that resolves to the same file is the same profile. Pointing at a
+# *different* file re-embeds the corpus.
 model_path = "models/nomic-embed-text-v2-moe.Q8_0.gguf"
 
 [extraction]
@@ -44,6 +44,8 @@ use_ocr = false
 
 # Optional: choose a specific extractor per file type. Unset types use the
 # registry default. Keys are bare file types; values are registered extractor
-# names (currently: "pymupdf4llm" for pdf, "plaintext" for txt/md/markdown).
+# names (currently for pdf: "pymupdf4llm" (default, layout-aware Markdown) or
+# "pymupdf-raw" (text layer only, ~275x faster -- see README, "Choosing a PDF
+# extractor"); "plaintext" for txt/md/markdown).
 [extraction.backends]
 # pdf = "pymupdf4llm"

@@ -1,12 +1,14 @@
 # cementic — architecture & design
 
-<!-- session-handoff:begin (2026-08-24c) -->
+<!-- session-handoff:begin (2026-08-26) -->
 ## Where the work stands
 
-**Repo state.** On `claude/destale`, branched from `main`. `main` is 1 commit
-ahead of `origin/main` (the systemd units). Everything else from today is
-pushed. v0.2.0 is still the last tag. Merging and pushing are the user's calls:
-a hook rejects agents touching `main`, so commit on a `claude/*` branch
+**Repo state.** On `claude/audit-fixes`, branched from `main` (which equals
+`origin/main`). The branch holds the second-pass audit's fixes — worker
+correctness, the shared daemon-health protocol, the migration-shim strip, and
+doc/systemd de-staling; findings and rationale in `notes/review-codebase.html`.
+v0.2.0 is still the last tag. Merging and pushing are the user's calls: a hook
+rejects agents touching `main`, so commit on a `claude/*` branch
 (`AGENT_BRANCH_PREFIX=claude`).
 
 **Entry point: the bulk import is RUNNING and needs no babysitting. Do not
@@ -42,7 +44,11 @@ Distrust the reasoning style, not just the numbers.**
   prefix. Only denormalising the filters onto `chunk_embeddings` made it flat.
   **The pattern in all three: a number measured at small scale, generalised.**
 
-**Live state.** Import running. Collections: `papers` (building), `soak` and
+**Live state.** Import running — 374,863/2,182,979 embedded (17.2%) on
+2026-08-26. While it runs, `status`/`doctor` may falsely advise restarting the
+embedding daemon (fixed on `claude/audit-fixes`, not yet running under the
+import's systemd units): do not restart it; check progress via the database.
+Collections: `papers` (building), `soak` and
 `test` (both active, searchable, sharing vector table `embedding_vectors_p5`);
 `test` is a testbed, remove freely. `soak` and `test` will rebuild on their next
 `cementic start` because today's extractor changes re-versioned their profiles.
@@ -130,7 +136,7 @@ indexing and search.
 
 - `EmbeddingRuntimeSpec` carries model + runtime identity. Providers are
   self-describing: `embedding_dim`, `distance_metric`, `format_document` /
-  `format_query`, `embed_batch`, `health_check`.
+  `format_query`, `embed_batch`, `describe()`.
 - `_PROVIDER_FACTORIES` maps provider name → factory; `create_provider(spec,
   config)` is the single resolver every caller uses.
 - The runtime spec flows into the embedding profile, so changing the model

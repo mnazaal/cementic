@@ -286,9 +286,9 @@ method = "hnsw"   # or "diskann"
 model_path = "models/nomic-embed-text-v2-moe.Q8_0.gguf"
 ```
 
-Write `model_path` exactly as shown. The path string is part of the embedding
-profile fingerprint, so spelling it `./models/...` mints a second profile for
-the same file and re-embeds the whole corpus.
+Model identity is the file's content digest, so any spelling of `model_path`
+that resolves to the same file is the same profile. Pointing it at a
+*different* file re-embeds the corpus.
 
 #### Every setting
 
@@ -651,6 +651,8 @@ src/cementic/
 ├── config.py             # Pydantic settings (TOML + env + flags)
 ├── db.py                 # SQLAlchemy models + engine/session
 ├── storage.py            # compressed artifact storage
+├── hashing.py            # shared file/content hashing
+├── model_digest.py       # cached content digest of the embedding model file
 ├── status_service.py     # worker / health / pipeline status
 ├── supervisor.py         # background process management
 ├── runner.py             # internal background runner for both workers

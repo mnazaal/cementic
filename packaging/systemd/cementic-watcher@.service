@@ -1,10 +1,13 @@
 # cementic source watcher for one collection, as a systemd *user* service.
 #
 # The directories to watch are not in the unit, because they differ per
-# collection. Put them in ~/.config/cementic/<collection>.dirs as a single
-# whitespace-separated line, e.g.
+# collection. Put them in ~/.config/cementic/<collection>.dirs.env as a
+# CEMENTIC_DIRS assignment (the EnvironmentFile below reads exactly that
+# file; the old instructions here described a bare `.dirs` file the unit
+# never read, so following them failed the unit at start), e.g.
 #
-#   echo /u/71/ibrahin1/data/Documents/Papers > ~/.config/cementic/papers.dirs
+#   echo 'CEMENTIC_DIRS=/u/71/ibrahin1/data/Documents/Papers' \
+#     > ~/.config/cementic/papers.dirs.env
 #   systemctl --user enable --now cementic-watcher@papers.service
 #
 # systemd splits $CEMENTIC_DIRS on whitespace, so a directory path containing a

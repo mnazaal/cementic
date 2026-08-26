@@ -1,11 +1,14 @@
 #!/usr/bin/env python
 """Compare the two ANN index build orders, on a real PostgreSQL.
 
-  insert then build  -- what cementic does today: embed everything, then one
-                        bulk CREATE INDEX at the building->ready transition,
+  insert then build  -- the old order: embed everything, then one bulk
+                        CREATE INDEX at the building->ready transition,
                         during which the pipeline worker does nothing else.
+                        Still used for DiskANN and resumed builds.
   build then insert  -- create the index while the table is empty (HNSW has no
                         training step) and let each insert maintain the graph.
+                        What cementic does today for HNSW, per the 2026-08-13
+                        decision this script justified (PLAN.md).
 
 Run against the *test* database, never a real one:
 

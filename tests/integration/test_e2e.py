@@ -22,7 +22,7 @@ from cementic.embedding_provider import EmbeddingProvider
 from cementic.pipeline_worker import PipelineWorker
 from cementic.revisions import promote_revision
 from cementic.source_watcher import SourceWatcher
-from tests.integration.test_pg_helpers import cleanup_pg_tables
+from tests.integration.pg_helpers import cleanup_pg_tables
 
 pytestmark = pytest.mark.pg
 

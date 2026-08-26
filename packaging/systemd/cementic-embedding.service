@@ -10,7 +10,10 @@
 #   mkdir -p ~/.config/systemd/user
 #   cp packaging/systemd/cementic-*.service ~/.config/systemd/user/
 #   cp packaging/systemd/cementic-*.timer   ~/.config/systemd/user/
-#   # ALIAS below must equal the fingerprint cementic computes for your config:
+#   # Write ~/.config/cementic/embedding.env with CEMENTIC_MODEL and
+#   # CEMENTIC_ALIAS (both units read it; stating the alias once means the
+#   # health probe cannot drift from the server when the fingerprint
+#   # changes). CEMENTIC_ALIAS must equal the fingerprint cementic computes:
 #   #   .venv/bin/python -c "from cementic.config import get_config; \
 #   #     from cementic.embedding_runtime import runtime_spec_from_config, \
 #   #     llama_cpp_runtime_fingerprint as f; c=get_config(); s=runtime_spec_from_config(c); \
@@ -29,8 +32,10 @@ After=network-online.target
 [Service]
 # systemd expands variables in arguments but NOT in the executable path, so
 # the binary is spelled out. %h is the home directory.
-Environment=CEMENTIC_MODEL=%h/projects/cementic/models/nomic-embed-text-v2-moe.Q8_0.gguf
-Environment=CEMENTIC_ALIAS=4e24fc85fe46967661c6a12c3520527be6a9a38d8f93cc7b18eb46f267fc85c1
+# CEMENTIC_MODEL and CEMENTIC_ALIAS live in one file shared with the health
+# probe; changing n_ctx/n_gpu_layers changes the fingerprint, and updating it
+# in one unit but not the other made the probe post a stale model id.
+EnvironmentFile=%h/.config/cementic/embedding.env
 Environment=LD_LIBRARY_PATH=%h/.cache/cementic-igpu/llama-b10605
 ExecStart=%h/.cache/cementic-igpu/llama-b10605/llama-server \
   --host 127.0.0.1 --port 11555 \

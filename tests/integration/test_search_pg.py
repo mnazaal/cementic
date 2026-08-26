@@ -9,7 +9,7 @@ from cementic.db import ExtractedDocument, SourceDocument
 from cementic.pipeline_worker import _purge_superseded_chunks
 from cementic.search import Searcher
 from cementic.source_watcher import _purge_document_chunks
-from tests.integration.test_pg_helpers import (
+from tests.integration.pg_helpers import (
     CURRENT_CONTENT_SQL,
     cleanup_pg_tables,
     seed_active_vector_collection,
