@@ -35,7 +35,7 @@ from cementic.vector_store import (
     vector_table_exists,
     vector_table_name,
 )
-from tests.integration.test_pg_helpers import (
+from tests.integration.pg_helpers import (
     VECTOR_DIM,
     cleanup_pg_tables,
     seed_active_vector_collection,

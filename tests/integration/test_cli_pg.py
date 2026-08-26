@@ -11,7 +11,7 @@ from typer.testing import CliRunner
 
 from cementic.cli import app
 from cementic.status_service import WorkerStatus
-from tests.integration.test_pg_helpers import cleanup_pg_tables, seed_active_vector_collection
+from tests.integration.pg_helpers import cleanup_pg_tables, seed_active_vector_collection
 
 runner = CliRunner()
 

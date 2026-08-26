@@ -39,7 +39,7 @@ from cementic.revisions import promote_revision, requeue_interrupted_artifacts
 from cementic.source_watcher import SourceWatcher
 from cementic.status_service import WorkerStatus
 from cementic.vector_store import index_access_method, vector_index_name
-from tests.integration.test_pg_helpers import cleanup_pg_tables
+from tests.integration.pg_helpers import cleanup_pg_tables
 
 
 class FakeEmbeddingClient(EmbeddingProvider):
