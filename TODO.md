@@ -30,6 +30,17 @@ index, versioned revisions) are documented in [PLAN.md](PLAN.md).
   not done", where it was parked behind "only if `db.py` is open for another
   reason" — a condition that has since been met twice.
 
+- Teach `count_model_tokens` the upstream `llama-server` tokenize endpoint.
+  The budget guard's exact check uses llama-cpp-python's
+  `/extras/tokenize/count`, which upstream `llama-server` (the
+  `daemon_command` path) does not serve — the 404 is cached, the guard
+  degrades to the cheap pre-filter, and a chunk at 513–549 model tokens gets
+  sent anyway and fails as a raw `500 ... increase the physical batch size`
+  instead of a clean over-budget reason. Upstream serves `/tokenize`; try it
+  before caching the 404. Observed live 2026-08-27 on the papers import
+  (failure *rate* unchanged and within the predicted band — the message and
+  the wasted round trip are the defect).
+
 ## Images / multimodal
 
 - Add an image extractor (`.png` / `.jpg`) — OCR/caption into the Markdown text
