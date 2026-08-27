@@ -726,3 +726,29 @@ class TestEnvAttributionCoversEveryShape:
         error = self._error(pipeline={"chunk_overlap": 128})
         rendered = format_config_error(error, tmp_path / "config.toml")
         assert "CEMENTIC_PIPELINE_CHUNK_SIZE" in rendered
+
+
+class TestDaemonCommandValidation:
+    """An unrenderable daemon_command must fail at load, not at first spawn.
+
+    Autostart first fires inside a background worker whose only voice is a
+    log file, hours after the config was written.
+    """
+
+    def test_unknown_placeholder_is_rejected_naming_the_choices(self) -> None:
+        with pytest.raises(ValidationError) as excinfo:
+            LlamaCppConfig(daemon_command=["srv", "--alias={fingerprint}"])
+        assert "{alias}" in str(excinfo.value)
+
+    def test_empty_command_is_rejected(self) -> None:
+        with pytest.raises(ValidationError, match="non-empty"):
+            LlamaCppConfig(daemon_command=[])
+
+    def test_valid_command_with_placeholders_loads(self) -> None:
+        config = LlamaCppConfig(
+            daemon_command=["env", "A=1", "srv", "--alias={alias}", "--port", "{port}"]
+        )
+        assert config.daemon_command is not None
+
+    def test_unset_stays_none(self) -> None:
+        assert LlamaCppConfig().daemon_command is None

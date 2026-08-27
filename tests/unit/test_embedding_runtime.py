@@ -13,6 +13,7 @@ from cementic.embedding_runtime import (
     DaemonHealth,
     EmbeddingRuntimeSpec,
     RemoteEmbeddingClient,
+    _matches_llama_daemon_cmdline,
     _read_daemon_pid_file,
     _start_llama_cpp_daemon,
     _stop_mismatched_llama_cpp_daemon,
@@ -23,6 +24,7 @@ from cementic.embedding_runtime import (
     llama_cpp_runtime_fingerprint,
     llama_daemon_status,
     probe_daemon,
+    render_daemon_command,
     runtime_spec_from_config,
     runtime_spec_from_profile_json,
     stop_llama_cpp_runtime,
@@ -364,6 +366,80 @@ class TestDaemonLifecycle:
         record = json.loads((temp_dir / "daemon.pid").read_text())
         assert record["pid"] == 4321
         assert "start_token" in record
+
+    @patch("cementic.embedding_runtime.spawn_detached", return_value=4321)
+    def test_start_daemon_spawns_the_configured_external_command(
+        self, mock_spawn, temp_dir
+    ) -> None:
+        """daemon_command replaces the bundled server; placeholders render.
+
+        The {alias} substitution is the point: it keeps the served fingerprint
+        in lockstep with the config, so a n_ctx/n_gpu_layers change can never
+        leave an external server behind on a stale alias.
+        """
+        config = Config()
+        config.llama_cpp.daemon_log_file = temp_dir / "daemon.log"
+        config.llama_cpp.daemon_pid_file = temp_dir / "daemon.pid"
+        config.llama_cpp.daemon_command = [
+            "env",
+            "LD_LIBRARY_PATH=/opt/llama",
+            "llama-server",
+            "--port",
+            "{port}",
+            "--model",
+            "{model}",
+            "--alias={alias}",
+            "--ctx-size",
+            "{n_ctx}",
+        ]
+
+        _start_llama_cpp_daemon(config)
+
+        command = mock_spawn.call_args[0][0]
+        assert command[:3] == ["env", "LD_LIBRARY_PATH=/opt/llama", "llama-server"]
+        assert "llama_cpp.server" not in command
+        assert command[command.index("--port") + 1] == str(config.llama_cpp.daemon_port)
+        assert command[command.index("--model") + 1] == str(
+            resolve_llama_model_path(config.llama_cpp.model_path)
+        )
+        expected_alias = build_llama_cpp_client(config).expected_fingerprint
+        assert f"--alias={expected_alias}" in command
+        assert command[command.index("--ctx-size") + 1] == str(config.llama_cpp.n_ctx)
+        record = json.loads((temp_dir / "daemon.pid").read_text())
+        assert record["pid"] == 4321
+
+    def test_custom_command_recovery_matches_by_alias_token(self) -> None:
+        """/proc recovery for an operator-shaped argv keys on the fingerprint."""
+        alias = "f" * 64
+        assert _matches_llama_daemon_cmdline(
+            ["llama-server", f"--alias={alias}"],
+            port=11555,
+            model_alias=alias,
+            custom_command=True,
+        )
+        assert _matches_llama_daemon_cmdline(
+            ["env", "X=1", "llama-server", "--alias", alias],
+            port=11555,
+            model_alias=alias,
+            custom_command=True,
+        )
+        assert not _matches_llama_daemon_cmdline(
+            ["llama-server", "--alias=" + "e" * 64],
+            port=11555,
+            model_alias=alias,
+            custom_command=True,
+        )
+
+    def test_render_daemon_command_substitutes_per_argument(self) -> None:
+        rendered = render_daemon_command(
+            ["srv", "--alias={alias}", "--port", "{port}", "plain"],
+            model="/m.gguf",
+            alias="abc",
+            host="127.0.0.1",
+            port=11555,
+            n_ctx=512,
+        )
+        assert rendered == ["srv", "--alias=abc", "--port", "11555", "plain"]
 
     @patch("cementic.embedding_runtime.spawn_detached", return_value=4321)
     def test_start_daemon_verbose_true(self, mock_spawn, temp_dir) -> None:

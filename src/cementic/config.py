@@ -574,6 +574,48 @@ class LlamaCppConfig(_SectionSettings):
     )
     daemon_pid_file: Path | None = Field(default=None, description="llama.cpp daemon PID path")
     daemon_log_file: Path | None = Field(default=None, description="llama.cpp daemon log path")
+    daemon_command: list[str] | None = Field(
+        default=None,
+        description="External embedding-server command for `embedding start`/"
+        "autostart to spawn and supervise instead of the bundled "
+        "llama_cpp.server (CPU-only unless llama-cpp-python was built with "
+        "GPU support). Placeholders substituted per argument: {model} "
+        "(resolved model path), {alias} (runtime fingerprint, the served "
+        "model id cementic verifies), {host}, {port}, {n_ctx}. The spawned "
+        "server must serve {alias} at /v1/models or startup fails fast "
+        "naming both models. Needs an environment variable? Prefix with "
+        "env(1): [\"env\", \"LD_LIBRARY_PATH=/x\", \"llama-server\", ...]. "
+        "From the environment this is JSON: "
+        "CEMENTIC_LLAMA_DAEMON_COMMAND='[\"llama-server\", ...]'",
+    )
+
+    @field_validator("daemon_command")
+    @classmethod
+    def _validate_daemon_command(cls, value: list[str] | None) -> list[str] | None:
+        """Reject an unrenderable command at load, not at first daemon start.
+
+        A typo'd placeholder otherwise surfaces hours later, when autostart
+        first fires inside a background worker whose only voice is a log file.
+        """
+        if value is None:
+            return value
+        if not value:
+            raise ValueError(
+                "daemon_command must be a non-empty command list, or left "
+                "unset to use the bundled llama_cpp.server"
+            )
+        dummy = {"model": "", "alias": "", "host": "", "port": "", "n_ctx": ""}
+        for argument in value:
+            try:
+                argument.format_map(dummy)
+            except (KeyError, IndexError, ValueError) as error:
+                raise ValueError(
+                    f"daemon_command argument {argument!r} is not renderable "
+                    f"({error}); available placeholders are " + "{model}, "
+                    "{alias}, {host}, {port}, {n_ctx}; escape a literal brace "
+                    "by doubling it"
+                )
+        return value
 
 
 class PipelineConfig(_SectionSettings):

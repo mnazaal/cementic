@@ -318,6 +318,7 @@ matching `CEMENTIC_*` variable (see [Environment variables](#environment-variabl
 | | `daemon_start_timeout_seconds` | `120` | How long to wait for a cold start |
 | | `llama_embed_timeout_seconds` | `120` | Per-request embedding timeout |
 | | `daemon_pid_file`, `daemon_log_file` | under the data dir | Daemon bookkeeping |
+| | `daemon_command` | unset | External embedding-server command for cementic to spawn/supervise instead of the bundled `llama_cpp.server`; placeholders `{model}` `{alias}` `{host}` `{port}` `{n_ctx}` (see "Running embeddings on a GPU") |
 | | `verbose` | `false` | Verbose llama.cpp logging |
 | `extraction` | `use_ocr` | `false` | OCR pages with no text layer (`rapidocr` is a required dependency, always installed) |
 | | `backends` | registry default | Per-file-type extractor choice, e.g. `pdf = "pymupdf-raw"`. PDFs: `pymupdf4llm` (default, Markdown structure via an ONNX layout model) or `pymupdf-raw` (text layer only, ~275× faster — see "Choosing a PDF extractor") |
@@ -379,12 +380,19 @@ their page counts.
 ### Running embeddings on a GPU
 
 cementic identifies its embedding server only by the model id reported at
-`/v1/models`, and spawns `llama_cpp.server` merely as a convenience. Any
-OpenAI-compatible server that reports the expected fingerprint will do — so a
-GPU-enabled llama.cpp needs **no cementic code change**, just
-`llama_cpp.daemon_autostart = false` and a server started with
-`--alias <fingerprint>`. Print the fingerprint with
-`llama_cpp_runtime_fingerprint` (see `embedding_runtime.py`).
+`/v1/models`; the bundled `llama_cpp.server` it spawns by default is merely a
+convenience (and CPU-only unless llama-cpp-python was built with GPU support).
+The supported way to use a GPU server is `llama_cpp.daemon_command`: set it to
+your external server's command (the template config ships a Vulkan
+`llama-server` example) and cementic spawns and supervises that instead —
+`cementic embedding start/stop/status`, on-demand autostart, and crashed-daemon
+recovery all apply unchanged, and the `{alias}` placeholder keeps the served
+fingerprint in lockstep with the config so a `n_ctx`/`n_gpu_layers` change can
+never leave a stale alias behind.
+
+Alternatively, run any OpenAI-compatible server entirely outside cementic with
+`llama_cpp.daemon_autostart = false` and `--alias <fingerprint>`; print the
+fingerprint with `llama_cpp_runtime_fingerprint` (see `embedding_runtime.py`).
 
 Measured with upstream `llama-bench`, pp512, nomic-embed-text-v2-moe Q8_0, on an
 Intel Core Ultra 5 125U with its integrated Arc GPU via Vulkan:

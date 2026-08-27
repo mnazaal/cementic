@@ -38,6 +38,21 @@ build_memory = "2GB"
 # that resolves to the same file is the same profile. Pointing at a
 # *different* file re-embeds the corpus.
 model_path = "models/nomic-embed-text-v2-moe.Q8_0.gguf"
+# Optional: have cementic spawn and supervise an external OpenAI-compatible
+# server (e.g. an upstream Vulkan llama-server for a GPU) instead of the
+# bundled CPU-only llama_cpp.server. `embedding start/stop/status`, on-demand
+# autostart, and the crashed-daemon recovery all apply to it unchanged.
+# Placeholders per argument: {model} {alias} {host} {port} {n_ctx}.
+# Needs an env var? Prefix with env(1), as the LD_LIBRARY_PATH line shows.
+# daemon_command = [
+#   "env", "LD_LIBRARY_PATH=/path/to/llama.cpp/build",
+#   "/path/to/llama-server",
+#   "--host", "{host}", "--port", "{port}",
+#   "--model", "{model}", "--alias", "{alias}",
+#   "--embeddings",
+#   "--ctx-size", "{n_ctx}", "--batch-size", "{n_ctx}", "--ubatch-size", "{n_ctx}",
+#   "--n-gpu-layers", "99",
+# ]
 
 [extraction]
 use_ocr = false

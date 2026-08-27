@@ -766,15 +766,24 @@ def _cmdline_has_adjacent_pair(cmdline: list[str], flag: str, value: str) -> boo
     return False
 
 
-def _matches_llama_daemon_cmdline(cmdline: list[str], *, port: int, model_alias: str) -> bool:
+def _matches_llama_daemon_cmdline(
+    cmdline: list[str], *, port: int, model_alias: str, custom_command: bool = False
+) -> bool:
     """Whether ``cmdline`` is a process `_start_llama_cpp_daemon` could have spawned.
 
-    All three of the criteria below are required, mirroring the exact
-    arguments that command builds (see ``_start_llama_cpp_daemon``): running
-    llama.cpp's own server module, on our configured port, serving *this*
-    runtime's fingerprint as its ``--model_alias``. Matching the alias is what
-    proves the process is ours and current, not merely some llama.cpp server.
+    For the bundled server, all three criteria are required, mirroring the
+    exact arguments that command builds: running llama.cpp's own server
+    module, on our configured port, serving *this* runtime's fingerprint as
+    its ``--model_alias``. Matching the alias is what proves the process is
+    ours and current, not merely some llama.cpp server.
+
+    For a configured ``daemon_command`` the argv shape is the operator's, so
+    the 64-hex fingerprint alias alone is the identity: any argument carrying
+    it ("--alias X" or "--alias={alias}") marks the process ours, and a stale
+    server fingerprints differently and cannot match.
     """
+    if custom_command:
+        return any(model_alias in argument for argument in cmdline)
     return (
         _cmdline_has_adjacent_pair(cmdline, "-m", "llama_cpp.server")
         and _cmdline_has_adjacent_pair(cmdline, "--port", str(port))
@@ -805,7 +814,12 @@ def _recover_daemon_pid(config: Config, pid_file: Path) -> int | None:
         # what used to be a side-effect-free pid-file read.
         return None
     candidates = find_pids_by_cmdline(
-        lambda cmdline: _matches_llama_daemon_cmdline(cmdline, port=port, model_alias=fingerprint)
+        lambda cmdline: _matches_llama_daemon_cmdline(
+            cmdline,
+            port=port,
+            model_alias=fingerprint,
+            custom_command=bool(config.llama_cpp.daemon_command),
+        )
     )
     if not candidates:
         return None
@@ -979,6 +993,25 @@ def _signal_daemon(pid: int, signal_number: int) -> _SignalResult:
     return _SignalResult.SENT
 
 
+def render_daemon_command(
+    template: list[str], *, model: str, alias: str, host: str, port: int, n_ctx: int
+) -> list[str]:
+    """Substitute the documented placeholders into a daemon command (pure).
+
+    Per-argument ``str.format_map``, so an argument can mix text and
+    placeholder ("--alias={alias}"). Config validation has already rejected
+    unknown placeholders, so this cannot raise on a loaded config.
+    """
+    values = {
+        "model": model,
+        "alias": alias,
+        "host": host,
+        "port": str(port),
+        "n_ctx": str(n_ctx),
+    }
+    return [argument.format_map(values) for argument in template]
+
+
 def _start_llama_cpp_daemon(
     config: Config,
     spec: EmbeddingRuntimeSpec | None = None,
@@ -1006,39 +1039,53 @@ def _start_llama_cpp_daemon(
         n_gpu_layers=n_gpu_layers,
         verbose=runtime_spec.verbose,
     )
-    # Run llama.cpp's own OpenAI-compatible server rather than a hand-rolled
-    # daemon. The runtime fingerprint is the served model's alias, so /v1/models
-    # reports exactly which config is loaded.
-    command = [
-        sys.executable,
-        "-m",
-        "llama_cpp.server",
-        "--host",
-        config.llama_cpp.daemon_host,
-        "--port",
-        str(config.llama_cpp.daemon_port),
-        "--model",
-        str(resolve_llama_model_path(runtime_spec.model_identifier)),
-        "--model_alias",
-        fingerprint,
-        "--n_ctx",
-        str(n_ctx),
-        # The server truncates every embedding input at n_batch tokens, whose
-        # own default is 512 -- so without these, raising n_ctx silently did
-        # nothing and inputs were still cut at 512. Both are derived from
-        # n_ctx, which is already in the runtime fingerprint, so pinning them
-        # here does not re-version anything.
-        "--n_batch",
-        str(n_ctx),
-        "--n_ubatch",
-        str(n_ctx),
-        "--n_gpu_layers",
-        str(n_gpu_layers),
-        "--embedding",
-        "true",
-        "--verbose",
-        "true" if runtime_spec.verbose else "false",
-    ]
+    if config.llama_cpp.daemon_command:
+        # The operator's own server -- e.g. an upstream Vulkan llama-server
+        # binary that llama-cpp-python cannot currently be built as. Same
+        # supervision either way: pid file with start token, the daemon lock,
+        # and the ready check that refuses a server not serving {alias}.
+        command = render_daemon_command(
+            config.llama_cpp.daemon_command,
+            model=str(resolve_llama_model_path(runtime_spec.model_identifier)),
+            alias=fingerprint,
+            host=config.llama_cpp.daemon_host,
+            port=config.llama_cpp.daemon_port,
+            n_ctx=n_ctx,
+        )
+    else:
+        # Run llama.cpp's own OpenAI-compatible server rather than a
+        # hand-rolled daemon. The runtime fingerprint is the served model's
+        # alias, so /v1/models reports exactly which config is loaded.
+        command = [
+            sys.executable,
+            "-m",
+            "llama_cpp.server",
+            "--host",
+            config.llama_cpp.daemon_host,
+            "--port",
+            str(config.llama_cpp.daemon_port),
+            "--model",
+            str(resolve_llama_model_path(runtime_spec.model_identifier)),
+            "--model_alias",
+            fingerprint,
+            "--n_ctx",
+            str(n_ctx),
+            # The server truncates every embedding input at n_batch tokens,
+            # whose own default is 512 -- so without these, raising n_ctx
+            # silently did nothing and inputs were still cut at 512. Both are
+            # derived from n_ctx, which is already in the runtime fingerprint,
+            # so pinning them here does not re-version anything.
+            "--n_batch",
+            str(n_ctx),
+            "--n_ubatch",
+            str(n_ctx),
+            "--n_gpu_layers",
+            str(n_gpu_layers),
+            "--embedding",
+            "true",
+            "--verbose",
+            "true" if runtime_spec.verbose else "false",
+        ]
     pid = spawn_detached(command, log_file)
     # llama_cpp.server does not write its own PID file; record it for teardown.
     try:
