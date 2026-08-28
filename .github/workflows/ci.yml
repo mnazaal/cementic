@@ -5,20 +5,34 @@ on:
     branches: [main]
   pull_request:
 
+# Every job takes its interpreter from setup-uv's `python-version`, which sets
+# UV_PYTHON -- and UV_PYTHON does override the repo's `.python-version`.
+# actions/setup-python used to sit here pinned to 3.12 and did nothing: uv
+# honours `.python-version` (3.13) over whatever is on PATH, so the workflow
+# named one version and ran another. That is how a 3.13-only failure
+# (ResourceWarning on unclosed sqlite connections) reached a CI job that
+# claimed to be 3.12.
+
 jobs:
   unit:
     runs-on: ubuntu-latest
+    strategy:
+      # One version failing should not hide the other's result.
+      fail-fast: false
+      matrix:
+        # 3.12 is the floor `requires-python` promises; 3.13 is what
+        # `.python-version` pins for local work. Only this job runs both --
+        # it is the cheapest, and the integration jobs' cost is in Postgres
+        # and the compose image, not in the interpreter.
+        python-version: ["3.12", "3.13"]
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
 
-      - name: Set up Python
-        uses: actions/setup-python@v6
-        with:
-          python-version: "3.12"
-
       - name: Install uv
         uses: astral-sh/setup-uv@v7
+        with:
+          python-version: ${{ matrix.python-version }}
 
       - name: Install dependencies
         run: uv sync --locked --extra dev
@@ -38,13 +52,10 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v7
 
-      - name: Set up Python
-        uses: actions/setup-python@v6
-        with:
-          python-version: "3.12"
-
       - name: Install uv
         uses: astral-sh/setup-uv@v7
+        with:
+          python-version: "3.13"
 
       - name: Install dependencies
         run: uv sync --locked --extra dev
@@ -58,13 +69,10 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v7
 
-      - name: Set up Python
-        uses: actions/setup-python@v6
-        with:
-          python-version: "3.12"
-
       - name: Install uv
         uses: astral-sh/setup-uv@v7
+        with:
+          python-version: "3.13"
 
       - name: Install dependencies
         run: uv sync --locked --extra dev
