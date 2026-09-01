@@ -266,6 +266,34 @@ class TestTokenBudgetGuard:
         )
 
     @patch("cementic.embedding_runtime.requests.post")
+    def test_failure_reason_recounts_exactly_when_the_ratio_bound_lied(self, mock_post) -> None:
+        """A chunk beyond the 1.45 ratio bound still gets a clean reason.
+
+        Live corpus chunks at 513-549 model tokens pass the cheap pre-filter
+        (their model/tiktoken ratio exceeds the measured bound), reach the
+        server, and 500. The reason pass runs on texts that have already
+        failed, so it must ask for the exact count instead of trusting the
+        pre-filter's "fits" -- otherwise 4,856 rows read "500 Server Error"
+        instead of naming the context window (observed live 2026-09-01).
+        """
+
+        def responses(url, **kwargs):
+            response = MagicMock()
+            if url.endswith("/extras/tokenize/count"):
+                response.status_code = 404
+                return response
+            response.status_code = 200
+            response.json.return_value = {"tokens": list(range(549))}
+            return response
+
+        mock_post.side_effect = responses
+
+        reason = self._client().over_budget_reason("short text the pre-filter passes")
+
+        assert reason is not None
+        assert "over its 512-token context window" in reason
+
+    @patch("cementic.embedding_runtime.requests.post")
     def test_a_server_without_the_endpoint_falls_back_to_the_estimate(self, mock_post) -> None:
         """A missing tokenizer endpoint must not silently re-admit truncation."""
         missing = MagicMock()

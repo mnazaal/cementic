@@ -370,7 +370,7 @@ class RemoteEmbeddingClient(EmbeddingProvider):
             return int(payload["count"])
         return len(payload["tokens"])
 
-    def over_budget_tokens(self, text: str) -> int | None:
+    def over_budget_tokens(self, text: str, *, exact: bool = False) -> int | None:
         """Exact model-token count if ``text`` exceeds the window, else None.
 
         The server truncates over-long input silently, so an over-budget text
@@ -379,7 +379,12 @@ class RemoteEmbeddingClient(EmbeddingProvider):
 
         Costs nothing in the common case: ``chunk.TOKENIZER`` counting is local,
         and only a text near enough to the limit to be in doubt pays for the
-        exact round trip.
+        exact round trip. ``exact=True`` skips that shortcut and always asks
+        the server: the ratio bound is an estimate, not a guarantee -- live
+        corpus chunks at 513-549 model tokens have passed the pre-filter
+        (model/tiktoken ratio beyond the bound) and 500'd at the server
+        (observed 2026-09-01) -- so the failure-reason path, where the text
+        has already failed and a round trip is free, must not trust "fits".
         """
         if self.n_ctx <= 0:
             return None
@@ -390,16 +395,16 @@ class RemoteEmbeddingClient(EmbeddingProvider):
             len(tiktoken.get_encoding(TOKENIZER).encode(text, disallowed_special=()))
             * _TOKEN_RATIO_UPPER_BOUND
         )
-        if approx <= self.n_ctx:
+        if not exact and approx <= self.n_ctx:
             return None
-        exact = self.count_model_tokens(text)
-        if exact is None:
+        exact_count = self.count_model_tokens(text)
+        if exact_count is None:
             # No exact tokenizer to appeal to. Report the estimate rather than
             # letting the text through: a silently truncated vector is the
             # failure this exists to prevent, and at the shipped chunk_size
             # this branch is unreachable anyway.
-            return int(approx)
-        return exact if exact > self.n_ctx else None
+            return int(approx) if approx > self.n_ctx else None
+        return exact_count if exact_count > self.n_ctx else None
 
     def _over_budget_message(self, tokens: int) -> str:
         # No advice sentence here: embed() also serves search queries, which
@@ -459,7 +464,7 @@ class RemoteEmbeddingClient(EmbeddingProvider):
         than reporting a bare failure. Callers of this method hold chunk text,
         so the chunk-sizing advice belongs here, not in the shared message.
         """
-        over = self.over_budget_tokens(text)
+        over = self.over_budget_tokens(text, exact=True)
         if over is None:
             return None
         return f"{self._over_budget_message(over)} -- lower pipeline.chunk_size"
