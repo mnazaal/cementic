@@ -216,6 +216,35 @@ it matters.
 
 ## Design decisions and open items
 
+### Decided — query-first embed scheduling (2026-09-01)
+
+**Taken; implementation next.** A search query landing mid-import waits on the
+shared llama-server: the worker POSTs 32 texts per request, b10605 schedules
+per-input FIFO with no HTTP priority hook, so a query's one task queues behind
+up to 32 — measured 0.4–9.6 s of queue delay (17.2 s worst-case wall) against
+~0.1 s of actual ANN+SQL. Design, prior-art survey (storage engines, vector
+DBs, inference servers, desktop indexers), and verified b10605 scheduler facts:
+`notes/design-embed-scheduling.html`.
+
+Three layers, first two to build:
+
+1. **Sub-batch submission** — keep the DB claim at 32, submit to llama-server
+   in sub-batches of ~slot count (4). Bounds query wait ~10 s → ~1 s with no
+   coordination code (queue delay is proportional to per-request input count).
+2. **Search lease** — `search` upserts a timestamp (`utc_now()`, house style) before embedding;
+   the worker checks between sub-batches and yields while fresh (TTL ~10 s,
+   refreshed per search), with a starvation cap so continuous searching cannot
+   stall a build. Precedent: Windows `IRowsetPrioritization`, Postgres
+   autovacuum cancellation, OpenAI flex tier.
+3. **Abort in-flight on lease activity** — possible (b10605 cancels queued
+   tasks ≤ ~1 s on client disconnect) but not built: Layer 1 shrinks the
+   quantum until aborting saves ≤ ~1 s. Seam left open.
+
+Parked with triggers: a second query-side llama-server (Vespa's documented
+practice; the strong fix if Layers 1–2 measure insufficient — costs runtime-
+fingerprint work and resident memory) and an upstream llama.cpp patch exposing
+the internal front-of-queue path as a `priority` field on embeddings.
+
 ### Decided — build the ANN index up front (2026-08-13)
 
 **Taken.** `ensure_revision_ann_index_up_front` (`revisions.py`) creates the

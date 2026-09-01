@@ -324,7 +324,10 @@ matching `CEMENTIC_*` variable (see [Environment variables](#environment-variabl
 | | `backends` | registry default | Per-file-type extractor choice, e.g. `pdf = "pymupdf-raw"`. PDFs: `pymupdf4llm` (default, Markdown structure via an ONNX layout model) or `pymupdf-raw` (text layer only, ~275× faster — see "Choosing a PDF extractor") |
 | `source_watcher` | `ignore_directories` | 16 names incl. `.git`, `node_modules`, `build`, `dist`, `venv`, `target` | Directory names skipped anywhere under a watched root. **Replaces** the defaults rather than adding to them; set `[]` to index everything |
 | | `state_path`, `log_file` | under the data dir | Watcher bookkeeping |
-| `pipeline_worker` | `batch_size` | `32` | Chunks per embedding request (1–128) |
+| `pipeline_worker` | `batch_size` | `32` | Chunks claimed from the database per embedding pass (1–128) |
+| | `embed_submit_batch_size` | `4` | Chunks per embedding-server request within one claim (1–128). llama-server schedules per input, strict FIFO, so this bounds how long a concurrent search query queues behind indexing (~1 s at 4 vs ~10 s at 32 on the measured iGPU) |
+| | `search_lease_ttl_seconds` | `10.0` | `search` records when it last ran; the worker pauses between embedding-server requests while a search happened this recently, so interactive queries do not queue behind bulk work. `0` disables |
+| | `search_yield_cap_seconds` | `60.0` | Bound on continuous yielding: after this long the worker runs one request anyway, so nonstop searching slows a build instead of stalling it |
 | | `poll_interval` | `1.0` | Seconds between polls when idle |
 | | `state_path`, `log_file` | under the data dir | Worker bookkeeping |
 | `bootstrap` | `auto_download_llama_model` | `true` | Fetch the model when missing |

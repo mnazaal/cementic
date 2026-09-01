@@ -88,6 +88,42 @@ class TestRevisionChoiceAgreesWithAndWithoutDashC:
         assert [revision.status for revision in named] == ["active"]
 
 
+class TestSearchActivityLease:
+    """The search-side half of query-first embed scheduling."""
+
+    def _session_factory(self):
+        engine = create_engine("sqlite:///:memory:")
+        Base.metadata.create_all(engine)
+        return sessionmaker(bind=engine, expire_on_commit=False)
+
+    def test_record_search_activity_upserts_the_single_lease_row(self):
+        from cementic.db import SearchActivity
+        from cementic.search import record_search_activity
+
+        session_factory = self._session_factory()
+        record_search_activity(session_factory)
+        with session_factory() as session:
+            first = session.get(SearchActivity, 1).last_search_at
+        record_search_activity(session_factory)
+        with session_factory() as session:
+            rows = session.query(SearchActivity).all()
+            assert len(rows) == 1
+            assert rows[0].last_search_at >= first
+
+    def test_record_search_activity_tolerates_a_database_without_the_table(self):
+        """The lease is best-effort: search must not fail on a pre-lease schema.
+
+        The table is created by the worker paths (create_tables); a search
+        against a database whose worker predates the lease must still search.
+        """
+        from cementic.db import SearchActivity
+        from cementic.search import record_search_activity
+
+        session_factory = self._session_factory()
+        SearchActivity.__table__.drop(session_factory.kw["bind"])
+        record_search_activity(session_factory)  # must not raise
+
+
 class TestSearcher:
     """Test search functionality."""
 

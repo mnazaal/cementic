@@ -324,6 +324,22 @@ class PipelineRevision(Base):
     )
 
 
+class SearchActivity(Base):
+    """Single-row lease recording when an interactive search last ran.
+
+    Written best-effort by ``Searcher.search`` before it embeds a query; read
+    by the pipeline worker between embed sub-batches, which yields the shared
+    embedding server while the lease is fresh so interactive queries do not
+    queue behind bulk indexing (notes/design-embed-scheduling.html).
+    """
+
+    __tablename__ = "search_activity"
+
+    #: Always 1 -- the table holds one row, upserted in place.
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    last_search_at: Mapped[datetime] = mapped_column(default=utc_now, nullable=False)
+
+
 def get_engine(database_url: str | URL) -> Engine:
     """Create database engine."""
     cache_key = _url_cache_key(database_url)

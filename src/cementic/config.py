@@ -849,12 +849,37 @@ class PipelineWorkerConfig(_SectionSettings):
         le=128,
         description="Number of chunks to embed in one batch",
     )
+    # Distinct from batch_size on purpose: the DB claim amortises round trips,
+    # while the per-request input count bounds how long a search query queues
+    # behind indexing -- llama-server schedules embeddings per input, strict
+    # FIFO, so a query's one task waits behind every text of the request in
+    # flight (notes/design-embed-scheduling.html). Default matches the server's
+    # observed slot count.
+    embed_submit_batch_size: int = Field(
+        default=4,
+        ge=1,
+        le=128,
+        description="Number of chunks per embedding-server request within one batch",
+    )
     # gt=0: zero or negative turned the idle wait into a hot spin pinning a
     # core, with nothing anywhere reporting why.
     poll_interval: float = Field(
         default=1.0,
         gt=0,
         description="Seconds between polling for pending chunks",
+    )
+    # The two halves of query-first scheduling (the search lease). ttl 0
+    # disables yielding; the cap keeps a continuously-refreshed lease (an
+    # agent hammering search) from stalling a build indefinitely.
+    search_lease_ttl_seconds: float = Field(
+        default=10.0,
+        ge=0,
+        description="Yield the embedding server while a search ran this recently (0 disables)",
+    )
+    search_yield_cap_seconds: float = Field(
+        default=60.0,
+        gt=0,
+        description="Run one sub-batch anyway after this long of continuous yielding",
     )
 
 

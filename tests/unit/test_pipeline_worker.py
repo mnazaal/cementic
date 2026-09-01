@@ -1,5 +1,6 @@
 """Tests for pipeline worker constructor, client creation, and lifecycle."""
 
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, Mock, patch
@@ -32,6 +33,7 @@ from cementic.pipeline_worker import (
     _try_acquire_pipeline_worker_lock,
     is_retryable_embed_error,
     revision_is_complete,
+    should_yield_to_search,
 )
 from cementic.state import DaemonState
 
@@ -60,7 +62,43 @@ class _ShortBatchClient:
         return [[1.0, 0.0]]
 
 
-def _seed_embedding_batch(session) -> int:
+class _RecordingBatchClient:
+    """Succeeds for every text and records how many texts each call carried."""
+
+    def __init__(self) -> None:
+        self.call_sizes: list[int] = []
+
+    def format_document(self, text: str) -> str:
+        return text
+
+    def embed_batch(self, texts: list[str]) -> list[list[float] | None]:
+        self.call_sizes.append(len(texts))
+        return [[1.0, 0.0] for _ in texts]
+
+
+class _PoisonChunkClient:
+    """Batch call raises on the poison text; individual embeds fail only it."""
+
+    def __init__(self, poison: str) -> None:
+        self.poison = poison
+        self.individual_calls: list[str] = []
+
+    def format_document(self, text: str) -> str:
+        return text
+
+    def embed_batch(self, texts: list[str]) -> list[list[float] | None]:
+        if self.poison in texts:
+            raise ValueError("poison chunk")
+        return [[1.0, 0.0] for _ in texts]
+
+    def embed(self, text: str) -> list[float]:
+        self.individual_calls.append(text)
+        if text == self.poison:
+            raise ValueError("poison chunk")
+        return [1.0, 0.0]
+
+
+def _seed_embedding_batch(session, n_chunks: int = 2) -> int:
     source = SourceDocument(collection="default", source_path="/tmp/a.txt", file_hash="h")
     extractor = ExtractorProfile(name="x", fingerprint="x", config_json="{}")
     chunk_profile = ChunkProfile(fingerprint="c", config_json="{}")
@@ -88,7 +126,7 @@ def _seed_embedding_batch(session) -> int:
     )
     session.add(chunked)
     session.flush()
-    for index in range(2):
+    for index in range(n_chunks):
         session.add(
             Chunk(
                 document_id=source.id,
@@ -784,8 +822,167 @@ class TestWorkerProcessingLoop:
         assert len(calls) == 2
 
 
+class TestShouldYieldToSearch:
+    """Pure yield policy for the embed step (query-first scheduling)."""
+
+    NOW = datetime(2026, 9, 1, 12, 0, 0, tzinfo=timezone.utc)
+
+    def test_fresh_lease_yields(self) -> None:
+        last = self.NOW - timedelta(seconds=3)
+        assert should_yield_to_search(last, self.NOW, 10.0, None, 60.0) is True
+
+    def test_stale_lease_does_not_yield(self) -> None:
+        last = self.NOW - timedelta(seconds=11)
+        assert should_yield_to_search(last, self.NOW, 10.0, None, 60.0) is False
+
+    def test_missing_lease_does_not_yield(self) -> None:
+        assert should_yield_to_search(None, self.NOW, 10.0, None, 60.0) is False
+
+    def test_zero_ttl_disables_yielding(self) -> None:
+        last = self.NOW - timedelta(seconds=1)
+        assert should_yield_to_search(last, self.NOW, 0.0, None, 60.0) is False
+
+    def test_yield_cap_forces_progress_under_continuous_searching(self) -> None:
+        """A lease refreshed in a loop must not stall a build indefinitely."""
+        last = self.NOW - timedelta(seconds=1)
+        yielding_since = self.NOW - timedelta(seconds=60)
+        assert should_yield_to_search(last, self.NOW, 10.0, yielding_since, 60.0) is False
+
+    def test_within_cap_keeps_yielding(self) -> None:
+        last = self.NOW - timedelta(seconds=1)
+        yielding_since = self.NOW - timedelta(seconds=30)
+        assert should_yield_to_search(last, self.NOW, 10.0, yielding_since, 60.0) is True
+
+
 class TestPipelineWorkerEmbedStep:
     """Embedding step liveness regressions."""
+
+    def test_embed_step_submits_claim_in_configured_sub_batches(
+        self, temp_dir: Path, monkeypatch
+    ) -> None:
+        """One DB claim goes to the provider as several bounded calls.
+
+        The provider request size bounds how long a search query queues behind
+        indexing (llama-server schedules per-input FIFO), so the claim size and
+        the submit size are separate knobs. The vector-table write is stubbed:
+        it is Postgres-only and not the behavior under test.
+        """
+        import cementic.pipeline_worker as worker_module
+
+        monkeypatch.setattr(worker_module, "ensure_vector_table_schema", lambda *a, **k: None)
+        monkeypatch.setattr(worker_module, "upsert_vectors", lambda *a, **k: None)
+        engine = create_engine("sqlite:///:memory:")
+        Base.metadata.create_all(engine)
+        session_factory = sessionmaker(bind=engine, expire_on_commit=False)
+        with session_factory() as session:
+            revision_id = _seed_embedding_batch(session, n_chunks=5)
+
+        config = Config()
+        config.pipeline_worker.log_file = temp_dir / "worker.log"
+        config.pipeline_worker.batch_size = 6
+        config.pipeline_worker.embed_submit_batch_size = 2
+        worker = PipelineWorker(config)
+        worker.Session = session_factory
+        client = _RecordingBatchClient()
+        worker.embedding_client = client
+
+        assert worker._step_embed(revision_id) is True
+
+        assert client.call_sizes == [2, 2, 1]
+        with session_factory() as session:
+            rows = session.query(ChunkEmbedding).order_by(ChunkEmbedding.chunk_id).all()
+            assert [row.status for row in rows] == ["done"] * 5
+
+    def test_embed_step_yields_between_sub_batches_while_search_lease_is_fresh(
+        self, temp_dir: Path, monkeypatch
+    ) -> None:
+        """A fresh search lease delays provider calls until it goes stale."""
+        import cementic.pipeline_worker as worker_module
+        from cementic.db import SearchActivity, utc_now
+
+        monkeypatch.setattr(worker_module, "ensure_vector_table_schema", lambda *a, **k: None)
+        monkeypatch.setattr(worker_module, "upsert_vectors", lambda *a, **k: None)
+        engine = create_engine("sqlite:///:memory:")
+        Base.metadata.create_all(engine)
+        session_factory = sessionmaker(bind=engine, expire_on_commit=False)
+        with session_factory() as session:
+            revision_id = _seed_embedding_batch(session, n_chunks=4)
+            session.merge(SearchActivity(id=1, last_search_at=utc_now()))
+            session.commit()
+
+        config = Config()
+        config.pipeline_worker.log_file = temp_dir / "worker.log"
+        config.pipeline_worker.batch_size = 6
+        config.pipeline_worker.embed_submit_batch_size = 2
+        worker = PipelineWorker(config)
+        worker.Session = session_factory
+        client = _RecordingBatchClient()
+        worker.embedding_client = client
+
+        class _StaleOnWait:
+            """Shutdown-event stand-in whose wait() ages the lease out."""
+
+            def __init__(self) -> None:
+                self.waits = 0
+
+            def is_set(self) -> bool:
+                return False
+
+            def wait(self, timeout: float | None = None) -> bool:
+                self.waits += 1
+                with session_factory() as session:
+                    row = session.get(SearchActivity, 1)
+                    row.last_search_at = utc_now() - timedelta(seconds=60)
+                    session.commit()
+                return False
+
+        event_stub = _StaleOnWait()
+        worker._shutdown_event = event_stub
+
+        assert worker._step_embed(revision_id) is True
+
+        assert event_stub.waits >= 1
+        assert client.call_sizes == [2, 2]
+        with session_factory() as session:
+            rows = session.query(ChunkEmbedding).order_by(ChunkEmbedding.chunk_id).all()
+            assert [row.status for row in rows] == ["done"] * 4
+
+    def test_data_failure_falls_back_to_individual_embeds_within_its_sub_batch_only(
+        self, temp_dir: Path, monkeypatch
+    ) -> None:
+        """One bad chunk costs its sub-batch the one-by-one retry, not the claim.
+
+        The whole-claim fallback re-embedded batch_size - 1 healthy chunks one
+        request at a time; scoping it to the failed sub-batch keeps the other
+        sub-batches on the batched path.
+        """
+        import cementic.pipeline_worker as worker_module
+
+        monkeypatch.setattr(worker_module, "ensure_vector_table_schema", lambda *a, **k: None)
+        monkeypatch.setattr(worker_module, "upsert_vectors", lambda *a, **k: None)
+        engine = create_engine("sqlite:///:memory:")
+        Base.metadata.create_all(engine)
+        session_factory = sessionmaker(bind=engine, expire_on_commit=False)
+        with session_factory() as session:
+            revision_id = _seed_embedding_batch(session, n_chunks=5)
+
+        config = Config()
+        config.pipeline_worker.log_file = temp_dir / "worker.log"
+        config.pipeline_worker.batch_size = 6
+        config.pipeline_worker.embed_submit_batch_size = 2
+        worker = PipelineWorker(config)
+        worker.Session = session_factory
+        client = _PoisonChunkClient(poison="chunk 2")
+        worker.embedding_client = client
+
+        assert worker._step_embed(revision_id) is True
+
+        # Only the poisoned sub-batch ("chunk 2", "chunk 3") went one at a time.
+        assert client.individual_calls == ["chunk 2", "chunk 3"]
+        with session_factory() as session:
+            rows = session.query(ChunkEmbedding).order_by(ChunkEmbedding.chunk_id).all()
+            assert [row.status for row in rows] == ["done", "done", "failed", "done", "done"]
+            assert "poison chunk" in rows[2].error_message
 
     def test_short_embedding_batch_marks_every_claimed_row_failed(self, temp_dir: Path) -> None:
         """A short provider response must not leave trailing rows stuck processing."""

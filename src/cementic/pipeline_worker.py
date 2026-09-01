@@ -24,10 +24,12 @@ from cementic.db import (
     ChunkEmbedding,
     ExtractedDocument,
     PipelineRevision,
+    SearchActivity,
     SourceDocument,
     create_tables,
     get_engine,
     get_session_factory,
+    utc_now,
 )
 from cementic.embedding_provider import EmbeddingProvider
 from cementic.embedding_runtime import create_provider, runtime_spec_from_config
@@ -156,6 +158,33 @@ def _server_rejected_the_input(response: object) -> bool:
         return False
     lowered = body.lower()
     return any(marker in lowered for marker in _PERMANENT_INPUT_REJECTION_MARKERS)
+
+
+def should_yield_to_search(
+    last_search_at: datetime | None,
+    now: datetime,
+    ttl_seconds: float,
+    yielding_since: datetime | None,
+    yield_cap_seconds: float,
+) -> bool:
+    """Whether the embed step should wait before its next sub-batch (pure).
+
+    A fresh lease means an interactive search is (or just was) in flight, so
+    the next sub-batch would queue the user's query behind bulk work on the
+    embedding server. The cap bounds continuous deference: a client that
+    refreshes the lease in a loop must not stall a build indefinitely, so
+    after ``yield_cap_seconds`` of uninterrupted yielding one sub-batch runs
+    anyway. ``ttl_seconds <= 0`` disables yielding entirely.
+    """
+    if ttl_seconds <= 0:
+        return False
+    if last_search_at is None:
+        return False
+    if (now - last_search_at).total_seconds() >= ttl_seconds:
+        return False
+    if yielding_since is not None and (now - yielding_since).total_seconds() >= yield_cap_seconds:
+        return False
+    return True
 
 
 def is_retryable_embed_error(error: BaseException) -> bool:
@@ -955,33 +984,61 @@ class PipelineWorker:
             # mismatch) silently stamped the whole batch terminally failed.
             raise RuntimeError("Embedding provider is not initialised")
         texts = [provider.format_document(content) for _, content in claimed]
-        # Message stamped on any row that ends up without a vector: the batch-wide
-        # exception if the whole call failed, or a per-row note if the batch
-        # succeeded but an individual embedding came back missing.
-        embeddings: list[list[float] | None]
-        try:
-            embeddings = list(provider.embed_batch(texts))
-        except Exception as error:
-            if is_retryable_embed_error(error):
-                self._release_after_provider_failure(error, claimed, profile_id)
-            # A genuine data failure. Retry one text at a time so a single bad
-            # chunk is marked failed on its own instead of taking the other
-            # batch_size - 1 down with it and blocking promotion.
-            try:
-                embeddings, failure_message = self._embed_individually(provider, texts, error)
-            except Exception as retry_error:
-                # The provider went away mid-retry: still a provider fact, so
-                # the claim must be released rather than stranded.
-                self._release_after_provider_failure(retry_error, claimed, profile_id)
-        else:
-            if len(embeddings) != len(claimed):
-                failure_message = (
-                    f"Embedding provider returned {len(embeddings)} embeddings "
-                    f"for {len(claimed)} chunks"
+        # Submitted in sub-batches: llama-server schedules embeddings per input,
+        # strict FIFO, so the per-request input count is exactly how long a
+        # search query queues behind this batch. The claim above stays large to
+        # amortise DB round trips; the request stays small to keep search
+        # responsive (notes/design-embed-scheduling.html).
+        submit_size = self.config.pipeline_worker.embed_submit_batch_size
+        embeddings: list[list[float] | None] = []
+        # Message stamped on any row that ends up without a vector: its
+        # sub-batch's exception if that call failed, or a per-row note if the
+        # call succeeded but an individual embedding came back missing.
+        fallback_messages: list[str] = []
+        for start in range(0, len(texts), submit_size):
+            self._wait_while_search_is_active(len(claimed))
+            if self._shutdown_event.is_set():
+                # Stop requested mid-claim: return the whole claim rather than
+                # racing the shutdown with more server round trips. Earlier
+                # sub-batches re-embed next start; the upsert is idempotent.
+                self._release_claimed_embeddings(
+                    [chunk_id for chunk_id, _ in claimed], profile_id
                 )
-                embeddings = [None for _ in claimed]
+                self.state_manager.update(current_activity=None)
+                return False
+            sub_texts = texts[start : start + submit_size]
+            sub_embeddings: list[list[float] | None]
+            try:
+                sub_embeddings = list(provider.embed_batch(sub_texts))
+            except Exception as error:
+                if is_retryable_embed_error(error):
+                    # Releases the whole claim, embedded-but-unwritten earlier
+                    # sub-batches included: the upsert is idempotent, and
+                    # re-embedding at most one claim is cheaper than a
+                    # partial-write path.
+                    self._release_after_provider_failure(error, claimed, profile_id)
+                # A genuine data failure. Retry one text at a time so a single
+                # bad chunk is marked failed on its own instead of taking the
+                # rest of its sub-batch down with it and blocking promotion.
+                try:
+                    sub_embeddings, sub_failure = self._embed_individually(
+                        provider, sub_texts, error
+                    )
+                except Exception as retry_error:
+                    # The provider went away mid-retry: still a provider fact,
+                    # so the claim must be released rather than stranded.
+                    self._release_after_provider_failure(retry_error, claimed, profile_id)
             else:
-                failure_message = "Failed to generate embedding"
+                if len(sub_embeddings) != len(sub_texts):
+                    sub_failure = (
+                        f"Embedding provider returned {len(sub_embeddings)} embeddings "
+                        f"for {len(sub_texts)} chunks"
+                    )
+                    sub_embeddings = [None for _ in sub_texts]
+                else:
+                    sub_failure = "Failed to generate embedding"
+            embeddings.extend(sub_embeddings)
+            fallback_messages.extend([sub_failure] * len(sub_texts))
 
         successes = [
             (chunk_id, embedding)
@@ -1027,7 +1084,7 @@ class PipelineWorker:
                         # actual cause -- and the chunk_size fix -- invisible
                         # in `status --verbose`.
                         row.status = "failed"
-                        row.error_message = reasons[offset] or failure_message
+                        row.error_message = reasons[offset] or fallback_messages[offset]
                     else:
                         row.status = "done"
                         row.error_message = None
@@ -1037,6 +1094,47 @@ class PipelineWorker:
             raise
         self.state_manager.update(current_activity=None)
         return True
+
+    def _read_search_lease(self) -> datetime | None:
+        """When an interactive search last ran, normalised to aware UTC."""
+        with self.Session() as session:
+            row: SearchActivity | None = session.get(SearchActivity, 1)
+        if row is None:
+            return None
+        value = row.last_search_at
+        if value.tzinfo is None:
+            # Driver round-trips can drop the timezone; the column is written
+            # from utc_now, so naive means UTC.
+            value = value.replace(tzinfo=timezone.utc)
+        return value
+
+    def _wait_while_search_is_active(self, claimed_count: int) -> None:
+        """Between sub-batches, hold off while the search lease is fresh.
+
+        The wait is shutdown-responsive and bounded by
+        ``search_yield_cap_seconds`` per invocation: each sub-batch defers at
+        most one cap window, so continuous searching degrades a build to one
+        sub-batch per window instead of stalling it (should_yield_to_search).
+        The yield is visible in ``status`` while it lasts.
+        """
+        ttl = self.config.pipeline_worker.search_lease_ttl_seconds
+        if ttl <= 0:
+            return
+        cap = self.config.pipeline_worker.search_yield_cap_seconds
+        yielding_since: datetime | None = None
+        while not self._shutdown_event.is_set() and should_yield_to_search(
+            self._read_search_lease(), utc_now(), ttl, yielding_since, cap
+        ):
+            if yielding_since is None:
+                yielding_since = utc_now()
+                self.state_manager.update(
+                    current_activity=(
+                        f"yielding to interactive search ({claimed_count} chunk(s) claimed)"
+                    )
+                )
+            self._shutdown_event.wait(self.config.pipeline_worker.poll_interval)
+        if yielding_since is not None:
+            self.state_manager.update(current_activity=f"embedding {claimed_count} chunk(s)")
 
     def _release_after_provider_failure(
         self, error: Exception, claimed: list[tuple[int, str]], profile_id: int

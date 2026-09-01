@@ -3,16 +3,24 @@
 from __future__ import annotations
 
 import dataclasses
+import logging
 
 # mypy: disable-error-code="import-untyped"
 from typing import Any, TypedDict
 
 import tiktoken
 from sqlalchemy import text
+from sqlalchemy.exc import SQLAlchemyError
 
 from cementic.chunk import TOKENIZER
 from cementic.config import Config, get_config
-from cementic.db import PipelineRevision, get_engine, get_session_factory
+from cementic.db import (
+    PipelineRevision,
+    SearchActivity,
+    get_engine,
+    get_session_factory,
+    utc_now,
+)
 from cementic.embedding_runtime import (
     create_provider,
     runtime_spec_from_profile_json,
@@ -152,6 +160,26 @@ def _searchable_revisions(revisions: list[PipelineRevision]) -> list[PipelineRev
     return list(searchable_by_collection.values())
 
 
+logger = logging.getLogger(__name__)
+
+
+def record_search_activity(session_factory: Any) -> None:
+    """Refresh the search lease (best-effort) in a short session of its own.
+
+    Runs before the query embeds so the pipeline worker can yield the shared
+    embedding server between its sub-batches (see ``db.SearchActivity``). A
+    failure is swallowed: the lease table is created by the worker paths
+    (``create_tables``), so a database whose worker predates it must still
+    search -- and a lease write never gets to break a search.
+    """
+    try:
+        with session_factory() as session:
+            session.merge(SearchActivity(id=1, last_search_at=utc_now()))
+            session.commit()
+    except SQLAlchemyError:
+        logger.debug("search-activity lease not recorded", exc_info=True)
+
+
 class Searcher:
     """Searcher for semantic search over active revisions."""
 
@@ -195,6 +223,10 @@ class Searcher:
             raise ValueError("query cannot be empty")
         if len(query) > MAX_QUERY_CHARS:
             raise ValueError(f"query too long: {len(query)} characters (max {MAX_QUERY_CHARS})")
+
+        # Before any embedding work, so the pipeline worker starts yielding the
+        # embedding server while revisions load and the provider connects.
+        record_search_activity(self.Session)
 
         with self.Session() as session:
             revisions = self._load_searchable_revisions(session, collections)
