@@ -198,6 +198,8 @@ class RemoteEmbeddingClient(EmbeddingProvider):
         # the window. Every production construction site passes the real value.
         self.n_ctx = n_ctx
         self._tokenize_endpoint_available: bool | None = None
+        #: Which tokenize path answered, once probed (see count_model_tokens).
+        self._tokenize_path: str | None = None
 
     @property
     def base_url(self) -> str:
@@ -323,21 +325,50 @@ class RemoteEmbeddingClient(EmbeddingProvider):
         """
         if self._tokenize_endpoint_available is False:
             return None
+        # Two spellings of the same endpoint: llama-cpp-python serves
+        # /extras/tokenize/count, upstream llama-server (the daemon_command
+        # path) serves /tokenize. Caching only the extras 404 degraded the
+        # guard to the cheap pre-filter on upstream servers, so a chunk at
+        # 513-549 model tokens was sent anyway and failed as a raw 500 instead
+        # of a clean over-budget reason (observed live 2026-08-27).
+        paths = (
+            [self._tokenize_path]
+            if self._tokenize_path is not None
+            else ["/extras/tokenize/count", "/tokenize"]
+        )
+        for path in paths:
+            count = self._exact_token_count(path, text)
+            if count is not None:
+                self._tokenize_endpoint_available = True
+                self._tokenize_path = path
+                return count
+        self._tokenize_endpoint_available = False
+        return None
+
+    def _exact_token_count(self, path: str, text: str) -> int | None:
+        """One endpoint's count for ``text``; None only on 404 (not served).
+
+        A transient failure (daemon down, cold, mid-restart) raises instead,
+        so the caller's retry path treats it as temporary rather than caching
+        "unsupported" or recording chunks as permanently unembeddable.
+        """
         response = requests.post(
-            f"{self.base_url}/extras/tokenize/count",
-            json={"input": text},
+            f"{self.base_url}{path}",
+            # extras reads "input", upstream /tokenize reads "content"; sent
+            # per path so a strict request model cannot 422 on a stray key.
+            json={"input": text} if path == "/extras/tokenize/count" else {"content": text},
             # Deliberately not self.timeout: tokenizing is trivial work, and a
             # long budget here would be spent waiting out a cold model load and
             # then leave nothing for the embedding request it precedes.
             timeout=min(self.timeout, _TOKENIZE_TIMEOUT_SECONDS),
         )
         if response.status_code == 404:
-            self._tokenize_endpoint_available = False
             return None
         response.raise_for_status()
-        count = int(response.json()["count"])
-        self._tokenize_endpoint_available = True
-        return count
+        payload = response.json()
+        if "count" in payload:
+            return int(payload["count"])
+        return len(payload["tokens"])
 
     def over_budget_tokens(self, text: str) -> int | None:
         """Exact model-token count if ``text`` exceeds the window, else None.

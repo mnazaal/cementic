@@ -233,6 +233,39 @@ class TestTokenBudgetGuard:
             self._client().embed("word " * 2000)
 
     @patch("cementic.embedding_runtime.requests.post")
+    def test_upstream_llama_server_tokenize_endpoint_is_used(self, mock_post) -> None:
+        """Upstream llama-server serves /tokenize, not /extras/tokenize/count.
+
+        The extras 404 used to be cached as "no exact tokenizer", so on the
+        daemon_command path a chunk at 513-549 model tokens was sent anyway and
+        failed as a raw 500 instead of a clean over-budget reason (observed
+        live 2026-08-27 on the papers import).
+        """
+
+        def responses(url, **kwargs):
+            response = MagicMock()
+            if url.endswith("/extras/tokenize/count"):
+                response.status_code = 404
+                return response
+            assert url.endswith("/tokenize")
+            response.status_code = 200
+            response.json.return_value = {"tokens": list(range(900))}
+            return response
+
+        mock_post.side_effect = responses
+        client = self._client()
+
+        assert client.over_budget_tokens("word " * 2000) == 900
+
+        # The working path is cached: the extras 404 is not probed again.
+        mock_post.reset_mock()
+        mock_post.side_effect = responses
+        assert client.count_model_tokens("more words") == 900
+        assert all(
+            "/extras/" not in call.args[0] for call in mock_post.call_args_list
+        )
+
+    @patch("cementic.embedding_runtime.requests.post")
     def test_a_server_without_the_endpoint_falls_back_to_the_estimate(self, mock_post) -> None:
         """A missing tokenizer endpoint must not silently re-admit truncation."""
         missing = MagicMock()
