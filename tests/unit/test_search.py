@@ -540,6 +540,14 @@ class TestQueryContextBound:
     def test_ordinary_query_is_accepted(self):
         _reject_query_over_context("transformer inference latency", 512)
 
+    def test_query_quoting_a_control_token_spelling_is_accepted(self):
+        """A pasted `<|endoftext|>` is prose to count, not a token to refuse.
+
+        tiktoken raises on literal control-token spellings unless told
+        otherwise (same landmine as chunk.py and the embed budget guard).
+        """
+        _reject_query_over_context("papers about the <|endoftext|> delimiter", 512)
+
     def test_bound_follows_the_configured_context_window(self):
         """The char-based cap could not do this: it was fixed at 8000 chars
         regardless of the window the model was actually loaded with."""

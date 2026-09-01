@@ -164,6 +164,18 @@ class TestTokenBudgetGuard:
             assert self._client().over_budget_tokens("a short chunk of text") is None
             mock_post.assert_not_called()
 
+    def test_literal_control_token_spellings_are_ordinary_text(self) -> None:
+        """`<|endoftext|>` in prose must be counted, not refused.
+
+        tiktoken raises on literal control-token spellings by default; that
+        string is ordinary prose in NLP papers, and the raise stamped 421
+        chunks of the live corpus terminally failed at the embed step even
+        though chunking (chunk.py, disallowed_special=()) had already passed
+        them through.
+        """
+        text = "as in GPT-2, sequences end with <|endoftext|> and <|endofprompt|> markers"
+        assert self._client().over_budget_tokens(text) is None
+
     @patch("cementic.embedding_runtime.requests.post")
     def test_long_text_is_measured_with_the_models_own_tokenizer(self, mock_post) -> None:
         counted = MagicMock()

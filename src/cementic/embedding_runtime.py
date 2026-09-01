@@ -352,7 +352,13 @@ class RemoteEmbeddingClient(EmbeddingProvider):
         """
         if self.n_ctx <= 0:
             return None
-        approx = len(tiktoken.get_encoding(TOKENIZER).encode(text)) * _TOKEN_RATIO_UPPER_BOUND
+        # disallowed_special=() as in chunk.py: a literal `<|endoftext|>` is
+        # ordinary prose in NLP papers, and tiktoken's default raise stamped
+        # such chunks terminally failed here after chunking had passed them.
+        approx = (
+            len(tiktoken.get_encoding(TOKENIZER).encode(text, disallowed_special=()))
+            * _TOKEN_RATIO_UPPER_BOUND
+        )
         if approx <= self.n_ctx:
             return None
         exact = self.count_model_tokens(text)

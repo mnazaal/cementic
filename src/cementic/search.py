@@ -62,7 +62,9 @@ def _reject_query_over_context(query: str, n_ctx: int) -> None:
     real count is available.
     """
     budget = max(1, int(n_ctx * _QUERY_CONTEXT_MARGIN))
-    tokens = len(tiktoken.get_encoding(TOKENIZER).encode(query))
+    # disallowed_special=() as in chunk.py: a pasted `<|endoftext|>` is prose
+    # to count, not a control token to refuse with an unrelated ValueError.
+    tokens = len(tiktoken.get_encoding(TOKENIZER).encode(query, disallowed_special=()))
     if tokens > budget:
         raise ValueError(
             f"query too long: about {tokens} tokens, but the embedding model's "
