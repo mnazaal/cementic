@@ -187,6 +187,33 @@ def should_yield_to_search(
     return True
 
 
+def embed_submit_size(
+    remaining: int, interactive_size: int, claim_size: int, search_is_active: bool
+) -> int:
+    """How many texts to put in the next embedding request (pure).
+
+    Sub-batching exists to bound how long an interactive query queues behind
+    bulk work, and it is not free: llama-server charges a fixed ~0.36 s per
+    request, and a request sized to the slot count empties every slot while the
+    client does its next round trip. Measured on the papers import, a fixed
+    size of 4 cost ~2x indexing throughput (4.0 -> 2.0 chunk/s) with ~25% of
+    wall clock spent with no slot busy.
+
+    So the size follows the lease rather than being constant. With no recent
+    search the whole claim goes in one request: no query is waiting, and the
+    server keeps a queue deep enough to refill slots as they free. With a fresh
+    lease the request shrinks to ``interactive_size`` so a query landing
+    mid-request waits for a few texts rather than a full claim.
+
+    The residual, stated plainly: the first query after a quiet stretch can
+    still land mid-request and wait out one full claim. Removing that needs
+    Layer 3 of notes/design-embed-scheduling.html (abort the in-flight request
+    on lease activity), which is still unbuilt.
+    """
+    size = interactive_size if search_is_active else claim_size
+    return max(1, min(size, remaining))
+
+
 def is_retryable_embed_error(error: BaseException) -> bool:
     """Whether an embedding failure is about the provider, not the texts (pure).
 
@@ -984,29 +1011,37 @@ class PipelineWorker:
             # mismatch) silently stamped the whole batch terminally failed.
             raise RuntimeError("Embedding provider is not initialised")
         texts = [provider.format_document(content) for _, content in claimed]
-        # Submitted in sub-batches: llama-server schedules embeddings per input,
-        # strict FIFO, so the per-request input count is exactly how long a
-        # search query queues behind this batch. The claim above stays large to
-        # amortise DB round trips; the request stays small to keep search
-        # responsive (notes/design-embed-scheduling.html).
-        submit_size = self.config.pipeline_worker.embed_submit_batch_size
+        # Request size follows the search lease: llama-server schedules
+        # embeddings per input, strict FIFO, so the per-request input count is
+        # exactly how long a search query queues behind this batch -- but a
+        # request sized to the slot count also drains the server between round
+        # trips and cost ~2x throughput when it was constant (embed_submit_size,
+        # notes/design-embed-scheduling.html).
+        interactive_size = self.config.pipeline_worker.embed_submit_batch_size
+        claim_size = self.config.pipeline_worker.batch_size
         embeddings: list[list[float] | None] = []
         # Message stamped on any row that ends up without a vector: its
-        # sub-batch's exception if that call failed, or a per-row note if the
+        # request's exception if that call failed, or a per-row note if the
         # call succeeded but an individual embedding came back missing.
         fallback_messages: list[str] = []
-        for start in range(0, len(texts), submit_size):
-            self._wait_while_search_is_active(len(claimed))
+        start = 0
+        while start < len(texts):
+            search_is_active = self._wait_while_search_is_active(len(claimed))
             if self._shutdown_event.is_set():
                 # Stop requested mid-claim: return the whole claim rather than
                 # racing the shutdown with more server round trips. Earlier
-                # sub-batches re-embed next start; the upsert is idempotent.
+                # requests re-embed next start; the upsert is idempotent.
                 self._release_claimed_embeddings(
                     [chunk_id for chunk_id, _ in claimed], profile_id
                 )
                 self.state_manager.update(current_activity=None)
                 return False
-            sub_texts = texts[start : start + submit_size]
+            sub_texts = texts[
+                start : start
+                + embed_submit_size(
+                    len(texts) - start, interactive_size, claim_size, search_is_active
+                )
+            ]
             sub_embeddings: list[list[float] | None]
             try:
                 sub_embeddings = list(provider.embed_batch(sub_texts))
@@ -1039,6 +1074,7 @@ class PipelineWorker:
                     sub_failure = "Failed to generate embedding"
             embeddings.extend(sub_embeddings)
             fallback_messages.extend([sub_failure] * len(sub_texts))
+            start += len(sub_texts)
 
         successes = [
             (chunk_id, embedding)
@@ -1108,22 +1144,28 @@ class PipelineWorker:
             value = value.replace(tzinfo=timezone.utc)
         return value
 
-    def _wait_while_search_is_active(self, claimed_count: int) -> None:
-        """Between sub-batches, hold off while the search lease is fresh.
+    def _wait_while_search_is_active(self, claimed_count: int) -> bool:
+        """Between requests, hold off while the search lease is fresh.
+
+        Returns whether a search is still recent once the wait ends, which is
+        what sizes the next request (embed_submit_size): the wait can end
+        because the lease went stale, or because the cap fired with the lease
+        still fresh, and those want different request sizes.
 
         The wait is shutdown-responsive and bounded by
-        ``search_yield_cap_seconds`` per invocation: each sub-batch defers at
+        ``search_yield_cap_seconds`` per invocation: each request defers at
         most one cap window, so continuous searching degrades a build to one
-        sub-batch per window instead of stalling it (should_yield_to_search).
+        request per window instead of stalling it (should_yield_to_search).
         The yield is visible in ``status`` while it lasts.
         """
         ttl = self.config.pipeline_worker.search_lease_ttl_seconds
         if ttl <= 0:
-            return
+            return False
         cap = self.config.pipeline_worker.search_yield_cap_seconds
         yielding_since: datetime | None = None
+        lease = self._read_search_lease()
         while not self._shutdown_event.is_set() and should_yield_to_search(
-            self._read_search_lease(), utc_now(), ttl, yielding_since, cap
+            lease, utc_now(), ttl, yielding_since, cap
         ):
             if yielding_since is None:
                 yielding_since = utc_now()
@@ -1133,8 +1175,12 @@ class PipelineWorker:
                     )
                 )
             self._shutdown_event.wait(self.config.pipeline_worker.poll_interval)
+            lease = self._read_search_lease()
         if yielding_since is not None:
             self.state_manager.update(current_activity=f"embedding {claimed_count} chunk(s)")
+        # Freshness alone, with no cap: `should_yield_to_search` with no
+        # `yielding_since` is exactly "a search ran within the TTL".
+        return should_yield_to_search(lease, utc_now(), ttl, None, cap)
 
     def _release_after_provider_failure(
         self, error: Exception, claimed: list[tuple[int, str]], profile_id: int

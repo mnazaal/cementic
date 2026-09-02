@@ -31,6 +31,7 @@ from cementic.pipeline_worker import (
     _purge_all_chunks,
     _purge_superseded_chunks,
     _try_acquire_pipeline_worker_lock,
+    embed_submit_size,
     is_retryable_embed_error,
     revision_is_complete,
     should_yield_to_search,
@@ -854,18 +855,39 @@ class TestShouldYieldToSearch:
         assert should_yield_to_search(last, self.NOW, 10.0, yielding_since, 60.0) is True
 
 
+class TestEmbedSubmitSize:
+    """Pure request-sizing policy for the embed step."""
+
+    def test_idle_sends_the_whole_claim(self) -> None:
+        """No query is waiting, so nothing is bought by splitting the claim."""
+        assert embed_submit_size(32, 4, 32, search_is_active=False) == 32
+
+    def test_active_search_shrinks_the_request(self) -> None:
+        assert embed_submit_size(32, 4, 32, search_is_active=True) == 4
+
+    def test_never_exceeds_what_is_left(self) -> None:
+        """The last request of a claim carries the remainder, not a full size."""
+        assert embed_submit_size(3, 4, 32, search_is_active=False) == 3
+        assert embed_submit_size(3, 4, 32, search_is_active=True) == 3
+
+    def test_always_makes_progress(self) -> None:
+        """A zero would spin the caller's loop forever on a non-empty claim."""
+        assert embed_submit_size(1, 0, 0, search_is_active=True) == 1
+        assert embed_submit_size(1, 0, 0, search_is_active=False) == 1
+
+
 class TestPipelineWorkerEmbedStep:
     """Embedding step liveness regressions."""
 
-    def test_embed_step_submits_claim_in_configured_sub_batches(
+    def test_embed_step_sends_the_whole_claim_when_nobody_is_searching(
         self, temp_dir: Path, monkeypatch
     ) -> None:
-        """One DB claim goes to the provider as several bounded calls.
+        """With no search lease the claim goes to the provider in one call.
 
-        The provider request size bounds how long a search query queues behind
-        indexing (llama-server schedules per-input FIFO), so the claim size and
-        the submit size are separate knobs. The vector-table write is stubbed:
-        it is Postgres-only and not the behavior under test.
+        Splitting it costs a fixed per-request overhead and drains the server's
+        slots across each round trip -- ~2x throughput, measured -- and buys
+        nothing when no query is waiting. The vector-table write is stubbed: it
+        is Postgres-only and not the behavior under test.
         """
         import cementic.pipeline_worker as worker_module
 
@@ -881,6 +903,50 @@ class TestPipelineWorkerEmbedStep:
         config.pipeline_worker.log_file = temp_dir / "worker.log"
         config.pipeline_worker.batch_size = 6
         config.pipeline_worker.embed_submit_batch_size = 2
+        worker = PipelineWorker(config)
+        worker.Session = session_factory
+        client = _RecordingBatchClient()
+        worker.embedding_client = client
+
+        assert worker._step_embed(revision_id) is True
+
+        assert client.call_sizes == [5]
+        with session_factory() as session:
+            rows = session.query(ChunkEmbedding).order_by(ChunkEmbedding.chunk_id).all()
+            assert [row.status for row in rows] == ["done"] * 5
+
+    def test_embed_step_shrinks_requests_while_a_search_is_active(
+        self, temp_dir: Path, monkeypatch
+    ) -> None:
+        """A lease that stays fresh caps each request at embed_submit_batch_size.
+
+        This is the case the small request exists for: a query landing
+        mid-request waits for a few texts rather than a whole claim. The yield
+        cap is what lets the build proceed at all while the lease keeps being
+        refreshed.
+        """
+        import cementic.pipeline_worker as worker_module
+        from cementic.db import SearchActivity, utc_now
+
+        monkeypatch.setattr(worker_module, "ensure_vector_table_schema", lambda *a, **k: None)
+        monkeypatch.setattr(worker_module, "upsert_vectors", lambda *a, **k: None)
+        engine = create_engine("sqlite:///:memory:")
+        Base.metadata.create_all(engine)
+        session_factory = sessionmaker(bind=engine, expire_on_commit=False)
+        with session_factory() as session:
+            revision_id = _seed_embedding_batch(session, n_chunks=5)
+            session.merge(SearchActivity(id=1, last_search_at=utc_now()))
+            session.commit()
+
+        config = Config()
+        config.pipeline_worker.log_file = temp_dir / "worker.log"
+        config.pipeline_worker.batch_size = 6
+        config.pipeline_worker.embed_submit_batch_size = 2
+        # The lease never goes stale here, so the cap is the only thing that
+        # releases a request: near-zero means every wait ends immediately with
+        # the search still active, which is exactly the small-request state.
+        config.pipeline_worker.search_yield_cap_seconds = 0.001
+        config.pipeline_worker.poll_interval = 0.001
         worker = PipelineWorker(config)
         worker.Session = session_factory
         client = _RecordingBatchClient()
@@ -942,21 +1008,27 @@ class TestPipelineWorkerEmbedStep:
         assert worker._step_embed(revision_id) is True
 
         assert event_stub.waits >= 1
-        assert client.call_sizes == [2, 2]
+        # The wait ended because the lease aged out, so the request that
+        # follows it is claim-sized rather than interactive-sized.
+        assert client.call_sizes == [4]
         with session_factory() as session:
             rows = session.query(ChunkEmbedding).order_by(ChunkEmbedding.chunk_id).all()
             assert [row.status for row in rows] == ["done"] * 4
 
-    def test_data_failure_falls_back_to_individual_embeds_within_its_sub_batch_only(
+    def test_data_failure_falls_back_to_individual_embeds_within_its_request_only(
         self, temp_dir: Path, monkeypatch
     ) -> None:
-        """One bad chunk costs its sub-batch the one-by-one retry, not the claim.
+        """One bad chunk costs its request the one-by-one retry, not the claim.
 
-        The whole-claim fallback re-embedded batch_size - 1 healthy chunks one
-        request at a time; scoping it to the failed sub-batch keeps the other
-        sub-batches on the batched path.
+        The retry is scoped to the failed request, so how much it re-embeds
+        follows the request size: small while a search is active (asserted
+        here), claim-sized when nothing is searching. That upper bound is
+        acceptable because it is rare -- ``embed_batch`` pre-filters
+        over-budget texts, and a retryable server error releases the claim
+        without reaching this path at all.
         """
         import cementic.pipeline_worker as worker_module
+        from cementic.db import SearchActivity, utc_now
 
         monkeypatch.setattr(worker_module, "ensure_vector_table_schema", lambda *a, **k: None)
         monkeypatch.setattr(worker_module, "upsert_vectors", lambda *a, **k: None)
@@ -965,11 +1037,15 @@ class TestPipelineWorkerEmbedStep:
         session_factory = sessionmaker(bind=engine, expire_on_commit=False)
         with session_factory() as session:
             revision_id = _seed_embedding_batch(session, n_chunks=5)
+            session.merge(SearchActivity(id=1, last_search_at=utc_now()))
+            session.commit()
 
         config = Config()
         config.pipeline_worker.log_file = temp_dir / "worker.log"
         config.pipeline_worker.batch_size = 6
         config.pipeline_worker.embed_submit_batch_size = 2
+        config.pipeline_worker.search_yield_cap_seconds = 0.001
+        config.pipeline_worker.poll_interval = 0.001
         worker = PipelineWorker(config)
         worker.Session = session_factory
         client = _PoisonChunkClient(poison="chunk 2")
@@ -977,7 +1053,7 @@ class TestPipelineWorkerEmbedStep:
 
         assert worker._step_embed(revision_id) is True
 
-        # Only the poisoned sub-batch ("chunk 2", "chunk 3") went one at a time.
+        # Only the poisoned request ("chunk 2", "chunk 3") went one at a time.
         assert client.individual_calls == ["chunk 2", "chunk 3"]
         with session_factory() as session:
             rows = session.query(ChunkEmbedding).order_by(ChunkEmbedding.chunk_id).all()

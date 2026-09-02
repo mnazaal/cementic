@@ -245,6 +245,29 @@ practice; the strong fix if Layers 1–2 measure insufficient — costs runtime-
 fingerprint work and resident memory) and an upstream llama.cpp patch exposing
 the internal front-of-queue path as a `priority` field on embeddings.
 
+**Amended 2026-09-02 — Layer 1 was not free, and is now conditional.** The
+design claimed sub-batching left indexing throughput untouched when nobody
+searches. It did not: measured on the papers import, a constant request size of
+4 cost **~2× throughput** (≈4.0 → ≈1.7–2.9 emb/s), a step visible at the exact
+worker restart that put it into service. Two causes, both measured against the
+live llama-server: a fixed ~0.36 s per request (0.72 s for one input against
+12.2 s for 32, so ~0.36 s of that is size-independent), and ~25% of wall clock
+with no slot busy, because a request sized to the slot count empties all four
+slots across every client round trip.
+
+The request size now follows the lease instead of being constant
+(`embed_submit_size`): the whole claim when no search is recent,
+`embed_submit_batch_size` while one is. Layer 2's yield is unchanged and still
+does the work during an interactive session. The residual is the honest cost of
+not building Layer 3 — the *first* query after a quiet stretch can land
+mid-request and wait out one full claim. It is bounded, and it exists only
+while a build runs: once a collection is promoted the worker embeds nothing and
+queries are uncontended.
+
+This also promotes Layer 3 from "value evaporated" to the thing that would
+remove the residual, since the premise that retired it — that Layer 1 had
+already shrunk the quantum for free — is what the measurement falsified.
+
 ### Decided — build the ANN index up front (2026-08-13)
 
 **Taken.** `ensure_revision_ann_index_up_front` (`revisions.py`) creates the

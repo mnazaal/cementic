@@ -849,17 +849,19 @@ class PipelineWorkerConfig(_SectionSettings):
         le=128,
         description="Number of chunks to embed in one batch",
     )
-    # Distinct from batch_size on purpose: the DB claim amortises round trips,
-    # while the per-request input count bounds how long a search query queues
-    # behind indexing -- llama-server schedules embeddings per input, strict
-    # FIFO, so a query's one task waits behind every text of the request in
-    # flight (notes/design-embed-scheduling.html). Default matches the server's
-    # observed slot count.
+    # Only applies while a search lease is fresh. llama-server schedules
+    # embeddings per input, strict FIFO, so a query's one task waits behind
+    # every text of the request in flight, and this bounds that wait -- but
+    # paying it when nobody is searching cost ~2x indexing throughput, because
+    # a request sized to the slot count leaves every slot idle across the
+    # client's round trip. With no recent search the worker sends batch_size
+    # instead (embed_submit_size, notes/design-embed-scheduling.html). Default
+    # matches the server's observed slot count.
     embed_submit_batch_size: int = Field(
         default=4,
         ge=1,
         le=128,
-        description="Number of chunks per embedding-server request within one batch",
+        description="Chunks per embedding-server request while a search is active",
     )
     # gt=0: zero or negative turned the idle wait into a hot spin pinning a
     # core, with nothing anywhere reporting why.
