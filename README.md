@@ -320,7 +320,7 @@ matching `CEMENTIC_*` variable (see [Environment variables](#environment-variabl
 | | `daemon_pid_file`, `daemon_log_file` | under the data dir | Daemon bookkeeping |
 | | `daemon_command` | unset | External embedding-server command for cementic to spawn/supervise instead of the bundled `llama_cpp.server`; placeholders `{model}` `{alias}` `{host}` `{port}` `{n_ctx}` (see "Running embeddings on a GPU") |
 | | `verbose` | `false` | Verbose llama.cpp logging |
-| `extraction` | `use_ocr` | `false` | OCR pages with no text layer (`rapidocr` is a required dependency, always installed) |
+| `extraction` | `use_ocr` | `false` | OCR pages with no text layer. Needs the opt-in `rapidocr` package and the `pymupdf4llm` backend — see "OCR for scanned PDFs" |
 | | `backends` | registry default | Per-file-type extractor choice, e.g. `pdf = "pymupdf-raw"`. PDFs: `pymupdf4llm` (default, Markdown structure via an ONNX layout model) or `pymupdf-raw` (text layer only, ~275× faster — see "Choosing a PDF extractor") |
 | `source_watcher` | `ignore_directories` | 16 names incl. `.git`, `node_modules`, `build`, `dist`, `venv`, `target` | Directory names skipped anywhere under a watched root. **Replaces** the defaults rather than adding to them; set `[]` to index everything |
 | | `state_path`, `log_file` | under the data dir | Watcher bookkeeping |
@@ -379,6 +379,43 @@ Extraction cost scales with pages, not documents: use **2.8 ms/page** for
 `pymupdf-raw` and **0.78 s/page** for `pymupdf4llm` when projecting. A per-document
 rate taken from short papers understates a corpus of longer ones by the ratio of
 their page counts.
+
+### OCR for scanned PDFs
+
+A PDF with no text layer extracts empty, and cementic fails the document rather
+than storing nothing (`extracted no text: the PDF has no text layer`). OCR is
+how you get text out of one, and it takes three things that must all agree:
+
+```bash
+# 1. install the OCR backend -- it is not a declared dependency
+uv tool install --with 'rapidocr>=3.6.0' git+ssh://git@github.com/mnazaal/cementic
+```
+
+```toml
+# 2. and 3. -- OCR only reaches extraction through the pymupdf4llm backend
+[extraction]
+backends = { pdf = "pymupdf4llm" }
+use_ocr = true
+```
+
+`cementic doctor` reports all three together, including the silent no-op where
+`use_ocr` is on but the pdf backend never calls OCR.
+
+`rapidocr` is deliberately not installed by default: it pulls opencv and an
+ONNX runtime, about 252 MB, for a path most corpora never take. cementic never
+imports it — pymupdf4llm owns the adapter and cementic hands its OCR callback
+over — so nothing breaks by its absence except OCR itself. Note that `uv tool
+install` *replaces* the requirement set rather than merging into it, so re-list
+any other `--with` pins in the same command.
+
+Both `use_ocr` and the backend choice are part of the extraction fingerprint,
+so turning OCR on re-versions the revision and re-extracts the collection.
+Point scanned documents at their own collection rather than flipping the flag
+under a corpus that does not need it.
+
+Two alternatives need no Python package at all: run `ocrmypdf` over the file
+first and index the result with any backend, or use PyMuPDF's own Tesseract
+binding. Both want the `tesseract` system package instead.
 
 ### Running embeddings on a GPU
 
@@ -486,7 +523,8 @@ export CEMENTIC_DB_PASSWORD=cementic
 # export CEMENTIC_DB_URL=postgresql://user:pass@host:5432/dbname
 
 # Extraction (per-file-type extractor choice lives in the
-# [extraction.backends] config table; this toggles OCR)
+# [extraction.backends] config table; this toggles OCR, which also needs the
+# opt-in rapidocr package and the pymupdf4llm backend)
 export CEMENTIC_EXTRACT_USE_OCR=false
 
 # Artifact storage

@@ -16,6 +16,7 @@ from cementic.extract import (
     extractor_for,
     extractor_registry_payload,
     normalize_backend_file_type,
+    ocr_would_run,
     strip_unstorable,
     supported_extensions,
 )
@@ -355,3 +356,29 @@ class TestDeletionNeedsProofOfAbsence:
             assert _is_missing(str(target)) is False
         finally:
             locked.chmod(0o755)
+
+
+class TestOcrReachesExtractionOnlyThroughOneBackend:
+    """`use_ocr` is a request, not a guarantee: the backend has to honour it."""
+
+    def test_off_by_default(self) -> None:
+        assert ocr_would_run(Config()) is False
+
+    def test_unset_pdf_backend_falls_through_to_the_ocr_capable_one(self) -> None:
+        """An unset backend resolves to the first registered extractor handling
+        .pdf, which is pymupdf4llm -- so OCR does run without naming it."""
+        config = Config(extraction=ExtractionConfig(use_ocr=True))
+        assert config.extraction.backends == {}
+        assert ocr_would_run(config) is True
+
+    def test_raw_backend_never_runs_ocr(self) -> None:
+        config = Config(
+            extraction=ExtractionConfig(use_ocr=True, backends={"pdf": "pymupdf-raw"})
+        )
+        assert ocr_would_run(config) is False
+
+    def test_naming_the_ocr_backend_explicitly_runs_ocr(self) -> None:
+        config = Config(
+            extraction=ExtractionConfig(use_ocr=True, backends={"pdf": "pymupdf4llm"})
+        )
+        assert ocr_would_run(config) is True

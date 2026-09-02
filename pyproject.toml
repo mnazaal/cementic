@@ -44,7 +44,16 @@ dependencies = [
     # not just pulled in by pymupdf4llm.
     "pymupdf>=1.27.1",
     "pymupdf-layout>=1.27.1",
-    "rapidocr>=3.6.0",
+    # rapidocr is deliberately *not* declared here. cementic never imports it:
+    # extract.py looks it up through pymupdf4llm and hands its exec_ocr over as
+    # a callback, and that path is only reachable with the pymupdf4llm backend
+    # and extraction.use_ocr on -- neither of which is the default. Declaring it
+    # put 252 MB of opencv and its ONNX runtime into every install for a path
+    # most installs never take. Opt in at install time instead:
+    #   uv tool install --with 'rapidocr>=3.6.0' <cementic>
+    # The >=3.6.0 floor is carried over from when this was declared; moving it
+    # out of the resolver means nothing enforces it at install time, so
+    # extract.py's error message states it to whoever has to act on it.
     "requests>=2.31.0",
     "rich>=13.0",
     "platformdirs>=4.0",

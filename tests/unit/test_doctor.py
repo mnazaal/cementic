@@ -3,7 +3,7 @@
 from unittest.mock import MagicMock, patch
 
 from cementic.config import Config
-from cementic.doctor import _daemon_state, collect_doctor_report
+from cementic.doctor import _daemon_state, _ocr_check, collect_doctor_report
 from cementic.embedding_runtime import AmbiguousDaemonPidsError, DaemonHealth
 
 
@@ -268,3 +268,57 @@ class TestModelCheck:
 
         assert report["checks"]["model"]["status"] == "warning"
         assert report["ok"] is True
+
+
+class TestOcrCheck:
+    """OCR needs two settings and a package to agree; each fails quietly alone."""
+
+    def test_ocr_off_needs_no_backend(self) -> None:
+        report = _ocr_check(Config())
+        assert report["status"] == "ok"
+        assert report["enabled"] is False
+
+    def test_ocr_on_under_a_backend_that_ignores_it_is_a_warning(self) -> None:
+        """The silent no-op: pymupdf-raw reads the text layer and never OCRs,
+        so `use_ocr = true` changes nothing and scans still extract empty."""
+        config = Config()
+        config.extraction.use_ocr = True
+        config.extraction.backends = {"pdf": "pymupdf-raw"}
+
+        report = _ocr_check(config)
+        assert report["status"] == "warning"
+        assert "pymupdf-raw" in report["message"]
+
+    def test_missing_engine_under_an_ocr_backend_fails(self) -> None:
+        """Not a warning: with OCR reaching extraction, every PDF raises, and
+        calling that ready would pass an unusable configuration."""
+        config = Config()
+        config.extraction.use_ocr = True
+        config.extraction.backends = {"pdf": "pymupdf4llm"}
+
+        with patch("cementic.extract.ocr_backend_available", return_value=False):
+            report = _ocr_check(config)
+        assert report["status"] == "fail"
+        assert "rapidocr>=3.6.0" in report["message"]
+
+    def test_installed_engine_under_an_ocr_backend_is_ok(self) -> None:
+        config = Config()
+        config.extraction.use_ocr = True
+        config.extraction.backends = {"pdf": "pymupdf4llm"}
+
+        with patch("cementic.extract.ocr_backend_available", return_value=True):
+            report = _ocr_check(config)
+        assert report["status"] == "ok"
+        assert report["enabled"] is True
+
+    def test_a_failing_ocr_check_fails_the_whole_report(self) -> None:
+        """The check has to reach `ok`, or doctor reports ready on a config
+        under which no PDF can be extracted."""
+        config = Config()
+        config.extraction.use_ocr = True
+        config.extraction.backends = {"pdf": "pymupdf4llm"}
+
+        with patch("cementic.extract.ocr_backend_available", return_value=False):
+            report = collect_doctor_report(config)
+        assert report["checks"]["ocr"]["status"] == "fail"
+        assert report["ok"] is False

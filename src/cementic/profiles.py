@@ -57,6 +57,15 @@ EXTRACTION_VERSION = "v1"
 #: only a rebuild that a layout-model upgrade should cause anyway.
 _EXTRACTION_LIBRARY_NAMES = ("pymupdf4llm", "pymupdf", "pymupdf-layout")
 
+#: Recorded only when extraction.use_ocr is on. rapidocr rewrites the extracted
+#: text wherever OCR runs, so by the rule above it belongs with the libraries
+#: listed there -- but adding it unconditionally would move the fingerprint of
+#: every OCR-free revision and re-extract corpora whose text it cannot have
+#: touched. Gating it on the flag that decides whether OCR runs at all keeps
+#: those fingerprints still. A None version is a normal reading here rather
+#: than a broken environment: rapidocr is an opt-in dependency (pyproject.toml).
+_OCR_LIBRARY_NAMES = ("rapidocr",)
+
 
 def _stable_json(payload: dict[str, object]) -> str:
     return json.dumps(payload, sort_keys=True, separators=(",", ":"))
@@ -66,8 +75,8 @@ def _fingerprint(payload: dict[str, object]) -> str:
     return sha256(_stable_json(payload).encode("utf-8")).hexdigest()
 
 
-def _installed_extraction_library_versions() -> dict[str, str | None]:
-    """Installed version of each extraction library, or None if not installed.
+def _installed_extraction_library_versions(names: tuple[str, ...]) -> dict[str, str | None]:
+    """Installed version of each named library, or None if not installed.
 
     None rather than a raised exception: a bare `importlib.metadata.version()`
     call raises `PackageNotFoundError` for an uninstalled optional package
@@ -75,7 +84,7 @@ def _installed_extraction_library_versions() -> dict[str, str | None]:
     construction itself must never crash on what happens to be installed).
     """
     versions: dict[str, str | None] = {}
-    for name in _EXTRACTION_LIBRARY_NAMES:
+    for name in names:
         try:
             versions[name] = _package_version(name)
         except PackageNotFoundError:
@@ -97,12 +106,16 @@ def build_extractor_profile_payload(config: Config) -> dict[str, object]:
     """
     from cementic.extract import extractor_registry_payload
 
+    library_names: tuple[str, ...] = _EXTRACTION_LIBRARY_NAMES
+    if config.extraction.use_ocr:
+        library_names += _OCR_LIBRARY_NAMES
+
     return {
         "backends": dict(sorted(config.extraction.backends.items())),
         "use_ocr": config.extraction.use_ocr,
         "version": EXTRACTION_VERSION,
         "extractors": extractor_registry_payload(),
-        "extraction_libraries": _installed_extraction_library_versions(),
+        "extraction_libraries": _installed_extraction_library_versions(library_names),
     }
 
 

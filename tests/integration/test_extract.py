@@ -6,7 +6,12 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from cementic.extract import extract_pdf_markdown
+from cementic.extract import (
+    _get_rapidocr_api,
+    _ocr_backend_installed,
+    extract_pdf_markdown,
+    ocr_backend_available,
+)
 
 
 def _fake_pdf_stack(*, layout: object = object(), to_markdown: object = "markdown"):
@@ -51,10 +56,14 @@ class TestExtractErrorPaths:
         """
         stack = _fake_pdf_stack(to_markdown=["page 1 text", "page 2 text"])
 
+        # OCR is stubbed rather than left to the environment: rapidocr is an
+        # opt-in dependency now, so the default use_ocr=True would otherwise
+        # make this test's outcome depend on whether it happens to be installed.
         with patch("pathlib.Path.exists", return_value=True):
-            with patch("cementic.extract._get_pymupdf", return_value=stack):
-                with pytest.raises(RuntimeError, match="page chunks"):
-                    extract_pdf_markdown("/fake/path.pdf")
+            with patch("cementic.extract._get_rapidocr_api", return_value=MagicMock()):
+                with patch("cementic.extract._get_pymupdf", return_value=stack):
+                    with pytest.raises(RuntimeError, match="page chunks"):
+                        extract_pdf_markdown("/fake/path.pdf")
 
     @patch("cementic.extract._get_rapidocr_api")
     def test_ocr_disabled(self, mock_ocr: MagicMock) -> None:
@@ -96,21 +105,50 @@ class TestExtractErrorPaths:
         stack[1].to_markdown.assert_not_called()
 
 
-class TestImportFailures:
-    """Test graceful handling of optional import failures."""
+class TestOcrBackendDetection:
+    """Availability is decided by the engine package, not by the adapter."""
 
-    def test_rapidocr_import_failure_returns_none(self) -> None:
-        """Verify _get_rapidocr_api returns None when rapidocr not available."""
-        from cementic.extract import _get_rapidocr_api
+    def test_no_engine_package_means_no_ocr(self) -> None:
+        with patch("cementic.extract._ocr_backend_installed", return_value=False):
+            assert _get_rapidocr_api() is None
+            assert ocr_backend_available() is False
 
-        # Simulate import failure by removing any cached module
-        saved = sys.modules.pop("pymupdf4llm.ocr", None)
-        try:
+    def test_an_importable_adapter_is_not_evidence_of_ocr(self) -> None:
+        """The bug an ImportError check could not see.
+
+        From pymupdf4llm 1.28 the adapter resolves its engine at import time and
+        swallows the absence, so `from pymupdf4llm.ocr import rapidocr_api`
+        succeeds with nothing behind it. Reading that as "OCR available" let
+        extraction run without OCR and write the result into an immutable
+        artifact -- the corpus then carried the degradation permanently.
+        """
+        with patch("cementic.extract.importlib.util.find_spec", return_value=None):
+            with patch.dict(sys.modules, {"pymupdf4llm.ocr.rapidocr_api": MagicMock()}):
+                assert _get_rapidocr_api() is None
+                assert ocr_backend_available() is False
+
+    def test_a_missing_adapter_module_is_still_handled(self) -> None:
+        """Older pymupdf4llm raises ImportError instead; both must read alike."""
+        with patch("cementic.extract._ocr_backend_installed", return_value=True):
             with patch.dict(sys.modules, {"pymupdf4llm.ocr": None}):
-                with patch("cementic.extract._get_rapidocr_api", return_value=None):
-                    result = _get_rapidocr_api()
-            # With our patch, it returns None
-            assert result is None
-        finally:
-            if saved is not None:
-                sys.modules["pymupdf4llm.ocr"] = saved
+                assert _get_rapidocr_api() is None
+
+    def test_either_engine_package_counts(self) -> None:
+        found = {"rapidocr_onnxruntime"}
+        with patch(
+            "cementic.extract.importlib.util.find_spec",
+            side_effect=lambda name: object() if name in found else None,
+        ):
+            assert _ocr_backend_installed() is True
+
+    def test_engine_is_probed_without_importing_it(self) -> None:
+        """`find_spec`, not `import`: importing rapidocr loads ONNX models."""
+        asked: list[str] = []
+
+        def fake_find_spec(name: str) -> None:
+            asked.append(name)
+            return None
+
+        with patch("cementic.extract.importlib.util.find_spec", side_effect=fake_find_spec):
+            assert _ocr_backend_installed() is False
+        assert "rapidocr" in asked

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import importlib.util
 import sys
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -48,14 +49,75 @@ def _get_pymupdf_bare() -> Any:
     return pymupdf
 
 
-def _get_rapidocr_api() -> Any | None:
-    """Lazily import RapidOCR API adapter."""
-    try:
-        from pymupdf4llm.ocr import rapidocr_api
+#: Where the OCR backend comes from. rapidocr is an opt-in dependency rather
+#: than a declared one (see pyproject.toml), so the version floor lives here,
+#: next to the check that needs it, instead of in a resolver that never sees
+#: it. Named once and used by both the extraction error and `cementic doctor`.
+OCR_INSTALL_HINT = (
+    "install it into the same environment: "
+    "`uv tool install --with 'rapidocr>=3.6.0' <cementic source>` "
+    "-- re-listing any other --with pins, which uv replaces rather than "
+    "merges -- or `uv pip install 'rapidocr>=3.6.0'` for a plain virtualenv"
+)
 
-        return rapidocr_api
-    except ImportError:
+
+#: The packages that can actually recognise text. pymupdf4llm's adapter accepts
+#: either, and asking about them by name is what makes the check survive the
+#: adapter being rewritten between pymupdf4llm releases.
+_OCR_BACKEND_PACKAGES = ("rapidocr", "rapidocr_onnxruntime")
+
+
+def _ocr_backend_installed() -> bool:
+    """Whether an OCR engine package is importable, without importing it.
+
+    `find_spec` rather than an import: importing rapidocr loads onnxruntime and
+    its models, which is seconds of work and megabytes of memory to answer a
+    yes/no question `cementic doctor` asks on every run.
+    """
+    for name in _OCR_BACKEND_PACKAGES:
+        try:
+            if importlib.util.find_spec(name) is not None:
+                return True
+        except (ImportError, ValueError):
+            continue
+    return False
+
+
+def _get_rapidocr_api() -> Any | None:
+    """Return pymupdf4llm's RapidOCR adapter, or None when OCR cannot run.
+
+    cementic never imports rapidocr itself: pymupdf4llm owns the adapter and
+    this hands its ``exec_ocr`` over as a callback. That indirection is what
+    lets rapidocr be an opt-in dependency -- but it is also why the engine is
+    checked for separately rather than inferred from whether the adapter
+    imports.
+
+    Both readings of that import are wrong on some pymupdf4llm version. Up to
+    0.3.4 the adapter does a top-level `import rapidocr`, so ImportError does
+    mean "no OCR". By 1.28.2 it resolves its engine at import time and swallows
+    the absence, so the module imports *successfully* with nothing behind it --
+    and extraction then writes un-OCR'd text into an immutable artifact, the
+    very failure `extract_pdf_markdown` raises to prevent. Asking about the
+    engine package by name is the one question both versions answer the same
+    way.
+
+    The adapter also prints its chosen engine to stdout as it loads, and
+    `cementic extract` puts document text on stdout, so the import runs under
+    the same redirect extraction uses.
+    """
+    if not _ocr_backend_installed():
         return None
+    with contextlib.redirect_stdout(sys.stderr):
+        try:
+            from pymupdf4llm.ocr import rapidocr_api
+        except ImportError:
+            return None
+    return rapidocr_api
+
+
+def ocr_backend_available() -> bool:
+    """Whether OCR could actually run right now (no side effects)."""
+    return _get_rapidocr_api() is not None
 
 
 def extract_pdf_markdown(pdf_path: str, use_ocr: bool = True) -> str:
@@ -88,10 +150,11 @@ def extract_pdf_markdown(pdf_path: str, use_ocr: bool = True) -> str:
         rapidocr_api = _get_rapidocr_api()
         if rapidocr_api is None:
             raise RuntimeError(
-                "extraction.use_ocr is enabled but rapidocr is not importable. "
-                "Extraction would silently fall back to no OCR and write the "
-                "result into an immutable artifact, so the whole corpus would "
-                "carry it. Install rapidocr or set extraction.use_ocr = false."
+                "extraction.use_ocr is enabled but no OCR backend is "
+                "installed. Extraction would silently fall back to no OCR and "
+                "write the result into an immutable artifact, so the whole "
+                "corpus would carry it. Either set extraction.use_ocr = false, "
+                f"or {OCR_INSTALL_HINT}."
             )
         ocr_kwargs["ocr_function"] = rapidocr_api.exec_ocr
 
@@ -186,6 +249,27 @@ _EXTRACTORS: dict[str, tuple[ExtractorSpec, ExtractorFn]] = {
         _plaintext_extractor,
     ),
 }
+
+
+#: The one registered extractor that runs OCR. `use_ocr` is inert under any
+#: other backend -- pymupdf-raw reads the text layer and never rasterises a
+#: page -- and an unset pdf backend falls through to this one, per the ordering
+#: `_EXTRACTORS` documents above.
+_OCR_CAPABLE_EXTRACTOR = "pymupdf4llm"
+
+
+def ocr_would_run(config: Config) -> bool:
+    """Whether the configured PDF backend would actually invoke OCR (pure).
+
+    `use_ocr` alone does not mean OCR happens: it reaches extraction only
+    through the pymupdf4llm backend. Enabling the flag while the configured
+    pdf backend is something else is a silent no-op, which is worth reporting
+    as its own state rather than reading as "OCR is on".
+    """
+    if not config.extraction.use_ocr:
+        return False
+    chosen = config.extraction.backends.get("pdf")
+    return chosen is None or chosen == _OCR_CAPABLE_EXTRACTOR
 
 
 def supported_extensions() -> frozenset[str]:

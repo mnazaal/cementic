@@ -69,6 +69,31 @@ class TestBuildExtractorProfilePayload:
         assert libraries["pymupdf4llm"]
         assert libraries["pymupdf"]
 
+    def test_ocr_library_recorded_only_when_ocr_is_on(self) -> None:
+        """rapidocr rewrites the text wherever OCR runs, so it belongs in the
+        fingerprint -- but only where it can have run. Recording it always would
+        re-version every OCR-free revision for a library that never touched it.
+        """
+        off = build_extractor_profile_payload(Config())
+        assert isinstance(off["extraction_libraries"], dict)
+        assert "rapidocr" not in off["extraction_libraries"]
+
+        config = Config()
+        config.extraction.use_ocr = True
+        on = build_extractor_profile_payload(config)
+        assert isinstance(on["extraction_libraries"], dict)
+        assert "rapidocr" in on["extraction_libraries"]
+
+    def test_ocr_off_fingerprint_is_unchanged_by_the_ocr_entry(self) -> None:
+        """The gate above is only worth having if it actually holds corpora
+        still: an OCR-free revision must fingerprint the same as it did before
+        rapidocr was ever named here."""
+        config = Config()
+        payload = build_extractor_profile_payload(config)
+        libraries = payload["extraction_libraries"]
+        assert isinstance(libraries, dict)
+        assert set(libraries) == {"pymupdf4llm", "pymupdf", "pymupdf-layout"}
+
     def test_changed_pymupdf4llm_version_changes_the_fingerprint(
         self, monkeypatch
     ) -> None:

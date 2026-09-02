@@ -224,9 +224,65 @@ def collect_doctor_report(config: Config) -> dict[str, Any]:
     }
 
     checks["chunk_budget"] = _chunk_budget_check(config)
+    checks["ocr"] = _ocr_check(config)
+    ocr_ok = checks["ocr"]["status"] != "fail"
 
-    ok = (config_error is None) and database_ok and extension_ok and model_ok and daemon_ok
+    ok = (
+        (config_error is None)
+        and database_ok
+        and extension_ok
+        and model_ok
+        and daemon_ok
+        and ocr_ok
+    )
     return {"ok": ok, "checks": checks}
+
+
+def _ocr_check(config: Config) -> dict[str, Any]:
+    """Report whether OCR is wanted, reachable, and installed.
+
+    Three states rather than a bare present/absent, because two different
+    settings have to agree before OCR runs and each fails quietly on its own.
+    A missing backend is a hard failure: with OCR reaching extraction, every
+    PDF raises rather than degrading, so reporting it as a warning would call
+    an unusable configuration ready.
+
+    Imported here rather than at module scope: `extract` loads the PDF stack.
+    """
+    from cementic.extract import OCR_INSTALL_HINT, ocr_backend_available, ocr_would_run
+
+    if not config.extraction.use_ocr:
+        return {
+            "status": "ok",
+            "enabled": False,
+            "message": "extraction.use_ocr is off; no OCR backend needed",
+        }
+    if not ocr_would_run(config):
+        return {
+            "status": "warning",
+            "enabled": True,
+            "message": (
+                "extraction.use_ocr is on, but "
+                f"[extraction.backends] pdf = '{config.extraction.backends.get('pdf')}' "
+                "reads the text layer and never runs OCR; scanned PDFs will "
+                "still extract empty. Set it to 'pymupdf4llm' to use OCR"
+            ),
+        }
+    if not ocr_backend_available():
+        return {
+            "status": "fail",
+            "enabled": True,
+            "message": (
+                "extraction.use_ocr is on and the pdf backend runs OCR, but no "
+                f"OCR backend is installed; every PDF will fail. Either {OCR_INSTALL_HINT}, "
+                "or set extraction.use_ocr = false"
+            ),
+        }
+    return {
+        "status": "ok",
+        "enabled": True,
+        "message": "OCR enabled and an OCR backend is installed",
+    }
 
 
 def _chunk_budget_check(config: Config) -> dict[str, Any]:
