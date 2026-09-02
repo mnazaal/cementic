@@ -769,7 +769,14 @@ def stop_background(
             # and delete the state files of workers that kept indexing.
             unsignalable_pids.append(pid)
 
-    timeout_seconds = 10.0  # grace period before --force is required
+    # Grace period before --force is required. The worker answers SIGTERM only
+    # between embedding requests, and a request is now claim-sized when nobody
+    # is searching (embed_submit_size): 32 inputs measured 12.2 s against the
+    # local llama-server, plus the write-back transaction. At the old 10 s this
+    # timed out on an ordinary busy worker, and because `stop` then exits
+    # non-zero, the documented `cementic stop && cementic start` restart
+    # silently never started anything -- observed live on the papers import.
+    timeout_seconds = 30.0
     remaining = wait_for_exit(signaled_pids, timeout_seconds=timeout_seconds)
     # SIGTERM never reached the EPERM'd pids, so they are certainly still
     # running: they rejoin the not-stopped set so no path below clears their
