@@ -167,7 +167,7 @@ def _daemon_lock_path(config: Config) -> Path:
 
 
 class RemoteEmbeddingClient(EmbeddingProvider):
-    """Client for a local OpenAI-compatible embedding server (``llama_cpp.server``).
+    """Client for a local OpenAI-compatible embedding server (``llama-server``).
 
     Embeds over ``/v1/embeddings`` (an input array is batched natively) and
     verifies identity through the server's own ``/v1/models`` endpoint: the
@@ -255,7 +255,7 @@ class RemoteEmbeddingClient(EmbeddingProvider):
         ) from last_error
 
     def _list_models(self) -> list[dict[str, Any]] | None:
-        # One retry for transient blips only. llama_cpp.server serializes all
+        # One retry for transient blips only. llama-server serializes all
         # requests behind a single model lock (see app.py's llama_outer_lock),
         # so /v1/models can legitimately block for the *entire* duration of an
         # in-flight embedding batch -- seconds to tens of seconds, not
@@ -312,7 +312,7 @@ class RemoteEmbeddingClient(EmbeddingProvider):
     def count_model_tokens(self, text: str) -> int | None:
         """Tokens in ``text`` per the *model's own* tokenizer, or None if unsupported.
 
-        ``llama_cpp.server`` exposes the loaded model's tokenizer over
+        ``llama-server`` exposes the loaded model's tokenizer over
         ``/extras/tokenize/count``. That is the only way to answer the budget
         question exactly: ``chunk.TOKENIZER`` is a different tokenizer and
         disagrees by up to a third on ordinary English and source code.
@@ -325,12 +325,14 @@ class RemoteEmbeddingClient(EmbeddingProvider):
         """
         if self._tokenize_endpoint_available is False:
             return None
-        # Two spellings of the same endpoint: llama-cpp-python serves
-        # /extras/tokenize/count, upstream llama-server (the daemon_command
-        # path) serves /tokenize. Caching only the extras 404 degraded the
-        # guard to the cheap pre-filter on upstream servers, so a chunk at
-        # 513-549 model tokens was sent anyway and failed as a raw 500 instead
-        # of a clean over-budget reason (observed live 2026-08-27).
+        # Two spellings of the same endpoint. Upstream llama-server -- the
+        # default -- serves /tokenize; llama-cpp-python's server serves
+        # /extras/tokenize/count. Both are probed because daemon_command names
+        # whatever server the operator has, and cementic no longer supplies
+        # one. Caching only the extras 404 degraded the guard to the cheap
+        # pre-filter, so a chunk at 513-549 model tokens was sent anyway and
+        # failed as a raw 500 instead of a clean over-budget reason (observed
+        # live 2026-08-27).
         paths = (
             [self._tokenize_path]
             if self._tokenize_path is not None
@@ -534,7 +536,7 @@ def get_llama_cpp_runtime_client(
         # config change, not busyness. Fall through to restart below.
     elif _daemon_pid_alive(config):
         # /v1/models didn't respond, but the daemon process is confirmed alive
-        # (PID + start-token). llama_cpp.server serializes every request behind
+        # (PID + start-token). llama-server serializes every request behind
         # one lock, so a daemon mid-embedding-batch looks identical to a dead
         # one over that probe alone. Wait the batch out instead of killing a
         # healthy process.
@@ -558,7 +560,7 @@ def get_llama_cpp_runtime_client(
 
     # Check the model is actually there before spawning a server around it.
     # `search` and `embed` reach this path without ever running the bootstrapper,
-    # so a missing or mistyped model produced `llama_cpp.server --model
+    # so a missing or mistyped model produced `llama-server --model
     # /does/not/exist`, a child that died instantly, and a generic startup
     # failure -- instead of the accurate "model not found at ..." message that
     # already exists. Imported locally to keep this module's import graph free of
@@ -677,7 +679,7 @@ def probe_daemon(
         return DaemonHealth.WRONG_MODEL
     if not _daemon_pid_alive(config):
         return DaemonHealth.DOWN
-    # No answer, but the process is alive. llama_cpp.server serializes every
+    # No answer, but the process is alive. llama-server serializes every
     # request behind one lock, so a daemon mid-batch is indistinguishable from a
     # dead one over HTTP alone.
     if wait_seconds > 0 and _poll_until_ready(client, wait_seconds):
@@ -800,36 +802,25 @@ class AmbiguousDaemonPidsError(RuntimeError):
         )
 
 
-def _cmdline_has_adjacent_pair(cmdline: list[str], flag: str, value: str) -> bool:
-    """Whether ``flag`` is immediately followed by ``value`` somewhere in ``cmdline``."""
-    for i in range(len(cmdline) - 1):
-        if cmdline[i] == flag and cmdline[i + 1] == value:
-            return True
-    return False
-
-
-def _matches_llama_daemon_cmdline(
-    cmdline: list[str], *, port: int, model_alias: str, custom_command: bool = False
-) -> bool:
+def _matches_llama_daemon_cmdline(cmdline: list[str], *, port: int, model_alias: str) -> bool:
     """Whether ``cmdline`` is a process `_start_llama_cpp_daemon` could have spawned.
 
-    For the bundled server, all three criteria are required, mirroring the
-    exact arguments that command builds: running llama.cpp's own server
-    module, on our configured port, serving *this* runtime's fingerprint as
-    its ``--model_alias``. Matching the alias is what proves the process is
-    ours and current, not merely some llama.cpp server.
+    The argv shape belongs to whoever wrote `daemon_command`, so both criteria
+    are substring tests rather than flag lookups: an argument may be "--alias X"
+    or "--alias={alias}", and there is no built-in argv shape to match exactly
+    any more.
 
-    For a configured ``daemon_command`` the argv shape is the operator's, so
-    the 64-hex fingerprint alias alone is the identity: any argument carrying
-    it ("--alias X" or "--alias={alias}") marks the process ours, and a stale
-    server fingerprints differently and cannot match.
+    The alias is a fingerprint of what the server loaded, so a stale runtime
+    cannot match. It says nothing about *where* the server listens, though, and
+    the port is not in it -- so the port is checked too. Without that, changing
+    daemon_port adopted the daemon still running on the old one: status
+    reported it running while every request went to a port nothing served.
+
+    The cost is that a command which never names its port cannot be recovered
+    from /proc. That is why every documented invocation carries {port}.
     """
-    if custom_command:
-        return any(model_alias in argument for argument in cmdline)
-    return (
-        _cmdline_has_adjacent_pair(cmdline, "-m", "llama_cpp.server")
-        and _cmdline_has_adjacent_pair(cmdline, "--port", str(port))
-        and _cmdline_has_adjacent_pair(cmdline, "--model_alias", model_alias)
+    return any(model_alias in argument for argument in cmdline) and any(
+        str(port) in argument for argument in cmdline
     )
 
 
@@ -857,10 +848,7 @@ def _recover_daemon_pid(config: Config, pid_file: Path) -> int | None:
         return None
     candidates = find_pids_by_cmdline(
         lambda cmdline: _matches_llama_daemon_cmdline(
-            cmdline,
-            port=port,
-            model_alias=fingerprint,
-            custom_command=bool(config.llama_cpp.daemon_command),
+            cmdline, port=port, model_alias=fingerprint
         )
     )
     if not candidates:
@@ -1035,14 +1023,34 @@ def _signal_daemon(pid: int, signal_number: int) -> _SignalResult:
     return _SignalResult.SENT
 
 
+#: llama-server's log threshold, not a boolean flag. 3 is the binary's own
+#: default (info); 5 is debug. Named so the mapping from `llama_cpp.verbose`
+#: is stated once rather than inlined as two magic numbers.
+_VERBOSITY_DEFAULT = "3"
+_VERBOSITY_DEBUG = "5"
+
+
 def render_daemon_command(
-    template: list[str], *, model: str, alias: str, host: str, port: int, n_ctx: int
+    template: list[str],
+    *,
+    model: str,
+    alias: str,
+    host: str,
+    port: int,
+    n_ctx: int,
+    n_gpu_layers: int,
+    verbose: bool,
 ) -> list[str]:
     """Substitute the documented placeholders into a daemon command (pure).
 
     Per-argument ``str.format_map``, so an argument can mix text and
     placeholder ("--alias={alias}"). Config validation has already rejected
     unknown placeholders, so this cannot raise on a loaded config.
+
+    ``verbose`` renders as llama-server's integer log threshold rather than a
+    bare flag: a conditional flag cannot be expressed by substitution, and it
+    has to be expressible, because `verbose` is part of the runtime
+    fingerprint and so must reach the command it claims to describe.
     """
     values = {
         "model": model,
@@ -1050,6 +1058,8 @@ def render_daemon_command(
         "host": host,
         "port": str(port),
         "n_ctx": str(n_ctx),
+        "n_gpu_layers": str(n_gpu_layers),
+        "verbosity": _VERBOSITY_DEBUG if verbose else _VERBOSITY_DEFAULT,
     }
     return [argument.format_map(values) for argument in template]
 
@@ -1081,55 +1091,21 @@ def _start_llama_cpp_daemon(
         n_gpu_layers=n_gpu_layers,
         verbose=runtime_spec.verbose,
     )
-    if config.llama_cpp.daemon_command:
-        # The operator's own server -- e.g. an upstream Vulkan llama-server
-        # binary that llama-cpp-python cannot currently be built as. Same
-        # supervision either way: pid file with start token, the daemon lock,
-        # and the ready check that refuses a server not serving {alias}.
-        command = render_daemon_command(
-            config.llama_cpp.daemon_command,
-            model=str(resolve_llama_model_path(runtime_spec.model_identifier)),
-            alias=fingerprint,
-            host=config.llama_cpp.daemon_host,
-            port=config.llama_cpp.daemon_port,
-            n_ctx=n_ctx,
-        )
-    else:
-        # Run llama.cpp's own OpenAI-compatible server rather than a
-        # hand-rolled daemon. The runtime fingerprint is the served model's
-        # alias, so /v1/models reports exactly which config is loaded.
-        command = [
-            sys.executable,
-            "-m",
-            "llama_cpp.server",
-            "--host",
-            config.llama_cpp.daemon_host,
-            "--port",
-            str(config.llama_cpp.daemon_port),
-            "--model",
-            str(resolve_llama_model_path(runtime_spec.model_identifier)),
-            "--model_alias",
-            fingerprint,
-            "--n_ctx",
-            str(n_ctx),
-            # The server truncates every embedding input at n_batch tokens,
-            # whose own default is 512 -- so without these, raising n_ctx
-            # silently did nothing and inputs were still cut at 512. Both are
-            # derived from n_ctx, which is already in the runtime fingerprint,
-            # so pinning them here does not re-version anything.
-            "--n_batch",
-            str(n_ctx),
-            "--n_ubatch",
-            str(n_ctx),
-            "--n_gpu_layers",
-            str(n_gpu_layers),
-            "--embedding",
-            "true",
-            "--verbose",
-            "true" if runtime_spec.verbose else "false",
-        ]
+    # One spawn path, whether the command is the default `llama-server`
+    # invocation or the operator's own: pid file with start token, the daemon
+    # lock, and a ready check that refuses a server not serving {alias}.
+    command = render_daemon_command(
+        config.llama_cpp.daemon_command,
+        model=str(resolve_llama_model_path(runtime_spec.model_identifier)),
+        alias=fingerprint,
+        host=config.llama_cpp.daemon_host,
+        port=config.llama_cpp.daemon_port,
+        n_ctx=n_ctx,
+        n_gpu_layers=n_gpu_layers,
+        verbose=runtime_spec.verbose,
+    )
     pid = spawn_detached(command, log_file)
-    # llama_cpp.server does not write its own PID file; record it for teardown.
+    # llama-server does not write its own PID file; record it for teardown.
     try:
         _write_daemon_pid_file(pid_file, pid)
     except OSError:

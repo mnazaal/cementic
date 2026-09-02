@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import os
+import shutil
+import subprocess
 from typing import Any
 
 from sqlalchemy import text
@@ -224,6 +227,8 @@ def collect_doctor_report(config: Config) -> dict[str, Any]:
     }
 
     checks["chunk_budget"] = _chunk_budget_check(config)
+    checks["embedding_server"] = _embedding_server_check(config)
+    server_ok = checks["embedding_server"]["status"] != "fail"
     checks["ocr"] = _ocr_check(config)
     ocr_ok = checks["ocr"]["status"] != "fail"
 
@@ -233,9 +238,95 @@ def collect_doctor_report(config: Config) -> dict[str, Any]:
         and extension_ok
         and model_ok
         and daemon_ok
+        and server_ok
         and ocr_ok
     )
     return {"ok": ok, "checks": checks}
+
+
+#: Long enough for a cold binary to load its libraries and print a version,
+#: short enough that `cementic doctor` never appears to hang on a wedged one.
+_VERSION_PROBE_TIMEOUT_SECONDS = 10.0
+
+
+def _embedding_server_check(config: Config) -> dict[str, Any]:
+    """Report whether the configured server command names something runnable.
+
+    cementic drives llama.cpp over HTTP and ships no server of its own, so the
+    binary is a system prerequisite like Postgres. Checked here because the
+    alternative is discovering it at first autostart, inside a background
+    worker whose only voice is a log file.
+
+    Only argv[0] is inspected, and only when it is a bare name: a command
+    fronted by env(1) or naming a build directly carries setup this check
+    cannot reproduce -- an LD_LIBRARY_PATH the operator supplies precisely
+    because the binary needs it -- and running it without that would report a
+    working setup as broken.
+
+    Being on PATH is not the question, though; being runnable is. A stale
+    `llama-server` whose shared library moved resolves fine and then dies on
+    exec, which `which` alone reports as ready and autostart discovers later in
+    a worker log. So the resolved binary is asked for its version.
+    """
+    command = config.llama_cpp.daemon_command
+    executable = command[0]
+    if executable == "env" or os.sep in executable:
+        return {
+            "status": "ok",
+            "command": executable,
+            "message": f"daemon_command starts '{executable}'; not resolved further",
+        }
+    resolved = shutil.which(executable)
+    if resolved is None:
+        return {
+            "status": "fail",
+            "command": executable,
+            "message": (
+                f"'{executable}' is not on PATH, so the embedding server cannot "
+                "start. Install llama.cpp (its `llama-server` binary), or point "
+                "llama_cpp.daemon_command at a build you already have"
+            ),
+        }
+    problem = _executable_problem(resolved)
+    if problem is not None:
+        return {
+            "status": "fail",
+            "command": resolved,
+            "message": (
+                f"'{resolved}' is on PATH but does not run: {problem}. It would "
+                "resolve at autostart and then fail in the daemon log"
+            ),
+        }
+    return {
+        "status": "ok",
+        "command": resolved,
+        "message": f"embedding server found at {resolved}",
+    }
+
+
+def _executable_problem(path: str) -> str | None:
+    """Ask a binary for its version; return why it could not answer, or None.
+
+    `--version` because it is the cheapest subcommand that still loads the
+    program's shared libraries, which is the failure being looked for. Nothing
+    is started or written, so this stays inside `collect_doctor_report`'s
+    read-only contract.
+    """
+    try:
+        completed = subprocess.run(
+            [path, "--version"],
+            capture_output=True,
+            text=True,
+            timeout=_VERSION_PROBE_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired:
+        return f"no answer within {_VERSION_PROBE_TIMEOUT_SECONDS:g}s"
+    except OSError as error:
+        return str(error)
+    if completed.returncode != 0:
+        detail = (completed.stderr or completed.stdout or "").strip().splitlines()
+        return detail[-1] if detail else f"exited {completed.returncode}"
+    return None
 
 
 def _ocr_check(config: Config) -> dict[str, Any]:

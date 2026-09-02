@@ -58,12 +58,12 @@ dependencies = [
     "rich>=13.0",
     "platformdirs>=4.0",
     "tiktoken>=0.5.0",
-    # Lower bound is load-bearing, not aspirational: 0.3.9-0.3.22 silently break
-    # any /v1/embeddings call with more than one input in the same request
-    # (llama_decode returned -1). embed_batch() always sends multiple chunks per
-    # request, so every affected version fails every multi-chunk embedding batch.
-    # Bisected: 0.3.8 last-good, 0.3.9 first-bad, 0.3.22 last-bad, 0.3.23 fixed.
-    "llama-cpp-python[server]>=0.3.23",
+    # No llama.cpp Python binding is declared, and none is imported. cementic
+    # spawns an OpenAI-compatible embedding server and talks to it over HTTP,
+    # so llama.cpp is a system prerequisite like Postgres -- see
+    # config.DEFAULT_DAEMON_COMMAND. That also removes a second ggml build from
+    # the install, which could differ from the binary actually serving, and a
+    # source build on any platform without a prebuilt wheel.
 ]
 
 [project.optional-dependencies]

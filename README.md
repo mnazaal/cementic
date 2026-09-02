@@ -37,12 +37,13 @@ The repository is private, so installing straight from the URL
 first.
 
 cementic is verified for Linux with Python 3.12. macOS and Windows are
-best-effort until tested. Installing `llama-cpp-python[server]` builds llama.cpp
-from source on platforms without a prebuilt wheel, which needs a C/C++ toolchain
-and can take a while; if CMake reports it cannot find a compiler named `cc`, set
-`CC`/`CXX` explicitly (e.g. `CC=gcc CXX=g++ pipx install ...`). The embedding
-model itself is downloaded separately on first use when auto-download is
-enabled.
+best-effort until tested. No llama.cpp Python binding is installed: cementic
+drives an OpenAI-compatible embedding server over HTTP and never links
+llama.cpp, so `llama-server` is a system prerequisite alongside Postgres —
+see "Prerequisites". The build you install is the build that serves, GPU
+support included, and there is no second copy of ggml in the Python
+environment to drift from it. The embedding model itself is downloaded on
+first use when auto-download is enabled.
 
 ## Prerequisites
 
@@ -50,6 +51,11 @@ enabled.
   easiest path is generating a local setup via `cementic init postgres`, then
   starting it with **Docker** or **Podman** (see Setup). cementic itself does
   not manage containers.
+- **llama.cpp's `llama-server`** on PATH — cementic spawns and supervises it but
+  ships no embedding server of its own, so install a build (a GPU one if you
+  want a GPU; see "Running embeddings on a GPU") or point
+  `llama_cpp.daemon_command` at one you already have. `cementic doctor` checks
+  that it resolves *and* runs.
 - **Python 3.12+**
 - **8-16 GB RAM** recommended for the llama.cpp embedding backend (the model loads into memory)
 - **Disk space**: ~2 GB for the llama.cpp model, plus PostgreSQL data and artifact storage
@@ -318,7 +324,7 @@ matching `CEMENTIC_*` variable (see [Environment variables](#environment-variabl
 | | `daemon_start_timeout_seconds` | `120` | How long to wait for a cold start |
 | | `llama_embed_timeout_seconds` | `120` | Per-request embedding timeout |
 | | `daemon_pid_file`, `daemon_log_file` | under the data dir | Daemon bookkeeping |
-| | `daemon_command` | unset | External embedding-server command for cementic to spawn/supervise instead of the bundled `llama_cpp.server`; placeholders `{model}` `{alias}` `{host}` `{port}` `{n_ctx}` (see "Running embeddings on a GPU") |
+| | `daemon_command` | `llama-server ...` | Embedding-server command cementic spawns and supervises; defaults to upstream `llama-server` on PATH. Placeholders `{model}` `{alias}` `{host}` `{port}` `{n_ctx}` `{n_gpu_layers}` `{verbosity}` (see "Running embeddings on a GPU") |
 | | `verbose` | `false` | Verbose llama.cpp logging |
 | `extraction` | `use_ocr` | `false` | OCR pages with no text layer. Needs the opt-in `rapidocr` package and the `pymupdf4llm` backend — see "OCR for scanned PDFs" |
 | | `backends` | registry default | Per-file-type extractor choice, e.g. `pdf = "pymupdf-raw"`. PDFs: `pymupdf4llm` (default, Markdown structure via an ONNX layout model) or `pymupdf-raw` (text layer only, ~275× faster — see "Choosing a PDF extractor") |
@@ -420,15 +426,18 @@ binding. Both want the `tesseract` system package instead.
 ### Running embeddings on a GPU
 
 cementic identifies its embedding server only by the model id reported at
-`/v1/models`; the bundled `llama_cpp.server` it spawns by default is merely a
-convenience (and CPU-only unless llama-cpp-python was built with GPU support).
-The supported way to use a GPU server is `llama_cpp.daemon_command`: set it to
-your external server's command (the template config ships a Vulkan
-`llama-server` example) and cementic spawns and supervises that instead —
-`cementic embedding start/stop/status`, on-demand autostart, and crashed-daemon
-recovery all apply unchanged, and the `{alias}` placeholder keeps the served
+`/v1/models`, and it spawns that server from `llama_cpp.daemon_command` —
+by default `llama-server` on PATH. Nothing about GPU support lives in cementic:
+point the command at a Vulkan/CUDA build (the template config ships a Vulkan
+example) and that is the build that serves. `cementic embedding
+start/stop/status`, on-demand autostart, and crashed-daemon recovery apply to
+whatever the command names, and the `{alias}` placeholder keeps the served
 fingerprint in lockstep with the config so a `n_ctx`/`n_gpu_layers` change can
 never leave a stale alias behind.
+
+Recovering a running daemon from `/proc` matches both `{alias}` and `{port}` in
+its argv, so a command that never names its port cannot be re-adopted after the
+pid file is lost. Every documented invocation carries both.
 
 Alternatively, run any OpenAI-compatible server entirely outside cementic with
 `llama_cpp.daemon_autostart = false` and `--alias <fingerprint>`; print the

@@ -750,5 +750,16 @@ class TestDaemonCommandValidation:
         )
         assert config.daemon_command is not None
 
-    def test_unset_stays_none(self) -> None:
-        assert LlamaCppConfig().daemon_command is None
+    def test_unset_uses_the_default_llama_server_invocation(self) -> None:
+        """There is no built-in server to fall back to, so the default is a
+        real command: upstream llama-server, found on PATH."""
+        command = LlamaCppConfig().daemon_command
+        assert command[0] == "llama-server"
+        assert "{model}" in command
+        assert "{alias}" in command
+        assert "{port}" in command
+
+    def test_an_empty_command_is_refused(self) -> None:
+        """`[]` is a typo, not a way to ask for a server cementic no longer has."""
+        with pytest.raises(ValidationError, match="non-empty command list"):
+            LlamaCppConfig(daemon_command=[])

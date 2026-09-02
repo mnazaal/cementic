@@ -328,14 +328,14 @@ class TestFindPidsByCmdline:
         (pid_dir / "cmdline").write_bytes("\0".join(argv).encode("utf-8") + b"\0")
 
     def test_matches_by_predicate(self, tmp_path: Path) -> None:
-        self._write_entry(tmp_path, 111, ["python", "-m", "llama_cpp.server", "--port", "8083"])
+        self._write_entry(tmp_path, 111, ["llama-server", "--port", "8083"])
         self._write_entry(tmp_path, 222, ["other-process", "--flag"])
-        matches = find_pids_by_cmdline(lambda argv: "llama_cpp.server" in argv, proc_root=tmp_path)
+        matches = find_pids_by_cmdline(lambda argv: "llama-server" in argv, proc_root=tmp_path)
         assert matches == [111]
 
     def test_no_match_returns_empty(self, tmp_path: Path) -> None:
         self._write_entry(tmp_path, 111, ["other-process"])
-        matches = find_pids_by_cmdline(lambda argv: "llama_cpp.server" in argv, proc_root=tmp_path)
+        matches = find_pids_by_cmdline(lambda argv: "llama-server" in argv, proc_root=tmp_path)
         assert matches == []
 
     def test_multiple_matches_all_returned(self, tmp_path: Path) -> None:

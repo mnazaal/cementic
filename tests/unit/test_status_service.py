@@ -525,6 +525,7 @@ class TestCheckHealth:
                 mock_conn = MagicMock()
                 mock_engine.return_value.connect.return_value.__enter__.return_value = mock_conn
                 mock_client.return_value.health_check.return_value = True
+                mock_client.return_value.expected_fingerprint = "a" * 64
                 result = check_health(config)
                 assert result.db_reachable is True
 
@@ -558,6 +559,7 @@ class TestCheckHealth:
         mock_conn = MagicMock()
         mock_engine.return_value.connect.return_value.__enter__.return_value = mock_conn
         mock_client.return_value.health_check.return_value = False
+        mock_client.return_value.expected_fingerprint = "a" * 64
 
         result = check_health(config)
         assert result.embedding_healthy is False
@@ -684,6 +686,7 @@ class TestCheckHealth:
                     "cementic.embedding_runtime.build_llama_cpp_client"
                 ) as mock_client:
                     mock_client.return_value.health_check.return_value = True
+                    mock_client.return_value.expected_fingerprint = "a" * 64
                     result = check_health(config)
                     assert "running" in result.llama_daemon
                     assert "42" in result.llama_daemon
@@ -698,6 +701,7 @@ class TestCheckHealth:
                 "cementic.embedding_runtime.build_llama_cpp_client"
             ) as mock_client:
                 mock_client.return_value.health_check.return_value = True
+                mock_client.return_value.expected_fingerprint = "a" * 64
                 result = check_health(config)
                 assert result.llama_daemon == "stopped"
 
@@ -713,6 +717,7 @@ class TestCheckHealth:
                 "cementic.embedding_runtime.build_llama_cpp_client"
             ) as mock_client:
                 mock_client.return_value.health_check.return_value = True
+                mock_client.return_value.expected_fingerprint = "a" * 64
                 result = check_health(config)
                 assert result.llama_daemon == "stopped"
 

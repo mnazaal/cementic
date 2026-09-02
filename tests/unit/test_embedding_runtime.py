@@ -1,6 +1,7 @@
 """Tests for persistent llama.cpp runtime helpers."""
 
 import json
+import sys
 import time
 from unittest.mock import MagicMock, patch
 
@@ -417,7 +418,12 @@ class TestDaemonLifecycle:
             _start_llama_cpp_daemon(config)
 
     @patch("cementic.embedding_runtime.spawn_detached", return_value=4321)
-    def test_start_daemon_runs_llama_cpp_server(self, mock_spawn, temp_dir) -> None:
+    def test_start_daemon_runs_llama_server_by_default(self, mock_spawn, temp_dir) -> None:
+        """No config: the default command spawns upstream llama-server.
+
+        cementic ships no embedding server of its own -- it drives one over
+        HTTP -- so the default is a binary on PATH, not a Python module.
+        """
         config = Config()
         config.llama_cpp.daemon_log_file = temp_dir / "daemon.log"
         config.llama_cpp.daemon_pid_file = temp_dir / "daemon.pid"
@@ -426,15 +432,24 @@ class TestDaemonLifecycle:
         _start_llama_cpp_daemon(config)
 
         command = mock_spawn.call_args[0][0]
-        assert "llama_cpp.server" in command
-        assert command[command.index("--embedding") + 1] == "true"
-        assert command[command.index("--verbose") + 1] == "false"
+        assert command[0] == "llama-server"
+        assert "llama_cpp.server" not in command
+        assert sys.executable not in command
+        assert "--embeddings" in command
         # --model is resolved to the physical path the daemon will open, while
-        # the model_alias (fingerprint) still derives from the logical identifier.
+        # the alias (fingerprint) still derives from the logical identifier.
         assert command[command.index("--model") + 1] == str(
             resolve_llama_model_path(config.llama_cpp.model_path)
         )
-        # llama_cpp.server does not write its own PID file; we record it as a
+        assert command[command.index("--alias") + 1] == (
+            build_llama_cpp_client(config).expected_fingerprint
+        )
+        # The batch sizes track n_ctx: the server caps each embedding input at
+        # the batch size, so without them raising n_ctx would silently do
+        # nothing and inputs would stay truncated at the server's own default.
+        for flag in ("--ctx-size", "--batch-size", "--ubatch-size"):
+            assert command[command.index(flag) + 1] == str(config.llama_cpp.n_ctx)
+        # llama-server does not write its own PID file; we record it as a
         # {pid, start_token} JSON record for recycled-PID-safe teardown.
         record = json.loads((temp_dir / "daemon.pid").read_text())
         assert record["pid"] == 4321
@@ -481,26 +496,31 @@ class TestDaemonLifecycle:
         record = json.loads((temp_dir / "daemon.pid").read_text())
         assert record["pid"] == 4321
 
-    def test_custom_command_recovery_matches_by_alias_token(self) -> None:
-        """/proc recovery for an operator-shaped argv keys on the fingerprint."""
+    def test_recovery_matches_by_alias_token(self) -> None:
+        """/proc recovery keys on the fingerprint, whatever the argv shape."""
         alias = "f" * 64
         assert _matches_llama_daemon_cmdline(
-            ["llama-server", f"--alias={alias}"],
+            ["llama-server", f"--alias={alias}", "--port", "11555"],
             port=11555,
             model_alias=alias,
-            custom_command=True,
         )
         assert _matches_llama_daemon_cmdline(
-            ["env", "X=1", "llama-server", "--alias", alias],
+            ["env", "X=1", "llama-server", "--alias", alias, "--port=11555"],
             port=11555,
             model_alias=alias,
-            custom_command=True,
         )
         assert not _matches_llama_daemon_cmdline(
-            ["llama-server", "--alias=" + "e" * 64],
+            ["llama-server", "--alias=" + "e" * 64, "--port", "11555"],
             port=11555,
             model_alias=alias,
-            custom_command=True,
+        )
+        # Same runtime, different port: the alias cannot tell these apart (the
+        # port is not in it), and adopting the old one left status reporting a
+        # daemon that every request would miss.
+        assert not _matches_llama_daemon_cmdline(
+            ["llama-server", f"--alias={alias}", "--port", "11556"],
+            port=11555,
+            model_alias=alias,
         )
 
     def test_render_daemon_command_substitutes_per_argument(self) -> None:
@@ -511,8 +531,34 @@ class TestDaemonLifecycle:
             host="127.0.0.1",
             port=11555,
             n_ctx=512,
+            n_gpu_layers=0,
+            verbose=False,
         )
         assert rendered == ["srv", "--alias=abc", "--port", "11555", "plain"]
+
+    def test_render_daemon_command_maps_verbose_to_a_log_threshold(self) -> None:
+        """llama-server takes a verbosity number, not a boolean flag.
+
+        A conditional flag cannot be produced by substitution, and `verbose` is
+        part of the runtime fingerprint -- so it has to reach the command that
+        fingerprint claims to describe, or toggling it would restart the daemon
+        into an identical one.
+        """
+
+        def rendered(verbose: bool) -> list[str]:
+            return render_daemon_command(
+                ["srv", "--verbosity", "{verbosity}"],
+                model="/m.gguf",
+                alias="abc",
+                host="127.0.0.1",
+                port=11555,
+                n_ctx=512,
+                n_gpu_layers=0,
+                verbose=verbose,
+            )
+
+        assert rendered(False) != rendered(True)
+        assert rendered(True)[-1] > rendered(False)[-1]
 
     @patch("cementic.embedding_runtime.spawn_detached", return_value=4321)
     def test_start_daemon_verbose_true(self, mock_spawn, temp_dir) -> None:
@@ -524,7 +570,15 @@ class TestDaemonLifecycle:
         _start_llama_cpp_daemon(config)
 
         command = mock_spawn.call_args[0][0]
-        assert command[command.index("--verbose") + 1] == "true"
+        verbose_threshold = command[command.index("--verbosity") + 1]
+
+        config.llama_cpp.verbose = False
+        _start_llama_cpp_daemon(config)
+        quiet_threshold = mock_spawn.call_args[0][0][
+            mock_spawn.call_args[0][0].index("--verbosity") + 1
+        ]
+
+        assert verbose_threshold > quiet_threshold
 
     @patch("cementic.embedding_runtime.os.kill")
     @patch("cementic.embedding_runtime._write_daemon_pid_file", side_effect=OSError("read-only"))
@@ -1113,16 +1167,14 @@ class TestDaemonRecoveryFromProc:
         pid_dir = proc_root / str(pid)
         pid_dir.mkdir(parents=True)
         argv = [
-            "/usr/bin/python3",
-            "-m",
-            "llama_cpp.server",
+            "llama-server",
             "--host",
             "127.0.0.1",
             "--port",
             str(port),
             "--model",
             "/models/whatever.gguf",
-            "--model_alias",
+            "--alias",
             model_alias,
         ]
         (pid_dir / "cmdline").write_bytes("\0".join(argv).encode("utf-8") + b"\0")

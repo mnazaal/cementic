@@ -2,8 +2,15 @@
 
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from cementic.config import Config
-from cementic.doctor import _daemon_state, _ocr_check, collect_doctor_report
+from cementic.doctor import (
+    _daemon_state,
+    _embedding_server_check,
+    _ocr_check,
+    collect_doctor_report,
+)
 from cementic.embedding_runtime import AmbiguousDaemonPidsError, DaemonHealth
 
 
@@ -14,6 +21,25 @@ def _config_with_model_path(tmp_path, exists: bool):
         model_path.write_bytes(b"fake")
     config.llama_cpp.model_path = str(model_path)
     return config
+
+
+@pytest.fixture(autouse=True)
+def _stub_embedding_server_check(request):
+    """Keep the rest of the suite off the host's PATH.
+
+    `_embedding_server_check` resolves and runs a real binary, so without this
+    every test asserting the overall verdict would pass or fail according to
+    whether the developer happens to have llama-server installed and working.
+    The class that tests the check itself opts out.
+    """
+    if request.cls is TestEmbeddingServerCheck:
+        yield
+        return
+    with patch(
+        "cementic.doctor._embedding_server_check",
+        return_value={"status": "ok", "command": "llama-server", "message": "stubbed"},
+    ):
+        yield
 
 
 class TestConfigCheck:
@@ -321,4 +347,77 @@ class TestOcrCheck:
         with patch("cementic.extract.ocr_backend_available", return_value=False):
             report = collect_doctor_report(config)
         assert report["checks"]["ocr"]["status"] == "fail"
+        assert report["ok"] is False
+
+
+class TestEmbeddingServerCheck:
+    """cementic ships no embedding server, so the binary is a prerequisite."""
+
+    @staticmethod
+    def _config(command: list[str]) -> Config:
+        config = Config()
+        config.llama_cpp.daemon_command = command
+        return config
+
+    def test_a_name_not_on_path_fails(self) -> None:
+        report = _embedding_server_check(self._config(["llama-server-not-installed"]))
+        assert report["status"] == "fail"
+        assert "not on PATH" in report["message"]
+
+    def test_a_resolvable_binary_that_cannot_run_fails(self, tmp_path, monkeypatch) -> None:
+        """The failure `which` alone cannot see.
+
+        A build whose shared library moved resolves fine and dies on exec, so a
+        PATH-only check calls it ready and autostart discovers it later, in a
+        worker's log file.
+        """
+        broken = tmp_path / "llama-server"
+        broken.write_text("#!/bin/sh\necho 'libllama.so: cannot open' >&2\nexit 1\n")
+        broken.chmod(0o755)
+        monkeypatch.setenv("PATH", str(tmp_path))
+
+        report = _embedding_server_check(self._config(["llama-server"]))
+
+        assert report["status"] == "fail"
+        assert "does not run" in report["message"]
+        assert "libllama.so" in report["message"]
+
+    def test_a_working_binary_is_ok(self, tmp_path, monkeypatch) -> None:
+        working = tmp_path / "llama-server"
+        working.write_text("#!/bin/sh\necho 'version: 1'\n")
+        working.chmod(0o755)
+        monkeypatch.setenv("PATH", str(tmp_path))
+
+        report = _embedding_server_check(self._config(["llama-server"]))
+
+        assert report["status"] == "ok"
+        assert report["command"] == str(working)
+
+    def test_an_env_fronted_command_is_left_alone(self) -> None:
+        """env(1) carries setup this check cannot reproduce -- an
+        LD_LIBRARY_PATH supplied precisely because the binary needs it -- so
+        running the bare binary would report a working setup as broken."""
+        report = _embedding_server_check(
+            self._config(["env", "LD_LIBRARY_PATH=/opt/llama", "/opt/llama/llama-server"])
+        )
+        assert report["status"] == "ok"
+        assert "not resolved further" in report["message"]
+
+    def test_an_explicit_path_is_left_alone(self) -> None:
+        report = _embedding_server_check(self._config(["/opt/llama/llama-server"]))
+        assert report["status"] == "ok"
+        assert "not resolved further" in report["message"]
+
+    def test_a_failing_server_check_fails_the_whole_report(self) -> None:
+        """doctor must not report ready when nothing can serve embeddings."""
+        config = self._config(["llama-server-not-installed"])
+        mock_conn = MagicMock()
+        mock_conn.execute.return_value.scalar.return_value = True
+        mock_engine = MagicMock()
+        mock_engine.connect.return_value.__enter__.return_value = mock_conn
+
+        with patch("cementic.doctor.get_engine", return_value=mock_engine):
+            report = collect_doctor_report(config)
+
+        assert report["checks"]["embedding_server"]["status"] == "fail"
         assert report["ok"] is False

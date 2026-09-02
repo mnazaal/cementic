@@ -522,6 +522,54 @@ class DatabaseConfig(_SectionSettings):
         )
 
 
+#: Placeholders `daemon_command` arguments may carry. Every one is rendered
+#: from the runtime spec, so a command using none of them still starts -- it
+#: just serves whatever model it was hard-coded with, which the /v1/models
+#: alias check then refuses.
+DAEMON_COMMAND_PLACEHOLDERS = (
+    "model",
+    "alias",
+    "host",
+    "port",
+    "n_ctx",
+    "n_gpu_layers",
+    "verbosity",
+)
+
+#: The default embedding server: upstream llama.cpp's own, found on PATH.
+#:
+#: cementic talks to this over HTTP and never imports llama.cpp bindings, so
+#: nothing here is pinned by a Python dependency -- the binary you install is
+#: the build that runs, GPU support included. `cementic doctor` reports it
+#: missing rather than letting the first autostart fail in a worker log.
+#:
+#: --batch-size and --ubatch-size track n_ctx deliberately: the server caps
+#: each embedding input at the batch size, whose own default is smaller, so
+#: without them raising n_ctx silently does nothing and inputs stay truncated.
+DEFAULT_DAEMON_COMMAND = (
+    "llama-server",
+    "--host",
+    "{host}",
+    "--port",
+    "{port}",
+    "--model",
+    "{model}",
+    "--alias",
+    "{alias}",
+    "--embeddings",
+    "--ctx-size",
+    "{n_ctx}",
+    "--batch-size",
+    "{n_ctx}",
+    "--ubatch-size",
+    "{n_ctx}",
+    "--n-gpu-layers",
+    "{n_gpu_layers}",
+    "--verbosity",
+    "{verbosity}",
+)
+
+
 class LlamaCppConfig(_SectionSettings):
     """llama.cpp configuration."""
 
@@ -574,46 +622,45 @@ class LlamaCppConfig(_SectionSettings):
     )
     daemon_pid_file: Path | None = Field(default=None, description="llama.cpp daemon PID path")
     daemon_log_file: Path | None = Field(default=None, description="llama.cpp daemon log path")
-    daemon_command: list[str] | None = Field(
-        default=None,
-        description="External embedding-server command for `embedding start`/"
-        "autostart to spawn and supervise instead of the bundled "
-        "llama_cpp.server (CPU-only unless llama-cpp-python was built with "
-        "GPU support). Placeholders substituted per argument: {model} "
-        "(resolved model path), {alias} (runtime fingerprint, the served "
-        "model id cementic verifies), {host}, {port}, {n_ctx}. The spawned "
-        "server must serve {alias} at /v1/models or startup fails fast "
-        "naming both models. Needs an environment variable? Prefix with "
-        "env(1): [\"env\", \"LD_LIBRARY_PATH=/x\", \"llama-server\", ...]. "
+    daemon_command: list[str] = Field(
+        default_factory=lambda: list(DEFAULT_DAEMON_COMMAND),
+        description="Embedding-server command for `embedding start`/autostart "
+        "to spawn and supervise. Defaults to upstream `llama-server` on PATH; "
+        "cementic drives it over HTTP and never links llama.cpp itself, so the "
+        "build you point at is the build it uses. Placeholders substituted per "
+        "argument: {model} (resolved model path), {alias} (runtime fingerprint, "
+        "the served model id cementic verifies), {host}, {port}, {n_ctx}, "
+        "{n_gpu_layers}, {verbosity}. The spawned server must serve {alias} at "
+        "/v1/models or startup fails fast naming both models. Needs an "
+        "environment variable? Prefix with env(1): "
+        "[\"env\", \"LD_LIBRARY_PATH=/x\", \"llama-server\", ...]. "
         "From the environment this is JSON: "
         "CEMENTIC_LLAMA_DAEMON_COMMAND='[\"llama-server\", ...]'",
     )
 
     @field_validator("daemon_command")
     @classmethod
-    def _validate_daemon_command(cls, value: list[str] | None) -> list[str] | None:
+    def _validate_daemon_command(cls, value: list[str]) -> list[str]:
         """Reject an unrenderable command at load, not at first daemon start.
 
         A typo'd placeholder otherwise surfaces hours later, when autostart
         first fires inside a background worker whose only voice is a log file.
         """
-        if value is None:
-            return value
         if not value:
             raise ValueError(
-                "daemon_command must be a non-empty command list, or left "
-                "unset to use the bundled llama_cpp.server"
+                "daemon_command must be a non-empty command list; omit it to "
+                "use the default `llama-server` invocation"
             )
-        dummy = {"model": "", "alias": "", "host": "", "port": "", "n_ctx": ""}
+        dummy = dict.fromkeys(DAEMON_COMMAND_PLACEHOLDERS, "")
         for argument in value:
             try:
                 argument.format_map(dummy)
             except (KeyError, IndexError, ValueError) as error:
                 raise ValueError(
                     f"daemon_command argument {argument!r} is not renderable "
-                    f"({error}); available placeholders are " + "{model}, "
-                    "{alias}, {host}, {port}, {n_ctx}; escape a literal brace "
-                    "by doubling it"
+                    f"({error}); available placeholders are "
+                    + ", ".join("{" + name + "}" for name in DAEMON_COMMAND_PLACEHOLDERS)
+                    + "; escape a literal brace by doubling it"
                 )
         return value
 
