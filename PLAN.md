@@ -1,83 +1,107 @@
 # cementic — architecture & design
 
-<!-- session-handoff:begin (2026-08-26) -->
+<!-- session-handoff:begin (2026-09-02) -->
 ## Where the work stands
 
-**Repo state.** On `claude/audit-fixes`, branched from `main` (which equals
-`origin/main`). The branch holds the second-pass audit's fixes — worker
-correctness, the shared daemon-health protocol, the migration-shim strip, and
-doc/systemd de-staling; findings and rationale in `notes/review-codebase.html`.
-v0.2.0 is still the last tag. Merging and pushing are the user's calls: a hook
-rejects agents touching `main`, so commit on a `claude/*` branch
-(`AGENT_BRANCH_PREFIX=claude`).
+**Entry point: the `papers` import is RUNNING and needs no babysitting — read
+"Decided — query-first embed scheduling" below before touching embed
+throughput, because this session's headline finding there is now in doubt.**
 
-**Entry point: the bulk import is RUNNING and needs no babysitting. Do not
-start a second worker.** Collection `papers` is indexing
-`/u/71/ibrahin1/data/Documents/Papers` (22,246 PDFs) under **systemd user
-units**, not `cementic start` — `packaging/systemd/`, installed to
-`~/.config/systemd/user/`, with lingering enabled. Roughly 4.5 days at the
-measured 5.56 chunk/s. When it finishes: `cementic collection promote papers`.
+**Repo state.** Working tree clean. `main` is at `90d66ad`, **one commit ahead
+of `origin/main`**; this handoff commit sits on **`claude/session-handoff-2026-09-02`,
+unmerged**. Merging and pushing are the user's calls (a hook rejects agents
+touching `main`):
+```bash
+git checkout main && git merge --ff-only claude/session-handoff-2026-09-02
+```
+Three code commits landed today, all six gates green on the final state
+(`./scripts/check.sh`, exit 0, single clean run):
+- `9681259` embed request size follows the search lease instead of being constant.
+- `8254f77` `cementic stop` grace 10 s → 30 s.
+- `90d66ad` retry walk bounded to groups of 4 and made shutdown-responsive.
+Branch `claude/embed-retry-bounds` is merged into `main` and can be deleted.
 
-**`cementic status` reports `workers stopped` while it runs.** That line reads
-state written only by `cementic start`; the systemd units invoke
-`cementic.runner` directly. The progress counters beside it are accurate. Real
-liveness check:
-`systemctl --user is-active cementic-embedding cementic-worker@papers`.
+**Live state.** Collection `papers`, revision 16, still `building`. At 15:44 on
+2026-09-02: 2,265,313 done / 5,177 failed / 21,033 pending of 2,291,555. Worker
+started 14:33 and is progressing. When it drains: `cementic collection promote
+papers`. Only `papers` exists now — `soak` and `test` are gone, and the vector
+table is `embedding_vectors_p6`.
+
+If it needs restarting (`stop` then `start` is safe again as of `90d66ad`):
+```bash
+cementic stop
+cementic start /u/71/ibrahin1/data/Documents/Papers -c papers
+```
+Every `start` requeues the ~5,000 over-budget failures, so `failed` drops and
+`pending` jumps at each restart. That is the requeue, not new breakage.
+
+**Correction — distrust this session's throughput story, not just its numbers.**
+Three commits were justified by "constant sub-batching at 4 cost ~2× indexing
+throughput". Re-measured after the fix shipped, that attribution does not hold
+up: requests are confirmed claim-sized again (40 groups of exactly 32 launches
+between client round trips in the daemon log) with a 3-hour-stale search lease,
+and throughput is **2.24 chunk/s — inside the 1.7–2.9 band the sub-batched
+build ran at**, not the ~4.0 that preceded it. So restoring big requests did
+*not* restore the old rate, and the 4.0 → 2.0 step at the 2026-09-01 17:23
+restart has an unidentified cause. Ruled out this session: chunk length (flat at
+317–323 model tokens across the entire run, measured from the daemon log's
+`n_tokens`) and a missing GPU (`--list-devices` shows the Vulkan iGPU; the
+server has never restarted). Still open, in rough order of promise: HNSW insert
+cost growing with the graph (fits the slow 5.5 → 4.0 decay better than the
+step), host/GPU contention, and pgvector index maintenance.
+
+The changes are still worth keeping on their own merits — the per-request
+overhead is real (~0.36 s), and the `stop`/retry fixes are correctness fixes —
+but the "~2×" figure in `9681259`'s message, in PLAN's scheduling amendment, and
+in `embed_submit_size`'s docstring is **unconfirmed** and should not be repeated
+as established.
+
+**A hard ceiling worth knowing before optimising anything here.** The server
+runs `--ubatch-size {n_ctx}` = 512 and chunks average ~318 model tokens, so
+roughly one chunk fits per forward pass: slot 0 took 300 of the last 400
+launches with 32 tasks queued. Extra slots and bigger requests cannot buy
+concurrency the physical batch has no room for. Raising `n_ctx`/ubatch is the
+untested lever, and it changes the runtime fingerprint (`--alias`), so cementic
+would refuse the running server until it restarts.
 
 **Load-bearing numbers a cold reader should not re-derive.**
-- 5.56 chunk/s end to end on the iGPU (pure CPU is 1.23). 2.16M chunks ≈ 108 h.
-- Extraction scales with pages: 2.8 ms/page raw, 0.78 s/page with pymupdf4llm.
-- Expect ~110 documents (1 in 200) to fail extraction as scanned PDFs with no
-  text layer, and a handful of chunks per thousand to fail embedding as
-  over-budget. Both are isolated and do not stall the run.
-- The embedding server's `--alias` is a fingerprint of the model config
-  (`4e24fc85…`). Changing `n_gpu_layers` or `n_ctx` changes it and cementic
-  will then refuse the server.
+- One `/v1/embeddings` request costs ~0.36 s fixed plus ~0.38 s per input
+  (0.72 s for 1 input, 12.2 s for 32), measured against the live server.
+- ~5,000 chunks fail as over-budget. `embed_batch` pre-filters on the *cheap*
+  tiktoken estimate, so 513–549-model-token chunks still reach the server and
+  return a 500 that `_server_rejected_the_input` treats as terminal. Each
+  `cementic start` requeues them, so failures re-run and re-fail every restart.
+- 113 documents fail extraction as scanned PDFs with no text layer. Expected.
 
-**Corrections — measurement mistakes made today, all now fixed in the docs.
-Distrust the reasoning style, not just the numbers.**
-- *"The iGPU is only 1.22×."* `-ngl 0` is not a CPU baseline: llama.cpp offloads
-  large matmuls to any visible GPU. Only `-dev none` measures CPU. Real: 6.5×.
-- *"Thread pinning is worth 41%."* Noise; an identical config moved 53%.
-- *"The index-driven claim is flat."* It was not. Measured at 19,400 chunks the
-  planner drove from the work queue; at 300,000 it flips and walks the finished
-  prefix. Only denormalising the filters onto `chunk_embeddings` made it flat.
-  **The pattern in all three: a number measured at small scale, generalised.**
-
-**Live state.** Import running — 374,863/2,182,979 embedded (17.2%) on
-2026-08-26. While it runs, `status`/`doctor` may falsely advise restarting the
-embedding daemon (fixed on `claude/audit-fixes`, not yet running under the
-import's systemd units): do not restart it; check progress via the database.
-Collections: `papers` (building), `soak` and
-`test` (both active, searchable, sharing vector table `embedding_vectors_p5`);
-`test` is a testbed, remove freely. `soak` and `test` will rebuild on their next
-`cementic start` because today's extractor changes re-versioned their profiles.
-
-**Not in git:** `~/.cache/cementic-igpu/` (upstream llama.cpp b10605 Vulkan
-build — the systemd unit points at it, so do not delete it), plus
-`~/.cache/cementic-corpus/` and `~/.cache/cementic-ab/`.
+**Reading the daemon log** (`~/.local/share/cementic/llama_cpp_daemon.log`, 566
+MB, never rotated): timestamps are **uptime**, not wall clock, formatted
+`min.sec.ms.us`, and the file concatenates every server run — find the current
+run with `grep -an 'load_model: loading model'` first. Two artifacts: a requeue
+shows as an hour *above* the GPU rate (over-budget chunks are rejected at zero
+tokens), and startup banners with `couldn't bind` are failed autostarts, not
+restarts. Probe scripts for both measurements are in `notes/`
+(`probe_server_idle.py`, `probe_embed_batch_scaling.py`) — note `notes/` is
+gitignored, so they exist on this machine only and not in a fresh clone.
 
 **Environment quirks.**
-- The agent sandbox has **no `/dev/dri`, a separate PID namespace, and no
-  D-Bus**: GPU work, `ps`, and `systemctl --user` are all unavailable to it.
-  Filesystem and PostgreSQL are shared, so check progress through the database,
-  never through `ps`.
-- The corpus is two symlinks deep to `/u/71/ibrahin1/data/Documents/Papers`,
-  local ext4, 44 GiB. `du` without `-L` reports 36 bytes and looks empty.
-- Filenames there contain shell metacharacters; any shell tooling over the
-  corpus needs `find -print0 | xargs -0`. cementic itself is unaffected.
-- On a fresh connection `SHOW hnsw.ef_search` errors and `SET hnsw.ef_search` is
-  an inert placeholder until a vector query loads pgvector's module.
-- Green gates are not sufficient. Every defect found today — NUL bytes, the
-  retryable 500, both write-back stalls, the claim that was not flat — passed
-  all six gates and was caught by running against real data.
+- The agent sandbox has a **separate PID namespace**: `/proc/<pid>` and `ps` are
+  useless for liveness. Check the database and file mtimes instead.
+- `cementic` on PATH is the uv-tool snapshot; the project `.venv` is an editable
+  install of the working tree, so `.venv/bin/cementic` runs uncommitted code.
+  The running worker was started from `.venv` and therefore has all three fixes.
+- Only one `pytest -m pg` run at a time — two overlapping `./scripts/check.sh`
+  runs corrupted this session's evidence and had to be discarded.
+
+**Deviation from plan, agent-decided:** the throughput work was not on any
+roadmap. It started from "what's next?" and displaced the queued items below.
 
 **Exit criteria — commands whose output confirms the above.**
 ```bash
-git status --short                                    # empty
-cementic status -c papers | head -9                   # counters climbing
-systemctl --user is-active cementic-worker@papers     # active
-./scripts/check.sh                                    # six gates, exit 0 (~4 min)
+git status --short                                   # empty
+git log --oneline origin/main..main                  # 90d66ad (+ handoff once merged)
+git branch --show-current                            # main, after merging the handoff
+cementic status -c papers                            # counters climbing
+./scripts/check.sh                                   # six gates, exit 0 (~4 min)
 ```
 <!-- session-handoff:end -->
 
@@ -267,6 +291,29 @@ queries are uncontended.
 This also promotes Layer 3 from "value evaporated" to the thing that would
 remove the residual, since the premise that retired it — that Layer 1 had
 already shrunk the quantum for free — is what the measurement falsified.
+
+**Correction, same day, after the fix shipped: the ~2× attribution above does
+not hold.** With the adaptive sizing running, requests are confirmed
+claim-sized (40 groups of exactly 32 launches between client round trips) and
+the search lease is hours stale, yet throughput is 2.24 chunk/s — inside the
+1.7–2.9 band the constant-4 build ran at, not the ~4.0 that preceded it.
+Restoring big requests did not restore the old rate, so the 4.0 → 2.0 step at
+the 2026-09-01 17:23 restart is **unexplained**; it correlated with the
+sub-batch change and was attributed to it on that correlation alone.
+
+Ruled out since: chunk length (flat at 317–323 model tokens across the whole
+run) and GPU availability (the iGPU is visible and the server never restarted).
+Still open: HNSW insert cost growing with the graph — which fits the slow
+5.5 → 4.0 decay better than it fits a step — host contention, and pgvector
+index maintenance.
+
+What survives: the fixed ~0.36 s per request is measured and real, so
+sub-batching does cost *something*; and a hard ceiling was found that bounds
+any work here — `--ubatch-size` is 512 while chunks average ~318 model tokens,
+so about one chunk fits per forward pass and one slot took 300 of 400 launches
+with 32 tasks queued. Request size cannot buy concurrency the physical batch
+has no room for. Raising `n_ctx`/ubatch is the untested lever and changes the
+runtime fingerprint, so the server must restart for it.
 
 ### Decided — build the ANN index up front (2026-08-13)
 

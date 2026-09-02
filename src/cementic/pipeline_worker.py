@@ -194,10 +194,13 @@ def embed_submit_size(
 
     Sub-batching exists to bound how long an interactive query queues behind
     bulk work, and it is not free: llama-server charges a fixed ~0.36 s per
-    request, and a request sized to the slot count empties every slot while the
-    client does its next round trip. Measured on the papers import, a fixed
-    size of 4 cost ~2x indexing throughput (4.0 -> 2.0 chunk/s) with ~25% of
-    wall clock spent with no slot busy.
+    request (0.72 s for one input against 12.2 s for 32), so a claim split into
+    eight requests pays that eight times.
+
+    An earlier version of this docstring claimed a constant size of 4 cost ~2x
+    indexing throughput. That is unconfirmed: restoring claim-sized requests did
+    not restore the earlier rate, so the step it was inferred from has some
+    other cause (PLAN.md, "Decided -- query-first embed scheduling").
 
     So the size follows the lease rather than being constant. With no recent
     search the whole claim goes in one request: no query is waiting, and the
