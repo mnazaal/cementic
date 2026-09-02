@@ -83,11 +83,13 @@ class _PoisonChunkClient:
     def __init__(self, poison: str) -> None:
         self.poison = poison
         self.individual_calls: list[str] = []
+        self.batch_sizes: list[int] = []
 
     def format_document(self, text: str) -> str:
         return text
 
     def embed_batch(self, texts: list[str]) -> list[list[float] | None]:
+        self.batch_sizes.append(len(texts))
         if self.poison in texts:
             raise ValueError("poison chunk")
         return [[1.0, 0.0] for _ in texts]
@@ -1021,11 +1023,9 @@ class TestPipelineWorkerEmbedStep:
         """One bad chunk costs its request the one-by-one retry, not the claim.
 
         The retry is scoped to the failed request, so how much it re-embeds
-        follows the request size: small while a search is active (asserted
-        here), claim-sized when nothing is searching. That upper bound is
-        acceptable because it is rare -- ``embed_batch`` pre-filters
-        over-budget texts, and a retryable server error releases the claim
-        without reaching this path at all.
+        follows the request size, and a claim-sized request is re-tried in
+        groups before any text is embedded alone
+        (test_data_failure_retries_in_groups_before_going_one_at_a_time).
         """
         import cementic.pipeline_worker as worker_module
         from cementic.db import SearchActivity, utc_now
@@ -1059,6 +1059,106 @@ class TestPipelineWorkerEmbedStep:
             rows = session.query(ChunkEmbedding).order_by(ChunkEmbedding.chunk_id).all()
             assert [row.status for row in rows] == ["done", "done", "failed", "done", "done"]
             assert "poison chunk" in rows[2].error_message
+
+    def test_data_failure_retries_in_groups_before_going_one_at_a_time(
+        self, temp_dir: Path, monkeypatch
+    ) -> None:
+        """A claim-sized request that fails is re-tried in groups, not per text.
+
+        One text at a time uses a single server slot and costs a round trip per
+        chunk, so isolating one bad chunk in a 32-text claim took 32 sequential
+        calls. Only the group that fails again is walked individually; the rest
+        of the claim stays batched.
+        """
+        import cementic.pipeline_worker as worker_module
+
+        monkeypatch.setattr(worker_module, "ensure_vector_table_schema", lambda *a, **k: None)
+        monkeypatch.setattr(worker_module, "upsert_vectors", lambda *a, **k: None)
+        engine = create_engine("sqlite:///:memory:")
+        Base.metadata.create_all(engine)
+        session_factory = sessionmaker(bind=engine, expire_on_commit=False)
+        with session_factory() as session:
+            revision_id = _seed_embedding_batch(session, n_chunks=9)
+
+        config = Config()
+        config.pipeline_worker.log_file = temp_dir / "worker.log"
+        config.pipeline_worker.batch_size = 16
+        config.pipeline_worker.embed_submit_batch_size = 4
+        worker = PipelineWorker(config)
+        worker.Session = session_factory
+        client = _PoisonChunkClient(poison="chunk 2")
+        worker.embedding_client = client
+
+        assert worker._step_embed(revision_id) is True
+
+        # 9 in one request (no search active), then groups of 4, 4, 1.
+        assert client.batch_sizes == [9, 4, 4, 1]
+        # Only the group holding the poison went one at a time.
+        assert client.individual_calls == ["chunk 0", "chunk 1", "chunk 2", "chunk 3"]
+        with session_factory() as session:
+            rows = session.query(ChunkEmbedding).order_by(ChunkEmbedding.chunk_id).all()
+            statuses = [row.status for row in rows]
+            assert statuses == ["done", "done", "failed", "done", "done", *["done"] * 4]
+
+    def test_stop_during_the_retry_walk_releases_the_claim(
+        self, temp_dir: Path, monkeypatch
+    ) -> None:
+        """SIGTERM mid-retry returns the claim to pending instead of failing it.
+
+        The retry walk is one HTTP round trip per group and then per text, so
+        without a shutdown check the worker ignored a stop for the whole walk
+        -- 44 s measured, which outlasted `cementic stop`'s grace period and
+        turned the documented restart into a stop that started nothing.
+        """
+        import cementic.pipeline_worker as worker_module
+
+        monkeypatch.setattr(worker_module, "ensure_vector_table_schema", lambda *a, **k: None)
+        monkeypatch.setattr(worker_module, "upsert_vectors", lambda *a, **k: None)
+        engine = create_engine("sqlite:///:memory:")
+        Base.metadata.create_all(engine)
+        session_factory = sessionmaker(bind=engine, expire_on_commit=False)
+        with session_factory() as session:
+            revision_id = _seed_embedding_batch(session, n_chunks=9)
+
+        config = Config()
+        config.pipeline_worker.log_file = temp_dir / "worker.log"
+        config.pipeline_worker.batch_size = 16
+        config.pipeline_worker.embed_submit_batch_size = 4
+        worker = PipelineWorker(config)
+        worker.Session = session_factory
+        client = _PoisonChunkClient(poison="chunk 2")
+        worker.embedding_client = client
+
+        class _StopOnceEmbeddingStarted:
+            """Set only after the claim-sized request has been sent.
+
+            Keyed on the client rather than a call count so the worker cannot
+            satisfy this test by bailing out before it embeds anything -- which
+            is a different code path and would leave the retry walk untested.
+            """
+
+            def __init__(self, recorder: _PoisonChunkClient) -> None:
+                self.recorder = recorder
+
+            def is_set(self) -> bool:
+                return bool(self.recorder.batch_sizes)
+
+            def wait(self, timeout: float | None = None) -> bool:
+                return False
+
+        worker._shutdown_event = _StopOnceEmbeddingStarted(client)
+
+        assert worker._step_embed(revision_id) is False
+
+        # The claim-sized request went out and failed; the retry walk then saw
+        # the stop before issuing any group call.
+        assert client.batch_sizes == [9]
+        assert client.individual_calls == []
+        with session_factory() as session:
+            rows = session.query(ChunkEmbedding).order_by(ChunkEmbedding.chunk_id).all()
+            # Back to pending, not stamped failed: nothing here is a property
+            # of the texts.
+            assert {row.status for row in rows} == {"pending"}
 
     def test_short_embedding_batch_marks_every_claimed_row_failed(self, temp_dir: Path) -> None:
         """A short provider response must not leave trailing rows stuck processing."""

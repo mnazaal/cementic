@@ -214,6 +214,18 @@ def embed_submit_size(
     return max(1, min(size, remaining))
 
 
+class _ShutdownRequestedError(Exception):
+    """A stop was requested inside an embed retry loop.
+
+    The retry paths walk a failed request group by group and then text by text,
+    one HTTP round trip each. Without a shutdown check in those loops the
+    worker ignores SIGTERM for the whole walk -- measured at 44 s, which
+    outlasted `cementic stop`'s grace period and so broke the documented
+    `stop && start` restart. Raising unwinds to the claim's release path rather
+    than returning a short result, which would stamp unembedded rows failed.
+    """
+
+
 def is_retryable_embed_error(error: BaseException) -> bool:
     """Whether an embedding failure is about the provider, not the texts (pure).
 
@@ -1052,13 +1064,22 @@ class PipelineWorker:
                     # re-embedding at most one claim is cheaper than a
                     # partial-write path.
                     self._release_after_provider_failure(error, claimed, profile_id)
-                # A genuine data failure. Retry one text at a time so a single
-                # bad chunk is marked failed on its own instead of taking the
-                # rest of its sub-batch down with it and blocking promotion.
+                # A genuine data failure. Retry in groups so a single bad chunk
+                # is marked failed on its own instead of taking the rest of the
+                # request down with it and blocking promotion.
                 try:
-                    sub_embeddings, sub_failure = self._embed_individually(
-                        provider, sub_texts, error
+                    sub_embeddings, sub_failure = self._embed_isolating_failures(
+                        provider, sub_texts, error, interactive_size
                     )
+                except _ShutdownRequestedError:
+                    # Stop requested part-way through the retry walk. Nothing
+                    # here is a property of the texts, so the claim goes back
+                    # to `pending` rather than being stamped failed.
+                    self._release_claimed_embeddings(
+                        [chunk_id for chunk_id, _ in claimed], profile_id
+                    )
+                    self.state_manager.update(current_activity=None)
+                    return False
                 except Exception as retry_error:
                     # The provider went away mid-retry: still a provider fact,
                     # so the claim must be released rather than stranded.
@@ -1212,6 +1233,49 @@ class PipelineWorker:
             self._logger.error("Embedding provider restart failed: %s", restart_error)
         raise error
 
+    def _embed_isolating_failures(
+        self,
+        provider: EmbeddingProvider,
+        texts: list[str],
+        batch_error: Exception,
+        group_size: int,
+    ) -> tuple[list[list[float] | None], str]:
+        """Re-embed a failed request in small groups, isolating the bad texts.
+
+        Going straight to one text at a time costs one round trip per chunk on
+        a single slot, with the rest of the server idle. That was tolerable
+        while a request was slot-sized; once a request became claim-sized
+        (embed_submit_size) it meant 32 sequential calls to isolate one chunk,
+        and the corpus supplies plenty: ``embed_batch``'s pre-filter uses the
+        cheap tiktoken estimate, so a chunk in the 513-549 model-token band
+        passes it, reaches the server, and comes back as the 500 that
+        ``_server_rejected_the_input`` classifies as terminal. Observed live --
+        a requeue concentrates those failures and put the worker on one slot.
+
+        Retrying in groups keeps the healthy majority batched; only a group
+        that fails again is walked one text at a time.
+        """
+        results: list[list[float] | None] = []
+        step = max(1, group_size)
+        for start in range(0, len(texts), step):
+            if self._shutdown_event.is_set():
+                raise _ShutdownRequestedError
+            group = texts[start : start + step]
+            try:
+                group_results = list(provider.embed_batch(group))
+            except Exception as error:
+                if is_retryable_embed_error(error):
+                    # The provider, not these texts: the caller releases the
+                    # whole claim rather than stamping anything terminal.
+                    raise
+                group_results, _ = self._embed_individually(provider, group, error)
+            if len(group_results) != len(group):
+                # A short response here would shift every later result onto the
+                # wrong chunk; None is what the caller already stamps as failed.
+                group_results = [None for _ in group]
+            results.extend(group_results)
+        return results, str(batch_error)
+
     def _embed_individually(
         self, provider: EmbeddingProvider, texts: list[str], batch_error: Exception
     ) -> tuple[list[list[float] | None], str]:
@@ -1225,6 +1289,8 @@ class PipelineWorker:
         """
         results: list[list[float] | None] = []
         for text_value in texts:
+            if self._shutdown_event.is_set():
+                raise _ShutdownRequestedError
             try:
                 results.append(provider.embed(text_value))
             except Exception as error:
