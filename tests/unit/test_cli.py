@@ -895,11 +895,104 @@ class TestBackgroundCommands:
         assert "collections" in result.output
         assert "research" in result.output
         assert "10 docs" in result.output
-        assert "20/30 embedded (66.7%)" in result.output
+        # The failure count is named, not just implied by the gap: a corpus
+        # whose remainder can never succeed otherwise sits at a fraction short
+        # of 100% and reads as still working.
+        assert "20/30 embedded (66.7%, 2 failed)" in result.output
         mock_list_collections.assert_called_once_with(mock_session)
         mock_load_pipeline_status_bulk.assert_called_once_with(
             cementic_cli._get_config(), ["research"]
         )
+
+    @patch("cementic.cli._llama_daemon_runtime_status", return_value="running, pid=333")
+    @patch("cementic.cli.check_health")
+    @patch("cementic.cli.load_pipeline_status_bulk")
+    @patch("cementic.cli.list_collections")
+    @patch("cementic.cli_shared.get_session_factory")
+    @patch("cementic.cli_shared.get_engine")
+    @patch("cementic.cli.load_worker_statuses")
+    @patch("cementic.cli._load_supervisor_state")
+    @patch("cementic.cli.build_supervisor_status")
+    def test_status_omits_the_failure_note_when_there_are_none(
+        self,
+        mock_build_supervisor_status,
+        mock_load_supervisor_state,
+        mock_load_worker_statuses,
+        mock_get_engine,
+        mock_get_session_factory,
+        mock_list_collections,
+        mock_load_pipeline_status_bulk,
+        mock_check_health,
+        mock_daemon_status,
+    ):
+        """A clean collection says nothing about failures."""
+        mock_load_supervisor_state.return_value = {
+            "collection": "research",
+            "directories": ["/docs"],
+            "processes": [],
+        }
+        mock_load_worker_statuses.return_value = (
+            WorkerStatus(
+                state="running",
+                pid=("111"),
+                process="running",
+                current_file=None,
+                watched_directories=["/docs"],
+                processed_count=3,
+                failed_count=0,
+            ),
+            WorkerStatus(
+                state="running",
+                pid=("222"),
+                process="running",
+                current_file=None,
+                watched_directories=[],
+                processed_count=0,
+                failed_count=0,
+            ),
+        )
+        mock_build_supervisor_status.return_value = SimpleNamespace(
+            state="2/2 running", collection="research", directories=["/docs"]
+        )
+        mock_check_health.return_value = SimpleNamespace(
+            db_reachable=True,
+            embedding_provider="llama-cpp",
+            embedding_healthy=True,
+            llama_daemon="running, pid=333",
+        )
+        mock_session = MagicMock()
+        mock_session.__enter__.return_value = mock_session
+        mock_session.__exit__.return_value = False
+        mock_get_session_factory.return_value = lambda: mock_session
+        mock_list_collections.return_value = [
+            SimpleNamespace(name="research", documents=10, active_revision_label="rev-1")
+        ]
+        mock_load_pipeline_status_bulk.return_value = {
+            "research": SimpleNamespace(
+                documents=10,
+                extracted_done=10,
+                extracted_failed=0,
+                chunked_done=10,
+                chunked_failed=0,
+                total_chunks=30,
+                pending_embeddings=0,
+                processing_embeddings=0,
+                done_embeddings=30,
+                failed_embeddings=0,
+                extraction_pct=100.0,
+                chunking_pct=100.0,
+                embedding_pct=100.0,
+                active_revision_label="rev-1",
+                ready_revision_label=None,
+                building_revision_label=None,
+            )
+        }
+
+        result = runner.invoke(app, ["status"])
+
+        assert result.exit_code == 0
+        assert "30/30 embedded (100.0%)" in result.output
+        assert "failed" not in result.output.split("collections")[1]
 
     @patch("cementic.cli._llama_daemon_runtime_status", return_value="stopped")
     @patch("cementic.cli.check_health")

@@ -658,9 +658,16 @@ def status(
                 )
                 for row, ps in items:
                     frac = f"{ps.done_embeddings:,}/{ps.total_chunks:,}"
+                    # Naming the failures is what makes a finished collection
+                    # readable as finished. Showing done/total alone, a corpus
+                    # whose remainder can never succeed sits at "99.8%" forever
+                    # and is indistinguishable from one still working.
+                    failed_note = (
+                        f", {ps.failed_embeddings:,} failed" if ps.failed_embeddings else ""
+                    )
                     console.print(
                         f"  {row.name:<{name_w}}   {ps.documents:>{doc_w},} docs   "
-                        f"{frac:>{frac_w}} embedded ({ps.embedding_pct}%)"
+                        f"{frac:>{frac_w}} embedded ({ps.embedding_pct}%{failed_note})"
                     )
                 return
             # This session used to be opened and then discarded on the
