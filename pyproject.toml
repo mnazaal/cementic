@@ -132,7 +132,20 @@ testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_functions = ["test_*"]
 addopts = ["--strict-markers", "--strict-config"]
-filterwarnings = ["error"]
+filterwarnings = [
+    "error",
+    # typer imports names click 8.5 deprecated (get_binary_stream,
+    # get_text_stream) at import time, so `import typer` alone becomes a
+    # collection error under "error" and takes all eight CLI test modules with
+    # it. Not cementic's warning and not fixable by upgrading: 0.25.1 is the
+    # newest typer under the <0.26 cap above, and that cap is load-bearing.
+    #
+    # Scoped to click's deprecation shim, which emits exactly this message
+    # shape for a fixed list of seven names (click.utils.__getattr__). cementic
+    # imports none of them, so this cannot mask a warning about our own code.
+    # Drop it when the typer cap lifts.
+    "ignore:'click.utils.:DeprecationWarning",
+]
 markers = [
     "pg: tests requiring a running PostgreSQL container (podman compose up -d)",
 ]
