@@ -50,6 +50,18 @@ _TOKEN_RATIO_UPPER_BOUND = 1.45
 #: putting a tokenizer in the config load path.
 _TASK_PREFIX_TOKEN_ALLOWANCE = 8
 
+#: Tokens the server needs beyond the tokenized input. `/tokenize` reports the
+#: text's own tokens; llama-server then wraps the sequence with special tokens
+#: that must also fit the window, so an input measuring exactly `n_ctx` is
+#: refused with a 500. Distinct from `_TASK_PREFIX_TOKEN_ALLOWANCE`, which
+#: models the *task prefix* for callers reasoning about unprefixed chunk_size
+#: -- by the time text reaches `over_budget_tokens` that prefix is already in
+#: it, so subtracting the allowance here would double-count.
+#:
+#: Measured against llama-server b10605 with a 512-token window: 509 embeds,
+#: 511 and 512 are refused. 3 is the smallest verified-safe reserve.
+_SERVER_SPECIAL_TOKEN_RESERVE = 3
+
 #: Budget for a tokenize round trip. Tokenizing is trivial once the model is
 #: loaded, so a long timeout here buys nothing and costs the embedding request
 #: that follows its own budget when the daemon is cold.
@@ -387,8 +399,19 @@ class RemoteEmbeddingClient(EmbeddingProvider):
         (model/tiktoken ratio beyond the bound) and 500'd at the server
         (observed 2026-09-01) -- so the failure-reason path, where the text
         has already failed and a round trip is free, must not trust "fits".
+
+        The budget is ``n_ctx`` less a small reserve, not ``n_ctx`` itself.
+        Text arrives here already carrying the model's task prefix (the worker
+        applies it before batching), so the prefix is counted -- but the tokens
+        the server wraps around an input are not, and `/tokenize` does not
+        report them. Comparing against ``n_ctx`` therefore let a band through
+        that the server refused outright, which is where the live corpus's 204
+        raw-500 failures came from.
         """
         if self.n_ctx <= 0:
+            return None
+        budget = self.n_ctx - _SERVER_SPECIAL_TOKEN_RESERVE
+        if budget <= 0:
             return None
         # disallowed_special=() as in chunk.py: a literal `<|endoftext|>` is
         # ordinary prose in NLP papers, and tiktoken's default raise stamped
@@ -397,7 +420,7 @@ class RemoteEmbeddingClient(EmbeddingProvider):
             len(tiktoken.get_encoding(TOKENIZER).encode(text, disallowed_special=()))
             * _TOKEN_RATIO_UPPER_BOUND
         )
-        if not exact and approx <= self.n_ctx:
+        if not exact and approx <= budget:
             return None
         exact_count = self.count_model_tokens(text)
         if exact_count is None:
@@ -405,17 +428,19 @@ class RemoteEmbeddingClient(EmbeddingProvider):
             # letting the text through: a silently truncated vector is the
             # failure this exists to prevent, and at the shipped chunk_size
             # this branch is unreachable anyway.
-            return int(approx) if approx > self.n_ctx else None
-        return exact_count if exact_count > self.n_ctx else None
+            return int(approx) if approx > budget else None
+        return exact_count if exact_count > budget else None
 
     def _over_budget_message(self, tokens: int) -> str:
         # No advice sentence here: embed() also serves search queries, which
         # were told to "Lower pipeline.chunk_size" for a query that was simply
         # too long. Chunk-context advice is appended by over_budget_reason.
+        budget = self.n_ctx - _SERVER_SPECIAL_TOKEN_RESERVE
         return (
             f"text is about {tokens} tokens in the embedding model's own tokenizer, "
-            f"over its {self.n_ctx}-token context window; the server would embed only "
-            "the head and drop the rest"
+            f"over the {budget} an input may occupy ({self.n_ctx}-token context "
+            f"window less {_SERVER_SPECIAL_TOKEN_RESERVE} the server reserves); the "
+            "server would refuse it or embed only the head"
         )
 
     def _embed_inputs(self, inputs: str | list[str]) -> list[list[float]]:
@@ -435,6 +460,36 @@ class RemoteEmbeddingClient(EmbeddingProvider):
             raise ValueError(self._over_budget_message(over))
         return self._embed_inputs(text)[0]
 
+    def _partition_refused(
+        self, sendable: list[tuple[int, str]]
+    ) -> tuple[list[tuple[int, str]], list[tuple[int, str]]]:
+        """Split a rejected batch into (still sendable, refused as over budget).
+
+        The pre-filter's ratio bound is an estimate that some content violates:
+        measured on the live corpus, dot-leader contents pages tokenize at 1.59
+        model tokens per tiktoken token against a 1.45 bound, so they clear the
+        cheap check and the server then refuses the whole request. Raising the
+        bound is not the answer -- at the shipped chunk_size it would push every
+        chunk onto the exact round trip to catch a fraction of a percent.
+
+        So the batch is re-examined only once it has actually failed, where an
+        exact count per text is affordable. Anything genuinely over budget is
+        reported as such; if nothing is, the caller re-raises, because then the
+        failure was the server's and these chunks deserve a retry rather than a
+        terminal stamp.
+        """
+        keep: list[tuple[int, str]] = []
+        refused: list[tuple[int, str]] = []
+        for index, text in sendable:
+            try:
+                over = self.over_budget_tokens(text, exact=True)
+            except Exception:
+                # No exact answer available; treat it as sendable so a failure
+                # here cannot itself condemn the chunk.
+                over = None
+            (refused if over is not None else keep).append((index, text))
+        return keep, refused
+
     def embed_batch(self, texts: list[str]) -> list[list[float] | None]:
         """Embed a batch, reporting per-item None for anything over the window.
 
@@ -450,7 +505,19 @@ class RemoteEmbeddingClient(EmbeddingProvider):
         ]
         if not sendable:
             return results
-        embeddings = self._embed_inputs([text for _, text in sendable])
+        try:
+            embeddings = self._embed_inputs([text for _, text in sendable])
+        except requests.RequestException:
+            sendable, refused = self._partition_refused(sendable)
+            if not refused:
+                # Nothing in the batch is over budget, so the server itself is
+                # the problem. Propagate: the caller releases the claim and
+                # retries, rather than stamping healthy chunks terminally
+                # failed because the daemon was down for a moment.
+                raise
+            if not sendable:
+                return results
+            embeddings = self._embed_inputs([text for _, text in sendable])
         if len(embeddings) != len(sendable):
             raise ValueError(
                 f"embedding count {len(embeddings)} does not match input count {len(sendable)}"

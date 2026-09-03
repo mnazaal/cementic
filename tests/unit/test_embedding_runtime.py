@@ -219,7 +219,7 @@ class TestTokenBudgetGuard:
 
         assert vectors[0] == [0.5, 0.5]
         assert vectors[1] is None
-        assert "over its 512-token context window" in (
+        assert "512-token context window" in (
             client.over_budget_reason("word " * 2000) or ""
         )
 
@@ -230,7 +230,7 @@ class TestTokenBudgetGuard:
         counted.json.return_value = {"count": 900}
         mock_post.return_value = counted
 
-        with pytest.raises(ValueError, match="over its 512-token context window"):
+        with pytest.raises(ValueError, match="512-token context window"):
             self._client().embed("word " * 2000)
 
     @patch("cementic.embedding_runtime.requests.post")
@@ -292,7 +292,7 @@ class TestTokenBudgetGuard:
         reason = self._client().over_budget_reason("short text the pre-filter passes")
 
         assert reason is not None
-        assert "over its 512-token context window" in reason
+        assert "512-token context window" in reason
 
     @patch("cementic.embedding_runtime.requests.post")
     def test_a_server_without_the_endpoint_falls_back_to_the_estimate(self, mock_post) -> None:
@@ -1492,3 +1492,83 @@ class TestRuntimeFingerprintIsPathSpellingIndependent:
         assert llama_cpp_runtime_fingerprint(
             model_path="models/a.gguf", **kwargs
         ) != llama_cpp_runtime_fingerprint(model_path="models/b.gguf", **kwargs)
+
+
+class TestServerTokenReserve:
+    """An input measuring exactly n_ctx is refused, so the guard reserves room."""
+
+    @staticmethod
+    def _client(n_ctx: int = 512) -> RemoteEmbeddingClient:
+        return RemoteEmbeddingClient(
+            host="localhost", port=8081, embedding_dim=768,
+            expected_fingerprint="abc", n_ctx=n_ctx,
+        )
+
+    def test_text_at_the_window_size_is_refused(self) -> None:
+        """Measured against llama-server b10605: 511 and 512 tokens are refused
+        with a 500 in a 512-token window, while 509 embeds. Comparing against
+        n_ctx itself let that band through, which is where the live corpus's
+        204 raw-500 failures came from."""
+        client = self._client()
+        with patch.object(client, "count_model_tokens", return_value=512):
+            assert client.over_budget_tokens("x", exact=True) == 512
+
+    def test_text_just_inside_the_reserve_is_still_refused(self) -> None:
+        client = self._client()
+        with patch.object(client, "count_model_tokens", return_value=510):
+            assert client.over_budget_tokens("x", exact=True) == 510
+
+    def test_text_clear_of_the_reserve_passes(self) -> None:
+        client = self._client()
+        with patch.object(client, "count_model_tokens", return_value=509):
+            assert client.over_budget_tokens("x", exact=True) is None
+
+
+class TestRefusedBatchIsolatesTheOffender:
+    """One over-long chunk must not fail the batch it travelled in.
+
+    The pre-filter's ratio bound is an estimate some content violates -- dot
+    leaders tokenize at ~1.59 model tokens per tiktoken token against a 1.45
+    bound -- so a chunk can clear the cheap check and still be refused. When
+    that happens the whole request 500s, and every healthy chunk riding along
+    used to be stamped failed with it.
+    """
+
+    @staticmethod
+    def _client() -> RemoteEmbeddingClient:
+        return RemoteEmbeddingClient(
+            host="localhost", port=8081, embedding_dim=2,
+            expected_fingerprint="abc", n_ctx=512,
+        )
+
+    def test_healthy_chunks_survive_a_refused_batch(self) -> None:
+        client = self._client()
+        texts = ["short a", "TOO LONG", "short b"]
+
+        def fake_send(sent):
+            if any(t == "TOO LONG" for t in sent):
+                raise requests.HTTPError("500 Server Error")
+            return [[0.0, 1.0] for _ in sent]
+
+        def fake_exact(text, *, exact=False):
+            return 600 if text == "TOO LONG" else None
+
+        with patch.object(client, "_embed_inputs", side_effect=fake_send):
+            with patch.object(client, "over_budget_tokens", side_effect=fake_exact):
+                out = client.embed_batch(texts)
+
+        assert out[0] == [0.0, 1.0]
+        assert out[1] is None
+        assert out[2] == [0.0, 1.0]
+
+    def test_a_server_outage_is_raised_not_stamped(self) -> None:
+        """If nothing in the batch is over budget the failure was the server's.
+
+        Stamping these terminally would condemn healthy chunks for a daemon
+        that was down for a moment; the caller must be free to retry them.
+        """
+        client = self._client()
+        with patch.object(client, "_embed_inputs", side_effect=requests.HTTPError("boom")):
+            with patch.object(client, "over_budget_tokens", return_value=None):
+                with pytest.raises(requests.HTTPError):
+                    client.embed_batch(["a", "b"])

@@ -290,6 +290,33 @@ add a file type cementic does not already know — its best use. Ripples to
 set as plain data, matching how `ignore_directories` is already passed. The
 command extractor is never a fallback: it must be named in `backends`.
 
+### Open — what the next rebuild should carry (2026-09-03)
+
+Three changes are blocked on the same thing: they move the extractor or chunk
+profile, so each costs a full rebuild of `papers` — 2,298,558 chunks at the
+measured 5.56 chunk/s, about **4.5 days**. Do them together, once, whenever a
+rebuild happens for an independent reason. None is worth a rebuild alone.
+
+**Drop chunks that are mostly punctuation, at chunk time.** Measured on the
+live corpus: of 5,025 chunks that failed the token budget, ~3,830 are
+dot-leader tables of contents (`. . . . . 117 C.5.4 Proof of Claim 19`). They
+tokenize at ~1.59 model tokens per tiktoken token against a 1.45 bound, which
+is why they overflow. They are worthless for semantic search either way, and
+735 shorter ones *did* embed and are sitting in the index as junk vectors. The
+length limit is currently acting as an accidental filter for the rest.
+
+**Split over-budget chunks at embed time rather than failing them.** The
+residue after the punctuation filter is ~1,200 genuinely dense chunks — source
+code, maths, long structured titles. They are real content and are currently
+dropped. Note the loss is thinner than it looks: 1,137 documents have at least
+one failed chunk and **zero** documents lost all of theirs, so nothing became
+unfindable.
+
+**Reconsider `chunk_size` against the model's tokenizer, not tiktoken.** The
+mismatch is the root cause of both items above. Do not simply lower
+`chunk_size`: clearing the observed p95 (637 model tokens) needs 249, and the
+observed max (1958) needs 75, which is too small to be a useful chunk.
+
 ### Open — remove OCR from the codebase
 
 **Blocked on one full rebuild, not on design.** `use_ocr` reaches extraction
