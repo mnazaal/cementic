@@ -328,6 +328,8 @@ matching `CEMENTIC_*` variable (see [Environment variables](#environment-variabl
 | | `verbose` | `false` | Verbose llama.cpp logging |
 | `extraction` | `use_ocr` | `false` | OCR pages with no text layer. Needs the opt-in `rapidocr` package and the `pymupdf4llm` backend — see "OCR for scanned PDFs" |
 | | `backends` | registry default | Per-file-type extractor choice, e.g. `pdf = "pymupdf-raw"`. PDFs: `pymupdf4llm` (default, Markdown structure via an ONNX layout model) or `pymupdf-raw` (text layer only, ~275× faster — see "Choosing a PDF extractor") |
+| | `commands` | `{}` | Per-file-type argv for the `command` extractor, e.g. `pdf = ["pdftotext", "-layout", "{path}", "-"]`. Must print the document's text to stdout and nothing else (see "Extracting with an external command") |
+| | `command_versions` | `{}` | Per-file-type argv that prints the tool's version, e.g. `pdf = ["pdftotext", "-v"]`. **Required** for every entry in `commands` |
 | `source_watcher` | `ignore_directories` | 16 names incl. `.git`, `node_modules`, `build`, `dist`, `venv`, `target` | Directory names skipped anywhere under a watched root. **Replaces** the defaults rather than adding to them; set `[]` to index everything |
 | | `state_path`, `log_file` | under the data dir | Watcher bookkeeping |
 | `pipeline_worker` | `batch_size` | `32` | Chunks claimed from the database per embedding pass (1–128) |
@@ -422,6 +424,47 @@ under a corpus that does not need it.
 Two alternatives need no Python package at all: run `ocrmypdf` over the file
 first and index the result with any backend, or use PyMuPDF's own Tesseract
 binding. Both want the `tesseract` system package instead.
+
+### Extracting with an external command
+
+Any file type can be extracted by a command cementic runs, instead of a built-in
+extractor. The contract is the whole design: **argv in, text on stdout.**
+
+```toml
+[extraction.backends]
+pdf = "command"
+
+[extraction.commands]
+pdf = ["pdftotext", "-layout", "{path}", "-"]
+
+[extraction.command_versions]
+pdf = ["pdftotext", "-v"]
+```
+
+This is the same shape as `llama_cpp.daemon_command`: the tool is yours,
+cementic runs it and consumes its output. A tool that writes files rather than
+printing text — `ocrmypdf`, say — needs a two-line wrapper script that prints;
+that is the composition boundary, not something cementic tries to absorb.
+
+It is also how to index a file type cementic has no extractor for. Naming a
+type in `[extraction.commands]` adds it to the watcher's set, so `epub = [...]`
+makes `.epub` indexable. The command extractor is never a fallback — it only
+ever runs where `[extraction.backends]` names it.
+
+**`command_versions` is required, and cannot be guessed.** Its output goes into
+the extraction fingerprint, so upgrading the tool re-versions revisions instead
+of silently rewriting extracted text under them — the same protection a
+`pymupdf` bump already gets. It has to be configured because version flags
+disagree: `pdftotext -v` works while `pdftotext --version` reads the flag as a
+filename, prints an I/O error, and *exits 0*. A guessed flag would record that
+constant error as the version and never notice an upgrade.
+
+Nothing can detect a wrong flag automatically, so `cementic doctor` prints what
+each tool reported. If it says `I/O Error` rather than a version, fix the flag.
+
+A failing command is a failed document, not a silent empty one: a non-zero exit
+is reported with the tool's own stderr, and empty output is refused the same way
+it is for every other extractor.
 
 ### Running embeddings on a GPU
 

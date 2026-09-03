@@ -818,6 +818,80 @@ class ExtractionConfig(_SectionSettings):
         "registry default.",
     )
     use_ocr: bool = Field(default=False, description="Enable OCR when supported")
+    commands: dict[str, list[str]] = Field(
+        default_factory=dict,
+        description="Per-file-type extraction command for the 'command' "
+        "extractor, e.g. {'pdf': ['pdftotext', '-layout', '{path}', '-']}. The "
+        "command must print the document's text to stdout and nothing else; a "
+        "tool that writes files instead needs a wrapper script. Placeholder "
+        "substituted per argument: {path}. Keys are file types, with or "
+        "without a leading dot and in any case.",
+    )
+    command_versions: dict[str, list[str]] = Field(
+        default_factory=dict,
+        description="Per-file-type command that prints the extraction tool's "
+        "version, e.g. {'pdf': ['pdftotext', '-v']}. Required for every entry "
+        "in `commands`: its output enters the extraction fingerprint, so "
+        "upgrading the tool re-versions revisions instead of silently changing "
+        "extracted text. Cannot be inferred -- version flags disagree between "
+        "tools, and a wrong one can exit 0 while printing an error, which would "
+        "record a constant that never changes on upgrade.",
+    )
+
+    @field_validator("commands", "command_versions")
+    @classmethod
+    def _validate_command_tables(cls, value: dict[str, list[str]]) -> dict[str, list[str]]:
+        """Normalise file-type keys and reject a command that cannot run."""
+        from cementic.extract import normalize_backend_file_type
+
+        normalized: dict[str, list[str]] = {}
+        for file_type, argv in value.items():
+            key = normalize_backend_file_type(file_type)
+            if not key:
+                raise ValueError(f"empty file type in extraction commands: {file_type!r}")
+            if key in normalized and normalized[key] != argv:
+                raise ValueError(
+                    f"file type '{key}' is configured twice with different commands"
+                )
+            if not argv:
+                raise ValueError(f"extraction command for '{key}' is empty")
+            normalized[key] = list(argv)
+        return normalized
+
+    @model_validator(mode="after")
+    def _validate_commands_are_usable(self) -> "ExtractionConfig":
+        """Every command needs a version command, and vice versa.
+
+        Checked as a pair because each half is useless alone: a command with no
+        version command builds profiles with no way to notice the tool changed
+        under them, and a version command for a file type nothing extracts is a
+        typo that would otherwise sit there looking configured.
+        """
+        missing = sorted(set(self.commands) - set(self.command_versions))
+        if missing:
+            raise ValueError(
+                "extraction.command_versions is required for every file type in "
+                f"extraction.commands; missing: {', '.join(missing)}. Its output "
+                "enters the extraction fingerprint, so without it a tool upgrade "
+                "silently changes extracted text under an unchanged revision"
+            )
+        orphaned = sorted(set(self.command_versions) - set(self.commands))
+        if orphaned:
+            raise ValueError(
+                "extraction.command_versions names file types absent from "
+                f"extraction.commands: {', '.join(orphaned)}"
+            )
+        for file_type, argv in self.commands.items():
+            for argument in argv:
+                try:
+                    argument.format_map({"path": ""})
+                except (KeyError, IndexError, ValueError) as error:
+                    raise ValueError(
+                        f"extraction command for '{file_type}' has an unrenderable "
+                        f"argument {argument!r} ({error}); the only placeholder is "
+                        "{path}; escape a literal brace by doubling it"
+                    )
+        return self
 
     @field_validator("backends")
     @classmethod

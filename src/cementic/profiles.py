@@ -110,12 +110,50 @@ def build_extractor_profile_payload(config: Config) -> dict[str, object]:
     if config.extraction.use_ocr:
         library_names += _OCR_LIBRARY_NAMES
 
-    return {
+    payload: dict[str, object] = {
         "backends": dict(sorted(config.extraction.backends.items())),
         "use_ocr": config.extraction.use_ocr,
         "version": EXTRACTION_VERSION,
-        "extractors": extractor_registry_payload(),
+        "extractors": extractor_registry_payload(config),
         "extraction_libraries": _installed_extraction_library_versions(library_names),
+    }
+    payload.update(_command_extractor_identity(config))
+    return payload
+
+
+def _command_extractor_identity(config: Config) -> dict[str, object]:
+    """The argv and tool version behind every file type extracted by command.
+
+    Two keys rather than one because they answer different questions: the argv
+    is *what we asked for*, config the user can read back, while the version is
+    *what answered*, which config cannot know. Both belong in the fingerprint --
+    editing the command and upgrading the tool each change the extracted text.
+
+    Empty when no file type uses the command extractor, so the keys never
+    appear for a corpus they cannot describe and existing fingerprints do not
+    move. A command configured but not selected by `backends` is excluded for
+    the same reason: it produced none of this revision's text.
+
+    Probing costs a subprocess per command backend, paid once per revision --
+    this runs under `get_or_create_extractor_profile`, not per document.
+    """
+    from cementic.extract import COMMAND_EXTRACTOR_NAME, command_version
+
+    selected = sorted(
+        file_type
+        for file_type, backend in config.extraction.backends.items()
+        if backend == COMMAND_EXTRACTOR_NAME
+    )
+    if not selected:
+        return {}
+    return {
+        "commands": {
+            file_type: list(config.extraction.commands[file_type]) for file_type in selected
+        },
+        "command_versions": {
+            file_type: command_version(config.extraction.command_versions[file_type])
+            for file_type in selected
+        },
     }
 
 

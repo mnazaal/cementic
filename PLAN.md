@@ -240,6 +240,72 @@ it matters.
 
 ## Design decisions and open items
 
+### Decided — external command extractor (2026-09-03)
+
+**Taken; implementation next.** Extraction is the last subsystem that hardcodes
+Python libraries and grows a boolean per library feature. Embeddings already
+work the other way: `daemon_command` names a binary, cementic spawns it and
+consumes its output. A `command` extractor makes extraction symmetric — text
+comes from an operator-named argv, so OCR, `pdftotext`, `docling` and anything
+else are config, not dependencies. Built ahead of demand deliberately: the
+user's call, on the grounds that the seam is cheaper to add now than to retrofit.
+
+**Contract, kept narrow on purpose:** argv in, text on stdout, nothing else. A
+tool that writes files instead (`ocrmypdf`) gets a two-line wrapper — that is
+the composition boundary, not cementic's problem. A wide contract is what turns
+an early abstraction into debt.
+
+```toml
+[extraction.backends]
+pdf = "command"
+[extraction.commands]
+pdf = ["pdftotext", "-layout", "{path}", "-"]
+[extraction.command_versions]
+pdf = ["pdftotext", "-v"]
+```
+
+**`version_command` is required, because version flags cannot be guessed.**
+Probed on this host: `pdftotext --version` treats the flag as a filename,
+prints an I/O error and **exits 0**, while `pdftotext -v` works; `gs --version`
+and `mutool -v` disagree again. So neither the flag nor the exit code is a
+reliable signal, and a guessed flag would record a constant error string as
+"the version" — never changing on upgrade, silently disabling the guarantee.
+Its output enters the extraction payload so a tool upgrade re-versions
+revisions, the same property `extraction_libraries` gives pymupdf. Residual
+risk: a wrong flag that prints a constant cannot be detected automatically, so
+`doctor` prints what was recorded for a human to check.
+
+**Probe cost is a non-issue.** `build_extractor_profile_payload` is reached only
+via `get_or_create_extractor_profile` ← `revisions.py:184` ← revision creation.
+Once per revision, not per document; no cache needed.
+
+**Fingerprint-neutral by gating.** Both new payload keys appear only when a
+command backend is configured, so existing fingerprints do not move and no
+corpus rebuilds. Same trick as the conditional rapidocr entry in `profiles.py`.
+
+**`supported_extensions()` gains a `Config`.** The command extractor's
+extensions come from the `[extraction.commands]` keys, otherwise it could never
+add a file type cementic does not already know — its best use. Ripples to
+`source_watcher.py:125` and `:385`; `DocumentEventHandler` takes the resolved
+set as plain data, matching how `ignore_directories` is already passed. The
+command extractor is never a fallback: it must be named in `backends`.
+
+### Open — remove OCR from the codebase
+
+**Blocked on one full rebuild, not on design.** `use_ocr` reaches extraction
+only through the pymupdf4llm backend, so it is a knob that silently does nothing
+under `pymupdf-raw` — `doctor` grew a warning for exactly that, which is a guard
+where the fix is removing the knob. Deleting it removes rapidocr from the
+picture entirely (dependency, extra, and `--with` all moot).
+
+The cost is that `use_ocr` is a key in the extractor payload, so removing the
+field changes every extraction fingerprint: `papers` re-extracts, re-chunks and
+re-embeds all 2,291,555 chunks. Do it after the command extractor lands, so
+there is still an OCR route (a configured `ocrmypdf` wrapper), and only when a
+rebuild is affordable. Pre-processing with `ocrmypdf` into `pymupdf-raw` works
+with no cementic code at all and is the documented fallback — untested here, no
+OCR engine is installed on this host.
+
 ### Decided — query-first embed scheduling (2026-09-01)
 
 **Taken; implementation next.** A search query landing mid-import waits on the

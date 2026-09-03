@@ -59,6 +59,20 @@ model_path = "models/nomic-embed-text-v2-moe.Q8_0.gguf"
 [extraction]
 use_ocr = false
 
+# Optional: extract a file type with an external command instead of a built-in
+# extractor. Contract: argv in, text on stdout, nothing else. A tool that writes
+# files (ocrmypdf) needs a wrapper script that prints. Naming a type here also
+# makes it indexable, so this is how to add a type cementic has no extractor for.
+# command_versions is required for every entry: its output enters the extraction
+# fingerprint, so upgrading the tool re-versions revisions rather than silently
+# changing extracted text. It cannot be inferred -- `pdftotext -v` works while
+# `pdftotext --version` prints an error and exits 0.
+# [extraction.backends] pdf = "command"
+# [extraction.commands]
+# pdf = ["pdftotext", "-layout", "{path}", "-"]
+# [extraction.command_versions]
+# pdf = ["pdftotext", "-v"]
+
 # Optional: choose a specific extractor per file type. Unset types use the
 # registry default. Keys are bare file types; values are registered extractor
 # names (currently for pdf: "pymupdf4llm" (default, layout-aware Markdown) or

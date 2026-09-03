@@ -4,7 +4,7 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 from cementic import profiles as profiles_module
-from cementic.config import Config
+from cementic.config import Config, ExtractionConfig
 from cementic.embedding_provider import EmbeddingFacts
 from cementic.embedding_runtime import runtime_spec_from_profile_json
 from cementic.profiles import (
@@ -93,6 +93,68 @@ class TestBuildExtractorProfilePayload:
         libraries = payload["extraction_libraries"]
         assert isinstance(libraries, dict)
         assert set(libraries) == {"pymupdf4llm", "pymupdf", "pymupdf-layout"}
+
+    def test_command_identity_is_absent_until_a_command_backend_is_used(self) -> None:
+        """The whole reason this is gated: adding the seam must not re-version
+        corpora that cannot have used it. Adding these keys unconditionally
+        would rebuild every existing revision on upgrade day."""
+        payload = build_extractor_profile_payload(Config())
+        assert "commands" not in payload
+        assert "command_versions" not in payload
+
+    def test_command_identity_records_the_argv_and_the_tool(self, tmp_path) -> None:
+        script = tmp_path / "v.sh"
+        script.write_text("#!/bin/sh\necho 'tool 1.2.3'\n")
+        script.chmod(0o755)
+        config = Config(
+            extraction=ExtractionConfig(
+                backends={"pdf": "command"},
+                commands={"pdf": ["cat", "{path}"]},
+                command_versions={"pdf": [str(script)]},
+            )
+        )
+
+        payload = build_extractor_profile_payload(config)
+
+        assert payload["commands"] == {"pdf": ["cat", "{path}"]}
+        assert payload["command_versions"] == {"pdf": "tool 1.2.3"}
+
+    def test_upgrading_the_tool_changes_the_fingerprint(self, tmp_path) -> None:
+        """The property the probe exists for: a tool upgrade must re-version
+        revisions rather than silently rewriting extracted text under them."""
+        script = tmp_path / "v.sh"
+        config = Config(
+            extraction=ExtractionConfig(
+                backends={"pdf": "command"},
+                commands={"pdf": ["cat", "{path}"]},
+                command_versions={"pdf": [str(script)]},
+            )
+        )
+
+        script.write_text("#!/bin/sh\necho 'tool 1.2.3'\n")
+        script.chmod(0o755)
+        before = build_extractor_profile_payload(config)
+
+        script.write_text("#!/bin/sh\necho 'tool 1.3.0'\n")
+        script.chmod(0o755)
+        after = build_extractor_profile_payload(config)
+
+        assert before != after
+
+    def test_a_command_configured_but_unused_stays_out(self, tmp_path) -> None:
+        """It produced none of this revision's text, so it is not its identity."""
+        script = tmp_path / "v.sh"
+        script.write_text("#!/bin/sh\necho v\n")
+        script.chmod(0o755)
+        config = Config(
+            extraction=ExtractionConfig(
+                backends={"pdf": "pymupdf-raw"},
+                commands={"pdf": ["cat", "{path}"]},
+                command_versions={"pdf": [str(script)]},
+            )
+        )
+
+        assert "commands" not in build_extractor_profile_payload(config)
 
     def test_changed_pymupdf4llm_version_changes_the_fingerprint(
         self, monkeypatch

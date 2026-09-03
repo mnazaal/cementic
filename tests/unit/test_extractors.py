@@ -11,6 +11,7 @@ from cementic.config import Config, ExtractionConfig
 from cementic.extract import (
     ExtractorSpec,
     backend_choice_error,
+    command_version,
     extract_document,
     extraction_is_empty,
     extractor_for,
@@ -382,3 +383,105 @@ class TestOcrReachesExtractionOnlyThroughOneBackend:
             extraction=ExtractionConfig(use_ocr=True, backends={"pdf": "pymupdf4llm"})
         )
         assert ocr_would_run(config) is True
+
+
+class TestCommandExtractor:
+    """argv in, text on stdout -- the whole contract."""
+
+    @staticmethod
+    def _config(argv: list[str], *, file_type: str = "txt") -> Config:
+        return Config(
+            extraction=ExtractionConfig(
+                backends={file_type: "command"},
+                commands={file_type: argv},
+                command_versions={file_type: ["true"]},
+            )
+        )
+
+    def test_stdout_becomes_the_document(self, tmp_path) -> None:
+        source = tmp_path / "a.txt"
+        source.write_text("ignored; the command decides")
+        config = self._config(["printf", "%s", "text from the command"])
+
+        assert extract_document(str(source), config) == "text from the command"
+
+    def test_the_path_placeholder_is_substituted(self, tmp_path) -> None:
+        source = tmp_path / "a.txt"
+        source.write_text("real file content\n")
+
+        assert extract_document(str(source), self._config(["cat", "{path}"])) == (
+            "real file content\n"
+        )
+
+    def test_a_failing_command_names_its_stderr(self, tmp_path) -> None:
+        """The tool's own diagnosis is the useful half of the error."""
+        source = tmp_path / "a.txt"
+        source.write_text("x")
+        script = tmp_path / "fail.sh"
+        script.write_text("#!/bin/sh\necho 'unsupported encryption' >&2\nexit 3\n")
+        script.chmod(0o755)
+
+        with pytest.raises(RuntimeError, match="exited 3.*unsupported encryption"):
+            extract_document(str(source), self._config([str(script), "{path}"]))
+
+    def test_a_missing_command_is_reported_not_swallowed(self, tmp_path) -> None:
+        source = tmp_path / "a.txt"
+        source.write_text("x")
+
+        with pytest.raises(RuntimeError, match="could not run"):
+            extract_document(str(source), self._config(["definitely-not-a-tool", "{path}"]))
+
+    def test_empty_output_is_a_failure_like_any_other_extractor(self, tmp_path) -> None:
+        """A command that succeeds while printing nothing must not become a
+        `done` document with no text -- the failure `extraction_is_empty`
+        exists for, reached through a new extractor."""
+        source = tmp_path / "a.txt"
+        source.write_text("x")
+
+        with pytest.raises(ValueError, match="extracted no text"):
+            extract_document(str(source), self._config(["true"]))
+
+    def test_a_timeout_is_reported_as_one(self, tmp_path, monkeypatch) -> None:
+        source = tmp_path / "a.txt"
+        source.write_text("x")
+        monkeypatch.setattr(extract_mod, "COMMAND_TIMEOUT_SECONDS", 0.2)
+
+        with pytest.raises(RuntimeError, match="timed out"):
+            extract_document(str(source), self._config(["sleep", "5"]))
+
+
+class TestCommandVersionProbe:
+    """The fingerprint's only record of which build produced the text."""
+
+    def test_reports_what_the_tool_prints(self, tmp_path) -> None:
+        script = tmp_path / "v.sh"
+        script.write_text("#!/bin/sh\necho 'tool version 24.02.0'\n")
+        script.chmod(0o755)
+
+        assert command_version([str(script)]) == "tool version 24.02.0"
+
+    def test_stderr_counts_as_an_answer(self, tmp_path) -> None:
+        """Tools disagree about the stream; mutool -v prints to stderr."""
+        script = tmp_path / "v.sh"
+        script.write_text("#!/bin/sh\necho 'tool 1.2.3' >&2\n")
+        script.chmod(0o755)
+
+        assert command_version([str(script)]) == "tool 1.2.3"
+
+    def test_a_nonzero_exit_still_counts(self, tmp_path) -> None:
+        """The string only has to change when the tool changes."""
+        script = tmp_path / "v.sh"
+        script.write_text("#!/bin/sh\necho 'tool 9.9'\nexit 1\n")
+        script.chmod(0o755)
+
+        assert command_version([str(script)]) == "tool 9.9"
+
+    def test_silence_is_refused(self, tmp_path) -> None:
+        """An empty answer would let a tool upgrade rewrite the corpus under an
+        unchanged revision -- the exact failure the probe exists to prevent."""
+        with pytest.raises(RuntimeError, match="printed nothing"):
+            command_version(["true"])
+
+    def test_a_missing_tool_is_refused(self) -> None:
+        with pytest.raises(RuntimeError, match="could not run"):
+            command_version(["definitely-not-a-tool"])

@@ -231,6 +231,8 @@ def collect_doctor_report(config: Config) -> dict[str, Any]:
     server_ok = checks["embedding_server"]["status"] != "fail"
     checks["ocr"] = _ocr_check(config)
     ocr_ok = checks["ocr"]["status"] != "fail"
+    checks["extraction_commands"] = _extraction_commands_check(config)
+    commands_ok = checks["extraction_commands"]["status"] != "fail"
 
     ok = (
         (config_error is None)
@@ -240,6 +242,7 @@ def collect_doctor_report(config: Config) -> dict[str, Any]:
         and daemon_ok
         and server_ok
         and ocr_ok
+        and commands_ok
     )
     return {"ok": ok, "checks": checks}
 
@@ -327,6 +330,58 @@ def _executable_problem(path: str) -> str | None:
         detail = (completed.stderr or completed.stdout or "").strip().splitlines()
         return detail[-1] if detail else f"exited {completed.returncode}"
     return None
+
+
+def _extraction_commands_check(config: Config) -> dict[str, Any]:
+    """Report each command backend's tool and the version it reports.
+
+    The version string is printed rather than merely checked because the one
+    thing that cannot be validated automatically is a *wrong* version flag: a
+    command that exits 0 while printing an error records a constant that never
+    moves on upgrade, silently disabling the fingerprint guarantee it exists to
+    provide. A human reading "I/O Error: Couldn't open file '--version'" here
+    sees the problem immediately; no check can.
+
+    Imported here rather than at module scope: `extract` loads the PDF stack.
+    """
+    from cementic.extract import COMMAND_EXTRACTOR_NAME, command_version
+
+    selected = sorted(
+        file_type
+        for file_type, backend in config.extraction.backends.items()
+        if backend == COMMAND_EXTRACTOR_NAME
+    )
+    if not selected:
+        return {
+            "status": "ok",
+            "commands": {},
+            "message": "no file type uses the command extractor",
+        }
+
+    reported: dict[str, str] = {}
+    failures: list[str] = []
+    for file_type in selected:
+        try:
+            reported[file_type] = command_version(config.extraction.command_versions[file_type])
+        except RuntimeError as error:
+            failures.append(f"{file_type}: {error}")
+    if failures:
+        return {
+            "status": "fail",
+            "commands": reported,
+            "message": (
+                "an extraction tool could not report its version, so revisions "
+                "cannot record which build produced their text -- "
+                + "; ".join(failures)
+            ),
+        }
+    return {
+        "status": "ok",
+        "commands": reported,
+        "message": "; ".join(
+            f"{file_type}: {version.splitlines()[0]}" for file_type, version in reported.items()
+        ),
+    }
 
 
 def _ocr_check(config: Config) -> dict[str, Any]:

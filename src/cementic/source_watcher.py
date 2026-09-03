@@ -83,11 +83,20 @@ class DocumentEventHandler(FileSystemEventHandler):
         ignore_directories: Iterable[str] = (),
         watched_roots: Iterable[Path] = (),
         delete_directory_callback: Callable[[str], None] | None = None,
+        extensions: Iterable[str] | None = None,
     ) -> None:
         self.callback = callback
         self.delete_callback = delete_callback
         self.delete_directory_callback = delete_directory_callback
         self._ignored_directories = set(ignore_directories)
+        # Plain data, like ignore_directories above, rather than a Config: the
+        # set is config-dependent now (the `command` extractor's file types come
+        # from `[extraction.commands]`), but resolving it is the caller's job.
+        # None means the built-in extractors, which is what a handler built
+        # without a config can honestly claim to handle.
+        self._extensions = (
+            frozenset(extensions) if extensions is not None else supported_extensions()
+        )
         self._watched_roots = [Path(root) for root in watched_roots]
         self._timers: dict[str, Any] = {}
         self._debounce_seconds = 2.0
@@ -122,7 +131,7 @@ class DocumentEventHandler(FileSystemEventHandler):
     def _should_process(self, file_path: str) -> bool:
         if self._is_ignored(file_path):
             return False
-        return Path(file_path).suffix.lower() in supported_extensions()
+        return Path(file_path).suffix.lower() in self._extensions
 
     def _debounced_process(self, file_path: str) -> None:
         existing_timer = self._timers.pop(file_path, None)
@@ -312,6 +321,7 @@ class SourceWatcher:
             ignore_directories=self.config.source_watcher.ignore_directories,
             watched_roots=self._watched_roots,
             delete_directory_callback=self._on_directory_deleted,
+            extensions=supported_extensions(self.config),
         )
         self._event_handler = event_handler
         for path in self._watched_roots:
@@ -382,7 +392,7 @@ class SourceWatcher:
             )
 
     def _scan_existing(self, directory: Path) -> None:
-        extensions = supported_extensions()
+        extensions = supported_extensions(self.config)
         ignored = set(self.config.source_watcher.ignore_directories)
         # os.walk rather than rglob so ignored directories can be pruned from
         # the traversal itself: rglob would still descend into node_modules and

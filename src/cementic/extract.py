@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import contextlib
 import importlib.util
+import shlex
+import subprocess
 import sys
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -207,11 +209,17 @@ def extract_pdf_text(pdf_path: str) -> str:
 
 @dataclass(frozen=True)
 class ExtractorSpec:
-    """Self-describing identity of an extractor (mirrors EmbeddingRuntimeSpec)."""
+    """Self-describing identity of an extractor (mirrors EmbeddingRuntimeSpec).
+
+    ``extensions`` is None for an extractor whose file types come from config
+    rather than from the registry. Such an extractor is never a fallback --
+    `extractor_for` skips it unless `[extraction.backends]` names it -- because
+    "handles anything" would otherwise make it the default for everything.
+    """
 
     name: str
     version: int
-    extensions: tuple[str, ...]
+    extensions: tuple[str, ...] | None
 
 
 # An extractor turns a file path into Markdown/plain text. Pure w.r.t. the file.
@@ -228,6 +236,102 @@ def _raw_pdf_extractor(path: str, config: Config) -> str:
 
 def _plaintext_extractor(path: str, config: Config) -> str:
     return Path(path).read_text(encoding="utf-8")
+
+
+#: How long an extraction command may run before it is killed. Generous: OCR
+#: over a long scanned document is minutes of work, and the alternative to
+#: waiting is a half-extracted corpus.
+COMMAND_TIMEOUT_SECONDS = 900.0
+
+
+def _command_extractor(path: str, config: Config) -> str:
+    """Run the configured command for this file type and take its stdout.
+
+    The whole contract is argv in, text on stdout. Anything richer -- a tool
+    that writes files, or one needing a pipeline -- belongs in a wrapper script
+    the operator owns, which is the composition boundary this extractor exists
+    to offer rather than to erase.
+    """
+    file_type = normalize_backend_file_type(Path(path).suffix.lower())
+    argv = config.extraction.commands.get(file_type)
+    if not argv:
+        # Unreachable through config (validation pairs backends with commands),
+        # so this is for a Config assembled in code.
+        raise ValueError(
+            f"no [extraction.commands] entry for '{file_type}'; the 'command' "
+            "extractor cannot run without one"
+        )
+    rendered = [argument.format_map({"path": path}) for argument in argv]
+    try:
+        completed = subprocess.run(
+            rendered,
+            capture_output=True,
+            text=True,
+            timeout=COMMAND_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(
+            f"extraction command timed out after {COMMAND_TIMEOUT_SECONDS:g}s: "
+            f"{shlex.join(rendered)}"
+        )
+    except OSError as error:
+        raise RuntimeError(f"extraction command could not run ({error}): {rendered[0]}")
+    if completed.returncode != 0:
+        detail = (completed.stderr or "").strip().splitlines()
+        raise RuntimeError(
+            f"extraction command exited {completed.returncode}"
+            + (f": {detail[-1]}" if detail else "")
+            + f" [{shlex.join(rendered)}]"
+        )
+    return completed.stdout
+
+
+#: The registry name that selects the external-command extractor. Named so
+#: profiles.py can ask "is this file type extracted by a command" without
+#: repeating the literal.
+COMMAND_EXTRACTOR_NAME = "command"
+
+
+#: A version probe answers in milliseconds or it is broken. Short, unlike
+#: COMMAND_TIMEOUT_SECONDS, because this one runs during revision creation and
+#: a hang there stalls indexing before any document is touched.
+VERSION_PROBE_TIMEOUT_SECONDS = 30.0
+
+
+def command_version(argv: list[str]) -> str:
+    """What the extraction tool reports about itself, for the fingerprint.
+
+    stdout and stderr are both taken, and a non-zero exit is not an error: tools
+    disagree about all of it -- `mutool -v` prints to stderr, `gs --version` to
+    stdout -- and the string only has to *change when the tool changes*, not to
+    be well-formed. A tool that cannot answer at all is a hard error, because
+    the alternative is a profile that cannot notice its extractor was upgraded.
+
+    This is also why the version command is operator-supplied. `pdftotext
+    --version` reads the flag as a filename and exits 0 with an I/O error, so a
+    guessed flag records a constant that never moves on upgrade -- worse than
+    no probe, because it looks like one.
+    """
+    try:
+        completed = subprocess.run(
+            argv, capture_output=True, text=True, timeout=VERSION_PROBE_TIMEOUT_SECONDS
+        )
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(
+            f"version command timed out after {VERSION_PROBE_TIMEOUT_SECONDS:g}s: "
+            f"{shlex.join(argv)}"
+        )
+    except OSError as error:
+        raise RuntimeError(f"version command could not run ({error}): {argv[0]}")
+    reported = (completed.stdout + completed.stderr).strip()
+    if not reported:
+        raise RuntimeError(
+            f"version command printed nothing: {shlex.join(argv)}. Its output is "
+            "the extraction fingerprint's only record of which build produced "
+            "the text, so an empty answer would let a tool upgrade rewrite the "
+            "corpus under an unchanged revision"
+        )
+    return reported
 
 
 # The one place that maps content type -> extractor. Adding a document type is a
@@ -247,6 +351,12 @@ _EXTRACTORS: dict[str, tuple[ExtractorSpec, ExtractorFn]] = {
     "plaintext": (
         ExtractorSpec(name="plaintext", version=1, extensions=(".txt", ".md", ".markdown")),
         _plaintext_extractor,
+    ),
+    # extensions=None: this one handles whatever [extraction.commands] names,
+    # which is what lets it add a file type no built-in extractor knows.
+    COMMAND_EXTRACTOR_NAME: (
+        ExtractorSpec(name=COMMAND_EXTRACTOR_NAME, version=1, extensions=None),
+        _command_extractor,
     ),
 }
 
@@ -272,9 +382,21 @@ def ocr_would_run(config: Config) -> bool:
     return chosen is None or chosen == _OCR_CAPABLE_EXTRACTOR
 
 
-def supported_extensions() -> frozenset[str]:
-    """Every file extension some registered extractor can handle (lowercase)."""
-    return frozenset(ext for spec, _ in _EXTRACTORS.values() for ext in spec.extensions)
+def supported_extensions(config: Config | None = None) -> frozenset[str]:
+    """Every file extension some extractor can handle (lowercase).
+
+    Takes a Config because the ``command`` extractor's file types are config,
+    not registry: without it, a command backend could only re-handle types a
+    built-in extractor already claims, which forecloses adding a new one. None
+    means the built-in extractors alone -- the right answer for callers asking
+    what cementic can do before any config is in hand.
+    """
+    extensions = {
+        ext for spec, _ in _EXTRACTORS.values() if spec.extensions for ext in spec.extensions
+    }
+    if config is not None:
+        extensions |= {f".{file_type}" for file_type in config.extraction.commands}
+    return frozenset(extensions)
 
 
 def normalize_backend_file_type(file_type: str) -> str:
@@ -301,6 +423,12 @@ def backend_choice_error(file_type: str, extractor_name: str) -> str | None:
             f"unknown extraction backend '{extractor_name}' for '{file_type}'. "
             f"Available: {', '.join(sorted(_EXTRACTORS))}"
         )
+    if entry[0].extensions is None:
+        # A config-driven extractor: whether it handles this type is decided by
+        # its own config table, which ExtractionConfig validates as a pair with
+        # `commands`. Checking a static extension list here would reject every
+        # legitimate use.
+        return None
     suffix = f".{normalize_backend_file_type(file_type)}"
     if suffix not in entry[0].extensions:
         return (
@@ -327,7 +455,7 @@ def extractor_for(path: str, config: Config) -> tuple[str, ExtractorFn] | None:
             raise ValueError(problem)
         return chosen, _EXTRACTORS[chosen][1]
     for name, (spec, fn) in _EXTRACTORS.items():
-        if suffix in spec.extensions:
+        if spec.extensions is not None and suffix in spec.extensions:
             return name, fn
     return None
 
@@ -385,9 +513,26 @@ def extract_document(path: str, config: Config) -> str:
     return content
 
 
-def extractor_registry_payload() -> list[dict[str, object]]:
-    """Stable registry identity for profile fingerprinting (sorted by name)."""
+def extractor_registry_payload(config: Config | None = None) -> list[dict[str, object]]:
+    """Registry identity for profile fingerprinting (sorted by name).
+
+    Adding or revving a built-in extractor re-versions every revision, and
+    should: `extractor_for` falls back to the first registered extractor
+    handling a suffix, so the *set* of them decides what an unconfigured corpus
+    extracts with.
+
+    A config-driven extractor (``extensions is None``) is excluded unless
+    `backends` names it, because it takes no part in that fallback -- its
+    presence cannot change what any other corpus extracted. Including it would
+    re-version every existing revision on the day it was added, forcing a
+    rebuild to record an extractor none of them can have used.
+    """
+    chosen = set(config.extraction.backends.values()) if config is not None else set()
     return sorted(
-        ({"name": spec.name, "version": spec.version} for spec, _ in _EXTRACTORS.values()),
+        (
+            {"name": spec.name, "version": spec.version}
+            for spec, _ in _EXTRACTORS.values()
+            if spec.extensions is not None or spec.name in chosen
+        ),
         key=lambda item: str(item["name"]),
     )

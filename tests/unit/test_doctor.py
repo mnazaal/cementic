@@ -4,10 +4,11 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from cementic.config import Config
+from cementic.config import Config, ExtractionConfig
 from cementic.doctor import (
     _daemon_state,
     _embedding_server_check,
+    _extraction_commands_check,
     _ocr_check,
     collect_doctor_report,
 )
@@ -421,3 +422,59 @@ class TestEmbeddingServerCheck:
 
         assert report["checks"]["embedding_server"]["status"] == "fail"
         assert report["ok"] is False
+
+
+class TestExtractionCommandsCheck:
+    """Surfaces the one thing no check can validate: a wrong version flag."""
+
+    @staticmethod
+    def _config(version_argv: list[str]) -> Config:
+        return Config(
+            extraction=ExtractionConfig(
+                backends={"pdf": "command"},
+                commands={"pdf": ["cat", "{path}"]},
+                command_versions={"pdf": version_argv},
+            )
+        )
+
+    def test_quiet_when_no_command_backend_is_used(self) -> None:
+        report = _extraction_commands_check(Config())
+        assert report["status"] == "ok"
+        assert report["commands"] == {}
+
+    def test_reports_the_version_each_tool_gives(self, tmp_path) -> None:
+        script = tmp_path / "v.sh"
+        script.write_text("#!/bin/sh\necho 'tool 4.5.6'\n")
+        script.chmod(0o755)
+
+        report = _extraction_commands_check(self._config([str(script)]))
+
+        assert report["status"] == "ok"
+        assert report["commands"] == {"pdf": "tool 4.5.6"}
+        assert "tool 4.5.6" in report["message"]
+
+    def test_a_tool_that_cannot_answer_fails_the_report(self) -> None:
+        config = self._config(["definitely-not-a-tool"])
+        mock_conn = MagicMock()
+        mock_conn.execute.return_value.scalar.return_value = True
+        mock_engine = MagicMock()
+        mock_engine.connect.return_value.__enter__.return_value = mock_conn
+
+        with patch("cementic.doctor.get_engine", return_value=mock_engine):
+            report = collect_doctor_report(config)
+
+        assert report["checks"]["extraction_commands"]["status"] == "fail"
+        assert report["ok"] is False
+
+    def test_a_wrong_version_flag_is_shown_rather_than_judged(self, tmp_path) -> None:
+        """`pdftotext --version` exits 0 printing an error, so the recorded
+        "version" is a constant that never moves on upgrade. Nothing can detect
+        that automatically; printing it is what lets a human catch it."""
+        script = tmp_path / "v.sh"
+        script.write_text("#!/bin/sh\necho \"I/O Error: Couldn't open file '--version'\"\n")
+        script.chmod(0o755)
+
+        report = _extraction_commands_check(self._config([str(script)]))
+
+        assert report["status"] == "ok"
+        assert "I/O Error" in report["message"]
