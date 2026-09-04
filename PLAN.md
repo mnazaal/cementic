@@ -1,107 +1,76 @@
 # cementic — architecture & design
 
-<!-- session-handoff:begin (2026-09-02) -->
+<!-- session-handoff:begin (2026-09-04) -->
 ## Where the work stands
 
-**Entry point: the `papers` import is RUNNING and needs no babysitting — read
-"Decided — query-first embed scheduling" below before touching embed
-throughput, because this session's headline finding there is now in doubt.**
+**Entry point: read "Open — the embedding fingerprint does not record the
+llama.cpp build" below. The user called it a design smell and parked it for a
+dedicated session; nothing else here is waiting on a decision.**
 
-**Repo state.** Working tree clean. `main` is at `90d66ad`, **one commit ahead
-of `origin/main`**; this handoff commit sits on **`claude/session-handoff-2026-09-02`,
-unmerged**. Merging and pushing are the user's calls (a hook rejects agents
-touching `main`):
+**Repo state.** `main` is level with `origin/main` at `fa03c95` — the pins and
+the new `extractor_profile` doctor check are merged and pushed, and
+`claude/pin-extraction-library-versions` is now redundant and can be deleted.
+`uv tool upgrade cementic` has run: the PATH install reports pymupdf 1.27.1 /
+pymupdf4llm 0.3.4 and `extractor_profile: ok`, so the checkout and the snapshot
+finally agree. Only **this handoff commit is unmerged**, on
+`claude/session-handoff-2026-09-04`; a hook rejects agents touching `main`:
 ```bash
-git checkout main && git merge --ff-only claude/session-handoff-2026-09-02
+git checkout main && git merge --ff-only claude/session-handoff-2026-09-04
 ```
-Three code commits landed today, all six gates green on the final state
-(`./scripts/check.sh`, exit 0, single clean run):
-- `9681259` embed request size follows the search lease instead of being constant.
-- `8254f77` `cementic stop` grace 10 s → 30 s.
-- `90d66ad` retry walk bounded to groups of 4 and made shutdown-responsive.
-Branch `claude/embed-retry-bounds` is merged into `main` and can be deleted.
 
-**Live state.** Collection `papers`, revision 16, still `building`. At 15:44 on
-2026-09-02: 2,265,313 done / 5,177 failed / 21,033 pending of 2,291,555. Worker
-started 14:33 and is progressing. When it drains: `cementic collection promote
-papers`. Only `papers` exists now — `soak` and `test` are gone, and the vector
-table is `embedding_vectors_p6`.
+**Live state.** `papers` is whole and served: 23,064 documents, 2,298,558
+embeddings, revision 16 active, no building revision. Indexing now runs as the
+systemd user unit `cementic@papers.service` (one templated unit at
+`~/dotfiles/.config/systemd/user/cementic@.service`, stow-deployed, `loginctl
+enable-linger` on). It has NOT survived a reboot
+yet — that is the only unproven claim about it.
 
-If it needs restarting (`stop` then `start` is safe again as of `90d66ad`):
-```bash
-cementic stop
-cementic start /u/71/ibrahin1/data/Documents/Papers -c papers
-```
-Every `start` requeues the ~5,000 over-budget failures, so `failed` drops and
-`pending` jumps at each restart. That is the requeue, not new breakage.
+**Correction — PLAN said nothing about this, and it cost a near-rebuild.**
+`profiles.py` records the installed pymupdf/pymupdf-layout/pymupdf4llm versions
+in the extractor fingerprint, and `pyproject.toml` declared them by floor, so the
+checkout (1.27.1/0.3.4) and the uv-tool install (1.28.2) indexed the same corpus
+under *different* extractor profiles. A systemd unit pointed at the uv-tool
+interpreter opened extractor profile 9 and began re-extracting all 23,064
+documents; caught at 747 extractions, before any chunk or vector row was
+written. Revision 17, its extractions and its artifact directory were deleted.
+`fa03c95` pins all three exactly and adds a `cementic doctor` check that
+compares this install's extractor payload against each collection's active
+revision. Both environments now resolve the same
+versions, so either interpreter would extract identically today — but the unit
+stays on `~/projects/cementic/.venv/bin/python`, and **anything that repoints a
+`cementic.runner` invocation should check `extractor_profiles.config_json`
+against the install it is moving to first.** `cementic doctor` answers that in
+one line now.
 
-**Correction — distrust this session's throughput story, not just its numbers.**
-Three commits were justified by "constant sub-batching at 4 cost ~2× indexing
-throughput". Re-measured after the fix shipped, that attribution does not hold
-up: requests are confirmed claim-sized again (40 groups of exactly 32 launches
-between client round trips in the daemon log) with a 3-hour-stale search lease,
-and throughput is **2.24 chunk/s — inside the 1.7–2.9 band the sub-batched
-build ran at**, not the ~4.0 that preceded it. So restoring big requests did
-*not* restore the old rate, and the 4.0 → 2.0 step at the 2026-09-01 17:23
-restart has an unidentified cause. Ruled out this session: chunk length (flat at
-317–323 model tokens across the entire run, measured from the daemon log's
-`n_tokens`) and a missing GPU (`--list-devices` shows the Vulkan iGPU; the
-server has never restarted). Still open, in rough order of promise: HNSW insert
-cost growing with the graph (fits the slow 5.5 → 4.0 decay better than the
-step), host/GPU contention, and pgvector index maintenance.
+**Deviation from plan, user-directed:** none of this was on the roadmap. The
+session started from "workers didn't start after a reboot" and stayed there.
 
-The changes are still worth keeping on their own merits — the per-request
-overhead is real (~0.36 s), and the `stop`/retry fixes are correctness fixes —
-but the "~2×" figure in `9681259`'s message, in PLAN's scheduling amendment, and
-in `embed_submit_size`'s docstring is **unconfirmed** and should not be repeated
-as established.
+**Scratchpad — nothing promoted beyond the unit.** `~/.cache/cementic-autostart/`
+holds `cementic@.service` (already installed and committed to `~/dotfiles`),
+the `install.sh`/`fix.sh` that ran once, and `split/` — a five-unit alternative
+(separate embedding server + health timer) kept for the day a second collection
+makes the shared-server churn matter. The agent scratchpad held only throwaway
+HTTP stubs and is discarded.
 
-**A hard ceiling worth knowing before optimising anything here.** The server
-runs `--ubatch-size {n_ctx}` = 512 and chunks average ~318 model tokens, so
-roughly one chunk fits per forward pass: slot 0 took 300 of the last 400
-launches with 32 tasks queued. Extra slots and bigger requests cannot buy
-concurrency the physical batch has no room for. Raising `n_ctx`/ubatch is the
-untested lever, and it changes the runtime fingerprint (`--alias`), so cementic
-would refuse the running server until it restarts.
-
-**Load-bearing numbers a cold reader should not re-derive.**
-- One `/v1/embeddings` request costs ~0.36 s fixed plus ~0.38 s per input
-  (0.72 s for 1 input, 12.2 s for 32), measured against the live server.
-- ~5,000 chunks fail as over-budget. `embed_batch` pre-filters on the *cheap*
-  tiktoken estimate, so 513–549-model-token chunks still reach the server and
-  return a 500 that `_server_rejected_the_input` treats as terminal. Each
-  `cementic start` requeues them, so failures re-run and re-fail every restart.
-- 113 documents fail extraction as scanned PDFs with no text layer. Expected.
-
-**Reading the daemon log** (`~/.local/share/cementic/llama_cpp_daemon.log`, 566
-MB, never rotated): timestamps are **uptime**, not wall clock, formatted
-`min.sec.ms.us`, and the file concatenates every server run — find the current
-run with `grep -an 'load_model: loading model'` first. Two artifacts: a requeue
-shows as an hour *above* the GPU rate (over-budget chunks are rejected at zero
-tokens), and startup banners with `couldn't bind` are failed autostarts, not
-restarts. Probe scripts for both measurements are in `notes/`
-(`probe_server_idle.py`, `probe_embed_batch_scaling.py`) — note `notes/` is
-gitignored, so they exist on this machine only and not in a fresh clone.
-
-**Environment quirks.**
-- The agent sandbox has a **separate PID namespace**: `/proc/<pid>` and `ps` are
-  useless for liveness. Check the database and file mtimes instead.
-- `cementic` on PATH is the uv-tool snapshot; the project `.venv` is an editable
-  install of the working tree, so `.venv/bin/cementic` runs uncommitted code.
-  The running worker was started from `.venv` and therefore has all three fixes.
-- Only one `pytest -m pg` run at a time — two overlapping `./scripts/check.sh`
-  runs corrupted this session's evidence and had to be discarded.
-
-**Deviation from plan, agent-decided:** the throughput work was not on any
-roadmap. It started from "what's next?" and displaced the queued items below.
+**Environment quirks that cost time this session.**
+- The agent sandbox has a **separate PID namespace and no systemd bus**:
+  `systemctl`, `ps` and `/proc/<pid>` are all useless for liveness. Read the
+  database, state-file mtimes, and HTTP probes instead.
+- `~/.config`, `~/dotfiles` and `~/.local/bin` are read-only binds; writes there
+  silently no-op. Hand the user a script under `~/.cache/` to run.
+- Watcher/worker state files are **event-driven**, so a stale `last_updated` on
+  an idle collection is normal, not a dead process.
+- `cementic status` always reads `workers stopped` under systemd; the real check
+  is `systemctl --user is-active cementic@papers`.
 
 **Exit criteria — commands whose output confirms the above.**
 ```bash
-git status --short                                   # empty
-git log --oneline origin/main..main                  # 90d66ad (+ handoff once merged)
-git branch --show-current                            # main, after merging the handoff
-cementic status -c papers                            # counters climbing
-./scripts/check.sh                                   # six gates, exit 0 (~4 min)
+git status --short                              # empty
+git log --oneline main..claude/session-handoff-2026-09-04         # this commit only
+cementic status -c papers                       # 2,298,558/2,298,558, building=-
+cementic doctor                                 # extractor_profile: ok (PATH install)
+systemctl --user is-active cementic@papers      # active  (user runs this; no bus in the sandbox)
+pytest -m "not pg" -q && pytest -m pg -q        # 1125 passed / 56 passed
 ```
 <!-- session-handoff:end -->
 
@@ -337,6 +306,39 @@ there is still an OCR route (a configured `ocrmypdf` wrapper), and only when a
 rebuild is affordable. Pre-processing with `ocrmypdf` into `pymupdf-raw` works
 with no cementic code at all and is the documented fallback — untested here, no
 OCR engine is installed on this host.
+
+### Open — the embedding fingerprint does not record the llama.cpp build (2026-09-04)
+
+**Parked for a session of its own; the user reads it as a design smell and it is
+one.** `build_embedding_profile_payload` records provider, model basename, model
+digest, embedding dimension, distance metric, `n_ctx` and `n_gpu_layers`. It does
+not record which llama.cpp build produced the vectors, so swapping
+`~/.cache/cementic-igpu/llama-b10605` for a newer server rewrites embeddings
+under an unchanged fingerprint — the exact silent rewrite that
+`extraction_libraries` and `command_versions` exist to prevent elsewhere. The
+project applies the rule to a Python dependency and to a driven binary, and then
+not to the one binary every vector passes through.
+
+The tension that makes it not obvious:
+
+- Recording it re-versions the corpus on every llama.cpp upgrade — 2,298,558
+  chunks re-embedded. Unlike a pymupdf bump, which demonstrably rewrites text, a
+  server bump is usually numerically a no-op, so the rebuild buys nothing most
+  times and everything the once it matters.
+- The build is only knowable by asking a *running* server (`/props`, or the
+  startup banner in the daemon log). Putting it in the payload makes profile
+  construction depend on a live daemon, which today it does not.
+- README already states the project's stance that driven binaries are
+  doctor-checked prerequisites, not dependencies. That argues for detection over
+  fingerprinting — but `command_versions` is a driven binary *in* the
+  fingerprint, so the stance is not applied consistently and the inconsistency
+  is the thing to resolve first.
+
+Three options to weigh, not yet chosen: leave it and document the hole; put the
+build in the embedding profile and accept a rebuild per upgrade; or report the
+running server's build against the active revision's in `cementic doctor`,
+which detects without re-versioning and matches what `fa03c95` did for the
+extractor side.
 
 ### Decided — query-first embed scheduling (2026-09-01)
 
