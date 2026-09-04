@@ -1,5 +1,6 @@
 """Tests for read-only doctor diagnostics."""
 
+import json
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -9,6 +10,7 @@ from cementic.doctor import (
     _daemon_state,
     _embedding_server_check,
     _extraction_commands_check,
+    _extractor_drift_check,
     _ocr_check,
     collect_doctor_report,
 )
@@ -478,3 +480,81 @@ class TestExtractionCommandsCheck:
 
         assert report["status"] == "ok"
         assert "I/O Error" in report["message"]
+
+
+class TestExtractorDriftCheck:
+    """An install whose extractor payload differs from the active revision's
+    rebuilds the collection instead of extending it. That is invisible until
+    the worker has already re-extracted thousands of documents: the revision
+    label is built from the profile *name*, so both revisions print the same
+    string while holding different fingerprints."""
+
+    PAYLOAD = {
+        "backends": {"pdf": "pymupdf-raw"},
+        "use_ocr": False,
+        "version": "v1",
+        "extraction_libraries": {"pymupdf": "1.27.1", "pymupdf4llm": "0.3.4"},
+    }
+
+    def test_nothing_indexed_yet_has_nothing_to_compare(self) -> None:
+        report = _extractor_drift_check(self.PAYLOAD, [])
+
+        assert report["status"] == "ok"
+        assert report["drift"] == {}
+        assert "no active revision" in report["message"]
+
+    def test_a_matching_install_is_ok(self) -> None:
+        report = _extractor_drift_check(self.PAYLOAD, [("papers", dict(self.PAYLOAD))])
+
+        assert report["status"] == "ok"
+        assert report["drift"] == {}
+
+    def test_a_library_bump_warns_and_names_both_versions(self) -> None:
+        """The real case: a second install resolved a newer pymupdf, so
+        indexing from it re-extracts the corpus under a new profile."""
+        recorded = dict(self.PAYLOAD)
+        recorded["extraction_libraries"] = {"pymupdf": "1.28.2", "pymupdf4llm": "1.28.2"}
+
+        report = _extractor_drift_check(self.PAYLOAD, [("papers", recorded)])
+
+        assert report["status"] == "warning"
+        assert report["drift"]["papers"] == [
+            "extraction_libraries: pymupdf 1.28.2 -> 1.27.1, pymupdf4llm 1.28.2 -> 0.3.4"
+        ]
+        assert "papers" in report["message"]
+        assert "1.27.1" in report["message"]
+
+    def test_a_scalar_key_change_is_reported_whole(self) -> None:
+        recorded = dict(self.PAYLOAD, use_ocr=True)
+
+        report = _extractor_drift_check(self.PAYLOAD, [("papers", recorded)])
+
+        assert report["drift"]["papers"] == ["use_ocr: True -> False"]
+
+    def test_each_drifting_collection_is_named(self) -> None:
+        recorded = dict(self.PAYLOAD, version="v0")
+
+        report = _extractor_drift_check(
+            self.PAYLOAD, [("notes", recorded), ("papers", dict(self.PAYLOAD))]
+        )
+
+        assert set(report["drift"]) == {"notes"}
+        assert "notes" in report["message"]
+        assert "papers" not in report["message"]
+
+    def test_a_warning_does_not_fail_the_overall_report(self, tmp_path) -> None:
+        """Rebuilding is the right answer to a real extractor change, so this
+        cannot be the check that makes `cementic doctor` exit non-zero."""
+        config = _config_with_model_path(tmp_path, exists=True)
+        recorded = json.dumps(dict(self.PAYLOAD, version="v0"))
+        mock_conn = MagicMock()
+        mock_conn.execute.return_value.scalar.return_value = True
+        mock_conn.execute.return_value.fetchall.return_value = [("papers", recorded)]
+        mock_engine = MagicMock()
+        mock_engine.connect.return_value.__enter__.return_value = mock_conn
+
+        with patch("cementic.doctor.get_engine", return_value=mock_engine):
+            report = collect_doctor_report(config)
+
+        assert report["checks"]["extractor_profile"]["status"] == "warning"
+        assert report["ok"] is True

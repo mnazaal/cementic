@@ -421,6 +421,15 @@ so turning OCR on re-versions the revision and re-extracts the collection.
 Point scanned documents at their own collection rather than flipping the flag
 under a corpus that does not need it.
 
+The installed `pymupdf`, `pymupdf-layout` and `pymupdf4llm` versions are in that
+fingerprint too, which is why `pyproject.toml` pins all three exactly rather
+than by floor: a resolver picking a newer one at install time would re-extract
+every corpus built by an older install. Bumping them is a deliberate commit that
+costs a full rebuild. Pins hold only within one cementic version, so where a
+checkout and a released snapshot both exist, `cementic doctor` compares this
+install's extractor profile against each collection's active revision and warns
+which ones indexing from here would rebuild.
+
 Two alternatives need no Python package at all: run `ocrmypdf` over the file
 first and index the result with any backend, or use PyMuPDF's own Tesseract
 binding. Both want the `tesseract` system package instead.

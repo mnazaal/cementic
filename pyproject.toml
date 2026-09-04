@@ -39,11 +39,17 @@ dependencies = [
     "sqlalchemy>=2.0",
     "psycopg2-binary>=2.9.0",
     "watchdog>=4.0",
-    "pymupdf4llm>=0.0.5",
+    # Exact pins, not floors: profiles.py records these three versions in the
+    # extractor fingerprint, so the resolver picking a newer one at install
+    # time re-versions every corpus built by an older install. A bump is a
+    # rebuild of every collection, which is a commit to make deliberately --
+    # not a side effect of when someone happened to run `uv tool install`.
+    # Bump all three together and expect a full re-extract.
+    "pymupdf4llm==0.3.4",
     # Imported directly by extract.py (including the layout-activation check),
     # not just pulled in by pymupdf4llm.
-    "pymupdf>=1.27.1",
-    "pymupdf-layout>=1.27.1",
+    "pymupdf==1.27.1",
+    "pymupdf-layout==1.27.1",
     # rapidocr is deliberately *not* declared here. cementic never imports it:
     # extract.py looks it up through pymupdf4llm and hands its exec_ocr over as
     # a callback, and that path is only reachable with the pymupdf4llm backend

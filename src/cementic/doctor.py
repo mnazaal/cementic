@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
+from collections.abc import Sequence
 from typing import Any
 
 from sqlalchemy import text
@@ -141,6 +143,7 @@ def collect_doctor_report(config: Config) -> dict[str, Any]:
 
     database_ok = False
     extension_ok = False
+    active_extractor_profiles: list[tuple[str, dict[str, Any]]] | None = None
     try:
         engine = get_engine(config.database.url)
         with engine.connect() as conn:
@@ -159,6 +162,7 @@ def collect_doctor_report(config: Config) -> dict[str, Any]:
                     item["status"] in {"ok", "warning"} for item in extensions.values()
                 )
                 checks["extensions"] = extensions
+                active_extractor_profiles = _active_extractor_profiles(conn)
             except Exception as extension_error:
                 checks["extensions"] = {
                     "(inspection)": {
@@ -233,6 +237,7 @@ def collect_doctor_report(config: Config) -> dict[str, Any]:
     ocr_ok = checks["ocr"]["status"] != "fail"
     checks["extraction_commands"] = _extraction_commands_check(config)
     commands_ok = checks["extraction_commands"]["status"] != "fail"
+    checks["extractor_profile"] = _extractor_profile_check(config, active_extractor_profiles)
 
     ok = (
         (config_error is None)
@@ -429,6 +434,116 @@ def _ocr_check(config: Config) -> dict[str, Any]:
         "enabled": True,
         "message": "OCR enabled and an OCR backend is installed",
     }
+
+
+def _describe_profile_drift(recorded: dict[str, Any], current: dict[str, Any]) -> list[str]:
+    """Name every payload key whose value moved between two profiles.
+
+    Nested mappings (``extraction_libraries``) are compared entry by entry
+    rather than whole, so a pymupdf bump reads as "pymupdf 1.27.1 -> 1.28.2"
+    instead of printing both mappings and leaving the reader to diff them.
+    """
+    descriptions: list[str] = []
+    for key in sorted(set(recorded) | set(current)):
+        was, now = recorded.get(key), current.get(key)
+        if was == now:
+            continue
+        if isinstance(was, dict) and isinstance(now, dict):
+            entries = ", ".join(
+                f"{name} {was.get(name)} -> {now.get(name)}"
+                for name in sorted(set(was) | set(now))
+                if was.get(name) != now.get(name)
+            )
+            descriptions.append(f"{key}: {entries}")
+        else:
+            descriptions.append(f"{key}: {was} -> {now}")
+    return descriptions
+
+
+def _extractor_drift_check(
+    current_payload: dict[str, Any],
+    active_profiles: Sequence[tuple[str, dict[str, Any]]],
+) -> dict[str, Any]:
+    """Report collections this install would rebuild rather than extend.
+
+    The extractor profile is the only one of the three whose inputs come from
+    the environment rather than from config or a content digest: it records the
+    installed pymupdf/pymupdf4llm/pymupdf-layout versions, so an install that
+    resolved different ones opens a new extractor profile and re-extracts the
+    whole collection. Exact pins in pyproject stop that within one cementic
+    version; this catches what they cannot -- two installs of *different*
+    versions on one machine, which is the normal state once a checkout and a
+    released snapshot both exist.
+
+    A warning, not a failure: a rebuild is the correct response to a real
+    extractor change, and nothing here can know whether this one was intended.
+    """
+    drifted = {
+        collection: _describe_profile_drift(recorded, current_payload)
+        for collection, recorded in active_profiles
+    }
+    drifted = {collection: items for collection, items in drifted.items() if items}
+    if not drifted:
+        return {
+            "status": "ok",
+            "drift": {},
+            "message": (
+                "this install extracts as every active revision did"
+                if active_profiles
+                else "no active revision to compare against"
+            ),
+        }
+    return {
+        "status": "warning",
+        "drift": drifted,
+        "message": "; ".join(
+            f"indexing {collection} from this install would rebuild it ({', '.join(items)})"
+            for collection, items in sorted(drifted.items())
+        ),
+    }
+
+
+def _extractor_profile_check(
+    config: Config, active_profiles: Sequence[tuple[str, dict[str, Any]]] | None
+) -> dict[str, Any]:
+    """The drift check, plus the two states in which it cannot run.
+
+    Building this install's payload can fail: a command extractor whose version
+    probe cannot run raises from here, and doctor is the last place that may
+    answer a fault with a traceback. `extraction_commands` reports that fault
+    as the failure it is; this reports only that it could not compare.
+    """
+    if active_profiles is None:
+        return {
+            "status": "ok",
+            "drift": {},
+            "message": "database unreachable; extractor profiles not compared",
+        }
+    # Imported here rather than at module scope for the reason `_ocr_check`
+    # gives: building the payload loads the PDF stack.
+    from cementic.profiles import build_extractor_profile_payload
+
+    try:
+        current_payload = build_extractor_profile_payload(config)
+    except Exception as error:
+        return {
+            "status": "warning",
+            "drift": {},
+            "message": f"could not build this install's extractor profile to compare: {error}",
+        }
+    return _extractor_drift_check(current_payload, active_profiles)
+
+
+def _active_extractor_profiles(conn: Any) -> list[tuple[str, dict[str, Any]]]:
+    """(collection, extractor payload) for every collection's active revision."""
+    rows = conn.execute(
+        text(
+            "SELECT r.collection, p.config_json FROM pipeline_revisions r "
+            "JOIN extractor_profiles p ON p.id = r.extractor_profile_id "
+            "WHERE r.status = 'active' ORDER BY r.collection"
+        )
+    ).fetchall()
+    return [(str(collection), json.loads(payload)) for collection, payload in rows]
 
 
 def _chunk_budget_check(config: Config) -> dict[str, Any]:
