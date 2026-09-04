@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import signal
 import sys
@@ -61,6 +62,11 @@ _TASK_PREFIX_TOKEN_ALLOWANCE = 8
 #: Measured against llama-server b10605 with a 512-token window: 509 embeds,
 #: 511 and 512 are refused. 3 is the smallest verified-safe reserve.
 _SERVER_SPECIAL_TOKEN_RESERVE = 3
+
+#: Halvings allowed before an over-long text is embedded as-is. 12 splits a
+#: chunk into 4096 pieces; anything still over the window by then is not
+#: text this splitter can help with.
+_SPLIT_MAX_DEPTH = 12
 
 #: Budget for a tokenize round trip. Tokenizing is trivial once the model is
 #: loaded, so a long timeout here buys nothing and costs the embedding request
@@ -490,6 +496,66 @@ class RemoteEmbeddingClient(EmbeddingProvider):
             (refused if over is not None else keep).append((index, text))
         return keep, refused
 
+    def _split_to_fit(self, text: str, depth: int = 0) -> list[str]:
+        """Halve ``text`` until every piece fits the window.
+
+        Whitespace first, because a sentence boundary is a better cut than a
+        character one. But dot-leader contents pages are frequently a single
+        whitespace-free run -- one such chunk measured 1,806 tokens in a piece
+        the word split could not divide at all -- so a text with nothing to
+        split on falls through to characters. Without that fallback the
+        recursion returns a piece the server still refuses.
+
+        ``depth`` bounds the recursion rather than trusting the text to shrink:
+        a pathological input that never fits is better embedded truncated than
+        looping.
+        """
+        if self.over_budget_tokens(text, exact=True) is None:
+            return [text]
+        if depth >= _SPLIT_MAX_DEPTH:
+            return [text]
+        words = text.split()
+        if len(words) >= 2:
+            middle = len(words) // 2
+            return self._split_to_fit(" ".join(words[:middle]), depth + 1) + self._split_to_fit(
+                " ".join(words[middle:]), depth + 1
+            )
+        if len(text) < 2:
+            return [text]
+        middle = len(text) // 2
+        return self._split_to_fit(text[:middle], depth + 1) + self._split_to_fit(
+            text[middle:], depth + 1
+        )
+
+    def _embed_by_splitting(self, text: str) -> list[float] | None:
+        """Embed an over-long text as the mean of its pieces, or None.
+
+        A chunk over the window currently gets no vector at all, so pooling its
+        pieces is additive: no existing vector changes, and the alternative is
+        that the passage stays unsearchable. That is also why this does not
+        enter the embedding profile -- it produces vectors where there were
+        none, in the same space, rather than producing different ones.
+
+        None on failure rather than raising: the caller is mid-batch and the
+        text is already known to be unembeddable whole, so a failure here means
+        the chunk keeps the terminal status it would have had anyway.
+        """
+        pieces = self._split_to_fit(text)
+        try:
+            vectors = self._embed_inputs(pieces)
+        except requests.RequestException:
+            vectors = []
+            for piece in pieces:
+                try:
+                    vectors.extend(self._embed_inputs([piece]))
+                except requests.RequestException:
+                    return None
+        if not vectors:
+            return None
+        pooled = [sum(values) / len(vectors) for values in zip(*vectors)]
+        norm = math.sqrt(sum(value * value for value in pooled))
+        return [value / norm for value in pooled] if norm else pooled
+
     def embed_batch(self, texts: list[str]) -> list[list[float] | None]:
         """Embed a batch, reporting per-item None for anything over the window.
 
@@ -500,9 +566,14 @@ class RemoteEmbeddingClient(EmbeddingProvider):
         if not texts:
             return []
         results: list[list[float] | None] = [None] * len(texts)
-        sendable = [
-            (i, text) for i, text in enumerate(texts) if self.over_budget_tokens(text) is None
-        ]
+        sendable: list[tuple[int, str]] = []
+        oversized: list[tuple[int, str]] = []
+        for index, text in enumerate(texts):
+            (sendable if self.over_budget_tokens(text) is None else oversized).append(
+                (index, text)
+            )
+        for index, text in oversized:
+            results[index] = self._embed_by_splitting(text)
         if not sendable:
             return results
         try:
@@ -515,6 +586,8 @@ class RemoteEmbeddingClient(EmbeddingProvider):
                 # retries, rather than stamping healthy chunks terminally
                 # failed because the daemon was down for a moment.
                 raise
+            for index, text in refused:
+                results[index] = self._embed_by_splitting(text)
             if not sendable:
                 return results
             embeddings = self._embed_inputs([text for _, text in sendable])

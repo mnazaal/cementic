@@ -200,8 +200,14 @@ class TestTokenBudgetGuard:
         assert self._client().over_budget_tokens("word " * 2000) is None
 
     @patch("cementic.embedding_runtime.requests.post")
-    def test_embed_batch_reports_per_item_failure_not_a_dead_batch(self, mock_post) -> None:
-        """One over-long chunk must not cost the whole batch its embeddings."""
+    def test_embed_batch_keeps_the_batch_and_splits_the_over_long_one(self, mock_post) -> None:
+        """One over-long chunk must not cost the whole batch its embeddings.
+
+        It no longer costs itself one either: the chunk is embedded as the mean
+        of pieces that fit, because the alternative is a passage that is never
+        searchable. The reason string stays available for callers that still
+        need to explain a chunk they could not embed at all.
+        """
 
         def responses(url, **kwargs):
             response = MagicMock()
@@ -218,7 +224,7 @@ class TestTokenBudgetGuard:
         vectors = client.embed_batch(["short one", "word " * 2000])
 
         assert vectors[0] == [0.5, 0.5]
-        assert vectors[1] is None
+        assert vectors[1] is not None, "an over-long chunk is split, not dropped"
         assert "512-token context window" in (
             client.over_budget_reason("word " * 2000) or ""
         )
@@ -1558,8 +1564,10 @@ class TestRefusedBatchIsolatesTheOffender:
                 out = client.embed_batch(texts)
 
         assert out[0] == [0.0, 1.0]
-        assert out[1] is None
         assert out[2] == [0.0, 1.0]
+        # The offender is isolated from the batch; it is then split rather than
+        # dropped, so it ends up with a vector of its own.
+        assert out[1] is not None
 
     def test_a_server_outage_is_raised_not_stamped(self) -> None:
         """If nothing in the batch is over budget the failure was the server's.
@@ -1572,3 +1580,87 @@ class TestRefusedBatchIsolatesTheOffender:
             with patch.object(client, "over_budget_tokens", return_value=None):
                 with pytest.raises(requests.HTTPError):
                     client.embed_batch(["a", "b"])
+
+
+class TestOverBudgetChunksAreSplitNotDropped:
+    """An over-long chunk gets a vector from its pieces instead of nothing."""
+
+    @staticmethod
+    def _client() -> RemoteEmbeddingClient:
+        return RemoteEmbeddingClient(
+            host="localhost", port=8081, embedding_dim=2,
+            expected_fingerprint="abc", n_ctx=512,
+        )
+
+    def test_whitespace_free_text_still_splits(self) -> None:
+        """The dot-leader case: contents pages are often one long run with
+        nothing to split on, and a word-only split returns a piece the server
+        still refuses -- measured at 1,806 tokens in one such chunk."""
+        client = self._client()
+        text = "." * 4000
+
+        def too_long(t, *, exact=False):
+            return 900 if len(t) > 500 else None
+
+        with patch.object(client, "over_budget_tokens", side_effect=too_long):
+            pieces = client._split_to_fit(text)
+
+        assert len(pieces) > 1
+        assert all(len(piece) <= 500 for piece in pieces)
+        assert "".join(pieces) == text
+
+    def test_splitting_prefers_word_boundaries(self) -> None:
+        client = self._client()
+        text = " ".join(f"word{i}" for i in range(400))
+
+        def too_long(t, *, exact=False):
+            return 900 if len(t) > 600 else None
+
+        with patch.object(client, "over_budget_tokens", side_effect=too_long):
+            pieces = client._split_to_fit(text)
+
+        assert len(pieces) > 1
+        assert not any(piece.startswith(" ") or piece.endswith(" ") for piece in pieces)
+        assert " ".join(pieces) == text
+
+    def test_recursion_is_bounded(self) -> None:
+        """A text that never fits must be returned, not recursed forever."""
+        client = self._client()
+        with patch.object(client, "over_budget_tokens", return_value=900):
+            pieces = client._split_to_fit("a b c d e f g h")
+        assert pieces  # terminated
+
+    def test_batch_returns_a_pooled_vector_rather_than_none(self) -> None:
+        client = self._client()
+
+        def fake_over(text, *, exact=False):
+            return 900 if text == "TOO LONG TEXT" else None
+
+        with patch.object(client, "over_budget_tokens", side_effect=fake_over):
+            with patch.object(client, "_split_to_fit", return_value=["TOO", "LONG"]):
+                with patch.object(
+                    client, "_embed_inputs",
+                    side_effect=lambda sent: [[3.0, 4.0] for _ in sent],
+                ):
+                    out = client.embed_batch(["short", "TOO LONG TEXT"])
+
+        assert out[0] == [3.0, 4.0] or out[0] is not None
+        assert out[1] is not None, "an over-long chunk must not be dropped"
+
+    def test_the_pooled_vector_is_normalised(self) -> None:
+        client = self._client()
+        with patch.object(client, "_split_to_fit", return_value=["a", "b"]):
+            with patch.object(client, "_embed_inputs", return_value=[[3.0, 0.0], [0.0, 4.0]]):
+                pooled = client._embed_by_splitting("anything")
+        assert pooled is not None
+        assert round(sum(v * v for v in pooled) ** 0.5, 6) == 1.0
+
+    def test_a_piece_that_cannot_embed_yields_none(self) -> None:
+        """Failure here leaves the chunk terminal, which is where it already
+        was -- it must not raise out of a batch of healthy chunks."""
+        client = self._client()
+        with patch.object(client, "_split_to_fit", return_value=["a"]):
+            with patch.object(
+                client, "_embed_inputs", side_effect=requests.HTTPError("500")
+            ):
+                assert client._embed_by_splitting("anything") is None

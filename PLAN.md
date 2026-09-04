@@ -305,12 +305,17 @@ is why they overflow. They are worthless for semantic search either way, and
 735 shorter ones *did* embed and are sitting in the index as junk vectors. The
 length limit is currently acting as an accidental filter for the rest.
 
-**Split over-budget chunks at embed time rather than failing them.** The
-residue after the punctuation filter is ~1,200 genuinely dense chunks — source
-code, maths, long structured titles. They are real content and are currently
-dropped. Note the loss is thinner than it looks: 1,137 documents have at least
-one failed chunk and **zero** documents lost all of theirs, so nothing became
-unfindable.
+**Split over-budget chunks at embed time — DONE 2026-09-04, and it needed no
+rebuild.** Listed here first as rebuild work, which was wrong: chunking is
+untouched, so the chunk profile is unchanged, and the embedding profile is too.
+Chunks that had no vector gain one, which is additive — no existing vector
+moves, so requeueing the failed rows is enough to pick it up.
+
+The splitter halves on whitespace, then on characters: dot-leader pages are
+frequently one whitespace-free run, and a word-only split left a 1,806-token
+piece the server still refused. ~1,200 of the affected chunks are genuinely
+dense content (code, maths, long structured titles); the rest are contents
+pages, which the punctuation filter above should stop creating at all.
 
 **Reconsider `chunk_size` against the model's tokenizer, not tiktoken.** The
 mismatch is the root cause of both items above. Do not simply lower
