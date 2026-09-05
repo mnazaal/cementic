@@ -36,7 +36,9 @@ index, versioned revisions) are documented in [PLAN.md](PLAN.md).
   `embed_batch`'s pre-filter still uses the estimate, so a chunk at 513–549
   model tokens is sent anyway, fails with a 500, and drags its whole request
   into the isolate-and-retry path. ~5,000 chunks per corpus scan, re-run on
-  every `cementic start` because the requeue resets them.
+  every `cementic start` because the requeue resets them. Sequence this with
+  `PLAN.md`'s model migration, which re-derives `chunk_size` against the chosen
+  model's tokenizer and changes this item's arithmetic.
 
 ## Images / multimodal
 
@@ -63,7 +65,10 @@ missing pipeline-failure-to-status connection
 - Hybrid lexical + vector search for exact author names, acronyms, citations, and
   equation labels.
 - A multi-profile embedding daemon pool if old-model search and new-model
-  indexing need to run concurrently.
+  indexing need to run concurrently. *Trigger reached in principle:* the model
+  migration in `PLAN.md` puts exactly these two on one port. The no-code
+  workaround is a second `llama-server` on another port, so build this only if
+  running two servers by hand proves annoying during that migration.
 - Evaluate lighter embedding providers if llama.cpp memory use is too high on
   small machines.
 - **Build llama-cpp-python with Vulkan** so the iGPU works under

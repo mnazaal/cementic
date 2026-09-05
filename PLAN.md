@@ -3,9 +3,12 @@
 <!-- session-handoff:begin (2026-09-04) -->
 ## Where the work stands
 
-**Entry point: read "Open — the embedding fingerprint does not record the
-llama.cpp build" below. The user called it a design smell and parked it for a
-dedicated session; nothing else here is waiting on a decision.**
+**Entry point (corrected 2026-09-05): that parked item is now settled — see
+"Decided — detect server drift with a canary, not a fingerprint" below, and
+"Decided — migrate `papers` to another nomic model", which absorbed the
+rebuild-blocked work. Both inputs those carried are settled: the canary is an
+exact comparison (calibrated, zero drift across 213 builds on both backends),
+and the migration target is `nomic-embed-text-v1.5`. Neither is implemented.**
 
 **Repo state.** `main` is level with `origin/main` at `fa03c95` — the pins and
 the new `extractor_profile` doctor check are merged and pushed, and
@@ -259,86 +262,209 @@ add a file type cementic does not already know — its best use. Ripples to
 set as plain data, matching how `ignore_directories` is already passed. The
 command extractor is never a fallback: it must be named in `backends`.
 
-### Open — what the next rebuild should carry (2026-09-03)
+### Decided — migrate `papers` to another nomic model (2026-09-05)
 
-Three changes are blocked on the same thing: they move the extractor or chunk
-profile, so each costs a full rebuild of `papers` — 2,298,558 chunks at the
-measured 5.56 chunk/s, about **4.5 days**. Do them together, once, whenever a
-rebuild happens for an independent reason. None is worth a rebuild alone.
+**Direction taken; not urgent, and one input is still open (which model).** Three
+changes were parked waiting for a rebuild to happen for some independent reason,
+each costing a full re-embed on its own. Wanting a different embedding model is
+that reason, so they ride along — doing them afterwards costs a second ~5-day
+re-embed for nothing.
 
-**Drop chunks that are mostly punctuation, at chunk time.** Measured on the
-live corpus: of 5,025 chunks that failed the token budget, ~3,830 are
-dot-leader tables of contents (`. . . . . 117 C.5.4 Proof of Claim 19`). They
-tokenize at ~1.59 model tokens per tiktoken token against a 1.45 bound, which
-is why they overflow. They are worthless for semantic search either way, and
-735 shorter ones *did* embed and are sitting in the index as junk vectors. The
-length limit is currently acting as an accidental filter for the rest.
+What a model swap actually costs, read out of the code and the live database
+rather than estimated:
 
-**Split over-budget chunks at embed time — DONE 2026-09-04, and it needed no
-rebuild.** Listed here first as rebuild work, which was wrong: chunking is
-untouched, so the chunk profile is unchanged, and the embedding profile is too.
-Chunks that had no vector gain one, which is additive — no existing vector
-moves, so requeueing the failed rows is enough to pick it up.
+- **Extraction is untouched.** The extractor profile does not change, so all
+  23,064 documents are reused as they are.
+- **Chunks are reused unless chunk settings change.** `build_chunk_profile_payload`
+  is `chunk_size`, `chunk_overlap`, the tiktoken tokenizer and a version — the
+  model is not in it. In practice the swap changes them anyway, because
+  `chunk_size = 320` was chosen for this model's 512-token window. Re-chunking
+  needs no GPU and no server.
+- **Every chunk is re-embedded.** 2,298,558 at the measured 5.56 chunk/s is about
+  five days. A longer context trades chunk count against per-chunk cost rather
+  than removing the work, so treat any speedup as unmeasured until it is measured.
+- **No downtime, and no mixing.** Vectors live in a table per embedding profile
+  (`embedding_vectors_p6` today). The new revision builds into its own table
+  while the old one stays active and searchable; `promote_revision` flips at the
+  end. Cross-collection search already refuses to merge two models' scores
+  (`search.py:_mixed_model_message`).
+- **Disk roughly doubles until the old revision is pruned.** The database is
+  21 GB, of which `embedding_vectors_p6` — vectors plus HNSW index — is 18 GB.
+- **One daemon serves one model.** The server's `--alias` fingerprints what it
+  loaded and the readiness check refuses a server not serving it, so a
+  wrong-model answer is impossible — but indexing the new model and searching the
+  old contend for port 11555. This is the trigger for `TODO.md`'s parked
+  "multi-profile embedding daemon pool"; the no-code workaround is a second
+  `llama-server` on another port, which is already how the iGPU setup runs.
 
-The splitter halves on whitespace, then on characters: dot-leader pages are
-frequently one whitespace-free run, and a word-only split left a 1,806-token
-piece the server still refused. ~1,200 of the affected chunks are genuinely
-dense content (code, maths, long structured titles); the rest are contents
-pages, which the punctuation filter above should stop creating at all.
+**Chosen 2026-09-05 — `nomic-embed-text-v1.5`.**
+768 dimensions (unchanged, so the vector table shape is unchanged), an
+8192-token context against the current 512, Matryoshka truncation, a published
+GGUF, and an embedding space shared with `nomic-embed-vision-v1.5` — which would
+let figures and page images be searched alongside text without a second vector
+space, the thing `Markdown as the text intermediate representation` above calls
+option (b). The cost is giving up v2-moe's multilingual MoE, and v1.5 is an
+older generation (MTEB 62.28 at 768 dims, per its model card).
 
-**Reconsider `chunk_size` against the model's tokenizer, not tiktoken.** The
-mismatch is the root cause of both items above. Do not simply lower
-`chunk_size`: clearing the observed p95 (637 model tokens) needs 249, and the
-observed max (1958) needs 75, which is too small to be a useful chunk.
+Rejected: staying on v2-moe, which keeps the 512-token window and leaves all
+three parked items parked; and going straight to a multimodal model
+(`nomic-embed-multimodal-3b/7b`, `colnomic-embed-multimodal-3b/7b`), which is
+3-7B parameters against v1.5's ~0.1B, needs the parallel non-Markdown path, and
+has unverified llama.cpp support. v1.5's shared vision space is what makes that
+a cheap follow-on rather than a competing direction.
 
-### Open — remove OCR from the codebase
+Two scaffold-time checks, not yet run: that the v1.5 GGUF loads on this Vulkan
+build, and how v1.5 and v2-moe actually compare on retrieval over English
+papers. Both precede scheduling the five-day re-embed.
 
-**Blocked on one full rebuild, not on design.** `use_ocr` reaches extraction
-only through the pymupdf4llm backend, so it is a knob that silently does nothing
-under `pymupdf-raw` — `doctor` grew a warning for exactly that, which is a guard
-where the fix is removing the knob. Deleting it removes rapidocr from the
-picture entirely (dependency, extra, and `--with` all moot).
+**What rides along, in the order the pipeline runs them.**
+
+*Drop chunks that are mostly punctuation, at chunk time.* Measured on the live
+corpus: of 5,025 chunks that failed the token budget, ~3,830 are dot-leader
+tables of contents (`. . . . . 117 C.5.4 Proof of Claim 19`). They tokenize at
+~1.59 model tokens per tiktoken token against a 1.45 bound, which is why they
+overflow. They are worthless for semantic search either way, and 735 shorter
+ones *did* embed and sit in the index as junk vectors. The length limit is
+currently acting as an accidental filter for the rest. *Ends when:* a re-chunk
+of the corpus produces no dot-leader chunks and the junk vectors are gone.
+
+*Re-derive `chunk_size` against the model's own tokenizer, not tiktoken.* The
+mismatch is the root cause of the item above. Do not simply lower it: on the
+current model, clearing the observed p95 (637 model tokens) needs 249 and the
+observed max (1958) needs 75, which is too small to be a useful chunk. A
+larger-context model changes this arithmetic entirely, which is why it waits on
+the model choice. *Ends when:* `chunk_size` is set from a measured token-ratio
+distribution against the chosen model's `/tokenize`, recorded here.
+
+*Remove OCR from the codebase.* See the section below; it is blocked on this
+same rebuild and on the command extractor landing first.
+
+Already done, and it needed no rebuild: **splitting over-budget chunks at embed
+time** (`c99d84b`, 2026-09-04). Chunking and both profiles were untouched, so
+requeueing the failed rows was enough — chunks that had no vector gained one,
+which is additive. The splitter halves on whitespace, then on characters,
+because dot-leader pages are frequently one whitespace-free run. Roughly 1,200
+of the affected chunks are genuinely dense content (code, maths, long structured
+titles); the rest are contents pages that the punctuation filter above should
+stop creating at all.
+
+### Blocked on the migration above — remove OCR from the codebase
+
+**Not blocked on design; it now has a rebuild to ride on.** `use_ocr` reaches
+extraction only through the pymupdf4llm backend, so it is a knob that silently
+does nothing under `pymupdf-raw` — `doctor` grew a warning for exactly that,
+which is a guard where the fix is removing the knob. Deleting it removes
+rapidocr from the picture entirely (dependency, extra, and `--with` all moot).
 
 The cost is that `use_ocr` is a key in the extractor payload, so removing the
 field changes every extraction fingerprint: `papers` re-extracts, re-chunks and
-re-embeds all 2,291,555 chunks. Do it after the command extractor lands, so
-there is still an OCR route (a configured `ocrmypdf` wrapper), and only when a
-rebuild is affordable. Pre-processing with `ocrmypdf` into `pymupdf-raw` works
-with no cementic code at all and is the documented fallback — untested here, no
-OCR engine is installed on this host.
+re-embeds all 2,291,555 chunks — which is exactly what the model migration
+above pays for anyway, so it lands in that same rebuild. The remaining ordering
+constraint is the command extractor: it must land first, so there is still an
+OCR route (a configured `ocrmypdf` wrapper) once the knob is gone.
+Pre-processing with `ocrmypdf` into `pymupdf-raw` works with no cementic code at
+all and is the documented fallback — untested here, no OCR engine is installed
+on this host.
 
-### Open — the embedding fingerprint does not record the llama.cpp build (2026-09-04)
+### Decided — detect server drift with a canary, not a fingerprint (2026-09-05)
 
-**Parked for a session of its own; the user reads it as a design smell and it is
-one.** `build_embedding_profile_payload` records provider, model basename, model
-digest, embedding dimension, distance metric, `n_ctx` and `n_gpu_layers`. It does
-not record which llama.cpp build produced the vectors, so swapping
-`~/.cache/cementic-igpu/llama-b10605` for a newer server rewrites embeddings
-under an unchanged fingerprint — the exact silent rewrite that
-`extraction_libraries` and `command_versions` exist to prevent elsewhere. The
-project applies the rule to a Python dependency and to a driven binary, and then
-not to the one binary every vector passes through.
+**Taken; implementation next. Supersedes the open item that asked whether to
+record the llama.cpp build in the embedding profile, and corrects its central
+claim.** That note said a server upgrade is "usually numerically a no-op".
+Nothing had measured it, and as stated it is false: new kernels and different
+reduction orders move the last bits by construction.
 
-The tension that makes it not obvious:
+Measured 2026-09-05 against the live server (`b10605-a130532ae`,
+nomic-embed-text-v2-moe Q8_0, Vulkan iGPU), embedding one text three ways over
+`/v1/embeddings`:
 
-- Recording it re-versions the corpus on every llama.cpp upgrade — 2,298,558
-  chunks re-embedded. Unlike a pymupdf bump, which demonstrably rewrites text, a
-  server bump is usually numerically a no-op, so the rebuild buys nothing most
-  times and everything the once it matters.
-- The build is only knowable by asking a *running* server (`/props`, or the
-  startup banner in the daemon log). Putting it in the payload makes profile
-  construction depend on a live daemon, which today it does not.
-- README already states the project's stance that driven binaries are
-  doctor-checked prerequisites, not dependencies. That argues for detection over
-  fingerprinting — but `command_versions` is a driven binary *in* the
-  fingerprint, so the stance is not applied consistently and the inconsistency
-  is the thing to resolve first.
+| Same text, same model, same build | Bitwise identical | max abs diff | cosine |
+| --- | --- | --- | --- |
+| the same request, twice | yes | 0 | 1.000000000000 |
+| alone vs. first of a 2-text request | no | 7.5e-9 | 1.000000000000 |
+| alone vs. last of a 32-text request | no | 2.3e-3 | 0.999796 |
 
-Three options to weigh, not yet chosen: leave it and document the hole; put the
-build in the embedding profile and accept a rebuild per upgrade; or report the
-running server's build against the active revision's in `cementic doctor`,
-which detects without re-versioning and matches what `fa03c95` did for the
-extractor side.
+**The corpus is already not bitwise reproducible, and no fingerprint can make it
+so.** The worker submits `pipeline_worker.batch_size = 32` texts per request, so
+a chunk's exact vector depends on which 31 others rode with it — on arrival
+order, and on where a restart landed. What the fingerprint guarantees is
+therefore not "the same bits" but "the same vector space, comparable distances",
+and 2.3e-3 of wobble does not threaten that.
+
+That reframes the question. It is not *does an upgrade change the numbers*
+(everything does, including doing nothing) but *does it change them by more than
+the noise the corpus already carries*. Two classes of llama.cpp change, which a
+build string cannot tell apart:
+
+- **arithmetic** — new kernels, different reduction order, quantization
+  rewrites. The same magnitude as the batching wobble above. A rebuild buys
+  nothing.
+- **semantic** — a tokenizer fix, a pooling-type or normalization default, an
+  attention-mask fix for embedding models. These change the function rather than
+  its rounding, and would move cosine far below 0.999. A rebuild is mandatory.
+
+**Decision: `cementic doctor` grows a behavioral canary, and the server build is
+recorded beside it as evidence rather than as identity.** A revision stores a
+handful of fixed reference texts with their vectors; doctor re-embeds them **as
+one fixed request — same texts, same order, same count** — and reports the
+cosine against the stored ones. The first row of the table is what makes this
+work: a fixed request is bitwise reproducible within a build, so any difference
+at all is the server's doing, and the size of it says which class the change is.
+**The comparison is strict** — doctor flags any difference from the stored
+vectors, and reports the cosine only to say how bad it is (~1e-9 is arithmetic
+noise, below 0.999 is a changed function). Accepting a drifted build must be an
+explicit act that re-stamps the canary, not a threshold that silently absorbs
+it; that is the difference between a check that stays trustworthy and one that
+is tuned until it never fires.
+
+The canary must live *outside* `build_embedding_profile_payload`. Anything in
+that payload moves the fingerprint and forks the corpus, which is the outcome
+being avoided. The natural home is a sibling table keyed by
+`embedding_profile_id` holding the texts, their vectors, and the `build_info`
+string the server reported when they were taken (`/props`, today
+`b10605-a130532ae`). Note that `EmbeddingProfile.config_json` is *not* the
+fingerprinted payload — it carries the runtime payload `search` rebuilds a spec
+from (`profiles.py:307`) — so it is not a shortcut home for this either.
+
+Rejected:
+
+- **Leave it and document the hole.** Free, and forgotten by exactly the person
+  it would have saved.
+- **Put the build in the embedding profile.** Fires on every upgrade including
+  the arithmetic-class majority, each costing a full re-embed (~5 days at the
+  measured 5.56 chunk/s), and makes profile construction depend on a live
+  daemon, which today it does not.
+- **Compare build strings in doctor.** The same false-alarm rate without the
+  rebuild. A check that fires on every upgrade is a check that gets ignored.
+
+**Threshold settled 2026-09-05 — there isn't one; the check is exact.**
+Calibrated by running b10605 against b10818 (213 builds and ~12 days later),
+same model, same flags, the same 200 real `papers` chunks in the production
+32-per-request shape, on both backends:
+
+| Backend | Result |
+| --- | --- |
+| CPU (agent sandbox, no `/dev/dri`) | 200/200 bitwise identical, max abs diff 0 |
+| Vulkan iGPU (`Intel(R) Graphics (MTL)`) | 200/200 bitwise identical, max abs diff 0 |
+
+Zero drift, not small drift — so a strict check costs nothing in false alarms
+and needs no guessed threshold. Both classes are covered by that: a semantic
+change (tokenizer, pooling, normalization, mask) would move vectors on either
+backend, and the Vulkan run additionally exercises the shader kernels that
+arithmetic-class drift would come from.
+
+The honest limit is that this is **one upgrade interval**, so it bounds nothing
+about future builds — but that is precisely why the check is strict rather than
+tuned. If a later build does drift, doctor says so loudly and the cosine
+classifies it; the answer is then to re-stamp the canary or to rebuild, decided
+by a human looking at the number.
+
+Reproduce with `~/.cache/cementic-igpu/calibration/calibrate.sh` (it reuses
+`sample.json`, so inputs stay identical); the CPU-run artifacts are preserved
+alongside as `*-cpu`. Note for whoever repeats this: absence of Vulkan lines in
+the server log does **not** mean CPU — the known-GPU run from 2026-08-24 has
+none either. Check `llama-server --list-devices`, and remember an agent shell
+sees no GPU at all.
 
 ### Decided — query-first embed scheduling (2026-09-01)
 
