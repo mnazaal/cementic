@@ -220,18 +220,31 @@ holds the feature backlog, which this does not cover.
 
 1. **Merge the canary.** `claude/embedding-canary` fast-forwards onto `main`.
    *Ends when:* `git log --oneline main -1` shows it.
-2. **Compare v1.5 against v2-moe on this corpus.** Sample ~5,000 real chunks,
-   reuse their existing v2-moe vectors from `embedding_vectors_p6` rather than
-   re-embedding them, embed the same chunks with v1.5, then query with each
-   document's first chunk and score how often a *different* chunk of the same
-   document ranks top-k. ~15 minutes on the iGPU; an agent shell cannot run it
-   (no `/dev/dri`). *Anti-scope:* this is a comparison, not a retrieval
-   benchmark -- no new eval harness, no labelled set. *Ends when:* recall@k for
-   both models is written into the migration section.
-   **This is the gate.** If v1.5 does not beat v2-moe, the migration does not
-   happen, the three rebuild-blocked items stay parked, and steps 3-6 are moot.
-   Note the limit: it compares the models at today's 320-token chunking, not at
-   the ~1,300 the migration would adopt.
+2. **Compare v1.5 against v2-moe on this corpus.**
+   `~/.cache/cementic-igpu/calibration/compare-models.sh` (the agent shell has
+   no `/dev/dri`, so this one is run by hand). Title-to-body retrieval over
+   1,000 real papers, two body chunks each: the query is the paper's title from
+   its filename, a hit is any chunk of that paper, and the title-page chunks
+   are dropped so the task is retrieval rather than string matching. 30-80
+   minutes; it prints a rate and ETA early enough to abort.
+
+   Three design points were forced by measurement rather than chosen:
+   - **Both models are embedded fresh in one session.** Reusing the stored
+     index vectors for v2-moe biased it -- the same model beat *itself* on the
+     margin for 62 of 100 queries that way, purely from batch composition.
+   - **The stored vectors stay in as a control arm**, so every run prints how
+     large a difference means nothing.
+   - **A margin metric sits beside recall**, because recall saturated at 1.0 at
+     every smaller scale tried (6, 40 and 120 documents); the margin between
+     the right paper and the best wrong one does not saturate.
+
+   *Anti-scope:* a comparison, not a retrieval benchmark -- no eval harness, no
+   labelled set. *Ends when:* the table and the control split are written into
+   the migration section.
+   **This is the gate.** If v1.5 does not beat v2-moe by more than the control
+   arm's split, the migration rests on the 4x context alone -- decide then
+   whether that is worth five days. Note the limit: it compares the models at
+   today's 320-token chunking, not at the ~1,300 the migration would adopt.
 3. **Re-derive `chunk_size`** against v1.5's own `/tokenize` at its measured
    2048-token window. *Ends when:* the value and the token-ratio distribution
    behind it are recorded.
