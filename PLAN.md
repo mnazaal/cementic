@@ -1,82 +1,73 @@
 # cementic — architecture & design
 
-<!-- session-handoff:begin (2026-09-04) -->
+<!-- session-handoff:begin (2026-09-05) -->
 ## Where the work stands
 
-**No thread is mid-flight; pick up from `TODO.md`'s roadmap.** The 2026-09-05
-session closed three things and opened none. The parked fingerprint item is
-settled: the embedding canary is implemented and merged (`06f7d62`). The
-migration to `nomic-embed-text-v1.5` was decided and then **rejected by its own
-gate** -- v1.5 retrieves measurably worse than v2-moe here, so `papers` stays as
-it is and the three rebuild-blocked changes stay parked (see the closed
-execution order above). And two sections that read as pending work were marked
-DONE: the command extractor and query-first embed scheduling had both already
-shipped.
+**Entry point: nothing is mid-flight.** No thread was left open — the session
+closed three and started none. Pick the next item from `TODO.md`'s roadmap; the
+one that changed status is **the over-budget chunk pre-filter**, which lost its
+last dependency (the model migration that would have re-derived `chunk_size` is
+rejected) and gained evidence: v2-moe's 512-token window refused 5 batches of
+2,000 chunks during the 2026-09-05 comparison run, so overflow is routine
+rather than rare.
 
-**Repo state (corrected 2026-09-05 — the lines below described the previous
-session's branches, which have since merged).** `main` carries `06f7d62`, the
-canary implementation. Unmerged: `claude/migration-plan`, this plan revision.
-A hook rejects agents touching `main`, so merging is yours:
+**Repo state.** `main` is at `0d445ca` — four agent branches merged and
+deleted this session (canary, plan, experiment, rejection). **Only this handoff
+commit is unmerged**, on `claude/session-handoff-2026-09-05`; a hook rejects
+agents committing to `main`, so merging is yours and the next unit of work
+needs its own fresh `claude/<topic>` branch:
 ```bash
-git checkout main && git merge --ff-only claude/migration-plan
+git checkout main && git merge --ff-only claude/session-handoff-2026-09-05
 ```
-`uv tool upgrade cementic` has run: the PATH install reports pymupdf 1.27.1 /
-pymupdf4llm 0.3.4 and `extractor_profile: ok`, so the checkout and the snapshot
-agree.
 
-**Live state.** `papers` is whole and served: 23,064 documents, 2,298,558
-embeddings, revision 16 active, no building revision. Indexing now runs as the
-systemd user unit `cementic@papers.service` (one templated unit at
-`~/dotfiles/.config/systemd/user/cementic@.service`, stow-deployed, `loginctl
-enable-linger` on). It has NOT survived a reboot
-yet — that is the only unproven claim about it.
+**What this session settled.**
+- The embedding canary is implemented and merged (`06f7d62`): `canary.py`, the
+  `embedding_canary` doctor check, and the `embedding_profile_canaries` table.
+  It has captured nothing yet — capture is lazy, on the next indexing run.
+- The v1.5 migration is **rejected by its own gate**, with numbers in the
+  closed execution order below. `papers` stays on v2-moe; the three
+  rebuild-blocked changes are parked again.
+- Two `Decided` sections claimed work that had already shipped (the command
+  extractor, both layers of query-first embed scheduling). Both now say DONE.
 
-**Correction — PLAN said nothing about this, and it cost a near-rebuild.**
-`profiles.py` records the installed pymupdf/pymupdf-layout/pymupdf4llm versions
-in the extractor fingerprint, and `pyproject.toml` declared them by floor, so the
-checkout (1.27.1/0.3.4) and the uv-tool install (1.28.2) indexed the same corpus
-under *different* extractor profiles. A systemd unit pointed at the uv-tool
-interpreter opened extractor profile 9 and began re-extracting all 23,064
-documents; caught at 747 extractions, before any chunk or vector row was
-written. Revision 17, its extractions and its artifact directory were deleted.
-`fa03c95` pins all three exactly and adds a `cementic doctor` check that
-compares this install's extractor payload against each collection's active
-revision. Both environments now resolve the same
-versions, so either interpreter would extract identically today — but the unit
-stays on `~/projects/cementic/.venv/bin/python`, and **anything that repoints a
-`cementic.runner` invocation should check `extractor_profiles.config_json`
-against the install it is moving to first.** `cementic doctor` answers that in
-one line now.
+**Corrections — where this plan described reality wrongly.** Distrust these
+sections' history, not their current text:
+- The canary was designed to compare **bitwise** and shipped comparing by
+  cosine. A fixed request is *not* reproducible on a busy server: llama-server
+  packs concurrent slot work into unified batches, so replaying after unrelated
+  traffic gives cosine 0.999908 rather than 1.0. Agent-decided change, made
+  mid-implementation rather than shipping the approved design.
+- The cross-build calibration's "zero drift" was true but under-powered — both
+  runs replayed the same traffic sequence, holding fixed the one variable that
+  moves vectors.
+- v1.5's context is **2048, not the advertised 8192**; the GGUF's `n_ctx_train`
+  caps it. 8192 needs `--rope-scaling yarn --rope-scale 4`, untested for
+  quality.
 
-**Deviation from plan, user-directed:** none of this was on the roadmap. The
-session started from "workers didn't start after a reboot" and stayed there.
+**Environment quirks that cost time.**
+- The agent shell has no `/dev/dri`, so `--n-gpu-layers` is accepted and
+  ignored and every GPU run there is really CPU. **Do not infer the backend
+  from the server log** — a real GPU run prints no Vulkan lines and reports
+  `n_threads = 2` exactly like a CPU one. Use `llama-server --list-devices`.
+- Embedding through the agent shell against the shared production server ran at
+  0.8–1.7 embeds/s against 3.4/s in the user's own shell. Size agent-side
+  probes accordingly.
 
-**Scratchpad — nothing promoted beyond the unit.** `~/.cache/cementic-autostart/`
-holds `cementic@.service` (already installed and committed to `~/dotfiles`),
-the `install.sh`/`fix.sh` that ran once, and `split/` — a five-unit alternative
-(separate embedding server + health timer) kept for the day a second collection
-makes the shared-server churn matter. The agent scratchpad held only throwaway
-HTTP stubs and is discarded.
-
-**Environment quirks that cost time this session.**
-- The agent sandbox has a **separate PID namespace and no systemd bus**:
-  `systemctl`, `ps` and `/proc/<pid>` are all useless for liveness. Read the
-  database, state-file mtimes, and HTTP probes instead.
-- `~/.config`, `~/dotfiles` and `~/.local/bin` are read-only binds; writes there
-  silently no-op. Hand the user a script under `~/.cache/` to run.
-- Watcher/worker state files are **event-driven**, so a stale `last_updated` on
-  an idle collection is normal, not a dead process.
-- `cementic status` always reads `workers stopped` under systemd; the real check
-  is `systemctl --user is-active cementic@papers`.
+**Artifacts.** `~/.cache/cementic-igpu/calibration/` holds the scripts this
+plan cites (`compare-models.sh` + `compare_models.py`, `calibrate.sh`) and
+their logs — keep those. Reproducible and safe to delete: `b10818.tar.gz`
+(33 MB, already extracted beside it) and `vecs-*.json` (13 MB). The agent
+scratchpad held only section drafts and a probe whose findings are in the text
+below; discarded.
 
 **Exit criteria — commands whose output confirms the above.**
 ```bash
-git status --short                              # empty
-git log --oneline main..claude/session-handoff-2026-09-04         # this commit only
-cementic status -c papers                       # 2,298,558/2,298,558, building=-
-cementic doctor                                 # extractor_profile: ok (PATH install)
-systemctl --user is-active cementic@papers      # active  (user runs this; no bus in the sandbox)
-pytest -m "not pg" -q && pytest -m pg -q        # 1125 passed / 56 passed
+git status --short                    # empty
+git log --oneline main..HEAD          # this handoff commit only, until merged
+git log --oneline -1 main             # 0d445ca
+cementic status -c papers             # 2,298,558/2,298,558 embedded, building=-
+cementic doctor                       # ok; embedding_canary reports no canary yet
+./scripts/check.sh                    # six gates, all ok
 ```
 <!-- session-handoff:end -->
 
