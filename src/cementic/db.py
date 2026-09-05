@@ -230,6 +230,30 @@ class EmbeddingProfile(Base):
     revisions: Mapped[list["PipelineRevision"]] = relationship(back_populates="embedding_profile")
 
 
+class EmbeddingProfileCanary(Base):
+    """Reference vectors proving which server produced a profile's embeddings.
+
+    One row per embedding profile, written once and then only re-stamped
+    deliberately. The profile itself cannot carry this: anything inside
+    `build_embedding_profile_payload` moves the fingerprint and forks the
+    corpus, which is the outcome the canary exists to avoid (see `canary.py`).
+    """
+
+    __tablename__ = "embedding_profile_canaries"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    embedding_profile_id: Mapped[int] = mapped_column(
+        ForeignKey("embedding_profiles.id", ondelete="CASCADE"), nullable=False, unique=True
+    )
+    #: The exact strings sent, so a replay re-sends the same request.
+    texts_json: Mapped[str] = mapped_column(Text, nullable=False)
+    vectors_json: Mapped[str] = mapped_column(Text, nullable=False)
+    #: llama.cpp `build_info` when the vectors were taken, where the server
+    #: reported one. Evidence for reading a later difference, never identity.
+    server_build: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(default=utc_now)
+
+
 class ChunkEmbedding(Base):
     """Embedding work-tracking for one chunk/profile pair.
 

@@ -11,6 +11,7 @@ from sqlalchemy import func, insert, literal, select, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
+from cementic.canary import capture_canary
 from cementic.config import Config
 from cementic.db import (
     Chunk,
@@ -184,6 +185,11 @@ def get_target_revision(
     extractor_profile = get_or_create_extractor_profile(session, config)
     chunk_profile = get_or_create_chunk_profile(session, config)
     embedding_profile = get_or_create_embedding_profile(session, config, provider)
+    if provider is not None:
+        # Lazy and once per profile: profiles built before canaries existed --
+        # including the one behind the live corpus -- gain one here rather than
+        # staying permanently uncheckable.
+        capture_canary(session, embedding_profile, provider, server_build=provider.server_build())
 
     current = (
         session.query(PipelineRevision)
@@ -373,10 +379,7 @@ def promote_revision(
     # the race into one winner and one clear error. FOR UPDATE is a no-op on
     # SQLite, where there is no concurrent writer to race.
     current_status = (
-        session.query(PipelineRevision.status)
-        .filter_by(id=revision.id)
-        .with_for_update()
-        .scalar()
+        session.query(PipelineRevision.status).filter_by(id=revision.id).with_for_update().scalar()
     )
     if current_status != "ready":
         raise ValueError("Only ready revisions can be promoted")
@@ -560,9 +563,11 @@ def _purge_dropped_embeddings(
     if not profile_ids:
         return []
 
-    chunk_ids = select(Chunk.id).join(
-        SourceDocument, Chunk.document_id == SourceDocument.id
-    ).where(SourceDocument.collection == collection)
+    chunk_ids = (
+        select(Chunk.id)
+        .join(SourceDocument, Chunk.document_id == SourceDocument.id)
+        .where(SourceDocument.collection == collection)
+    )
 
     session.query(ChunkEmbedding).filter(
         ChunkEmbedding.chunk_id.in_(chunk_ids),
@@ -657,9 +662,9 @@ def prune_collection_history(session: Session, collection: str) -> list[str]:
             synchronize_session=False
         )
 
-    session.query(PipelineRevision).filter(PipelineRevision.id.in_(plan.removable_revision_ids)).delete(
-        synchronize_session=False
-    )
+    session.query(PipelineRevision).filter(
+        PipelineRevision.id.in_(plan.removable_revision_ids)
+    ).delete(synchronize_session=False)
     session.flush()
 
     # After the revision delete, so the "is this profile still referenced

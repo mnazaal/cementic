@@ -49,6 +49,28 @@ class EmbeddingProvider(ABC):
             distance_metric=self.distance_metric,
         )
 
+    def server_build(self) -> str | None:
+        """Identifier of the runtime behind this provider, where it publishes one.
+
+        Optional by design: it is evidence recorded beside a canary, never the
+        thing compared, so a provider that cannot answer costs nothing.
+        """
+        return None
+
+    def embed_exact(self, texts: list[str]) -> list[list[float]]:
+        """Embed texts in a fixed request shape, refusing none and splitting none.
+
+        `embed_batch` is the throughput path: it sizes requests from config and
+        isolates refusals, so the same texts can travel in different shapes on
+        different days -- and request shape perturbs the vectors (~2.3e-3
+        between a text embedded alone and as the last of 32). A canary needs the
+        opposite guarantee, so this must depend on nothing but its argument.
+
+        The default embeds one text at a time; a provider that can send them as
+        one request should override it, keeping the shape fixed either way.
+        """
+        return [self.embed(text) for text in texts]
+
     @abstractmethod
     def embed(self, text: str) -> list[float]:
         """Generate embedding for a single text.

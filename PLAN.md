@@ -6,9 +6,10 @@
 **Entry point (corrected 2026-09-05): that parked item is now settled — see
 "Decided — detect server drift with a canary, not a fingerprint" below, and
 "Decided — migrate `papers` to another nomic model", which absorbed the
-rebuild-blocked work. Both inputs those carried are settled: the canary is an
-exact comparison (calibrated, zero drift across 213 builds on both backends),
-and the migration target is `nomic-embed-text-v1.5`. Neither is implemented.**
+rebuild-blocked work. The canary is implemented and its threshold measured
+(cosine 0.99; the earlier "compare exactly" plan was falsified by the live
+server and is corrected in place). The migration target is
+`nomic-embed-text-v1.5`, chosen but not scheduled.**
 
 **Repo state.** `main` is level with `origin/main` at `fa03c95` — the pins and
 the new `extractor_profile` doctor check are merged and pushed, and
@@ -368,7 +369,8 @@ on this host.
 
 ### Decided — detect server drift with a canary, not a fingerprint (2026-09-05)
 
-**Taken; implementation next. Supersedes the open item that asked whether to
+**Implemented 2026-09-05 (`canary.py`, `doctor.py`'s `embedding_canary` check,
+`embedding_profile_canaries`). Supersedes the open item that asked whether to
 record the llama.cpp build in the embedding profile, and corrects its central
 claim.** That note said a server upgrade is "usually numerically a no-op".
 Nothing had measured it, and as stated it is false: new kernels and different
@@ -437,27 +439,35 @@ Rejected:
 - **Compare build strings in doctor.** The same false-alarm rate without the
   rebuild. A check that fires on every upgrade is a check that gets ignored.
 
-**Threshold settled 2026-09-05 — there isn't one; the check is exact.**
-Calibrated by running b10605 against b10818 (213 builds and ~12 days later),
-same model, same flags, the same 200 real `papers` chunks in the production
-32-per-request shape, on both backends:
+**Threshold: cosine 0.99 — and the "no threshold at all" plan above was
+wrong.** Cross-build calibration ran b10605 against b10818 (213 builds and ~12
+days later), same model, same flags, the same 200 real `papers` chunks in the
+production 32-per-request shape, on both backends:
 
 | Backend | Result |
 | --- | --- |
 | CPU (agent sandbox, no `/dev/dri`) | 200/200 bitwise identical, max abs diff 0 |
 | Vulkan iGPU (`Intel(R) Graphics (MTL)`) | 200/200 bitwise identical, max abs diff 0 |
 
-Zero drift, not small drift — so a strict check costs nothing in false alarms
-and needs no guessed threshold. Both classes are covered by that: a semantic
-change (tokenizer, pooling, normalization, mask) would move vectors on either
-backend, and the Vulkan run additionally exercises the shader kernels that
-arithmetic-class drift would come from.
+That reads as "zero drift, so compare exactly", and it is the wrong conclusion.
+Both runs replayed the *same traffic sequence* against a fresh server, holding
+fixed the one variable that actually moves vectors. Running the implemented
+canary against the live server exposed it on first contact: replaying the
+canary after an unrelated 3-text request gives cosine 0.999908 instead of 1.0,
+and after an 18-text request 0.999887, while back-to-back replays with nothing
+in between are exact. llama-server packs concurrent slot work into unified
+batches (`kv_unified = true` in its own startup log), so reproducibility is a
+property of the request *and its predecessors* — which no client can fix, and
+which `doctor` cannot avoid, since its own daemon probe embeds first.
 
-The honest limit is that this is **one upgrade interval**, so it bounds nothing
-about future builds — but that is precisely why the check is strict rather than
-tuned. If a later build does drift, doctor says so loudly and the cosine
-classifies it; the answer is then to re-stamp the canary or to rebuild, decided
-by a human looking at the number.
+The floor is therefore measured rather than absent: scheduling noise reaches
+2.0e-4 in (1 - cosine) and request composition 2.3e-3, while a tokenizer,
+pooling or normalization change lands two orders of magnitude below. `0.99`
+sits in that gap, ~100x above the worst observed noise, deliberately
+conservative because both bounds come from a handful of sampled shapes rather
+than a derivation. What the cross-build table still establishes is that no
+*semantic* change happened across those 213 builds; that conclusion never
+depended on the traffic sequence.
 
 Reproduce with `~/.cache/cementic-igpu/calibration/calibrate.sh` (it reuses
 `sample.json`, so inputs stay identical); the CPU-run artifacts are preserved
@@ -465,6 +475,14 @@ alongside as `*-cpu`. Note for whoever repeats this: absence of Vulkan lines in
 the server log does **not** mean CPU — the known-GPU run from 2026-08-24 has
 none either. Check `llama-server --list-devices`, and remember an agent shell
 sees no GPU at all.
+
+**Left undone deliberately.** Re-stamping is a row delete plus one indexing
+run, which capture's store-if-absent rule already makes correct; a
+`cementic doctor --restamp` would be a nicer front door for it, and is not
+worth a command until a real build upgrade makes someone want it. Capture is
+also indexing-only: a collection that never indexes again keeps no canary, so
+the check reports honestly that it has nothing to replay rather than inventing
+a reference from today's server.
 
 ### Decided — query-first embed scheduling (2026-09-01)
 

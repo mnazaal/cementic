@@ -183,7 +183,6 @@ def _daemon_lock_path(config: Config) -> Path:
     return pid_file.with_name(f"{pid_file.name}.lock")
 
 
-
 class RemoteEmbeddingClient(EmbeddingProvider):
     """Client for a local OpenAI-compatible embedding server (``llama-server``).
 
@@ -460,6 +459,30 @@ class RemoteEmbeddingClient(EmbeddingProvider):
         rows = sorted(payload["data"], key=lambda row: row.get("index", 0))
         return [[float(value) for value in row["embedding"]] for row in rows]
 
+    def embed_exact(self, texts: list[str]) -> list[list[float]]:
+        """One POST, whatever `embed_submit_batch_size` says, with no retry.
+
+        Deliberately bypasses the budget pre-filter and the isolate-and-retry
+        walk: both change how many texts ride in a request, and a canary that
+        moved with them would report cementic's own settings as server drift.
+        """
+        return self._embed_inputs(list(texts))
+
+    def server_build(self) -> str | None:
+        """The running server's llama.cpp build (`b10605-a130532ae`), if it says.
+
+        Recorded beside a canary as evidence for reading a later difference.
+        Absent on a server that does not publish `/props`, which is why every
+        caller treats it as optional rather than as the thing being checked.
+        """
+        try:
+            response = requests.get(f"{self.base_url}/props", timeout=2)
+            response.raise_for_status()
+            build = response.json().get("build_info")
+        except (requests.RequestException, ValueError):
+            return None
+        return str(build) if build else None
+
     def embed(self, text: str) -> list[float]:
         over = self.over_budget_tokens(text)
         if over is not None:
@@ -569,9 +592,7 @@ class RemoteEmbeddingClient(EmbeddingProvider):
         sendable: list[tuple[int, str]] = []
         oversized: list[tuple[int, str]] = []
         for index, text in enumerate(texts):
-            (sendable if self.over_budget_tokens(text) is None else oversized).append(
-                (index, text)
-            )
+            (sendable if self.over_budget_tokens(text) is None else oversized).append((index, text))
         for index, text in oversized:
             results[index] = self._embed_by_splitting(text)
         if not sendable:
@@ -987,9 +1008,7 @@ def _recover_daemon_pid(config: Config, pid_file: Path) -> int | None:
         # what used to be a side-effect-free pid-file read.
         return None
     candidates = find_pids_by_cmdline(
-        lambda cmdline: _matches_llama_daemon_cmdline(
-            cmdline, port=port, model_alias=fingerprint
-        )
+        lambda cmdline: _matches_llama_daemon_cmdline(cmdline, port=port, model_alias=fingerprint)
     )
     if not candidates:
         return None

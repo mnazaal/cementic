@@ -135,15 +135,14 @@ def collect_doctor_report(config: Config) -> dict[str, Any]:
             "status": "ok" if config_error is None else "fail",
             "path": str(config_path) if config_path is not None else None,
             "database_url": config.database.url.render_as_string(hide_password=True),
-            "message": (
-                _config_message(config_path, config_error)
-            ),
+            "message": (_config_message(config_path, config_error)),
         }
     }
 
     database_ok = False
     extension_ok = False
     active_extractor_profiles: list[tuple[str, dict[str, Any]]] | None = None
+    active_canaries: list[tuple[str, str, str, str, str | None]] | None = None
     try:
         engine = get_engine(config.database.url)
         with engine.connect() as conn:
@@ -155,9 +154,7 @@ def collect_doctor_report(config: Config) -> dict[str, Any]:
             # reported an unreachable database (plus the init-postgres hint) for
             # a server that had just answered SELECT 1.
             try:
-                extensions = {
-                    name: _extension_check(conn, name) for name in REQUIRED_DB_EXTENSIONS
-                }
+                extensions = {name: _extension_check(conn, name) for name in REQUIRED_DB_EXTENSIONS}
                 extension_ok = all(
                     item["status"] in {"ok", "warning"} for item in extensions.values()
                 )
@@ -170,6 +167,7 @@ def collect_doctor_report(config: Config) -> dict[str, Any]:
                         "message": f"could not inspect extensions: {extension_error}",
                     }
                 }
+            active_canaries = _active_embedding_canaries(conn)
     except Exception as error:
         checks["database"] = {
             "status": "fail",
@@ -238,6 +236,9 @@ def collect_doctor_report(config: Config) -> dict[str, Any]:
     checks["extraction_commands"] = _extraction_commands_check(config)
     commands_ok = checks["extraction_commands"]["status"] != "fail"
     checks["extractor_profile"] = _extractor_profile_check(config, active_extractor_profiles)
+    checks["embedding_canary"] = _embedding_canary_check(
+        config, active_canaries, daemon_healthy=daemon_healthy
+    )
 
     ok = (
         (config_error is None)
@@ -376,8 +377,7 @@ def _extraction_commands_check(config: Config) -> dict[str, Any]:
             "commands": reported,
             "message": (
                 "an extraction tool could not report its version, so revisions "
-                "cannot record which build produced their text -- "
-                + "; ".join(failures)
+                "cannot record which build produced their text -- " + "; ".join(failures)
             ),
         }
     return {
@@ -544,6 +544,118 @@ def _active_extractor_profiles(conn: Any) -> list[tuple[str, dict[str, Any]]]:
         )
     ).fetchall()
     return [(str(collection), json.loads(payload)) for collection, payload in rows]
+
+
+def _canary_drift_check(
+    config: Config, canaries: Sequence[tuple[str, str, str, str, str | None]]
+) -> dict[str, Any]:
+    """Replay each active revision's stored canary against the running server.
+
+    Only a server serving *that profile's* model is asked. A daemon loaded with
+    another model would fail every canary by construction, which would report a
+    deliberate model swap as corruption -- and collections on a legacy profile
+    (the usual state once a model has moved on) would warn forever.
+    """
+    from cementic.canary import (
+        compare_canary_vectors,
+        decode_texts,
+        decode_vectors,
+        describe_canary_verdict,
+    )
+    from cementic.embedding_runtime import runtime_spec_from_profile_json
+
+    findings: dict[str, str] = {}
+    checked = 0
+    worst_cosine = 1.0
+    for collection, profile_json, texts_json, vectors_json, recorded_build in canaries:
+        try:
+            spec = runtime_spec_from_profile_json(profile_json)
+            if spec.provider != "llama-cpp":
+                continue
+            client = build_llama_cpp_client(config, spec)
+            if not client.matches_expected_runtime():
+                continue
+            observed = client.embed_exact(decode_texts(texts_json))
+            verdict = compare_canary_vectors(decode_vectors(vectors_json), observed)
+        except Exception as error:
+            findings[collection] = f"could not replay this collection's canary: {error}"
+            continue
+        checked += 1
+        worst_cosine = min(worst_cosine, verdict.worst_cosine)
+        # Only a changed *function* is a finding. Reporting the server's own
+        # scheduling noise as drift would fire on nothing but llama-server
+        # batching two requests differently, and a check that cries wolf on
+        # normal operation is one nobody reads.
+        if not verdict.comparable:
+            findings[collection] = describe_canary_verdict(verdict, recorded_build)
+    if not findings:
+        return {
+            "status": "ok",
+            "drift": {},
+            "message": (
+                f"{checked} active revision(s) reproduce their reference vectors "
+                f"(worst cosine {worst_cosine:.9f})"
+                if checked
+                else "no active revision has a reference canary the running server can replay"
+            ),
+        }
+    return {
+        "status": "warning",
+        "drift": findings,
+        "message": "; ".join(
+            f"{collection}: {finding}" for collection, finding in sorted(findings.items())
+        ),
+    }
+
+
+def _embedding_canary_check(
+    config: Config,
+    canaries: Sequence[tuple[str, str, str, str, str | None]] | None,
+    *,
+    daemon_healthy: bool,
+) -> dict[str, Any]:
+    """The canary replay, plus the two states in which it cannot run.
+
+    Skipped rather than failed when the daemon is not answering: this check
+    reads a running server, and `doctor` may not start one.
+    """
+    if canaries is None:
+        return {
+            "status": "ok",
+            "drift": {},
+            "message": "database unreachable; reference vectors not compared",
+        }
+    if not daemon_healthy:
+        return {
+            "status": "ok",
+            "drift": {},
+            "message": "embedding server not answering; reference vectors not compared",
+        }
+    return _canary_drift_check(config, canaries)
+
+
+def _active_embedding_canaries(
+    conn: Any,
+) -> list[tuple[str, str, str, str, str | None]]:
+    """(collection, embedding runtime json, canary texts, canary vectors, build)."""
+    try:
+        rows = conn.execute(
+            text(
+                "SELECT r.collection, p.config_json, c.texts_json, c.vectors_json, "
+                "c.server_build FROM pipeline_revisions r "
+                "JOIN embedding_profiles p ON p.id = r.embedding_profile_id "
+                "JOIN embedding_profile_canaries c ON c.embedding_profile_id = p.id "
+                "WHERE r.status = 'active' ORDER BY r.collection"
+            )
+        ).fetchall()
+    except Exception:
+        # A database created before this table exists is the normal state on
+        # upgrade, and `doctor` may not create schema to fix it -- the next
+        # indexing run does. Reading that as "none recorded" keeps a diagnostic
+        # from failing on the absence of the thing it diagnoses.
+        conn.rollback()
+        return []
+    return [(str(row[0]), str(row[1]), str(row[2]), str(row[3]), row[4]) for row in rows]
 
 
 def _chunk_budget_check(config: Config) -> dict[str, Any]:

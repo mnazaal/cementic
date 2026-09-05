@@ -516,6 +516,40 @@ tok/s against a raw 382, so derate by roughly a quarter.
 profile, so changing it re-versions the corpus. Set it before a bulk import,
 not after.
 
+### Detecting an embedding server that changed under you
+
+`n_gpu_layers` is in the fingerprint, but the llama.cpp *build* is not — it is
+knowable only by asking a running server, and putting it in the profile would
+re-version the whole corpus on every upgrade. So cementic detects instead.
+
+Each embedding profile stores a few reference texts with the vectors one server
+produced for them, taken once on the first indexing run that uses the profile.
+`cementic doctor` replays that exact request against the running server and
+compares by cosine. It warns only when the server computes *different*
+embeddings from the indexed ones — the collection then needs rebuilding, or the
+previous server restoring.
+
+The comparison cannot be bit-for-bit, and the reason is worth knowing before
+you tune anything: llama-server packs concurrent slot work into unified
+batches, so the same request returns slightly different vectors depending on
+what the server handled just before it. Measured here, replaying a canary after
+an unrelated 3-text request moved it to cosine 0.999908; request composition
+moves it up to 2.3e-3 (a text embedded alone versus as the last of 32). Bit
+equality would report that scheduling as corruption.
+
+What noise cannot do is cross the gap to a changed function. A tokenizer,
+pooling or normalisation change lands two orders of magnitude below any of the
+above, which is where the threshold sits. Upgrades themselves are usually
+harmless: b10605 against b10818 — 213 builds apart — returned bitwise identical
+vectors for 200 real chunks on both CPU and Vulkan.
+
+Only a server serving that profile's own model is asked, so a deliberate model
+swap and collections left on a legacy profile are skipped rather than reported
+as corruption. To get these numbers for your own hardware, run two builds in
+turn on a spare port with identical flags and embed the same sample through
+each — and keep the traffic sequence identical between the two, or you measure
+the scheduling noise above instead of the build difference.
+
 ### Running indexing as a background service
 
 `cementic start` spawns the watcher and worker as detached children of your
@@ -770,6 +804,7 @@ src/cementic/
 ├── state.py              # daemon state files
 ├── bootstrap.py          # DB-reachable check + llama model download
 ├── doctor.py             # read-only runtime diagnostics
+├── canary.py             # reference vectors that catch a changed embedding server
 ├── filelock.py           # advisory file locks (start, daemon autostart)
 ├── validation.py         # collection-name validation
 └── templates/            # files `cementic init postgres` and `config init` copy out

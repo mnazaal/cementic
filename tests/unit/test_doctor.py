@@ -7,7 +7,10 @@ import pytest
 
 from cementic.config import Config, ExtractionConfig
 from cementic.doctor import (
+    _active_embedding_canaries,
+    _canary_drift_check,
     _daemon_state,
+    _embedding_canary_check,
     _embedding_server_check,
     _extraction_commands_check,
     _extractor_drift_check,
@@ -86,9 +89,7 @@ class TestConfigCheck:
 
     @patch("cementic.doctor._daemon_state", return_value=(True, True, "reachable"))
     @patch("cementic.doctor.get_engine")
-    def test_no_config_file_is_not_a_failure(
-        self, mock_get_engine, mock_daemon, tmp_path
-    ) -> None:
+    def test_no_config_file_is_not_a_failure(self, mock_get_engine, mock_daemon, tmp_path) -> None:
         """Running without a config file is normal, not an error."""
         mock_get_engine.side_effect = Exception("no db in this test")
 
@@ -116,8 +117,7 @@ class TestExtensionFailureIsNotADatabaseFailure:
         assert report["checks"]["database"]["reachable"] is True
         extensions = report["checks"]["extensions"]
         assert any(
-            "could not inspect extensions" in payload["message"]
-            for payload in extensions.values()
+            "could not inspect extensions" in payload["message"] for payload in extensions.values()
         )
         assert report["ok"] is False
 
@@ -241,9 +241,7 @@ class TestModelCheck:
         config = _config_with_model_path(tmp_path, exists=False)
         config.bootstrap.auto_download_llama_model = True
 
-        with patch(
-            "cementic.config.user_data_dir", return_value=str(tmp_path / "elsewhere")
-        ):
+        with patch("cementic.config.user_data_dir", return_value=str(tmp_path / "elsewhere")):
             report = collect_doctor_report(config)
 
         assert report["checks"]["model"]["status"] == "fail"
@@ -558,3 +556,98 @@ class TestExtractorDriftCheck:
 
         assert report["checks"]["extractor_profile"]["status"] == "warning"
         assert report["ok"] is True
+
+
+class TestEmbeddingCanaryCheck:
+    """A newer llama-server can rewrite vectors under an unchanged fingerprint:
+    the profile records the model and the context window, not the build that
+    ran them. The canary replays a stored request and compares strictly, since
+    one build answering one fixed request is bitwise reproducible."""
+
+    ROWS = [("papers", "{}", '["a"]', "[[1.0, 0.0]]", "b10605-a130532ae")]
+
+    def _client(self, vectors, *, serving_ours: bool = True):
+        client = MagicMock()
+        client.matches_expected_runtime.return_value = serving_ours
+        client.embed_exact.return_value = vectors
+        return client
+
+    def _patched(self, client):
+        return (
+            patch("cementic.doctor.build_llama_cpp_client", return_value=client),
+            patch(
+                "cementic.embedding_runtime.runtime_spec_from_profile_json",
+                return_value=MagicMock(provider="llama-cpp"),
+            ),
+        )
+
+    def _run(self, rows, client):
+        build_patch, spec_patch = self._patched(client)
+        with build_patch, spec_patch:
+            return _canary_drift_check(Config(), rows)
+
+    def test_a_reproducing_server_is_ok(self) -> None:
+        report = self._run(self.ROWS, self._client([[1.0, 0.0]]))
+
+        assert report["status"] == "ok"
+        assert report["drift"] == {}
+        assert "1 active revision(s)" in report["message"]
+        assert "worst cosine 1.000000000" in report["message"]
+
+    def test_a_changed_function_warns_and_names_the_collection(self) -> None:
+        report = self._run(self.ROWS, self._client([[0.0, 1.0]]))
+
+        assert report["status"] == "warning"
+        assert "not comparable" in report["drift"]["papers"]
+        assert "papers" in report["message"]
+
+    def test_scheduling_noise_is_not_a_finding(self) -> None:
+        """The server's own batching moves vectors at ~1e-4 (measured live), so
+        warning on any difference would warn on normal operation."""
+        report = self._run(self.ROWS, self._client([[1.0, 1e-9]]))
+
+        assert report["status"] == "ok"
+        assert report["drift"] == {}
+
+    def test_a_server_on_another_model_is_skipped_not_failed(self) -> None:
+        """The usual state after a deliberate model swap, and for collections
+        left on a legacy profile: asking that server to reproduce these vectors
+        would report an intended change as corruption, forever."""
+        report = self._run(self.ROWS, self._client([[0.0, 1.0]], serving_ours=False))
+
+        assert report["status"] == "ok"
+        assert "no active revision has a reference canary" in report["message"]
+
+    def test_a_replay_failure_is_reported_not_raised(self) -> None:
+        client = self._client([[1.0, 0.0]])
+        client.embed_exact.side_effect = RuntimeError("connection refused")
+
+        report = self._run(self.ROWS, client)
+
+        assert report["status"] == "warning"
+        assert "could not replay" in report["drift"]["papers"]
+
+    def test_an_unreachable_database_compares_nothing(self) -> None:
+        report = _embedding_canary_check(Config(), None, daemon_healthy=True)
+
+        assert report["status"] == "ok"
+        assert "database unreachable" in report["message"]
+
+    def test_a_silent_daemon_compares_nothing(self) -> None:
+        """`doctor` may not start a daemon, so with none answering there is
+        nothing to ask -- and that is not a fault of the collection."""
+        report = _embedding_canary_check(Config(), self.ROWS, daemon_healthy=False)
+
+        assert report["status"] == "ok"
+        assert "not answering" in report["message"]
+
+    def test_a_database_without_the_canary_table_reads_as_none_recorded(self) -> None:
+        """Found live: the query shared a `try` with the extension checks, so a
+        database predating the table reported `extensions: fail` and buried the
+        real state. `doctor` may not create schema, and the next indexing run
+        does, so absence is a state to report rather than a fault."""
+        conn = MagicMock()
+        conn.execute.side_effect = Exception('relation "embedding_profile_canaries" does not exist')
+
+        assert _active_embedding_canaries(conn) == []
+        conn.rollback.assert_called_once()
