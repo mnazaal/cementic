@@ -3,14 +3,15 @@
 <!-- session-handoff:begin (2026-09-04) -->
 ## Where the work stands
 
-**Entry point: "Execution order — the migration thread" below.** The next
-action is its step 2, the v1.5-against-v2-moe retrieval comparison, which gates
-everything after it. Three things this session changed about the picture: the
-parked fingerprint item is settled (the canary is implemented and merged as
-`06f7d62`), the migration target is chosen
-(`nomic-embed-text-v1.5`, with a measured 2048-token window rather than the
-advertised 8192), and two sections that read as pending work are marked DONE —
-the command extractor and query-first embed scheduling both shipped.
+**No thread is mid-flight; pick up from `TODO.md`'s roadmap.** The 2026-09-05
+session closed three things and opened none. The parked fingerprint item is
+settled: the embedding canary is implemented and merged (`06f7d62`). The
+migration to `nomic-embed-text-v1.5` was decided and then **rejected by its own
+gate** -- v1.5 retrieves measurably worse than v2-moe here, so `papers` stays as
+it is and the three rebuild-blocked changes stay parked (see the closed
+execution order above). And two sections that read as pending work were marked
+DONE: the command extractor and query-first embed scheduling had both already
+shipped.
 
 **Repo state (corrected 2026-09-05 — the lines below described the previous
 session's branches, which have since merged).** `main` carries `06f7d62`, the
@@ -212,63 +213,37 @@ is the contract for the *text* extraction family, not a universal law; per-type
 backend choice is what raises text-extraction quality (e.g. docling/marker) where
 it matters.
 
-## Execution order — the migration thread
+## Execution order — CLOSED, the gate failed (2026-09-05)
 
-The single sequencing authority for the work the 2026-09-05 decisions imply.
-Each `Decided` section below holds its own rationale and detail; `TODO.md`
-holds the feature backlog, which this does not cover.
+The migration this sequenced is **not happening**: v1.5 retrieves measurably
+worse than v2-moe on this corpus. Steps 1 and 2 ran; 3 to 6 are void. Kept
+short as the record of how it closed; the reasoning is in the migration section
+below, and `TODO.md` holds the feature backlog as before.
 
-1. **Merge the canary.** `claude/embedding-canary` fast-forwards onto `main`.
-   *Ends when:* `git log --oneline main -1` shows it.
-2. **Compare v1.5 against v2-moe on this corpus.**
-   `~/.cache/cementic-igpu/calibration/compare-models.sh` (the agent shell has
-   no `/dev/dri`, so this one is run by hand). Title-to-body retrieval over
-   1,000 real papers, two body chunks each: the query is the paper's title from
-   its filename, a hit is any chunk of that paper, and the title-page chunks
-   are dropped so the task is retrieval rather than string matching. 30-80
-   minutes; it prints a rate and ETA early enough to abort.
+1. **Merge the canary.** DONE -- `06f7d62` on `main`.
+2. **Compare v1.5 against v2-moe.** DONE, and it is the reason this list is
+   closed. 1,000 papers, 2,000 body chunks, title-to-body retrieval, both
+   models embedded fresh in one session with the stored index vectors as a
+   control arm (`~/.cache/cementic-igpu/calibration/compare-models.sh`):
 
-   Three design points were forced by measurement rather than chosen:
-   - **Both models are embedded fresh in one session.** Reusing the stored
-     index vectors for v2-moe biased it -- the same model beat *itself* on the
-     margin for 62 of 100 queries that way, purely from batch composition.
-   - **The stored vectors stay in as a control arm**, so every run prints how
-     large a difference means nothing.
-   - **A margin metric sits beside recall**, because recall saturated at 1.0 at
-     every smaller scale tried (6, 40 and 120 documents); the margin between
-     the right paper and the best wrong one does not saturate.
+   | arm | recall@1 | recall@10 | MRR | mean margin |
+   | --- | --- | --- | --- | --- |
+   | v2-moe (current) | 0.7170 | 0.8870 | 0.7797 | 0.0546 |
+   | v1.5 (candidate) | 0.6590 | 0.8450 | 0.7267 | 0.0279 |
+   | v2-moe from the stored index (control) | 0.7200 | 0.8860 | 0.7812 | 0.0545 |
 
-   *Anti-scope:* a comparison, not a retrieval benchmark -- no eval harness, no
-   labelled set. *Ends when:* the table and the control split are written into
-   the migration section.
-   **This is the gate.** If v1.5 does not beat v2-moe by more than the control
-   arm's split, the migration rests on the 4x context alone -- decide then
-   whether that is worth five days. Note the limit: it compares the models at
-   today's 320-token chunking, not at the ~1,300 the migration would adopt.
-3. **Re-derive `chunk_size`** against v1.5's own `/tokenize` at its measured
-   2048-token window. *Ends when:* the value and the token-ratio distribution
-   behind it are recorded.
-4. **Filter mostly-punctuation chunks at chunk time.** *Ends when:* a re-chunk
-   produces no dot-leader chunks.
-5. **Remove `use_ocr`.** Unblocked -- its ordering constraint (the command
-   extractor) shipped in `935bf45`. *Ends when:* the field is gone from the
-   extractor payload and `doctor`'s OCR check with it.
-6. **Run the migration.** Config swap, rebuild into the new profile's own
-   vector table, promote, prune the old revision. ~5 days. *Ends when:*
-   `cementic status -c papers` reports the v1.5 revision active and the p6
-   table is dropped.
+   v1.5 is worse on every measure: -8.1% recall@1, -6.8% MRR, and it separates
+   the right paper from the best wrong one **half** as well (-48.9%). Paired
+   over 1,000 queries it ranks the paper higher on 133 and lower on 245 (exact
+   sign test p = 8.9e-09), and wins the margin on 299 against the control arm's
+   own 523 -- ten standard deviations below the null the control measures. The
+   control arm also lands on top of fresh v2-moe, which is what says the
+   comparison itself is sound.
 
-**Risk, unmitigated by design: search on `papers` is unavailable for the
-duration of step 6.** Indexing wants v1.5 loaded; searching the still-active
-revision wants v2-moe; `llama_cpp.daemon_port` is one port for both, and the
-alias check makes the loser error rather than answer wrongly. Correct, but it
-means five days without search unless `TODO.md`'s parked multi-profile daemon
-pool gets built first. Decide which before starting step 6, not during it.
-
-**Risk: the canary captured for the new profile attests to whatever server is
-running at step 6, not to a reviewed one.** That is by construction (capture is
-lazy and once per profile) and is fine, provided the migration is not started
-on a server nobody meant to be running -- check `cementic doctor` first.
+3-6. **Void.** `chunk_size` re-derivation, the punctuation filter and OCR
+   removal go back to parked: each costs a full rebuild and there is no longer
+   a rebuild to ride on. The five-day re-embed and its five days without search
+   are not being spent.
 
 ## Design decisions and open items
 
@@ -325,13 +300,29 @@ add a file type cementic does not already know — its best use. Ripples to
 set as plain data, matching how `ignore_directories` is already passed. The
 command extractor is never a fallback: it must be named in `backends`.
 
-### Decided — migrate `papers` to another nomic model (2026-09-05)
+### Rejected by measurement — migrating `papers` to v1.5 (2026-09-05)
 
-**Direction taken; not urgent, and one input is still open (which model).** Three
-changes were parked waiting for a rebuild to happen for some independent reason,
-each costing a full re-embed on its own. Wanting a different embedding model is
-that reason, so they ride along — doing them afterwards costs a second ~5-day
-re-embed for nothing.
+**Decided, then reversed the same day by the gate that was built to test it.**
+The candidate was `nomic-embed-text-v1.5`; it retrieves worse than the v2-moe
+already in place (numbers in the closed execution order above), so `papers`
+stays on v2-moe and the three rebuild-blocked changes stay parked. Everything
+below is kept because it is what a *future* model swap costs, and because the
+reasoning that pointed at v1.5 was sound right up to the measurement -- which
+is the argument for keeping the gate cheap and running it first.
+
+**What would reopen this.** A candidate that beats v2-moe on
+`compare-models.sh`, run the same way. Two facts worth carrying into that
+search: a longer context is not itself worth a rebuild -- v1.5's 2048 against
+v2-moe's 512 did not compensate for worse retrieval -- and v1.5 embedded ~4x
+faster in the same run (3.4 against 0.8 embeds/s, partly because v2-moe's
+512-token window refused five batches to v1.5's one, forcing per-text retries).
+If indexing throughput ever binds harder than retrieval quality, that trade is
+now measured rather than guessed.
+
+Three changes were parked waiting for a rebuild to happen for some independent
+reason, each costing a full re-embed on its own. A model swap would have been
+that reason, so they were to ride along — doing them afterwards costs a second
+~5-day re-embed for nothing.
 
 What a model swap actually costs, read out of the code and the live database
 rather than estimated:
@@ -432,7 +423,7 @@ of the affected chunks are genuinely dense content (code, maths, long structured
 titles); the rest are contents pages that the punctuation filter above should
 stop creating at all.
 
-### Step 5 of the execution order — remove OCR from the codebase
+### Parked again — remove OCR from the codebase
 
 **Not blocked on design; it now has a rebuild to ride on.** `use_ocr` reaches
 extraction only through the pymupdf4llm backend, so it is a knob that silently
@@ -442,10 +433,11 @@ rapidocr from the picture entirely (dependency, extra, and `--with` all moot).
 
 The cost is that `use_ocr` is a key in the extractor payload, so removing the
 field changes every extraction fingerprint: `papers` re-extracts, re-chunks and
-re-embeds all 2,291,555 chunks — which is exactly what the model migration
-above pays for anyway, so it lands in that same rebuild. Its ordering
-constraint is satisfied: the command extractor shipped in `935bf45`, so a
-configured `ocrmypdf` wrapper remains an OCR route once the knob is gone.
+re-embeds all 2,291,555 chunks. The model migration would have paid for that
+rebuild anyway, and it is not happening, so this waits for the next real reason
+to rebuild. Its *other* constraint is now satisfied: the command extractor
+shipped in `935bf45`, so a configured `ocrmypdf` wrapper remains an OCR route
+once the knob is gone.
 Pre-processing with `ocrmypdf` into `pymupdf-raw` works with no cementic code at
 all and is the documented fallback — untested here, no OCR engine is installed
 on this host.
