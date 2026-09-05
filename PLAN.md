@@ -3,24 +3,25 @@
 <!-- session-handoff:begin (2026-09-04) -->
 ## Where the work stands
 
-**Entry point (corrected 2026-09-05): that parked item is now settled — see
-"Decided — detect server drift with a canary, not a fingerprint" below, and
-"Decided — migrate `papers` to another nomic model", which absorbed the
-rebuild-blocked work. The canary is implemented and its threshold measured
-(cosine 0.99; the earlier "compare exactly" plan was falsified by the live
-server and is corrected in place). The migration target is
-`nomic-embed-text-v1.5`, chosen but not scheduled.**
+**Entry point: "Execution order — the migration thread" below.** The next
+action is its step 2, the v1.5-against-v2-moe retrieval comparison, which gates
+everything after it. Three things this session changed about the picture: the
+parked fingerprint item is settled (the canary is implemented and merged as
+`06f7d62`), the migration target is chosen
+(`nomic-embed-text-v1.5`, with a measured 2048-token window rather than the
+advertised 8192), and two sections that read as pending work are marked DONE —
+the command extractor and query-first embed scheduling both shipped.
 
-**Repo state.** `main` is level with `origin/main` at `fa03c95` — the pins and
-the new `extractor_profile` doctor check are merged and pushed, and
-`claude/pin-extraction-library-versions` is now redundant and can be deleted.
+**Repo state (corrected 2026-09-05 — the lines below described the previous
+session's branches, which have since merged).** `main` carries `06f7d62`, the
+canary implementation. Unmerged: `claude/migration-plan`, this plan revision.
+A hook rejects agents touching `main`, so merging is yours:
+```bash
+git checkout main && git merge --ff-only claude/migration-plan
+```
 `uv tool upgrade cementic` has run: the PATH install reports pymupdf 1.27.1 /
 pymupdf4llm 0.3.4 and `extractor_profile: ok`, so the checkout and the snapshot
-finally agree. Only **this handoff commit is unmerged**, on
-`claude/session-handoff-2026-09-04`; a hook rejects agents touching `main`:
-```bash
-git checkout main && git merge --ff-only claude/session-handoff-2026-09-04
-```
+agree.
 
 **Live state.** `papers` is whole and served: 23,064 documents, 2,298,558
 embeddings, revision 16 active, no building revision. Indexing now runs as the
@@ -211,11 +212,59 @@ is the contract for the *text* extraction family, not a universal law; per-type
 backend choice is what raises text-extraction quality (e.g. docling/marker) where
 it matters.
 
+## Execution order — the migration thread
+
+The single sequencing authority for the work the 2026-09-05 decisions imply.
+Each `Decided` section below holds its own rationale and detail; `TODO.md`
+holds the feature backlog, which this does not cover.
+
+1. **Merge the canary.** `claude/embedding-canary` fast-forwards onto `main`.
+   *Ends when:* `git log --oneline main -1` shows it.
+2. **Compare v1.5 against v2-moe on this corpus.** Sample ~5,000 real chunks,
+   reuse their existing v2-moe vectors from `embedding_vectors_p6` rather than
+   re-embedding them, embed the same chunks with v1.5, then query with each
+   document's first chunk and score how often a *different* chunk of the same
+   document ranks top-k. ~15 minutes on the iGPU; an agent shell cannot run it
+   (no `/dev/dri`). *Anti-scope:* this is a comparison, not a retrieval
+   benchmark -- no new eval harness, no labelled set. *Ends when:* recall@k for
+   both models is written into the migration section.
+   **This is the gate.** If v1.5 does not beat v2-moe, the migration does not
+   happen, the three rebuild-blocked items stay parked, and steps 3-6 are moot.
+   Note the limit: it compares the models at today's 320-token chunking, not at
+   the ~1,300 the migration would adopt.
+3. **Re-derive `chunk_size`** against v1.5's own `/tokenize` at its measured
+   2048-token window. *Ends when:* the value and the token-ratio distribution
+   behind it are recorded.
+4. **Filter mostly-punctuation chunks at chunk time.** *Ends when:* a re-chunk
+   produces no dot-leader chunks.
+5. **Remove `use_ocr`.** Unblocked -- its ordering constraint (the command
+   extractor) shipped in `935bf45`. *Ends when:* the field is gone from the
+   extractor payload and `doctor`'s OCR check with it.
+6. **Run the migration.** Config swap, rebuild into the new profile's own
+   vector table, promote, prune the old revision. ~5 days. *Ends when:*
+   `cementic status -c papers` reports the v1.5 revision active and the p6
+   table is dropped.
+
+**Risk, unmitigated by design: search on `papers` is unavailable for the
+duration of step 6.** Indexing wants v1.5 loaded; searching the still-active
+revision wants v2-moe; `llama_cpp.daemon_port` is one port for both, and the
+alias check makes the loser error rather than answer wrongly. Correct, but it
+means five days without search unless `TODO.md`'s parked multi-profile daemon
+pool gets built first. Decide which before starting step 6, not during it.
+
+**Risk: the canary captured for the new profile attests to whatever server is
+running at step 6, not to a reviewed one.** That is by construction (capture is
+lazy and once per profile) and is fine, provided the migration is not started
+on a server nobody meant to be running -- check `cementic doctor` first.
+
 ## Design decisions and open items
 
-### Decided — external command extractor (2026-09-03)
+### Decided — external command extractor (2026-09-03) — DONE
 
-**Taken; implementation next.** Extraction is the last subsystem that hardcodes
+**Shipped in `935bf45`** (registry entry, `[extraction.commands]` with its
+paired `command_versions`, the `extraction_commands` doctor check, tests).
+Retained for the rationale; nothing below is outstanding. Extraction was the
+last subsystem that hardcoded
 Python libraries and grows a boolean per library feature. Embeddings already
 work the other way: `daemon_command` names a binary, cementic spawns it and
 consumes its output. A `command` extractor makes extraction symmetric — text
@@ -299,8 +348,9 @@ rather than estimated:
   `llama-server` on another port, which is already how the iGPU setup runs.
 
 **Chosen 2026-09-05 — `nomic-embed-text-v1.5`.**
-768 dimensions (unchanged, so the vector table shape is unchanged), an
-8192-token context against the current 512, Matryoshka truncation, a published
+768 dimensions (unchanged, so the vector table shape is unchanged), a longer
+context than the current 512 (measured below, and it is not the 8192 the model
+card advertises), Matryoshka truncation, a published
 GGUF, and an embedding space shared with `nomic-embed-vision-v1.5` — which would
 let figures and page images be searched alongside text without a second vector
 space, the thing `Markdown as the text intermediate representation` above calls
@@ -314,9 +364,28 @@ three parked items parked; and going straight to a multimodal model
 has unverified llama.cpp support. v1.5's shared vision space is what makes that
 a cheap follow-on rather than a competing direction.
 
-Two scaffold-time checks, not yet run: that the v1.5 GGUF loads on this Vulkan
-build, and how v1.5 and v2-moe actually compare on retrieval over English
-papers. Both precede scheduling the five-day re-embed.
+**Load check done 2026-09-05, and it corrects the headline number.** The GGUF
+already in `models/` (`nomic-embed-text-v1.5.f16.gguf`, 274 MB) loads under
+b10818 and serves 768-dim vectors. But its context is **2048, not 8192**:
+`n_ctx_train` in the GGUF is 2048, and llama.cpp caps the slot to it -- "the
+slot context (8192) exceeds the training context of the model (2048) -
+capping", after which a 3,002-token input is refused outright. The card's 8192
+comes from RoPE scaling that this conversion does not carry.
+
+8192 *can* be forced -- `--rope-scaling yarn --rope-scale 4` loads at
+`n_ctx_slot = 8192` and embeds a 3,000-word input fine -- but that is untested
+for quality, and the flags do not match what the card specifies (dynamic NTK
+scaling, factor 2.0). Treat scaled RoPE as its own experiment, not as a
+config line.
+
+So the honest gain is **4x the current window, not 16x**: 2048 tokens supports
+a `chunk_size` near 1,300 against today's 320, which cuts the corpus from
+~2.3M chunks to roughly 575k and the vector table from 18 GB to ~4.5 GB. Still
+worth the migration; just not the number the plan was written around.
+
+One scaffold-time check remains: how v1.5 and v2-moe actually compare on
+retrieval over these papers. It precedes scheduling the five-day re-embed,
+because it is the only claim here still resting on a model card.
 
 **What rides along, in the order the pipeline runs them.**
 
@@ -332,10 +401,11 @@ of the corpus produces no dot-leader chunks and the junk vectors are gone.
 *Re-derive `chunk_size` against the model's own tokenizer, not tiktoken.* The
 mismatch is the root cause of the item above. Do not simply lower it: on the
 current model, clearing the observed p95 (637 model tokens) needs 249 and the
-observed max (1958) needs 75, which is too small to be a useful chunk. A
-larger-context model changes this arithmetic entirely, which is why it waits on
-the model choice. *Ends when:* `chunk_size` is set from a measured token-ratio
-distribution against the chosen model's `/tokenize`, recorded here.
+observed max (1958) needs 75, which is too small to be a useful chunk. v1.5's
+measured 2048-token window changes that arithmetic entirely: the observed max
+fits with room to spare, so the filter above stops being load-bearing.
+*Ends when:* `chunk_size` is set from a measured token-ratio distribution
+against the chosen model's `/tokenize`, recorded here.
 
 *Remove OCR from the codebase.* See the section below; it is blocked on this
 same rebuild and on the command extractor landing first.
@@ -349,7 +419,7 @@ of the affected chunks are genuinely dense content (code, maths, long structured
 titles); the rest are contents pages that the punctuation filter above should
 stop creating at all.
 
-### Blocked on the migration above — remove OCR from the codebase
+### Step 5 of the execution order — remove OCR from the codebase
 
 **Not blocked on design; it now has a rebuild to ride on.** `use_ocr` reaches
 extraction only through the pymupdf4llm backend, so it is a knob that silently
@@ -360,9 +430,9 @@ rapidocr from the picture entirely (dependency, extra, and `--with` all moot).
 The cost is that `use_ocr` is a key in the extractor payload, so removing the
 field changes every extraction fingerprint: `papers` re-extracts, re-chunks and
 re-embeds all 2,291,555 chunks — which is exactly what the model migration
-above pays for anyway, so it lands in that same rebuild. The remaining ordering
-constraint is the command extractor: it must land first, so there is still an
-OCR route (a configured `ocrmypdf` wrapper) once the knob is gone.
+above pays for anyway, so it lands in that same rebuild. Its ordering
+constraint is satisfied: the command extractor shipped in `935bf45`, so a
+configured `ocrmypdf` wrapper remains an OCR route once the knob is gone.
 Pre-processing with `ocrmypdf` into `pymupdf-raw` works with no cementic code at
 all and is the documented fallback — untested here, no OCR engine is installed
 on this host.
@@ -484,9 +554,12 @@ also indexing-only: a collection that never indexes again keeps no canary, so
 the check reports honestly that it has nothing to replay rather than inventing
 a reference from today's server.
 
-### Decided — query-first embed scheduling (2026-09-01)
+### Decided — query-first embed scheduling (2026-09-01) — DONE
 
-**Taken; implementation next.** A search query landing mid-import waits on the
+**Both layers shipped**: sub-batching as `pipeline_worker.embed_submit_batch_size`
+and the search lease as `db.SearchActivity` / `search.record_search_activity`,
+consumed by `pipeline_worker`'s `_wait_while_search_is_active`. Retained for the
+measurements and the parked triggers. A search query landing mid-import waits on the
 shared llama-server: the worker POSTs 32 texts per request, b10605 schedules
 per-input FIFO with no HTTP priority hook, so a query's one task queues behind
 up to 32 — measured 0.4–9.6 s of queue delay (17.2 s worst-case wall) against
