@@ -53,7 +53,7 @@ def test_convert_uses_layout_and_disables_header_footer(temp_dir: Path) -> None:
     stack = _fake_pdf_stack()
     with patch("cementic.extract._get_pymupdf", return_value=stack):
         with patch("cementic.extract._get_rapidocr_api", return_value=rapidocr):
-            result = extract_pdf_markdown(str(pdf_path))
+            result = extract_pdf_markdown(str(pdf_path), use_ocr=True)
 
     assert result == "markdown"
     stack[1].to_markdown.assert_called_once_with(

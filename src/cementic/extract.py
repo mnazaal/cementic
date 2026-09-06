@@ -122,7 +122,7 @@ def ocr_backend_available() -> bool:
     return _get_rapidocr_api() is not None
 
 
-def extract_pdf_markdown(pdf_path: str, use_ocr: bool = True) -> str:
+def extract_pdf_markdown(pdf_path: str, use_ocr: bool = False) -> str:
     """Extract PDF content as Markdown using pymupdf4llm.
 
     Backend selection happens upstream in ``extractor_for`` (via the
@@ -131,7 +131,9 @@ def extract_pdf_markdown(pdf_path: str, use_ocr: bool = True) -> str:
 
     Args:
         pdf_path: Path to PDF file
-        use_ocr: Whether to run OCR over the pages
+        use_ocr: Whether to run OCR over the pages. Defaults to off, matching
+            ``extraction.use_ocr``; the two disagreeing meant the only honest
+            reading of a bare call was "whichever default you happen to hit".
 
     Returns:
         Markdown content as string
