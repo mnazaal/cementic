@@ -343,6 +343,14 @@ class TestSafePct:
     def test_rounds_to_one_decimal(self) -> None:
         assert _safe_pct(1, 3) == 33.3
 
+    def test_never_rounds_up_to_complete(self) -> None:
+        # 2,161 chunks short of 2.16M rounds to 100.0 at one decimal place, and
+        # a status line reading 100.0% is what a reader stops watching.
+        assert _safe_pct(2_160_000 - 2_161, 2_160_000) == 99.9
+
+    def test_reaches_complete_only_when_done(self) -> None:
+        assert _safe_pct(2_160_000, 2_160_000) == 100.0
+
 
 class TestSelectTargetRevision:
     """Tests for pure revision selection policy."""
@@ -1004,3 +1012,79 @@ class TestPerFileViewAgreesWithTheSummary:
         assert by_path["/col/1.pdf"].extraction_status == "done"
         done_rows = sum(1 for f in files if f.extraction_status == "done")
         assert done_rows == summary.extracted_done
+
+
+class TestFileProgressLimit:
+    """The cap `status --verbose` uses, and what it is allowed to hide."""
+
+    def _session_factory(self):
+        engine = create_engine("sqlite:///:memory:")
+        Base.metadata.create_all(engine)
+        return engine, sessionmaker(bind=engine, expire_on_commit=False)
+
+    def test_limit_caps_rows_read(self) -> None:
+        engine, session_factory = self._session_factory()
+        with session_factory() as session:
+            _seed_collection_with_documents(session, "col", 10)
+            session.commit()
+
+        with (
+            patch("cementic.status_service.get_engine", return_value=engine),
+            patch("cementic.status_service.get_session_factory", return_value=session_factory),
+        ):
+            assert len(load_file_progress(Config(), "col", 3)) == 3
+            assert len(load_file_progress(Config(), "col", None)) == 10
+
+    def test_failures_survive_the_cap(self) -> None:
+        """The cap is only worth having if it keeps what a reader came for.
+
+        Ten healthy documents sort before the broken one by path, so an
+        unordered LIMIT 1 would return a `done` row and hide the failure.
+        """
+        engine, session_factory = self._session_factory()
+        with session_factory() as session:
+            revision = _seed_collection_with_documents(session, "col", 10)
+            broken = SourceDocument(
+                collection="col", source_path="/col/zzz-last-by-path.pdf", file_hash="hz"
+            )
+            session.add(broken)
+            session.flush()
+            session.add(
+                ExtractedDocument(
+                    document_id=broken.id,
+                    extractor_profile_id=revision.extractor_profile_id,
+                    status="failed",
+                    source_file_hash="hz",
+                    error_message="extraction broke",
+                )
+            )
+            session.commit()
+
+        with (
+            patch("cementic.status_service.get_engine", return_value=engine),
+            patch("cementic.status_service.get_session_factory", return_value=session_factory),
+        ):
+            files = load_file_progress(Config(), "col", 1)
+
+        assert [f.source_path for f in files] == ["/col/zzz-last-by-path.pdf"]
+        assert files[0].extraction_status == "failed"
+
+    def test_unstarted_files_sort_ahead_of_finished_ones(self) -> None:
+        engine, session_factory = self._session_factory()
+        with session_factory() as session:
+            _seed_collection_with_documents(session, "col", 5)
+            session.add(
+                SourceDocument(
+                    collection="col", source_path="/col/zzz-untouched.pdf", file_hash="hu"
+                )
+            )
+            session.commit()
+
+        with (
+            patch("cementic.status_service.get_engine", return_value=engine),
+            patch("cementic.status_service.get_session_factory", return_value=session_factory),
+        ):
+            files = load_file_progress(Config(), "col", 1)
+
+        assert files[0].source_path == "/col/zzz-untouched.pdf"
+        assert files[0].extraction_status == "pending"

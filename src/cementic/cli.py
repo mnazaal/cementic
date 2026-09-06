@@ -258,6 +258,12 @@ def _stdin_is_a_terminal() -> bool:
 
 _STARTUP_GRACE_SECONDS = 2.0
 
+#: How many files `status --verbose` lists before it stops. A screenful of the
+#: rows that sort first, not one line per document: at corpus scale the
+#: unlimited listing loaded tens of megabytes of ORM objects to flood a
+#: terminal. `--limit 0` restores the full listing.
+DEFAULT_STATUS_FILE_LIMIT = 20
+
 
 def _pipeline_worker_activity() -> str | None:
     """What the pipeline worker is busy with, if it published anything.
@@ -570,6 +576,12 @@ def status(
         "-v",
         help="Show per-file pipeline progress",
     ),
+    limit: int = typer.Option(
+        DEFAULT_STATUS_FILE_LIMIT,
+        "--limit",
+        min=0,
+        help="Max files listed by --verbose; 0 for all",
+    ),
     json_output: bool = typer.Option(
         False,
         "--json",
@@ -579,6 +591,8 @@ def status(
     """Show background worker status and collection progress."""
     if collection is not None:
         collection = _validated_collection_name(collection)
+    # 0 is the escape hatch, and None is how the query layer spells "no LIMIT".
+    file_limit = limit or None
 
     state = _load_supervisor_state()
     source_watcher_status, pipeline_worker_status = load_worker_statuses(_get_config())
@@ -608,6 +622,7 @@ def status(
             health_error,
             collection,
             verbose,
+            file_limit,
         )
         failed = render.print_status_document(document)
         if failed:
@@ -678,7 +693,9 @@ def status(
             _require_known_collection(session, collection)
 
         pipeline_status = load_pipeline_status(_get_config(), collection)
-        render._print_collection_detail(collection, pipeline_status, verbose, _get_config())
+        render._print_collection_detail(
+            collection, pipeline_status, verbose, _get_config(), file_limit
+        )
 
 
 @app.command(

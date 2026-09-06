@@ -198,6 +198,7 @@ def _print_collection_detail(
     pipeline_status: Any,
     verbose: bool,
     config: Config,
+    file_limit: int | None = None,
 ) -> None:
     """Print a concise per-collection summary; per-file detail behind --verbose."""
     ps = pipeline_status
@@ -250,7 +251,7 @@ def _print_collection_detail(
 
     if verbose and collection:
         try:
-            files = load_file_progress(config, collection)
+            files = load_file_progress(config, collection, file_limit)
             if not files:
                 console.print("files: none")
                 return
@@ -266,6 +267,14 @@ def _print_collection_detail(
                 if f.error_message:
                     status_line += f" | error: {f.error_message[:80]}"
                 console.print(status_line)
+            if file_limit is not None and len(files) == file_limit:
+                # Saying so is the whole point of having a cap. An unannounced
+                # truncation is the same defect as the swallowed exception
+                # below: a partial listing that reads as the complete answer.
+                console.print(
+                    f"  ... capped at {file_limit}; failures and unfinished files sort first."
+                    " Use --limit 0 for all."
+                )
         except Exception as error:
             # This used to be swallowed at exit 0 (and the database-unavailable
             # case printed nothing at all), so a truncated report read as the
@@ -287,6 +296,7 @@ def build_status_document(
     health_error: str | None,
     collection: str | None,
     verbose: bool,
+    file_limit: int | None = None,
 ) -> dict[str, Any]:
     """Build the `status --json` document.
 
@@ -367,8 +377,11 @@ def build_status_document(
                 ps = load_pipeline_status(config, collection)
                 output["pipeline"] = {"collection": collection, **asdict(ps)}
                 if verbose:
-                    files = load_file_progress(config, collection)
+                    files = load_file_progress(config, collection, file_limit)
                     output["files"] = [asdict(f) for f in files]
+                    output["files_truncated"] = (
+                        file_limit is not None and len(files) == file_limit
+                    )
     except Exception as error:
         output["error"] = no_schema_hint if is_schema_missing(error) else str(error)
 

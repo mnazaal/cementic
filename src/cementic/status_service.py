@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from sqlalchemy import and_, func, or_, text
+from sqlalchemy import ColumnElement, and_, case, func, or_, text
 
 from cementic.config import Config
 from cementic.db import (
@@ -117,8 +117,20 @@ class FileProgress:
 
 
 def _safe_pct(done: int, total: int) -> float:
-    """Return percentage, or 0.0 if total is zero."""
-    return round((done / total) * 100, 1) if total > 0 else 0.0
+    """Return percentage, or 0.0 if total is zero.
+
+    Rounding is not allowed to reach 100.0 while anything is outstanding. One
+    decimal place over 2.16M chunks is a resolution of ~2,162 chunks, so a build
+    with thousands still pending rounded up and displayed as finished -- and
+    "finished" is the one thing a reader acts on. Holding at 99.9 until the last
+    item lands keeps 100.0 meaning done.
+    """
+    if total <= 0:
+        return 0.0
+    pct = round((done / total) * 100, 1)
+    if pct >= 100.0 and done < total:
+        return 99.9
+    return pct
 
 
 def _select_target_revision(
@@ -470,8 +482,43 @@ def check_health(config: Config) -> HealthStatus:
     )
 
 
-def load_file_progress(config: Config, collection: str) -> list[FileProgress]:
-    """Load per-file pipeline progress for verbose status output."""
+def _file_progress_rank() -> ColumnElement[int]:
+    """Order files by how much they want a reader: failed, then unfinished, then done.
+
+    Written against the outer-joined tables, so a missing artifact row (no
+    extraction attempted yet) is checked by id before its status is compared --
+    a NULL status is neither equal nor unequal to 'done' and would otherwise
+    fall through to the done bucket.
+    """
+    return case(
+        (ExtractedDocument.status == "failed", 0),
+        (ChunkedDocument.status == "failed", 0),
+        (ExtractedDocument.id.is_(None), 1),
+        (ExtractedDocument.status != "done", 1),
+        (ChunkedDocument.id.is_(None), 1),
+        (ChunkedDocument.status != "done", 1),
+        else_=2,
+    )
+
+
+def load_file_progress(
+    config: Config, collection: str, limit: int | None = None
+) -> list[FileProgress]:
+    """Load per-file pipeline progress for verbose status output.
+
+    ``limit`` caps the rows read, and None means every document. A corpus-scale
+    collection is the reason the cap exists: 23k documents is one ORM object per
+    document plus a per-chunk count for each, which is tens of megabytes loaded
+    to print a page of terminal output nobody reads past.
+
+    The cap is only useful if the interesting rows survive it, so failures sort
+    first and never-started work second -- the two states a reader opens this
+    view to find. Ordering runs in SQL rather than over the result, because
+    sorting after the LIMIT would sort whichever arbitrary rows the cap let
+    through. Embedding failures are not part of the rank: they are counted per
+    chunked document in a second query below, and the summary line above this
+    listing already names them.
+    """
     engine = get_engine(config.database.url)
     session_factory = get_session_factory(engine)
     with session_factory() as session:
@@ -518,7 +565,8 @@ def load_file_progress(config: Config, collection: str) -> list[FileProgress]:
                 ),
             )
             .filter(SourceDocument.collection == collection, SourceDocument.status != "deleted")
-            .order_by(SourceDocument.source_path)
+            .order_by(_file_progress_rank(), SourceDocument.source_path)
+            .limit(limit)
             .all()
         )
 
