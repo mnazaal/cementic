@@ -24,7 +24,7 @@ index, versioned revisions) are documented in [PLAN.md](PLAN.md).
   already ships — a result carries collection, source_path, content, score,
   distance and score_kind.)
 - Match database URLs with `make_url` rather than `startswith("postgresql://")`
-  (`db.py:316`). The current check skips the `gssencmode` connect-arg for
+  (`db.py:375`). The current check skips the `gssencmode` connect-arg for
   driver-qualified URLs like `postgresql+psycopg2://`, which a user setting
   `CEMENTIC_DB_URL` may well write. Carried over from PLAN.md's "Deliberately
   not done", where it was parked behind "only if `db.py` is open for another

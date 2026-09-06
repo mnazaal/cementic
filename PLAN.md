@@ -11,14 +11,11 @@ rejected) and gained evidence: v2-moe's 512-token window refused 5 batches of
 2,000 chunks during the 2026-09-05 comparison run, so overflow is routine
 rather than rare.
 
-**Repo state.** `main` is at `0d445ca` — four agent branches merged and
-deleted this session (canary, plan, experiment, rejection). **Only this handoff
-commit is unmerged**, on `claude/session-handoff-2026-09-05`; a hook rejects
-agents committing to `main`, so merging is yours and the next unit of work
-needs its own fresh `claude/<topic>` branch:
-```bash
-git checkout main && git merge --ff-only claude/session-handoff-2026-09-05
-```
+**Repo state.** `main` is at `641334d`, clean and pushed; the handoff commit
+was merged and its branch deleted, so nothing is unmerged. Five agent branches
+were merged and deleted in total (canary, plan, experiment, rejection,
+handoff). A hook rejects agents committing to `main`, so the next unit of work
+needs its own fresh `claude/<topic>` branch.
 
 **What this session settled.**
 - The embedding canary is implemented and merged (`06f7d62`): `canary.py`, the
@@ -63,8 +60,8 @@ below; discarded.
 **Exit criteria — commands whose output confirms the above.**
 ```bash
 git status --short                    # empty
-git log --oneline main..HEAD          # this handoff commit only, until merged
-git log --oneline -1 main             # 0d445ca
+git log --oneline main..HEAD          # empty
+git log --oneline -1 main             # 641334d
 cementic status -c papers             # 2,298,558/2,298,558 embedded, building=-
 cementic doctor                       # ok; embedding_canary reports no canary yet
 ./scripts/check.sh                    # six gates, all ok
@@ -287,7 +284,7 @@ corpus rebuilds. Same trick as the conditional rapidocr entry in `profiles.py`.
 **`supported_extensions()` gains a `Config`.** The command extractor's
 extensions come from the `[extraction.commands]` keys, otherwise it could never
 add a file type cementic does not already know — its best use. Ripples to
-`source_watcher.py:125` and `:385`; `DocumentEventHandler` takes the resolved
+`source_watcher.py:324` and `:395`; `DocumentEventHandler` takes the resolved
 set as plain data, matching how `ignore_directories` is already passed. The
 command extractor is never a fallback: it must be named in `backends`.
 
@@ -492,7 +489,7 @@ being avoided. The natural home is a sibling table keyed by
 string the server reported when they were taken (`/props`, today
 `b10605-a130532ae`). Note that `EmbeddingProfile.config_json` is *not* the
 fingerprinted payload — it carries the runtime payload `search` rebuilds a spec
-from (`profiles.py:307`) — so it is not a shortcut home for this either.
+from (`profiles.py:301`) — so it is not a shortcut home for this either.
 
 Rejected:
 
@@ -707,7 +704,7 @@ of the filename.
 
 That last item bundled two concerns the code has since separated, so read it as
 half-closed. *Which model produced these vectors* no longer comes from a
-filename: Batch C (`77e0e3f`) made it a content digest (`profiles.py:169`).
+filename: Batch C (`77e0e3f`) made it a content digest (`profiles.py:170`).
 *Which text policy applies* is still a filename match (`embedding_text.py:33`),
 deliberately so — that half is the fifth-review residual below, and it is the
 only live part of this item.
@@ -720,7 +717,7 @@ the code, which is why they carry their resolution inline:
 
 - ~~**`check_health` still calls a live-but-broken daemon healthy.**~~
   **RESOLVED 2026-08-18** by the release plan's batch 1a (`04e974a`):
-  `DaemonHealth.WEDGED` (`embedding_runtime.py:553-567`) plus the two-stage
+  `DaemonHealth.WEDGED` (`embedding_runtime.py:758-772`) plus the two-stage
   probe, with the busy/wedged disambiguation observed working live during the
   batch-3 build. The motivating incident stands as the record: on 2026-08-15 a
   wedged daemon held the port for 21 hours while `cementic status` reported
@@ -753,7 +750,7 @@ bug and is one, but the fix costs more than the defect:
 - ~~**`verbose` in the embedding profile fingerprint.**~~ **RESOLVED 2026-08-23**
   by Batch C (`77e0e3f`). The entry's own condition is what closed it: removal
   was only worth doing batched with a model-identity change so the corpus is
-  re-embedded once, and Batch C was that change. `profiles.py:174` now records
+  re-embedded once, and Batch C was that change. `profiles.py:230` now records
   the deliberate absence. It correctly stays in the *runtime* fingerprint, where
   it is a launch argument.
 - **Naive `TIMESTAMP` columns.** Zero readers today (one write, no comparison,
@@ -768,7 +765,7 @@ bug and is one, but the fix costs more than the defect:
   Note the gap is wider than first recorded: the check is
   `startswith("postgresql://")`, so it also misses driver-qualified URLs like
   `postgresql+psycopg2://`, which a user setting `CEMENTIC_DB_URL` may well write.
-  **Audit 2026-08-23:** still live at `db.py:316`, and the entry now fails its
+  **Audit 2026-08-23:** still live at `db.py:375`, and the entry now fails its
   own test — a register of things deliberately not done cannot hold an item whose
   stated trigger has already fired. Queued in `TODO.md` instead.
 - **`ignore_directories` replacing the defaults.** Working as documented,
@@ -810,7 +807,7 @@ blocks the import.
 
 Checked against the real 22,246-file corpus and **not present**, so reachable in
 principle but not here: filenames containing `[` (would break
-`status --verbose`, `render.py:260`), non-UTF-8 filenames (`source_watcher.py:566`
+`status --verbose`, `render.py:260`), non-UTF-8 filenames (`source_watcher.py:593`
 then `render.py:157`), and paths over ~2,600 bytes (btree limit on
 `ix_source_documents_collection_source`, `db.py:70`).
 
@@ -825,22 +822,22 @@ Live, in rough order of how likely they are to bite:
   saturates the daemon a healthy server can be reported WEDGED — and the
   suggested remedy, restarting it, discards an in-flight batch.
 - **Whole-corpus deletes run as one unbounded transaction** with a 22k-element
-  `IN` list (`source_watcher.py:338`, `collections.py:136`), blocking autovacuum
+  `IN` list (`source_watcher.py:71`, `collections.py:136`), blocking autovacuum
   for its duration and leaving millions of dead index entries.
 - **Progress rounds to `100.0%` while thousands of chunks are outstanding**
-  (`status_service.py:115`); at 2.16M the display resolution is ~2,162 chunks.
-- **A revision can reach `ready` mid-initial-scan** (`pipeline_worker.py:977`):
+  (`status_service.py:119`); at 2.16M the display resolution is ~2,162 chunks.
+- **A revision can reach `ready` mid-initial-scan** (`pipeline_worker.py:263`):
   the watcher registers documents one at a time with no scan-complete marker, so
   a drain of the first N looks complete. Promotion re-checks and refuses, so this
   misleads rather than corrupts.
 - **`chunk_text` is quadratic in one whitespace-free run** (`chunk.py`): 160k
   characters took 12.2 s, inside a Rust call that ignores the shutdown event.
   Reachable from a minified line or a PDF text layer with no spaces.
-- **`extractor_registry_payload` hashes the whole registry** (`extract.py:282`),
+- **`extractor_registry_payload` hashes the whole registry** (`extract.py:516`),
   so adding a `.docx` extractor re-versions every existing PDF corpus. Matters
   more now that new extractors are near-term work.
 - **`extract_pdf_markdown`'s signature defaults `use_ocr=True`** while the config
-  defaults `False` (`extract.py:47`). No effect today — `_pdf_extractor` always
+  defaults `False` (`extract.py:125`). No effect today — `_pdf_extractor` always
   passes the config value — but the two disagree.
 
 Resolved by the systemd units rather than by code: the worker had no respawn
