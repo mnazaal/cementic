@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import ForeignKey, Index, Integer, String, Text, create_engine, inspect, text
+from sqlalchemy.engine import make_url
 from sqlalchemy.exc import IntegrityError, OperationalError, ProgrammingError
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship, sessionmaker
 
@@ -369,10 +370,14 @@ def get_engine(database_url: str | URL) -> Engine:
     cache_key = _url_cache_key(database_url)
     engine = _ENGINE_CACHE.get(cache_key)
     if engine is None:
-        # The cache key is already the fully rendered URL.
-        url_str = cache_key
         connect_args: dict[str, object] = {"connect_timeout": 5}
-        if url_str.startswith("postgresql://"):
+        # Parsed, not prefix-matched. `gssencmode` is a psycopg2 connect arg, so
+        # the question is which driver this URL resolves to -- and
+        # `postgresql+psycopg2://`, which a user setting CEMENTIC_DB_URL may
+        # well write, does not start with `postgresql://`. It got no
+        # `gssencmode` and the connection hung on the GSSAPI probe the option
+        # exists to skip.
+        if make_url(database_url).get_backend_name() == "postgresql":
             connect_args["gssencmode"] = "disable"
         engine = create_engine(
             database_url,
