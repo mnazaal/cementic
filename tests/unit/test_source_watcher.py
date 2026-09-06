@@ -18,7 +18,12 @@ from cementic.db import (
     ExtractorProfile,
     SourceDocument,
 )
-from cementic.source_watcher import DocumentEventHandler, SourceWatcher
+from cementic.source_watcher import (
+    _DELETE_BATCH_SIZE,
+    DocumentEventHandler,
+    SourceWatcher,
+    _purge_document_chunks,
+)
 from cementic.state import DaemonState
 from cementic.supervisor import process_start_token
 
@@ -571,3 +576,79 @@ class TestRegistrationGuardsAreCounted:
         state = watcher.state_manager.load()
         assert state.failed_count == 1
         assert any("too large" in entry for entry in state.skipped_files)
+
+
+class TestPurgeDocumentChunks:
+    """Chunk deletion is batched, and batching must not lose rows."""
+
+    def _session(self):
+        engine = create_engine("sqlite://")
+        Base.metadata.create_all(engine)
+        return sessionmaker(bind=engine, expire_on_commit=False)()
+
+    def _seed(self, session, n_documents: int) -> list[int]:
+        extractor = ExtractorProfile(name="x", fingerprint="ext", config_json="{}")
+        chunk_profile = ChunkProfile(fingerprint="chunk", config_json="{}")
+        session.add_all([extractor, chunk_profile])
+        session.flush()
+        document_ids = []
+        for i in range(n_documents):
+            doc = SourceDocument(collection="col", source_path=f"/col/{i}.pdf", file_hash=f"h{i}")
+            session.add(doc)
+            session.flush()
+            extracted = ExtractedDocument(
+                document_id=doc.id,
+                extractor_profile_id=extractor.id,
+                source_file_hash=f"h{i}",
+                content_hash=f"c{i}",
+                status="done",
+            )
+            session.add(extracted)
+            session.flush()
+            chunked = ChunkedDocument(
+                extracted_document_id=extracted.id,
+                chunk_profile_id=chunk_profile.id,
+                source_content_hash=f"c{i}",
+                status="done",
+            )
+            session.add(chunked)
+            session.flush()
+            session.add(
+                Chunk(
+                    document_id=doc.id,
+                    chunked_document_id=chunked.id,
+                    chunk_index=0,
+                    content="c",
+                )
+            )
+            document_ids.append(doc.id)
+        session.commit()
+        return document_ids
+
+    def test_deletes_every_chunk_across_batch_boundaries(self) -> None:
+        session = self._session()
+        document_ids = self._seed(session, _DELETE_BATCH_SIZE + 7)
+
+        _purge_document_chunks(session, document_ids)
+        session.commit()
+
+        assert session.query(Chunk).count() == 0
+
+    def test_leaves_documents_outside_the_list_alone(self) -> None:
+        session = self._session()
+        document_ids = self._seed(session, 4)
+
+        _purge_document_chunks(session, document_ids[:2])
+        session.commit()
+
+        remaining = {chunk.document_id for chunk in session.query(Chunk).all()}
+        assert remaining == set(document_ids[2:])
+
+    def test_empty_list_is_a_no_op(self) -> None:
+        session = self._session()
+        self._seed(session, 2)
+
+        _purge_document_chunks(session, [])
+        session.commit()
+
+        assert session.query(Chunk).count() == 2

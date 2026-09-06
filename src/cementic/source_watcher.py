@@ -51,6 +51,11 @@ def _is_missing(source_path: str) -> bool:
     return False
 
 
+#: Documents per chunk-delete statement. Bounds the IN list and the row count
+#: of any single delete; the transaction around them is the caller's.
+_DELETE_BATCH_SIZE = 500
+
+
 def _purge_document_chunks(session: Session, document_ids: list[int]) -> None:
     """Delete the chunks of removed documents, and with them their vectors.
 
@@ -68,9 +73,19 @@ def _purge_document_chunks(session: Session, document_ids: list[int]) -> None:
     """
     if not document_ids:
         return
-    session.query(Chunk).filter(Chunk.document_id.in_(document_ids)).delete(
-        synchronize_session=False
-    )
+    # Batched, because the whole-corpus case is real: removing a collection
+    # passes every document at once. One statement with a 22k-element IN list
+    # deletes ~2.3M chunk rows and their cascaded vectors in a single
+    # transaction, which holds its snapshot open for the duration and keeps
+    # autovacuum off every table it touches until it commits.
+    #
+    # The batches share the caller's transaction, so this is still all-or-
+    # nothing; what it bounds is the size of each statement, not the atomicity.
+    for start in range(0, len(document_ids), _DELETE_BATCH_SIZE):
+        batch = document_ids[start : start + _DELETE_BATCH_SIZE]
+        session.query(Chunk).filter(Chunk.document_id.in_(batch)).delete(
+            synchronize_session=False
+        )
 
 
 class DocumentEventHandler(FileSystemEventHandler):
