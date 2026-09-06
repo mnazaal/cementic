@@ -23,24 +23,27 @@ index, versioned revisions) are documented in [PLAN.md](PLAN.md).
 - Enrich search results with document id and optional artifact path. (`collection`
   already ships — a result carries collection, source_path, content, score,
   distance and score_kind.)
-- Match database URLs with `make_url` rather than `startswith("postgresql://")`
-  (`db.py:375`). The current check skips the `gssencmode` connect-arg for
-  driver-qualified URLs like `postgresql+psycopg2://`, which a user setting
-  `CEMENTIC_DB_URL` may well write. Carried over from PLAN.md's "Deliberately
-  not done", where it was parked behind "only if `db.py` is open for another
-  reason" — a condition that has since been met twice.
 
 - Pre-filter over-budget chunks against the model's own tokenizer, not just
   the cheap tiktoken estimate. `count_model_tokens` learned upstream
-  `llama-server`'s `/tokenize` in `1ff5269`, so the *exact* check works — but
-  `embed_batch`'s pre-filter still uses the estimate, so a chunk at 513–549
-  model tokens is sent anyway, fails with a 500, and drags its whole request
-  into the isolate-and-retry path. ~5,000 chunks per corpus scan, re-run on
-  every `cementic start` because the requeue resets them. No longer waiting on
-  anything: the model migration that would have re-derived `chunk_size` was
-  rejected (`PLAN.md`), so this stands on its own against v2-moe's 512-token
-  window — which refused 5 batches of 2,000 chunks in the 2026-09-05
-  comparison run, so the overflow is routine rather than rare.
+  `llama-server`'s `/tokenize` in `1ff5269`, so the *exact* check works, while
+  `embed_batch`'s pre-filter still uses the estimate: a chunk at 513–549 model
+  tokens is sent anyway, fails with a 500, and drags its whole request into the
+  isolate-and-retry path. **Not urgent, measured 2026-09-06:** `chunk_embeddings`
+  is 2,298,558 rows, all `done`, none failed or pending — `c99d84b` splits
+  over-budget chunks instead of dropping them, so they already succeed. What
+  remains is a wasted round trip during indexing only, which a settled corpus
+  never pays. *Do it when:* a bulk import or rebuild is next on the cards.
+
+- Find out why `cementic status` blocks for tens of seconds. Measured
+  2026-09-06 on the `papers` collection: 12 s, 18 s, 44 s, 50 s, 60 s, 83 s and
+  128 s across seven runs, at 0–2% CPU — it is waiting on something, not
+  computing. Reproduces on the pre-change uv-tool install too, so it is not
+  from this pass, and `check_health` timed at 0.15 s when called directly, so
+  the two-minute daemon probe is not obviously the answer either. PLAN.md
+  records this as fixed ("`status` no longer blocks 120 s to return an answer
+  the pid file already had"), which the measurements contradict. Worth a
+  root-cause pass before anything else in this file: it is the command run most.
 
 ## Images / multimodal
 
@@ -103,6 +106,14 @@ give it a condition someone could actually notice.
   (`_TASK_PREFIX_TOKEN_ALLOWANCE`). *Reopen when:* `config.py` is next open for
   another reason — the change touches four modules and is not worth a slot on
   its own.
+- **Stop the extractor registry re-versioning corpora that cannot be affected.**
+  `extractor_registry_payload` (`extract.py:516`) hashes every built-in
+  extractor, so adding a `.docx` entry re-versions an all-PDF corpus and forces
+  a full rebuild — 2.3M vectors, ~108 hours. The gating that already excludes
+  config-driven extractors cannot simply be widened: narrowing the payload
+  moves the fingerprint by itself, so the fix costs exactly the rebuild it
+  prevents. *Reopen when:* you want a non-PDF extractor, or anything else
+  forces a rebuild — on that day the narrowing rides along for free.
 - **Publish the repo.** Nothing gates on it today; the install docs no longer
   describe a command that cannot work. Publishing only changes whether a
   `pipx install git+https://...` one-liner works for someone who is not the

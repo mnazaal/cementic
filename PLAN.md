@@ -715,6 +715,12 @@ had. Two more were reopened and are now also closed; both entries below were
 still written as open when the sixth review (2026-08-23) checked them against
 the code, which is why they carry their resolution inline:
 
+**Correction 2026-09-06:** the claim above that `status` no longer blocks is
+not true of the code today. Seven timed runs of `cementic status -c papers`
+took 12–128 s at 0–2% CPU, on this build and on an install predating it. What
+was fixed was one path; something else in the command still waits. Queued in
+`TODO.md` as a root-cause item.
+
 - ~~**`check_health` still calls a live-but-broken daemon healthy.**~~
   **RESOLVED 2026-08-18** by the release plan's batch 1a (`04e974a`):
   `DaemonHealth.WEDGED` (`embedding_runtime.py:758-772`) plus the two-stage
@@ -813,32 +819,27 @@ then `render.py:157`), and paths over ~2,600 bytes (btree limit on
 
 Live, in rough order of how likely they are to bite:
 
-- **`cementic status --verbose` has no limit** (`status_service.py:477`,
-  `render.py:253`). One line per document; at 22k it loads ~50 MB of ORM objects
-  and floods the terminal. Add `--limit`, defaulting to failed/pending first.
-- **`_step_embed` publishes no worker activity** (`pipeline_worker.py`, the
-  embed step writes neither `current_file` nor `current_activity`). The
-  busy-vs-wedged guard reads exactly that state, so during the phase that
-  saturates the daemon a healthy server can be reported WEDGED — and the
-  suggested remedy, restarting it, discards an in-flight batch.
-- **Whole-corpus deletes run as one unbounded transaction** with a 22k-element
-  `IN` list (`source_watcher.py:71`, `collections.py:136`), blocking autovacuum
-  for its duration and leaving millions of dead index entries.
-- **Progress rounds to `100.0%` while thousands of chunks are outstanding**
-  (`status_service.py:119`); at 2.16M the display resolution is ~2,162 chunks.
+**Closed 2026-09-06.** Six of the eight are closed. Five went in one pass: the unlimited
+`status --verbose` (now `--limit`, default 20, failures first), the
+rounding that reported 100.0% with work outstanding, the unbounded
+whole-corpus delete (batched at 500 documents), `chunk_text`'s unkillable
+quadratic (refused above a 100,000-character unbroken run), and
+`extract_pdf_markdown`'s `use_ocr` default. `_step_embed` needed nothing:
+it had already been fixed, and this entry had gone on describing a defect
+the code closed -- which is why the two that remain say what is still true
+of the code rather than what was once observed.
+
+`extractor_registry_payload` moved to `TODO.md`'s parked list. It is real,
+but narrowing the payload moves the fingerprint exactly as adding an
+extractor does, so the fix costs the 2.3M-vector rebuild it exists to
+avoid; it is only free on a day something else is already rebuilding.
+
+Still live:
+
 - **A revision can reach `ready` mid-initial-scan** (`pipeline_worker.py:263`):
   the watcher registers documents one at a time with no scan-complete marker, so
   a drain of the first N looks complete. Promotion re-checks and refuses, so this
   misleads rather than corrupts.
-- **`chunk_text` is quadratic in one whitespace-free run** (`chunk.py`): 160k
-  characters took 12.2 s, inside a Rust call that ignores the shutdown event.
-  Reachable from a minified line or a PDF text layer with no spaces.
-- **`extractor_registry_payload` hashes the whole registry** (`extract.py:516`),
-  so adding a `.docx` extractor re-versions every existing PDF corpus. Matters
-  more now that new extractors are near-term work.
-- **`extract_pdf_markdown`'s signature defaults `use_ocr=True`** while the config
-  defaults `False` (`extract.py:125`). No effect today — `_pdf_extractor` always
-  passes the config value — but the two disagree.
 
 Resolved by the systemd units rather than by code: the worker had no respawn
 after an OOM or reboot, so a multi-day run ended silently.
