@@ -2,7 +2,13 @@
 import pytest
 import tiktoken
 
-from cementic.chunk import TOKENIZER, TextChunk, chunk_text
+from cementic.chunk import (
+    MAX_UNBROKEN_RUN_CHARS,
+    TOKENIZER,
+    TextChunk,
+    chunk_text,
+    longest_unbroken_run,
+)
 
 
 class TestChunkText:
@@ -162,3 +168,50 @@ class TestMultiByteCharacterBoundaries:
         chunks = chunk_text(text, chunk_size=16, chunk_overlap=0)
 
         assert "".join(chunk.content for chunk in chunks) == text
+
+
+class TestUnbrokenRunGuard:
+    """The cap that keeps one spaceless run out of tiktoken's BPE loop."""
+
+    def test_measures_the_longest_run(self):
+        assert longest_unbroken_run("ab cdef g") == 4
+        assert longest_unbroken_run("   ") == 0
+        assert longest_unbroken_run("") == 0
+
+    def test_ordinary_text_is_untouched(self):
+        """Whatever the guard does, it must not change output for real prose.
+
+        Same total length as the refused case below, spaced normally.
+        """
+        text = ("word " * (MAX_UNBROKEN_RUN_CHARS // 5)) + "x"
+
+        chunks = chunk_text(text, chunk_size=512, chunk_overlap=0)
+
+        assert "".join(chunk.content for chunk in chunks) == text
+
+    def test_one_long_run_is_refused_with_a_reason(self):
+        text = "x" * (MAX_UNBROKEN_RUN_CHARS + 1)
+
+        with pytest.raises(ValueError, match="unbroken run"):
+            chunk_text(text, chunk_size=512, chunk_overlap=0)
+
+    def test_a_run_at_the_limit_is_allowed(self, monkeypatch):
+        """The cap is exclusive: exactly the limit still chunks.
+
+        Run against a lowered cap rather than the real one. Encoding a genuine
+        100,000-character run costs 3.5 s -- which is the cost this guard exists
+        to bound, so paying it once per test run to assert a boundary is the
+        wrong trade.
+        """
+        monkeypatch.setattr("cementic.chunk.MAX_UNBROKEN_RUN_CHARS", 1_000)
+        text = "x" * 1_000
+
+        chunks = chunk_text(text, chunk_size=512, chunk_overlap=0)
+
+        assert "".join(chunk.content for chunk in chunks) == text
+
+    def test_the_cap_is_read_at_call_time(self, monkeypatch):
+        monkeypatch.setattr("cementic.chunk.MAX_UNBROKEN_RUN_CHARS", 1_000)
+
+        with pytest.raises(ValueError, match="1,001 characters"):
+            chunk_text("x" * 1_001, chunk_size=512, chunk_overlap=0)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 import tiktoken
@@ -9,6 +10,24 @@ import tiktoken
 #: Tokenizer used for chunking. Also recorded in chunk profiles (see profiles.py),
 #: so changing it re-versions every chunk profile.
 TOKENIZER = "cl100k_base"
+
+#: Longest run of non-whitespace characters `chunk_text` will hand the
+#: tokenizer. tiktoken's pre-tokenizer splits on whitespace and then runs BPE
+#: over each piece, and that merge loop is superlinear in the piece's length: a
+#: single unbroken 160k-character run measured 12.2 s, inside a Rust call that
+#: does not observe the shutdown event, so `cementic stop` cannot interrupt it.
+#: Four times that run length is over three minutes of unkillable CPU.
+#:
+#: The cap is deliberately far above real prose. Nothing in a document with
+#: ordinary spacing comes near it; what does is a PDF whose text layer lost its
+#: spacing, or a minified line in a source file -- text that tokenizes into
+#: garbage and retrieves nothing even when it succeeds.
+MAX_UNBROKEN_RUN_CHARS = 100_000
+
+
+def longest_unbroken_run(text: str) -> int:
+    """Length of the longest run of non-whitespace characters (pure)."""
+    return max((match.end() - match.start() for match in re.finditer(r"\S+", text)), default=0)
 
 
 def _character_boundary(data: bytes, index: int) -> int:
@@ -51,6 +70,19 @@ def chunk_text(
         raise ValueError("chunk_overlap must be non-negative")
     if chunk_overlap >= chunk_size:
         raise ValueError("chunk_overlap must be smaller than chunk_size")
+
+    # Checked before encoding, because the cost being avoided is inside
+    # `encode`. The chunk step turns this into a failed document carrying the
+    # message, which `status --verbose` lists ahead of the healthy ones -- a
+    # stated failure the reader can act on, rather than a worker that appears
+    # to hang on one file and cannot be stopped.
+    run = longest_unbroken_run(text)
+    if run > MAX_UNBROKEN_RUN_CHARS:
+        raise ValueError(
+            f"unbroken run of {run:,} characters exceeds the {MAX_UNBROKEN_RUN_CHARS:,} "
+            "chunking limit; the text layer has probably lost its spacing "
+            "(try a different [extraction.backends] pdf backend)"
+        )
 
     encoding = tiktoken.get_encoding(TOKENIZER)
     # `disallowed_special=()` because tiktoken otherwise refuses any text
