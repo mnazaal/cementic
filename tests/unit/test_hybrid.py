@@ -8,6 +8,7 @@ from cementic.hybrid import (
     deduplicate,
     looks_like_identifier,
     reciprocal_rank_fusion,
+    scores_explain_order,
 )
 
 
@@ -101,3 +102,23 @@ class TestCombine:
     def test_an_unknown_lead_is_refused(self):
         with pytest.raises(ValueError, match="lead must be"):
             combine(self.VECTOR, self.LEXICAL, lead="lexcial")
+
+
+class TestScoresExplainOrder:
+    """The predicate that decides whether the score column is worth printing."""
+
+    def test_descending_scores_explain_the_order(self):
+        assert scores_explain_order([0.9, 0.5, 0.1]) is True
+
+    def test_equal_scores_still_explain_it(self):
+        assert scores_explain_order([0.5, 0.5, 0.5]) is True
+
+    def test_the_measured_fused_case_does_not(self):
+        """The exact numbers a fused terminal listing printed."""
+        assert scores_explain_order([0.270, 0.089, 0.267]) is False
+
+    def test_a_single_result_is_trivially_consistent(self):
+        assert scores_explain_order([0.42]) is True
+
+    def test_empty_is_trivially_consistent(self):
+        assert scores_explain_order([]) is True

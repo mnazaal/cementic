@@ -50,6 +50,7 @@ from cementic.embedding_runtime import (
 from cementic.embedding_text import describe_text_policy
 from cementic.extract import extract_document
 from cementic.filelock import LockUnavailableError, file_lock
+from cementic.hybrid import scores_explain_order
 from cementic.search import MAX_SEARCH_RESULTS, Searcher
 from cementic.state import DaemonState, StateManager
 from cementic.status_service import (
@@ -963,6 +964,11 @@ def search(
         None,
         help="Additional collections after --collection/-c",
     ),
+    scores: bool = typer.Option(
+        False,
+        "--scores",
+        help="Always show the relevance score, even when it does not explain the order",
+    ),
     json_output: bool = typer.Option(
         False,
         "--json",
@@ -1010,10 +1016,19 @@ def search(
             console.print("no results")
         elif results:
             rank_w = len(str(len(results)))
+            # The score column is printed only while it still explains the
+            # order. After fusion the list is ordered by summed reciprocal rank
+            # while each result carries its own arm's score, so the numbers go
+            # up and down the page and the listing reads as mis-sorted. Every
+            # human-facing search tool surveyed (ripgrep, fzf, Recoll,
+            # Spotlight, Google) shows no score at all; `--scores` is Recoll's
+            # off-by-default escape hatch for when you want them anyway.
+            show_scores = scores or scores_explain_order([r["score"] for r in results])
             for i, result in enumerate(results, 1):
                 preview = " ".join(result["content"].split())
+                score_column = f"{result['score']:.3f}  " if show_scores else ""
                 console.print(
-                    f"{i:>{rank_w}}. {result['score']:.3f}  {escape(result['source_path'])}"
+                    f"{i:>{rank_w}}. {score_column}{escape(result['source_path'])}"
                 )
                 # One line per hit. Truncation is for a terminal, where a long
                 # preview would wrap and bury the ranking; off a TTY the width

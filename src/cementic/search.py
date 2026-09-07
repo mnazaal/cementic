@@ -89,6 +89,9 @@ class SearchResult(TypedDict):
     #: to invalid JSON -- `cementic search --json | jq` is a documented usage.
     distance: float | None
     score_kind: str
+    #: 1-based position in the returned list. Stated rather than left to be
+    #: inferred from `score`, which after fusion no longer explains the order.
+    rank: int
 
 
 _DISTANCE_OPERATORS = {
@@ -187,6 +190,17 @@ def record_search_activity(session_factory: Any) -> None:
             session.commit()
     except SQLAlchemyError:
         logger.debug("search-activity lease not recorded", exc_info=True)
+
+
+def _numbered(results: list[SearchResult]) -> list[SearchResult]:
+    """Stamp each result with its 1-based position in the final order (pure).
+
+    Assigned last, once the order is settled, so `rank` can never disagree with
+    the list it describes.
+    """
+    for position, result in enumerate(results, start=1):
+        result["rank"] = position
+    return results
 
 
 class Searcher:
@@ -327,6 +341,7 @@ class Searcher:
                             score=score,
                             distance=distance,
                             score_kind=score_kind,
+                            rank=0,
                         )
                     )
 
@@ -335,8 +350,10 @@ class Searcher:
 
         combined.sort(key=lambda result: result["score"], reverse=True)
         if not self.config.search.hybrid:
-            return combined[:top_k]
-        return self._merge_arms(session_free_results=combined, query=query, top_k=top_k)
+            return _numbered(combined[:top_k])
+        return _numbered(
+            self._merge_arms(session_free_results=combined, query=query, top_k=top_k)
+        )
 
     def _lexical_results(
         self, session: Any, revision: PipelineRevision, query: str, top_k: int
@@ -367,6 +384,7 @@ class Searcher:
                 score=float(row.rank),
                 distance=None,
                 score_kind="lexical_rank",
+                rank=0,
             )
             for row in rows
         ]

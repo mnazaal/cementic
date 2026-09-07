@@ -82,6 +82,22 @@ def reciprocal_rank_fusion(
     return [path for path, _ in sorted(scores.items(), key=lambda item: -item[1])]
 
 
+def scores_explain_order(scores: list[float]) -> bool:
+    """Whether the scores are consistent with the order they are shown in (pure).
+
+    The test for whether a score column is worth printing. After fusion the list
+    is ordered by summed reciprocal rank while each result still carries its own
+    arm's score, and those two orders differ -- which is how a terminal came to
+    print `0.270, 0.089, 0.267` and look broken. A cosine similarity and a
+    `ts_rank` are not on one scale and no amount of formatting makes them so.
+
+    Checked rather than inferred from a flag: whether the numbers explain the
+    order is a property of the numbers, and a flag saying "this was fused" would
+    still be wrong for a fused list whose arms happened not to interleave.
+    """
+    return all(earlier >= later for earlier, later in zip(scores, scores[1:]))
+
+
 def looks_like_identifier(query: str) -> bool:
     """Whether a query is a single bare word (pure).
 
