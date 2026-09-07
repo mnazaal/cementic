@@ -1,69 +1,91 @@
 # cementic — architecture & design
 
-<!-- session-handoff:begin (2026-09-05) -->
+<!-- session-handoff:begin (2026-09-07) -->
 ## Where the work stands
 
-**Entry point (corrected 2026-09-07): hybrid retrieval is mid-flight.** The
-line that stood here said nothing was, which was true when written and is not
-now. Read **Execution order — hybrid retrieval** and start at its step 1; the
-evidence behind it is in **In progress — hybrid lexical + vector retrieval**
-and `notes/design-hybrid-retrieval.html`. `TODO.md` still holds the feature
-backlog for when this thread closes.
+**Entry point: nothing is mid-flight; hybrid retrieval shipped end to end.**
+Read **Execution order — hybrid retrieval** below: steps 1 through 5b(vi) are
+all marked done with their commits. The next unit of work is a fresh
+`claude/<topic>` branch on one of the three items at the bottom of this block.
 
-**Repo state.** `main` is at `641334d`, clean and pushed; the handoff commit
-was merged and its branch deleted, so nothing is unmerged. Five agent branches
-were merged and deleted in total (canary, plan, experiment, rejection,
-handoff). A hook rejects agents committing to `main`, so the next unit of work
-needs its own fresh `claude/<topic>` branch.
+**Repo state.** `main` at `0691f8b`, clean; the feature branch was merged and
+deleted. **`main` is 17 commits ahead of `origin/main`, unpushed**, and this
+handoff commit is a further one on `claude/session-handoff-2026-09-07`, not yet
+merged. A hook rejects agents committing to `main`, so both the merge and the
+push are yours:
+```bash
+git checkout main && git merge --ff-only claude/session-handoff-2026-09-07 && git push
+``` Pushing is yours; a hook
+rejects agents committing to `main`. Nothing is running: no background jobs, no
+cluster work, scratchpad empty.
 
-**What this session settled.**
-- The embedding canary is implemented and merged (`06f7d62`): `canary.py`, the
-  `embedding_canary` doctor check, and the `embedding_profile_canaries` table.
-  It has captured nothing yet — capture is lazy, on the next indexing run.
-- The v1.5 migration is **rejected by its own gate**, with numbers in the
-  closed execution order below. `papers` stays on v2-moe; the three
-  rebuild-blocked changes are parked again.
-- Two `Decided` sections claimed work that had already shipped (the command
-  extractor, both layers of query-first embed scheduling). Both now say DONE.
+**What shipped.** Two arcs, both closed. A six-item operational pass
+(`203d0c6`–`78675b3`), then hybrid lexical + vector retrieval measured,
+pre-registered and built (`38d7d56`–`0691f8b`). Evidence and verdicts are in
+**In progress — hybrid lexical + vector retrieval** and the execution order;
+this block does not restate them.
 
-**Corrections — where this plan described reality wrongly.** Distrust these
-sections' history, not their current text:
-- The canary was designed to compare **bitwise** and shipped comparing by
-  cosine. A fixed request is *not* reproducible on a busy server: llama-server
-  packs concurrent slot work into unified batches, so replaying after unrelated
-  traffic gives cosine 0.999908 rather than 1.0. Agent-decided change, made
-  mid-implementation rather than shipping the approved design.
-- The cross-build calibration's "zero drift" was true but under-powered — both
-  runs replayed the same traffic sequence, holding fixed the one variable that
-  moves vectors.
-- v1.5's context is **2048, not the advertised 8192**; the GGUF's `n_ctx_train`
-  caps it. 8192 needs `--rope-scaling yarn --rope-scale 4`, untested for
-  quality.
+**Corrections — distrust these sections' history, not their current text.**
+- This plan went stale against the code **three times** in one session: the
+  audit register still described `_step_embed` as unfixed after the code closed
+  it, 13 of 22 `file.py:line` anchors pointed at unrelated code, and steps
+  5b(ii–iv) read as pending while committed. All three are repaired, but the
+  register is prose nobody re-checks, so verify an entry against the code before
+  acting on it.
+- The handoff block above this one claimed nothing was mid-flight while hybrid
+  retrieval was live. Same failure, one level up.
+
+**Deviations from the written plan, attributed.**
+- *User-directed:* the pre-registered rule said build the full-text index after
+  import (GIN makes chunk inserts ~4.5x slower, +360%, failing a 10% bar). Built
+  up front instead — in context it is ~7 minutes against ~115 hours of
+  embedding, 0.1% of import wall clock, so the rule measured the wrong quantity.
+  Recorded as a departure in step 5b(i) rather than the rule quietly rewritten.
+- *Agent-decided:* step 1's exit condition (≥90% confirms the tie-break
+  diagnosis) came back 68% — reported as not confirmed rather than rounded up.
+  Step 3's threshold rule pointed at T=100 on a 2-of-40 margin; reported as
+  under-powered and T=20 used instead.
 
 **Environment quirks that cost time.**
-- The agent shell has no `/dev/dri`, so `--n-gpu-layers` is accepted and
-  ignored and every GPU run there is really CPU. **Do not infer the backend
-  from the server log** — a real GPU run prints no Vulkan lines and reports
-  `n_threads = 2` exactly like a CPU one. Use `llama-server --list-devices`.
-- Embedding through the agent shell against the shared production server ran at
-  0.8–1.7 embeds/s against 3.4/s in the user's own shell. Size agent-side
-  probes accordingly.
+- The Bash sandbox fails intermittently with `bwrap: Can't mount proc`; retry
+  with the sandbox disabled. It recovers on its own and then breaks again.
+- Two background runs were **killed for low memory** mid-experiment. Long
+  measurement runs must be split (one query set per invocation), not batched.
+- `psql` is not installed — Postgres is in a container. Use the project venv
+  (`./.venv/bin/python` with `cementic.db.get_engine`) for ad-hoc SQL.
+- Tool output is sometimes silently compressed, dropping code tokens. Never edit
+  a file from a compressed read; re-read in smaller chunks or use `Read`.
 
-**Artifacts.** `~/.cache/cementic-igpu/calibration/` holds the scripts this
-plan cites (`compare-models.sh` + `compare_models.py`, `calibrate.sh`) and
-their logs — keep those. Reproducible and safe to delete: `b10818.tar.gz`
-(33 MB, already extracted beside it) and `vecs-*.json` (13 MB). The agent
-scratchpad held only section drafts and a probe whose findings are in the text
-below; discarded.
+**Artifacts — one of these is a real risk.**
+- `notes/` is **gitignored**, and it holds the pre-registration, the four-survey
+  prior art, and the probe harnesses that produced every number in this thread
+  (`design-hybrid-retrieval.html`, `probe_hybrid_retrieval.py`,
+  `probe_gin_insert_cost.py`). A `git clean -xdf` destroys all of it. Copies are
+  at `~/.cache/cementic-verify/notes-backup/`; the durable fix is a decision
+  about `.gitignore` that is yours, not an agent's.
+- `~/.cache/cementic-verify/` holds every gate run and measurement log cited
+  above — keep. The corrupted-PLAN backup and its diagnostic copy were
+  discarded; PLAN is committed and healthy.
+- The live database carries `ix_chunks_v2_fts` (617 MB, valid), renamed in place
+  from the hand-built probe index rather than rebuilt.
+
+**Next, in the order I would take it.**
+1. **Push, then use it for a week.** Living with hybrid search beats more
+   measurement.
+2. **Query logging**, if the precondition matters to you — see the risk in the
+   In-progress section. It only pays if started early, and it gates nothing.
+3. **The CLI-surface audit against `llm`** — queued in `TODO.md` with its
+   rationale.
 
 **Exit criteria — commands whose output confirms the above.**
 ```bash
 git status --short                    # empty
-git log --oneline main..HEAD          # empty
-git log --oneline -1 main             # 641334d
-cementic status -c papers             # 2,298,558/2,298,558 embedded, building=-
-cementic doctor                       # ok; embedding_canary reports no canary yet
+git log --oneline -1 main             # 0691f8b, until the handoff is merged
+git status -sb | head -1              # ahead 17 (18 once merged), until you push
 ./scripts/check.sh                    # six gates, all ok
+cementic search "variational inference" -c papers -n 3   # scores shown, descending
+cementic search "Hochreiter" -c papers -n 3              # no score column (fused)
+cementic search "Hochreiter" -c papers -n 3 --scores     # scores back on request
 ```
 <!-- session-handoff:end -->
 
