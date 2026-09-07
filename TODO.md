@@ -45,6 +45,20 @@ index, versioned revisions) are documented in [PLAN.md](PLAN.md).
   the pid file already had"), which the measurements contradict. Worth a
   root-cause pass before anything else in this file: it is the command run most.
 
+- Audit the CLI surface against `llm`'s embeddings commands
+  (https://llm.datasette.io/en/stable/embeddings/cli.html), and cut what does not
+  earn its place. Raised 2026-09-07 after reading that tool: it is JSON-first,
+  pipeable, has a small obvious surface, and needs no daemon, no PostgreSQL and
+  no systemd — which is the shape PLAN.md's own "Unix composability" principle
+  asks for and cementic's front door does not have. It could not replace
+  cementic (verified from its source: `similar_by_vector` registers a Python
+  UDF and linear-scans every row, so 2.3M chunks would take minutes against
+  cementic's 1-2 s; and it has neither chunking nor PDF extraction) — the point
+  is the interface, not the engine. cementic already has the composable layer:
+  `extract | chunk | embed` are stdin/stdout filters. It is buried under the
+  daemon and the database. *Do it when:* the hybrid thread closes; this is a
+  separate piece of work and conflating the two would hide both.
+
 ## Images / multimodal
 
 - Add an image extractor (`.png` / `.jpg`) — OCR/caption into the Markdown text

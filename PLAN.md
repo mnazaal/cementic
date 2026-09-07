@@ -344,7 +344,15 @@ vector retrieval** below and `notes/design-hybrid-retrieval.html`.
       is a deliberate departure from a rule fixed in advance, recorded as one
       because the alternative is pretending the rule was never written.
 
-   ii. **Creation path.** `ensure_lexical_index(engine)`, PostgreSQL-only and a
+   ii. ~~**Creation path.**~~ **DONE 2026-09-07 (`36c73ff`), with a defect
+      found and fixed in `45ed214`.** The first version ran the CONCURRENTLY
+      build inside `create_tables`, which runs at worker startup — so on an
+      existing corpus `cementic start` would have blocked for minutes, or
+      indefinitely, because CONCURRENTLY waits for every open transaction on
+      the table before it begins. A hanging test found it. Startup now builds
+      only on an empty table, where it is instant; an existing corpus upgrades
+      via `build_lexical_index`, which a person runs and watches.
+      `ensure_lexical_index(engine)`, PostgreSQL-only and a
       no-op elsewhere — the pattern `ensure_vector_extensions` already uses, and
       the reason the sqlite unit suite keeps working. An empty table indexes
       instantly; an existing corpus needs `CREATE INDEX CONCURRENTLY`, which
@@ -352,7 +360,12 @@ vector retrieval** below and `notes/design-hybrid-retrieval.html`.
       *Exit:* `cementic doctor` reports the index present on `papers`; the
       sqlite-backed unit tests are untouched.
 
-   iii. **The lexical query, scoped to the active revision.** The correctness
+   iii. ~~**The lexical query, scoped to the active revision.**~~ **DONE
+      2026-09-07 (`45ed214`).** `lexical_sql` joins the *same* per-profile
+      vector table `knn_sql` joins and filters on the *same* three denormalised
+      columns, so scope parity is structural rather than remembered. The test
+      was mutation-checked: with the chunk-profile filter neutralised it fails,
+      so it tests the filter and not the join. The correctness
       risk of the whole step: the vector arm is implicitly scoped because each
       profile owns its own vector table, but `chunks_v2` holds chunks from
       *every* revision including superseded ones. The lexical query must filter
@@ -361,14 +374,49 @@ vector retrieval** below and `notes/design-hybrid-retrieval.html`.
       *Exit:* a test that seeds a superseded revision's chunks and proves they
       are never returned.
 
-   iv. **Wire in `hybrid.combine`.** Routing decided by `looks_like_identifier`
+   iv. ~~**Wire in `hybrid.combine`.**~~ **DONE 2026-09-07 (`03f443d`).**
+      Verified on the live corpus: a semantic query stays vector-led and
+      unchanged, a rare token is lexical-led, `--json` parses.
+      `SearchResult.distance` became `float | None` — a lexical hit has no
+      distance from the query vector, and NaN would have serialised to invalid
+      JSON, breaking the documented `search --json | jq`. Routing decided by
+      `looks_like_identifier`
       plus one document-frequency probe at threshold 20; config to set the
       threshold and to turn hybrid off.
       *Exit:* `cementic search` returns routed results on `papers`, and
       `./scripts/check.sh` is green.
 
-   v. **README.** The search section gains what hybrid does and when the
-      lexical arm leads.
+   v. **Stop the score column contradicting the order.** With fusion on the
+      terminal printed `0.270, 0.089, 0.267` — the list is ordered by rank
+      fusion while the column still shows each arm's own score. Settled against
+      a four-survey prior-art review (`notes/design-hybrid-retrieval.html`),
+      whose finding is that the convention splits by *audience*: every
+      human-facing tool surveyed (ripgrep, fzf, Recoll, DEVONthink, Zotero,
+      Obsidian, Spotlight, Windows Search, Everything, Google, Bing) withholds
+      a numeric score by default, while machine-facing systems put the fused
+      value in `score` and discard everything else.
+      - Add `rank` to `SearchResult`: the 1-based position in the returned
+        list, so order is stated rather than inferred from a number.
+      - Terminal shows the score only when it is still monotonic with the
+        order — that is, when the list was not fused. `--scores` forces it,
+        which is Recoll's off-by-default `%R` pattern.
+      - JSON keeps each result's *own* arm score with `score_kind` naming it,
+        plus `rank`. More than any surveyed library retains, and affordable
+        only because `score_kind` already exists.
+      *Exit:* a fused terminal listing shows no non-monotonic column, `--json`
+      still parses, and a pure-vector search prints its cosine exactly as
+      before.
+      *Anti-scope:* do not write the RRF sum into `score`. It is the
+      Elasticsearch/LlamaIndex convention and it is monotonic, but it replaces
+      a meaningful cosine 0.675 with a meaningless 0.0164 *including for
+      pure-vector queries where nothing was fused* — a regression in the common
+      case to fix a problem that exists only in the fused one.
+
+   vi. **README.** The search section gains what hybrid does, when the lexical
+      arm leads, and that a single common word is not an identifier query —
+      "Hochreiter" appears in 1,697 of 23,064 documents, so it routes to the
+      vector arm and searching famous names will not behave like searching rare
+      ones.
 
    *Anti-scope for all of 5b:* one index, one fusion rule, one threshold. No
    per-collection tuning surface, no query classifier beyond the two-line
