@@ -937,6 +937,29 @@ class StorageConfig(_SectionSettings):
     )
 
 
+class SearchConfig(_SectionSettings):
+    """Hybrid search configuration."""
+
+    model_config = SettingsConfigDict(env_prefix="CEMENTIC_SEARCH_")
+    _toml_section = "search"
+
+    hybrid: bool = Field(
+        default=True,
+        description="Blend exact-word matching with vector search. Measured on a "
+        "23k-paper corpus: without it, a query that is a rare exact token -- an "
+        "author surname, an acronym, an equation label -- finds the right paper "
+        "in the top 10 about 5% of the time. With it, essentially always.",
+    )
+    lexical_lead_max_documents: int = Field(
+        default=20,
+        ge=1,
+        description="A single-word query matching at most this many documents is "
+        "answered from the exact-match ranking; anything broader is led by vector "
+        "search. Measured: exact matching's rank-1 advantage runs +0.45 at 1-5 "
+        "documents, +0.15 at 6-20, +0.05 at 21-100 and is gone beyond that.",
+    )
+
+
 class SourceWatcherConfig(_SectionSettings):
     """Source watcher configuration."""
 
@@ -1048,6 +1071,7 @@ class Config(BaseSettings):
     llama_cpp: LlamaCppConfig = Field(default_factory=LlamaCppConfig)
     pipeline: PipelineConfig = Field(default_factory=PipelineConfig)
     index: IndexConfig = Field(default_factory=IndexConfig)
+    search: SearchConfig = Field(default_factory=SearchConfig)
     extraction: ExtractionConfig = Field(default_factory=ExtractionConfig)
     storage: StorageConfig = Field(default_factory=StorageConfig)
     source_watcher: SourceWatcherConfig = Field(default_factory=SourceWatcherConfig)

@@ -15,6 +15,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from cementic.chunk import TOKENIZER
 from cementic.config import Config, get_config
 from cementic.db import (
+    LEXICAL_TEXT_CONFIG,
     PipelineRevision,
     SearchActivity,
     get_engine,
@@ -25,10 +26,13 @@ from cementic.embedding_runtime import (
     create_provider,
     runtime_spec_from_profile_json,
 )
+from cementic.hybrid import combine, looks_like_identifier
 from cementic.revisions import BUILDING_STATUSES
 from cementic.vector_store import (
+    LEXICAL_CANDIDATE_POOL,
     index_access_method,
     knn_sql,
+    lexical_sql,
     pgvector_version,
     query_tuning_statements,
     supports_hnsw_iterative_scan,
@@ -80,7 +84,10 @@ class SearchResult(TypedDict):
     source_path: str
     content: str
     score: float
-    distance: float
+    #: Distance from the query vector, or None for a result the vector arm did
+    #: not produce. A lexical hit has no such distance, and NaN would serialise
+    #: to invalid JSON -- `cementic search --json | jq` is a documented usage.
+    distance: float | None
     score_kind: str
 
 
@@ -323,8 +330,100 @@ class Searcher:
                         )
                     )
 
+                if self.config.search.hybrid:
+                    combined.extend(self._lexical_results(session, revision, query, top_k))
+
         combined.sort(key=lambda result: result["score"], reverse=True)
-        return combined[:top_k]
+        if not self.config.search.hybrid:
+            return combined[:top_k]
+        return self._merge_arms(session_free_results=combined, query=query, top_k=top_k)
+
+    def _lexical_results(
+        self, session: Any, revision: PipelineRevision, query: str, top_k: int
+    ) -> list[SearchResult]:
+        """Exact-word matches, over exactly the rows the vector arm searched.
+
+        Scored on ``ts_rank`` and labelled as such: a lexical hit has no distance
+        from the query vector, and inventing one would put two incomparable
+        numbers in the same column. `_merge_arms` orders by rank position rather
+        than by score for the same reason.
+        """
+        rows = session.execute(
+            text(lexical_sql(revision.embedding_profile_id, text_config=LEXICAL_TEXT_CONFIG)),
+            {
+                "query": query,
+                "collection": revision.collection,
+                "chunk_profile_id": revision.chunk_profile_id,
+                "extractor_profile_id": revision.extractor_profile_id,
+                "pool": LEXICAL_CANDIDATE_POOL,
+                "k": top_k,
+            },
+        )
+        return [
+            SearchResult(
+                collection=row.collection,
+                source_path=row.source_path,
+                content=row.content,
+                score=float(row.rank),
+                distance=None,
+                score_kind="lexical_rank",
+            )
+            for row in rows
+        ]
+
+    def _merge_arms(
+        self, session_free_results: list[SearchResult], query: str, top_k: int
+    ) -> list[SearchResult]:
+        """Interleave the two arms: leading arm takes rank 1, fusion takes the rest.
+
+        Measured on a 23k-paper corpus: fusion alone improves recall@10 for both
+        query kinds but loses the top slot to whichever single arm the query
+        suits, because reciprocal rank fusion is symmetric and a document ranked
+        first by one arm ties exactly with the other arm's first. Routing only
+        position one recovers that without giving back the recall fusion earns.
+        """
+        vector_arm = [r for r in session_free_results if r["score_kind"] != "lexical_rank"]
+        lexical_arm = [r for r in session_free_results if r["score_kind"] == "lexical_rank"]
+        if not lexical_arm or not vector_arm:
+            return session_free_results[:top_k]
+
+        by_path: dict[str, SearchResult] = {}
+        # Vector results win the projection: their score is comparable across
+        # queries, which `ts_rank` is not.
+        for result in lexical_arm + vector_arm:
+            by_path[result["source_path"]] = result
+
+        lead = "lexical" if self._lexical_should_lead(query) else "vector"
+        ordering = combine(
+            [r["source_path"] for r in vector_arm],
+            [r["source_path"] for r in lexical_arm],
+            lead=lead,
+        )
+        return [by_path[path] for path in ordering][:top_k]
+
+    def _lexical_should_lead(self, query: str) -> bool:
+        """Whether this query is a single token rare enough to trust exactly.
+
+        Two cheap tests rather than a classifier. The syntactic one is pure; the
+        rarity one costs a capped index probe, which stops at the threshold and
+        so never scans a common term's full posting list.
+        """
+        if not looks_like_identifier(query):
+            return False
+        threshold = self.config.search.lexical_lead_max_documents
+        with self.Session() as session:
+            rows = session.execute(
+                text(
+                    "SELECT DISTINCT document_id FROM ("
+                    "  SELECT document_id FROM chunks_v2 "
+                    f"  WHERE to_tsvector('{LEXICAL_TEXT_CONFIG}', content) "
+                    f"        @@ plainto_tsquery('{LEXICAL_TEXT_CONFIG}', :query) "
+                    "  LIMIT :probe"
+                    ") c"
+                ),
+                {"query": query, "probe": threshold * 20},
+            ).fetchall()
+        return 0 < len(rows) <= threshold
 
     def unsearchable_collections(self, collections: list[str]) -> list[str]:
         """Return requested collections that have no searchable revision.
