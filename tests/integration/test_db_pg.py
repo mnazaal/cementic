@@ -8,6 +8,7 @@ from sqlalchemy.orm import sessionmaker
 
 from cementic import vector_store
 from cementic.db import (
+    LEXICAL_INDEX_NAME,
     Chunk,
     ChunkedDocument,
     ChunkProfile,
@@ -15,6 +16,8 @@ from cementic.db import (
     ExtractedDocument,
     ExtractorProfile,
     SourceDocument,
+    _lexical_index_exists,
+    create_tables,
     ensure_embedding_ann_index,
     ensure_vector_extensions,
 )
@@ -392,3 +395,57 @@ class TestActiveRevisionIndexConcurrency:
 
         assert outcomes == ["ok"] * 4, outcomes
         assert _active_revision_index_exists(pg_engine)
+
+
+class TestLexicalIndexPg:
+    """The full-text index, against a real PostgreSQL."""
+
+    def test_create_tables_leaves_a_valid_index(self, pg_engine):
+        """It must exist *and* be valid.
+
+        A failed CONCURRENTLY build leaves an INVALID index that the planner
+        silently ignores, so checking only for presence would pass while every
+        lexical search fell back to a sequential scan.
+        """
+        create_tables(pg_engine)
+
+        assert _lexical_index_exists(pg_engine)
+        with pg_engine.connect() as conn:
+            valid = conn.execute(
+                text(
+                    "select indisvalid from pg_index "
+                    "where indexrelid = to_regclass(:name)"
+                ),
+                {"name": LEXICAL_INDEX_NAME},
+            ).scalar()
+        assert valid is True
+
+    def test_is_idempotent(self, pg_engine):
+        create_tables(pg_engine)
+        create_tables(pg_engine)
+
+        assert _lexical_index_exists(pg_engine)
+
+    def test_the_planner_actually_uses_it(self, pg_engine):
+        """The index is only worth having if the query reaches it.
+
+        The text search configuration in the index and in the query must match;
+        when they drift the planner ignores the index without saying so, which
+        is invisible until someone times a search on a full corpus.
+        """
+        create_tables(pg_engine)
+
+        with pg_engine.connect() as conn:
+            conn.execute(text("set enable_seqscan = off"))
+            plan = "\n".join(
+                row[0]
+                for row in conn.execute(
+                    text(
+                        "explain select id from chunks_v2 where "
+                        "to_tsvector('english', content) @@ "
+                        "plainto_tsquery('english', 'kalman')"
+                    )
+                ).fetchall()
+            )
+
+        assert LEXICAL_INDEX_NAME in plan, plan

@@ -314,15 +314,35 @@ vector retrieval** below and `notes/design-hybrid-retrieval.html`.
    profile payload for the reason already established — a text-derived index
    cannot change a vector.
 
-   i. **Measure the insert cost before making it default-on.** A GIN index
-      slows writes, and indexing throughput is the axis this project already
-      spent 26 days → 4.5 days getting right; shipping an unmeasured regression
-      into it would be the worst possible trade.
-      *Exit:* chunks/second on a fixed batch with and without the index.
-      *Decision rule, fixed now:* under 10% slower, build it up front on the
-      empty table and let inserts maintain it (the `ensure_revision_ann_index_up_front`
-      argument, which applies unchanged); 10% or worse, build it after import
-      instead and say so in the docs.
+   i. ~~**Measure the insert cost before making it default-on.**~~ **DONE
+      2026-09-07 — and the pre-registered rule asked the wrong question.**
+      Interleaved arms, real chunk text, first batch discarded
+      (`notes/probe_gin_insert_cost.py`):
+
+      | arm | median per 2,000 rows | rows/s |
+      | --- | --- | --- |
+      | with GIN index | 0.480 s | 4,166 |
+      | without | 0.104 s | 19,184 |
+
+      **+360% write overhead**, far past the 10% bar, and the no-index arm's
+      own spread is 0.041 s so the difference is not noise. By the rule as
+      written: build after import.
+
+      The rule is wrong, because relative insert throughput is not the
+      decision-relevant quantity — total import wall clock is, and inserts are
+      not remotely the bottleneck. Over the whole corpus: 2,298,558 chunks at
+      4,166 rows/s is **9.2 minutes** of insert time against **2.0 minutes**
+      without, a difference of ~7 minutes. Embedding the same corpus runs at
+      the measured 5.56 chunk/s — about **115 hours**. The index costs **0.1%
+      of import wall clock**, and the arithmetic that makes it look expensive
+      is a ratio between two quantities that are both ~750× faster than the
+      step that actually gates the pipeline.
+
+      **Decision: build up front**, which is also the `ensure_revision_ann_index_up_front`
+      precedent — no post-import build step to forget, no window where the
+      index is silently absent, and the index is correct at every moment. This
+      is a deliberate departure from a rule fixed in advance, recorded as one
+      because the alternative is pretending the rule was never written.
 
    ii. **Creation path.** `ensure_lexical_index(engine)`, PostgreSQL-only and a
       no-op elsewhere — the pattern `ensure_vector_extensions` already uses, and

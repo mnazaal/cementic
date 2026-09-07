@@ -3,12 +3,14 @@
 from unittest.mock import MagicMock, patch
 
 import pytest
+from sqlalchemy import create_engine, inspect
 
 from cementic.db import (
     REQUIRED_DB_EXTENSIONS,
     _ensure_ann_access_method,
     create_tables,
     ensure_embedding_ann_index,
+    ensure_lexical_index,
     ensure_vector_extensions,
     get_engine,
 )
@@ -157,3 +159,42 @@ def test_ensure_embedding_ann_index_rejects_unsupported_metric() -> None:
     mock_engine.connect.assert_not_called()
 
 
+
+
+class TestEnsureLexicalIndex:
+    """The full-text index hybrid search reads."""
+
+    def test_is_a_no_op_on_sqlite(self):
+        """sqlite has no tsvector, and the whole unit suite runs on it.
+
+        Guarded by dialect rather than by catching the failure, so a non-Postgres
+        backend never pays a doomed round trip at every `create_tables`.
+        """
+        engine = MagicMock()
+        engine.dialect.name = "sqlite"
+
+        ensure_lexical_index(engine)
+
+        engine.connect.assert_not_called()
+
+    def test_skips_when_the_index_already_exists(self):
+        engine = MagicMock()
+        engine.dialect.name = "postgresql"
+
+        with patch("cementic.db._lexical_index_exists", return_value=True):
+            ensure_lexical_index(engine)
+
+        engine.connect.assert_not_called()
+
+    def test_create_tables_on_sqlite_still_works(self):
+        """The regression this guard exists to prevent.
+
+        Built with `create_engine` rather than `get_engine` because the latter
+        always passes psycopg2's `connect_timeout`, which sqlite's driver
+        refuses -- the mismatch PLAN.md records under "deliberately not done".
+        """
+        engine = create_engine("sqlite://")
+
+        create_tables(engine)
+
+        assert "chunks_v2" in inspect(engine).get_table_names()

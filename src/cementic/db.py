@@ -424,10 +424,112 @@ _ACTIVE_REVISION_UNIQUE_DDL = (
 )
 
 
+#: Name of the full-text index the lexical half of hybrid search reads.
+LEXICAL_INDEX_NAME = "ix_chunks_v2_fts"
+
+#: Text search configuration for that index. It must match the one the query
+#: uses, or the planner silently ignores the index and every lexical search
+#: becomes a sequential scan of 2.3M rows.
+LEXICAL_TEXT_CONFIG = "english"
+
+
+def _lexical_index_exists(engine: Engine) -> bool:
+    """Whether the full-text index is present."""
+    return LEXICAL_INDEX_NAME in {
+        index["name"] for index in inspect(engine).get_indexes(Chunk.__tablename__)
+    }
+
+
+def _table_has_rows(conn: Any, table: str) -> bool:
+    return conn.execute(text(f"SELECT 1 FROM {table} LIMIT 1")).first() is not None
+
+
+def ensure_lexical_index(engine: Engine) -> None:
+    """Create the full-text index hybrid search reads, if it is absent.
+
+    PostgreSQL-only, like ``ensure_vector_extensions``: sqlite has no
+    ``tsvector``, the unit suite runs on sqlite, and a no-op keeps it that way.
+
+    One index serves every collection and every revision. Vectors need a table
+    per embedding profile because two models produce incomparable vectors;
+    chunk *text* does not depend on the model, so this belongs beside
+    ``ix_chunks_v2_document`` as an ordinary table-level index and takes no part
+    in revision or profile machinery.
+
+    Built up front rather than after import. Measured 2026-09-07: the index
+    makes chunk inserts about 4.5x slower (19,184 -> 4,166 rows/s), which is
+    ~7 minutes across the whole corpus against ~115 hours of embedding -- 0.1%
+    of import wall clock. Paying it continuously buys an index that is correct
+    at every moment, with no post-import step to forget and no window where
+    exact-match search silently returns nothing.
+
+    On a table that already holds rows the build takes minutes under an ACCESS
+    EXCLUSIVE lock, so it runs CONCURRENTLY on its own autocommit connection and
+    indexing and search keep working throughout.
+    """
+    if engine.dialect.name != "postgresql":
+        return
+    if _lexical_index_exists(engine):
+        return
+
+    table = Chunk.__tablename__
+    ddl = (
+        f"ON {table} USING gin (to_tsvector('{LEXICAL_TEXT_CONFIG}', content))"
+    )
+    with engine.connect() as conn:
+        populated = _table_has_rows(conn, table)
+
+    try:
+        if populated:
+            # CONCURRENTLY cannot run inside a transaction block.
+            with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+                conn.execute(
+                    text(f"CREATE INDEX CONCURRENTLY IF NOT EXISTS {LEXICAL_INDEX_NAME} {ddl}")
+                )
+        else:
+            with engine.begin() as conn:
+                conn.execute(
+                    text(f"CREATE INDEX IF NOT EXISTS {LEXICAL_INDEX_NAME} {ddl}")
+                )
+    except (IntegrityError, ProgrammingError, OperationalError):
+        # Same race as the active-revision index below: `IF NOT EXISTS` checks
+        # the catalog before taking its lock, so the two workers `cementic
+        # start` spawns can both pass and one loses on pg_class. Re-check rather
+        # than guess -- an unhandled raise here kills the worker at startup.
+        if not _lexical_index_exists(engine):
+            raise
+
+    # A failed CONCURRENTLY build leaves an INVALID index behind that the
+    # planner ignores, so the catalog says "present" while every lexical search
+    # silently falls back to a sequential scan. Drop it so the next start
+    # retries rather than inheriting a permanently useless index.
+    if populated and not _lexical_index_is_valid(engine):
+        with engine.begin() as conn:
+            conn.execute(text(f"DROP INDEX IF EXISTS {LEXICAL_INDEX_NAME}"))
+        raise RuntimeError(
+            f"Concurrent build of {LEXICAL_INDEX_NAME} did not complete; the "
+            "invalid index has been dropped and will be retried on the next start."
+        )
+
+
+def _lexical_index_is_valid(engine: Engine) -> bool:
+    """Whether the full-text index finished building (PostgreSQL only)."""
+    with engine.connect() as conn:
+        valid = conn.execute(
+            text(
+                "SELECT indisvalid FROM pg_index "
+                "WHERE indexrelid = to_regclass(:name)"
+            ),
+            {"name": LEXICAL_INDEX_NAME},
+        ).scalar()
+    return bool(valid)
+
+
 def create_tables(engine: Engine) -> None:
     """Create all tables required by the versioned pipeline schema."""
     ensure_vector_extensions(engine)
     Base.metadata.create_all(engine)
+    ensure_lexical_index(engine)
     try:
         with engine.begin() as conn:
             conn.execute(text(_ACTIVE_REVISION_UNIQUE_DDL))
