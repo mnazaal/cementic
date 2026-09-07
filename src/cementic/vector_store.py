@@ -169,6 +169,59 @@ def knn_sql(profile_id: int, *, distance_operator: str) -> str:
     )
 
 
+#: Chunks pulled from the full-text index before ranking and scope filtering.
+#: Two reasons it exists. ``ts_rank`` recomputes a tsvector per candidate row,
+#: so ranking every match of a common term scores hundreds of thousands of
+#: chunks -- measured as a hang of minutes. And the scope filter is applied
+#: *after* this cap, so the pool needs headroom over ``top_k``: mid-rebuild a
+#: collection has two revisions in ``chunks_v2`` and up to half the candidates
+#: can be out of scope.
+LEXICAL_CANDIDATE_POOL = 2000
+
+
+def lexical_sql(profile_id: int, *, text_config: str) -> str:
+    """Full-text search over the same rows ``knn_sql`` searches.
+
+    Scope parity with the vector arm is structural, not coincidental: this joins
+    the *same* per-profile vector table and filters on the *same* three
+    denormalised columns. ``chunks_v2`` is a single global table holding chunks
+    from every collection and every revision, including superseded ones, so a
+    lexical query written against it directly would happily return documents the
+    vector arm cannot reach -- and the two halves of one search would disagree
+    about what the collection contains.
+
+    The text predicate drives an inner LIMIT rather than sitting beside the scope
+    filters. Measured 2026-09-06: with the filters and the text match in one
+    WHERE clause the planner drives from the joined table and applies the text
+    match as a filter, never touching the GIN index -- a term matching nothing
+    then costs a full scan of every row to prove absence. Retrieving from the
+    index first and filtering the candidates afterwards keeps the bitmap index
+    scan.
+    """
+    table = vector_table_name(profile_id)
+    rank = (
+        f"ts_rank(to_tsvector('{text_config}', c.content), "
+        f"plainto_tsquery('{text_config}', :query))"
+    )
+    return (
+        "SELECT sd.collection AS collection, sd.source_path AS source_path, "
+        f"c.content AS content, {rank} AS rank "
+        "FROM ("
+        "  SELECT id, document_id, content FROM chunks_v2 "
+        f"  WHERE to_tsvector('{text_config}', content) "
+        f"        @@ plainto_tsquery('{text_config}', :query) "
+        "  LIMIT :pool"
+        ") c "
+        f"JOIN {table} ev ON ev.chunk_id = c.id "
+        "JOIN source_documents sd ON sd.id = c.document_id "
+        "WHERE ev.collection = :collection "
+        "AND ev.chunk_profile_id = :chunk_profile_id "
+        "AND ev.extractor_profile_id = :extractor_profile_id "
+        f"ORDER BY {rank} DESC "
+        "LIMIT :k"
+    )
+
+
 #: pgvector release that introduced ``hnsw.iterative_scan``.
 _ITERATIVE_SCAN_SINCE = (0, 8, 0)
 

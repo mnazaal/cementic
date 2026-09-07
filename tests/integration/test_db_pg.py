@@ -9,6 +9,7 @@ from sqlalchemy.orm import sessionmaker
 from cementic import vector_store
 from cementic.db import (
     LEXICAL_INDEX_NAME,
+    LEXICAL_TEXT_CONFIG,
     Chunk,
     ChunkedDocument,
     ChunkProfile,
@@ -16,6 +17,7 @@ from cementic.db import (
     ExtractedDocument,
     ExtractorProfile,
     SourceDocument,
+    _lexical_index_ddl,
     _lexical_index_exists,
     create_tables,
     ensure_embedding_ann_index,
@@ -449,3 +451,121 @@ class TestLexicalIndexPg:
             )
 
         assert LEXICAL_INDEX_NAME in plan, plan
+
+
+@pytest.mark.pg
+class TestLexicalScope:
+    """The lexical arm must search exactly the rows the vector arm searches.
+
+    `chunks_v2` is one global table holding chunks from every collection and
+    every revision, superseded ones included. A lexical query written against it
+    directly returns documents the vector arm structurally cannot, so the two
+    halves of one search disagree about what the collection contains.
+    """
+
+    def _seed_two_revisions(self, pg_session):
+        """One chunk in scope, one from a superseded revision, same words."""
+        current = _create_minimal_pipeline(pg_session)
+        stale_chunk_prof = ChunkProfile(config_json="{}", fingerprint="cp-superseded")
+        pg_session.add(stale_chunk_prof)
+        pg_session.flush()
+
+        stale_src = SourceDocument(
+            source_path="/test/superseded.pdf",
+            file_hash="stale-hash",
+            collection=current.collection,
+            status="pending",
+        )
+        pg_session.add(stale_src)
+        pg_session.flush()
+        stale_ext = ExtractedDocument(
+            document_id=stale_src.id,
+            extractor_profile_id=current.extractor_profile_id,
+            artifact_path="/test/superseded.json",
+            status="done",
+        )
+        pg_session.add(stale_ext)
+        pg_session.flush()
+        stale_chunked = ChunkedDocument(
+            extracted_document_id=stale_ext.id,
+            chunk_profile_id=stale_chunk_prof.id,
+            status="done",
+        )
+        pg_session.add(stale_chunked)
+        pg_session.flush()
+        stale_chunk = Chunk(
+            document_id=stale_src.id,
+            chunked_document_id=stale_chunked.id,
+            chunk_index=1,
+            # Deliberately the same distinctive word as the in-scope chunk, so
+            # only the scope filter can tell them apart.
+            content="test chunk for ann index",
+        )
+        pg_session.add(stale_chunk)
+        pg_session.flush()
+        # Plain ints captured before the commit expires these objects. Touching
+        # an expired attribute afterwards issues a refresh, which opens a
+        # transaction -- and an open transaction on chunks_v2 is exactly what a
+        # CONCURRENTLY build waits on, forever.
+        stale_chunk_id, stale_profile_id = stale_chunk.id, stale_chunk_prof.id
+        pg_session.commit()
+        pg_session.close()
+        return current, stale_chunk_id, stale_profile_id
+
+    def test_superseded_chunks_are_never_returned(self, pg_engine, pg_session):
+        current, stale_chunk_id, stale_chunk_profile_id = self._seed_two_revisions(
+            pg_session
+        )
+        with pg_engine.begin() as conn:
+            vector_store.ensure_vector_table_schema(conn, current.embedding_profile_id, 4)
+        with pg_engine.connect() as conn:
+            vector_store.upsert_vectors(
+                conn,
+                current.embedding_profile_id,
+                [(current.chunk_id, [0.1, 0.2, 0.3, 0.4])],
+                collection=current.collection,
+                extractor_profile_id=current.extractor_profile_id,
+                chunk_profile_id=current.chunk_profile_id,
+            )
+            # The superseded chunk gets a vector row too, in the SAME profile
+            # table, differing only in chunk_profile_id. Without it the join
+            # alone would exclude it and this test would pass while proving
+            # nothing about the scope filter -- which is the only thing it is
+            # here to check.
+            vector_store.upsert_vectors(
+                conn,
+                current.embedding_profile_id,
+                [(stale_chunk_id, [0.9, 0.8, 0.7, 0.6])],
+                collection=current.collection,
+                extractor_profile_id=current.extractor_profile_id,
+                chunk_profile_id=stale_chunk_profile_id,
+            )
+            conn.commit()
+        # Plain build, not CONCURRENTLY: this test is about the scope filter,
+        # and two rows index instantly. `build_lexical_index`'s concurrent path
+        # is covered where a populated corpus actually needs it.
+        with pg_engine.begin() as conn:
+            conn.execute(text(_lexical_index_ddl(Chunk.__tablename__)))
+
+        sql = vector_store.lexical_sql(
+            current.embedding_profile_id, text_config=LEXICAL_TEXT_CONFIG
+        )
+        with pg_engine.connect() as conn:
+            rows = conn.execute(
+                text(sql),
+                {
+                    "query": "ann index",
+                    "collection": current.collection,
+                    "chunk_profile_id": current.chunk_profile_id,
+                    "extractor_profile_id": current.extractor_profile_id,
+                    "pool": vector_store.LEXICAL_CANDIDATE_POOL,
+                    "k": 10,
+                },
+            ).fetchall()
+
+        paths = [r.source_path for r in rows]
+        assert "/test/minimal.pdf" in paths, "the in-scope chunk must be found"
+        assert "/test/superseded.pdf" not in paths, (
+            "a superseded revision's chunk was returned by the lexical arm"
+        )
+        _cleanup(pg_engine, current.embedding_profile_id)

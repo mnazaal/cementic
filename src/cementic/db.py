@@ -473,24 +473,20 @@ def ensure_lexical_index(engine: Engine) -> None:
         return
 
     table = Chunk.__tablename__
-    ddl = (
-        f"ON {table} USING gin (to_tsvector('{LEXICAL_TEXT_CONFIG}', content))"
-    )
     with engine.connect() as conn:
-        populated = _table_has_rows(conn, table)
+        if _table_has_rows(conn, table):
+            # Deliberately not built here. This runs at worker startup, and on a
+            # populated table the build takes minutes: a plain CREATE INDEX
+            # holds ACCESS EXCLUSIVE for all of it, and CONCURRENTLY waits for
+            # every open transaction on the table before it even begins -- so
+            # `cementic start` would block for minutes, or indefinitely against
+            # a long-running reader. An existing corpus upgrades by calling
+            # `build_lexical_index` explicitly instead.
+            return
 
     try:
-        if populated:
-            # CONCURRENTLY cannot run inside a transaction block.
-            with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
-                conn.execute(
-                    text(f"CREATE INDEX CONCURRENTLY IF NOT EXISTS {LEXICAL_INDEX_NAME} {ddl}")
-                )
-        else:
-            with engine.begin() as conn:
-                conn.execute(
-                    text(f"CREATE INDEX IF NOT EXISTS {LEXICAL_INDEX_NAME} {ddl}")
-                )
+        with engine.begin() as conn:
+            conn.execute(text(_lexical_index_ddl(table)))
     except (IntegrityError, ProgrammingError, OperationalError):
         # Same race as the active-revision index below: `IF NOT EXISTS` checks
         # the catalog before taking its lock, so the two workers `cementic
@@ -499,16 +495,43 @@ def ensure_lexical_index(engine: Engine) -> None:
         if not _lexical_index_exists(engine):
             raise
 
+
+def _lexical_index_ddl(table: str, *, concurrently: bool = False) -> str:
+    concurrent = "CONCURRENTLY " if concurrently else ""
+    return (
+        f"CREATE INDEX {concurrent}IF NOT EXISTS {LEXICAL_INDEX_NAME} ON {table} "
+        f"USING gin (to_tsvector('{LEXICAL_TEXT_CONFIG}', content))"
+    )
+
+
+def build_lexical_index(engine: Engine) -> None:
+    """Build the full-text index on a corpus that already has chunks.
+
+    The upgrade path, kept out of `ensure_lexical_index` because it blocks:
+    minutes of work on a large corpus, and CONCURRENTLY additionally waits for
+    every open transaction on the table before starting. Fine as something a
+    person runs and watches; not fine at worker startup.
+
+    CONCURRENTLY so indexing and search keep working throughout, which also
+    means it cannot run inside a transaction block.
+    """
+    if engine.dialect.name != "postgresql":
+        return
+    if _lexical_index_exists(engine) and _lexical_index_is_valid(engine):
+        return
+    with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+        conn.execute(text(_lexical_index_ddl(Chunk.__tablename__, concurrently=True)))
+
     # A failed CONCURRENTLY build leaves an INVALID index behind that the
     # planner ignores, so the catalog says "present" while every lexical search
-    # silently falls back to a sequential scan. Drop it so the next start
-    # retries rather than inheriting a permanently useless index.
-    if populated and not _lexical_index_is_valid(engine):
+    # silently falls back to a sequential scan of every chunk. Drop it, so a
+    # retry builds rather than inheriting a permanently useless index.
+    if not _lexical_index_is_valid(engine):
         with engine.begin() as conn:
             conn.execute(text(f"DROP INDEX IF EXISTS {LEXICAL_INDEX_NAME}"))
         raise RuntimeError(
             f"Concurrent build of {LEXICAL_INDEX_NAME} did not complete; the "
-            "invalid index has been dropped and will be retried on the next start."
+            "invalid index it left behind has been dropped. Re-run to retry."
         )
 
 
