@@ -23,6 +23,7 @@ This keeps old search available while a new extractor, chunking policy, or embed
 - Separates extraction, chunking, and embedding so each stage can evolve independently
 - Keeps one active searchable revision per collection while a replacement revision builds
 - Uses explicit `cementic collection promote` to switch search to a new ready revision
+- Searches meaning and exact words together, so a rare surname or acronym is findable
 
 ## Installation
 
@@ -288,6 +289,12 @@ chunk_size = 320
 [index]
 method = "hnsw"   # or "diskann"
 
+[search]
+# Blend exact-word matching with vector search (default true).
+hybrid = true
+# A one-word query matching at most this many documents is led by exact matching.
+lexical_lead_max_documents = 20
+
 [llama_cpp]
 model_path = "models/nomic-embed-text-v2-moe.Q8_0.gguf"
 ```
@@ -353,6 +360,47 @@ than embedded truncated, and shows up as a failed chunk in `cementic status`.
 Raising either value without re-measuring risks silently truncated embeddings;
 the derivation is under "Measurements behind the defaults" below, and the
 script is `scripts/measure_chunk_context_fit.py`.
+
+### How search combines meaning and exact words
+
+Search runs two arms over the same chunks and merges them.
+
+- The **vector arm** finds text that *means* something similar to the query. It is
+  what you want for `variational inference` or `how do transformers handle long
+  context`.
+- The **lexical arm** matches the words literally, through a PostgreSQL full-text
+  index. It is what you want for a surname, an acronym, an equation label — the
+  things a dense embedding cannot recover, because a single vector for a whole
+  chunk does not record that the chunk literally contains the string `BLEU`.
+
+Measured on a 23,064-paper corpus: for queries that are a rare exact token, vector
+search alone put the right paper in the top 10 **7 times out of 150**. With the
+lexical arm, every time.
+
+**One thing to know before you judge it: a common word is not an identifier
+query.** The lexical arm leads only when the query is a single word appearing in
+at most `search.lexical_lead_max_documents` documents (default 20). `Hochreiter`
+appears in 1,697 of 23,064 papers in one test corpus — it is the LSTM citation, so
+it is everywhere — and a word in 1,697 papers does not identify one. That query is
+led by the vector arm, and the top result may look unrelated. Author search works
+best for authors your corpus cites *rarely*, which is the opposite of the famous
+ones.
+
+Turn the whole thing off with `hybrid = false` under `[search]`.
+
+#### Why results sometimes show no score
+
+When both arms contribute, the list is ordered by *rank fusion*, not by either
+arm's score — and a cosine similarity and a text-rank score are not on the same
+scale. Printing them side by side produces a column that goes up and down the page
+and looks mis-sorted, so cementic prints the score only when it still explains the
+order. Pass `--scores` to see the numbers anyway, or use `--json`, which always
+carries `rank` alongside each result's own `score` and a `score_kind` naming which
+arm produced it:
+
+```bash
+cementic search "Hochreiter" -c papers --json | jq '{rank, score, score_kind}'
+```
 
 ### Choosing a PDF extractor
 

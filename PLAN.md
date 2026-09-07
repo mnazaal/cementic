@@ -412,7 +412,7 @@ vector retrieval** below and `notes/design-hybrid-retrieval.html`.
       pure-vector queries where nothing was fused* — a regression in the common
       case to fix a problem that exists only in the fused one.
 
-   vi. **README.** The search section gains what hybrid does, when the lexical
+   vi. ~~**README.**~~ **DONE 2026-09-07.** The search section gains what hybrid does, when the lexical
       arm leads, and that a single common word is not an identifier query —
       "Hochreiter" appears in 1,697 of 23,064 documents, so it routes to the
       vector arm and searching famous names will not behave like searching rare

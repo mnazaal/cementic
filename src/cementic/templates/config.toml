@@ -33,6 +33,16 @@ hnsw_iterative_scan = "relaxed_order"
 # HNSW build spill to disk and slow sharply; lower this on a small server.
 build_memory = "2GB"
 
+[search]
+# Search meaning and exact words together. Without this, a query that is a rare
+# exact token -- an author surname, an acronym, an equation label -- finds the
+# right document in the top 10 about 5% of the time; with it, essentially always.
+hybrid = true
+# A single-word query matching at most this many documents is answered from the
+# exact-match ranking; anything broader is led by vector search. A word in
+# thousands of documents does not identify one, so famous names do not qualify.
+lexical_lead_max_documents = 20
+
 [llama_cpp]
 # Model identity is the file's content digest, so any spelling of the path
 # that resolves to the same file is the same profile. Pointing at a
