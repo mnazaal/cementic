@@ -202,10 +202,12 @@ it matters.
 
 ## Execution order — hybrid retrieval (2026-09-07)
 
-The live one. The measurement is done and the mechanism is confirmed (see
-**In progress — hybrid lexical + vector retrieval** below; full record with
-predictions in `notes/design-hybrid-retrieval.html`). What is unsettled is the
-*shape*, and the first two steps may settle it in twenty minutes.
+The live one. Steps 1–5a are done: the mechanism is measured, the shape is
+settled (*the leading arm owns rank 1, fusion owns the rest*), and the pure
+core ships in `hybrid.py` verified against both query sets. What remains is
+step 5b — the imperative shell that builds the index and wires the core into
+`search.py`. Evidence and predictions are in **In progress — hybrid lexical +
+vector retrieval** below and `notes/design-hybrid-retrieval.html`.
 
 1. ~~**Confirm the rank-1 collapse is a tie-break artifact.**~~ **DONE
    2026-09-07.** Set A, n=150: 68.0% lost an *exact* score tie (winner was a
@@ -300,14 +302,57 @@ predictions in `notes/design-hybrid-retrieval.html`). What is unsettled is the
    the vector arm's first result costs nothing there and the fused tail still
    contributes the documents only the lexical arm found.
 
-5b. **The shell — still to do.** The lexical index becomes per-revision, built and
-   reconciled by `collection reindex` exactly as the ANN index is, and stays
-   *out* of the embedding profile payload — a text-derived index cannot change
-   a vector, and fingerprinting it would re-version 2.3M rows for nothing.
-   *Exit:* `cementic search` returns fused results on `papers` with
-   `./scripts/check.sh` green.
-   *Anti-scope:* one index and one fusion rule; no per-collection tuning
-   surface until something demands it.
+5b. **The shell — still to do.** *Correction 2026-09-07:* this step previously
+   said the lexical index becomes per-revision, reconciled by `collection
+   reindex` like the ANN index. That was wrong and made the step look three
+   times its real size. Vectors live in per-profile tables
+   (`embedding_vectors_p6`) because different models produce incomparable
+   vectors; `chunks_v2` is a single global table and text is
+   model-independent, so **one GIN index serves every collection and every
+   revision**. It belongs beside `ix_chunks_v2_document` as a table-level
+   index, and touches the revision machinery not at all. It stays out of every
+   profile payload for the reason already established — a text-derived index
+   cannot change a vector.
+
+   i. **Measure the insert cost before making it default-on.** A GIN index
+      slows writes, and indexing throughput is the axis this project already
+      spent 26 days → 4.5 days getting right; shipping an unmeasured regression
+      into it would be the worst possible trade.
+      *Exit:* chunks/second on a fixed batch with and without the index.
+      *Decision rule, fixed now:* under 10% slower, build it up front on the
+      empty table and let inserts maintain it (the `ensure_revision_ann_index_up_front`
+      argument, which applies unchanged); 10% or worse, build it after import
+      instead and say so in the docs.
+
+   ii. **Creation path.** `ensure_lexical_index(engine)`, PostgreSQL-only and a
+      no-op elsewhere — the pattern `ensure_vector_extensions` already uses, and
+      the reason the sqlite unit suite keeps working. An empty table indexes
+      instantly; an existing corpus needs `CREATE INDEX CONCURRENTLY`, which
+      cannot run inside a transaction and so needs its own connection.
+      *Exit:* `cementic doctor` reports the index present on `papers`; the
+      sqlite-backed unit tests are untouched.
+
+   iii. **The lexical query, scoped to the active revision.** The correctness
+      risk of the whole step: the vector arm is implicitly scoped because each
+      profile owns its own vector table, but `chunks_v2` holds chunks from
+      *every* revision including superseded ones. The lexical query must filter
+      to the active revision's chunk scope or search will return documents the
+      vector arm structurally cannot.
+      *Exit:* a test that seeds a superseded revision's chunks and proves they
+      are never returned.
+
+   iv. **Wire in `hybrid.combine`.** Routing decided by `looks_like_identifier`
+      plus one document-frequency probe at threshold 20; config to set the
+      threshold and to turn hybrid off.
+      *Exit:* `cementic search` returns routed results on `papers`, and
+      `./scripts/check.sh` is green.
+
+   v. **README.** The search section gains what hybrid does and when the
+      lexical arm leads.
+
+   *Anti-scope for all of 5b:* one index, one fusion rule, one threshold. No
+   per-collection tuning surface, no query classifier beyond the two-line
+   predicate, and no re-opening of RRF `k`.
 
 ## Execution order — v1.5 migration: CLOSED, the gate failed (2026-09-05)
 
@@ -387,9 +432,16 @@ does not change that. Cheap counter: log query strings and timestamps locally
 and read the mix in a few weeks. Does not block steps 1–2; does gate step 5.
 
 **Risk — the probe index is unmanaged.** `chunks_v2_fts_probe` sits on the live
-database outside the revision machinery, so a rebuild will not recreate it.
-Harmless while the corpus is static, and step 5 is what resolves it. If the
-thread is abandoned, `drop index chunks_v2_fts_probe` reverses it completely.
+database created by hand, so nothing recreates it after a `create_all` on a
+fresh database. Harmless while the corpus is static, and step 5b(ii) is what
+resolves it by giving the index a declared home. If the thread is abandoned,
+`drop index chunks_v2_fts_probe` reverses it completely.
+
+**Risk — the harness is not version controlled.** Every number in this section
+came from `notes/probe_hybrid_retrieval.py`, and `notes/` is gitignored by the
+project's own decision. The results survive here; the code that produced them
+would not survive a `git clean`. Either exempt that one file or accept that the
+measurements are reproducible only from their description.
 
 **Two performance traps, both measured rather than reasoned**, kept because
 each cost an hour: `select distinct document_id … limit n` makes the planner
