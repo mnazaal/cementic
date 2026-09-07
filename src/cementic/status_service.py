@@ -339,17 +339,38 @@ def load_pipeline_status_bulk(config: Config, collections: list[str]) -> dict[st
             ):
                 (chunked_done if status == "done" else chunked_failed)[collection] = count
 
+            # Reaches the document through the chunking rather than through
+            # `Chunk.document_id`. Both routes name the same document -- a
+            # chunk's `document_id` is copied from the extraction its chunking
+            # was built from (`_write_back_chunks`) -- but dropping the second
+            # one lets PostgreSQL count from `ix_chunks_v2_chunked_document_chunk`
+            # instead of the heap, which is 2.6 GB of chunk text for a count
+            # that needs no column at all. Measured 2026-09-07 on the 2.3M-chunk
+            # corpus: 90,515 buffers against 338,793, and zero rows disagree
+            # between the two routes.
+            #
+            # Pages read, not seconds: the warm wall time of the two forms is
+            # not separable here (0.6-2.3 s for both, a spread wider than the
+            # gap), and the plan still showed 342,820 heap fetches because the
+            # visibility map is stale -- so part of this is unrealised until
+            # the table is vacuumed. What it reliably removes is the 2.6 GB
+            # read that made a cold `status` unpredictable.
             total_chunks = {
                 collection: count
                 for collection, count in session.query(
-                    SourceDocument.collection, func.count(Chunk.id)
+                    # `count()`, not `count(Chunk.id)`: naming the column forces
+                    # the heap, and the heap is the 2.6 GB this rewrite exists
+                    # to stop reading. The join already guarantees a row per
+                    # chunk, so the two counts are equal.
+                    SourceDocument.collection,
+                    func.count(),
                 )
-                .select_from(Chunk)
-                .join(ChunkedDocument, Chunk.chunked_document_id == ChunkedDocument.id)
+                .select_from(ChunkedDocument)
                 .join(
                     ExtractedDocument, ChunkedDocument.extracted_document_id == ExtractedDocument.id
                 )
-                .join(SourceDocument, Chunk.document_id == SourceDocument.id)
+                .join(SourceDocument, ExtractedDocument.document_id == SourceDocument.id)
+                .join(Chunk, Chunk.chunked_document_id == ChunkedDocument.id)
                 .filter(SourceDocument.status != "deleted", or_(*chunk_conditions))
                 .group_by(SourceDocument.collection)
                 .all()

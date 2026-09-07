@@ -134,26 +134,23 @@ def chunk_scope(revision: PipelineRevision) -> tuple[Any, ...]:
     )
 
 
-def embedding_scope(revision: PipelineRevision) -> tuple[Any, ...]:
+def embedding_scope_denormalised(collection: str, revision: PipelineRevision) -> tuple[Any, ...]:
     """Conditions selecting the embeddings that count toward ``revision``.
 
-    Scoped through the revision's chunk chain, exactly like ``chunk_scope``: the
-    same embedding profile can be shared with an older revision's chunks (e.g.
-    after a chunk_size change with the same model), and counting those makes
+    Like the other scope builders, this is the single definition of "what
+    counts" -- shared by the worker's completeness check, by revision promotion
+    and by ``cementic status``. Unlike them it reads one table, because the
+    embedding count is the only one that runs at chunk scale rather than
+    document scale.
+
+    The chunk profile is in the predicate for the same reason ``chunk_scope``
+    carries it: one embedding profile can be shared with an older revision's
+    chunks (a chunk_size change with the same model), and counting those makes
     ``done + failed == total_chunks`` unreachable.
-    """
-    return (
-        *chunk_scope(revision),
-        ChunkEmbedding.embedding_profile_id == revision.embedding_profile_id,
-    )
 
-
-def embedding_scope_denormalised(collection: str, revision: PipelineRevision) -> tuple[Any, ...]:
-    """The same embedding set as ``embedding_scope``, read off one table.
-
-    ``embedding_scope`` reaches the collection and the two profiles by joining
-    ``chunk_embeddings`` -> ``chunks_v2`` -> ``chunked_documents`` ->
-    ``extracted_documents`` -> ``source_documents``, so counting over it scans
+    The joined form this replaces reached the collection and the two profiles
+    through ``chunk_embeddings`` -> ``chunks_v2`` -> ``chunked_documents`` ->
+    ``extracted_documents`` -> ``source_documents``, so counting over it scanned
     all of ``chunks_v2`` -- 2.6 GB of chunk text read to fetch three integers a
     row. Measured 2026-09-07 on the 2,298,558-row ``papers`` corpus: 8.0 s of
     ``cementic status``'s 9.1 s, and 368k buffers against 29k here, which is

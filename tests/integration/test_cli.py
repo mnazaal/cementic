@@ -154,6 +154,13 @@ def _seed_ready_revision(session, collection: str, *, with_document: bool) -> Pi
                 chunk_id=chunk.id,
                 embedding_profile_id=embedding_profile.id,
                 status="done",
+                # Set as `materialize_pending_embeddings` sets them -- the only
+                # writer of these rows. Revision completeness counts off these
+                # columns, so a row that leaves them NULL is invisible to the
+                # promotion gate and the revision reads as incomplete.
+                collection=collection,
+                extractor_profile_id=extractor_profile.id,
+                chunk_profile_id=chunk_profile.id,
             )
         )
 

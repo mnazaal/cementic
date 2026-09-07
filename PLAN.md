@@ -1,92 +1,81 @@
 # cementic — architecture & design
 
-<!-- session-handoff:begin (2026-09-07) -->
+<!-- session-handoff:begin (2026-09-07, evening) -->
 ## Where the work stands
 
-**Entry point: nothing is mid-flight; hybrid retrieval shipped end to end.**
-Read **Execution order — hybrid retrieval** below: steps 1 through 5b(vi) are
-all marked done with their commits. The next unit of work is a fresh
-`claude/<topic>` branch on one of the three items at the bottom of this block.
+**Entry point: one command left to run, in `TODO.md`.** The two papers this
+session found stranded are still stranded -- the code fix stops it recurring
+but cannot re-chunk what is already lost. `TODO.md`'s "Two papers were silently
+unsearchable" entry carries the exact command, self-finding rather than
+hard-coded to those ids. Run it, then `cementic start` picks them up (~103
+chunks of embedding work). Everything else below is finished.
 
-**Repo state.** `main` at `0691f8b`, clean; the feature branch was merged and
-deleted. **`main` is 17 commits ahead of `origin/main`, unpushed**, and this
-handoff commit is a further one on `claude/session-handoff-2026-09-07`, not yet
-merged. A hook rejects agents committing to `main`, so both the merge and the
-push are yours:
+**Repo state.** `main` at `012b490` and pushed; the status-latency fix is in.
+This pass sits unmerged on `claude/status-followups`. A hook rejects agents
+committing to `main`, so the merge and push are yours:
 ```bash
-git checkout main && git merge --ff-only claude/session-handoff-2026-09-07 && git push
-``` Pushing is yours; a hook
-rejects agents committing to `main`. Nothing is running: no background jobs, no
-cluster work, scratchpad empty.
+git checkout main && git merge --ff-only claude/status-followups && git push
+```
+Nothing is running: no background jobs, no cluster work, scratchpad empty.
 
-**What shipped.** Two arcs, both closed. A six-item operational pass
-(`203d0c6`–`78675b3`), then hybrid lexical + vector retrieval measured,
-pre-registered and built (`38d7d56`–`0691f8b`). Evidence and verdicts are in
-**In progress — hybrid lexical + vector retrieval** and the execution order;
-this block does not restate them.
+**What shipped.** `cementic status -c papers` went from 12-128 s to 1.93-2.20 s.
+It was never a timeout: one count joined `chunk_embeddings` through `chunks_v2`
+to reach three columns `chunk_embeddings` already carries, so every run read
+2.6 GB of chunk text. Then the follow-ups: the `total_chunks` count now counts
+from an index instead of the heap, `compute_revision_counts` moved onto the
+same predicate so the worker and status stopped describing one set two ways,
+the pg suite's GSSAPI flake is fixed, and a silent data-loss bug was found and
+fixed. Numbers live in `TODO.md` and in `embedding_scope_denormalised`'s
+docstring; this block does not restate them.
 
-**Corrections — distrust these sections' history, not their current text.**
-- This plan went stale against the code **three times** in one session: the
-  audit register still described `_step_embed` as unfixed after the code closed
-  it, 13 of 22 `file.py:line` anchors pointed at unrelated code, and steps
-  5b(ii–iv) read as pending while committed. All three are repaired, but the
-  register is prose nobody re-checks, so verify an entry against the code before
-  acting on it.
-- The handoff block above this one claimed nothing was mid-flight while hybrid
-  retrieval was live. Same failure, one level up.
+**Corrections -- distrust these sections' history, not their current text.**
+- PLAN's "`status` no longer blocks 120 s" was true but about a different wait:
+  `3df0814` really did remove a daemon poll. No surviving timeout constant
+  explained 12-128 s, which is why a static audit could not close this and
+  per-statement timing could. Reach for the measurement earlier next time.
+- This session's own first read was wrong too: the 103-chunk discrepancy was
+  written up as "inert, nothing reads that column, do not investigate". It was
+  the visible edge of two unsearchable papers. The user overruled the
+  recommendation to park it, and that call was correct.
 
 **Deviations from the written plan, attributed.**
-- *User-directed:* the pre-registered rule said build the full-text index after
-  import (GIN makes chunk inserts ~4.5x slower, +360%, failing a 10% bar). Built
-  up front instead — in context it is ~7 minutes against ~115 hours of
-  embedding, 0.1% of import wall clock, so the rule measured the wrong quantity.
-  Recorded as a departure in step 5b(i) rather than the rule quietly rewritten.
-- *Agent-decided:* step 1's exit condition (≥90% confirms the tie-break
-  diagnosis) came back 68% — reported as not confirmed rather than rounded up.
-  Step 3's threshold rule pointed at T=100 on a 2-of-40 margin; reported as
-  under-powered and T=20 used instead.
+- *User-directed:* investigating the 103-chunk gap, against a recommendation to
+  record and park it.
+- *Agent-decided:* `embedding_scope` was deleted rather than left beside its
+  replacement, once the last caller moved. Two definitions of one set is the
+  drift `revisions.py` already warns about.
+- *Agent-decided:* the `total_chunks` rewrite keeps the join to
+  `source_documents` through `extracted_documents`, rather than the
+  `chunked_document_id IN (...)` form measured earlier -- same index-only plan,
+  and it drops no predicate.
 
 **Environment quirks that cost time.**
-- The Bash sandbox fails intermittently with `bwrap: Can't mount proc`; retry
-  with the sandbox disabled. It recovers on its own and then breaks again.
-- Two background runs were **killed for low memory** mid-experiment. Long
-  measurement runs must be split (one query set per invocation), not batched.
-- `psql` is not installed — Postgres is in a container. Use the project venv
-  (`./.venv/bin/python` with `cementic.db.get_engine`) for ad-hoc SQL.
-- Tool output is sometimes silently compressed, dropping code tokens. Never edit
-  a file from a compressed read; re-read in smaller chunks or use `Read`.
+- The Bash sandbox blocks 127.0.0.1:5432. `cementic search` under it exits 0
+  with "database not reachable", which reads as a dead container. Run anything
+  touching the DB with the sandbox disabled.
+- `pytest -m pg` intermittently errored *every* test at connect with a Kerberos
+  GSSAPI message. Fixed here (`conftest.py` now passes `gssencmode=disable`
+  like `db.py` always did), but if it returns, rerun before debugging code.
+- `psql` is not installed. Use `./.venv/bin/python` with `cementic.db.get_engine`
+  for ad-hoc SQL.
+- A working embedding client on SQLite hits the Postgres-only vector tables
+  (`to_regclass`). Worker tests that only care about chunking use
+  `FailingEmbeddingClient`.
 
-**Artifacts — one of these is a real risk.**
-- `notes/` is **gitignored**, and it holds the pre-registration, the four-survey
-  prior art, and the probe harnesses that produced every number in this thread
-  (`design-hybrid-retrieval.html`, `probe_hybrid_retrieval.py`,
-  `probe_gin_insert_cost.py`). A `git clean -xdf` destroys all of it. Copies are
-  at `~/.cache/cementic-verify/notes-backup/`; the durable fix is a decision
-  about `.gitignore` that is yours, not an agent's.
-- `~/.cache/cementic-verify/` holds every gate run and measurement log cited
-  above — keep. The corrupted-PLAN backup and its diagnostic copy were
-  discarded; PLAN is committed and healthy.
-- The live database carries `ix_chunks_v2_fts` (617 MB, valid), renamed in place
-  from the hand-built probe index rather than rebuilt.
+**Artifacts.** Every measurement behind the numbers above is in
+`~/.cache/cementic-status-debug/`: per-statement timings before and after,
+query plans, the interleaved A/B, and the invariant checks against the live
+corpus. `notes/` is still gitignored -- unchanged risk, unchanged decision.
 
-**Next, in the order I would take it.**
-1. **Push, then use it for a week.** Living with hybrid search beats more
-   measurement.
-2. **Query logging**, if the precondition matters to you — see the risk in the
-   In-progress section. It only pays if started early, and it gates nothing.
-3. **The CLI-surface audit against `llm`** — queued in `TODO.md` with its
-   rationale.
-
-**Exit criteria — commands whose output confirms the above.**
+**Exit criteria -- commands whose output confirms the above.**
 ```bash
-git status --short                    # empty
-git log --oneline -1 main             # 0691f8b, until the handoff is merged
-git status -sb | head -1              # ahead 17 (18 once merged), until you push
-./scripts/check.sh                    # six gates, all ok
-cementic search "variational inference" -c papers -n 3   # scores shown, descending
-cementic search "Hochreiter" -c papers -n 3              # no score column (fused)
-cementic search "Hochreiter" -c papers -n 3 --scores     # scores back on request
+git status --short                      # empty
+git log --oneline -1 main               # 012b490, until this branch is merged
+./scripts/check.sh                      # six gates, all ok
+./.venv/bin/cementic status -c papers   # ~2s warm; a cold cache still costs ~10s
 ```
+After the repair command in `TODO.md` and a worker run, `documents` stays
+23,064 while `embedded` rises by ~103.
 <!-- session-handoff:end -->
 
 ## Decision log
@@ -1040,7 +1029,9 @@ count now reads the denormalised columns `chunk_embeddings` already carries for
 `_step_embed`'s claim (`embedding_scope_denormalised`, `revisions.py`).
 Interleaved on the live corpus, same connection, both forms returning the same
 row: 1.15 s joined against 0.20 s flat warm, 7.96 s against 0.21 s cold.
-`cementic status -c papers` end to end: 1.93–2.20 s across five runs.
+`cementic status -c papers` end to end: 1.97-2.27 s across five warm runs,
+against 12-128 s before. A cold cache still costs -- one run just after the pg
+suite took 10.1 s -- so the tail is smaller, not gone.
 
 - ~~**`check_health` still calls a live-but-broken daemon healthy.**~~
   **RESOLVED 2026-08-18** by the release plan's batch 1a (`04e974a`):

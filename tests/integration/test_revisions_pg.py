@@ -281,7 +281,14 @@ def _seed_model_swap_with_vectors(session, collection: str) -> list[int]:
     for embedding, status in zip(embeddings, ("retired", "active", "ready")):
         session.add(
             ChunkEmbedding(
-                chunk_id=chunk.id, embedding_profile_id=embedding.id, status="done"
+                chunk_id=chunk.id,
+                embedding_profile_id=embedding.id,
+                status="done",
+                # As `materialize_pending_embeddings` writes them; revision
+                # completeness counts off these columns.
+                collection=collection,
+                extractor_profile_id=extractor.id,
+                chunk_profile_id=chunk_profile.id,
             )
         )
         session.add(

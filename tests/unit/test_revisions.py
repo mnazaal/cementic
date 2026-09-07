@@ -546,7 +546,14 @@ def _seed_model_swap_history(session, collection: str = "c1"):
             )
         )
         session.add(
-            ChunkEmbedding(chunk_id=chunk.id, embedding_profile_id=embedding.id, status="done")
+            ChunkEmbedding(
+                chunk_id=chunk.id,
+                embedding_profile_id=embedding.id,
+                status="done",
+                collection=collection,
+                extractor_profile_id=extractor.id,
+                chunk_profile_id=chunk_profile.id,
+            )
         )
     session.commit()
     return embeddings, chunk

@@ -38,7 +38,7 @@ from cementic.index_strategies import index_dimension_error
 from cementic.revisions import (
     chunk_scope,
     chunked_scope,
-    embedding_scope,
+    embedding_scope_denormalised,
     ensure_revision_ann_index,
     ensure_revision_ann_index_up_front,
     ensure_revision_vector_table,
@@ -295,6 +295,19 @@ def _purge_all_chunks(session: Session, extracted_document_id: int) -> None:
     Removing them makes the document return nothing until it extracts again,
     which is the honest answer, and the failure is already visible as
     ``failures extract=N`` in ``cementic status``.
+
+    The emptied chunkings must also be invalidated, or "until it extracts
+    again" never arrives. ``_step_chunk`` re-claims a *done* chunking only when
+    its ``source_content_hash`` differs from the extraction's, so a file that
+    later extracts to the **same** text it had before matches its own stale
+    hash, is never revisited, and keeps zero chunks for good -- while
+    ``chunked_scope`` still counts it as done, so ``cementic status`` reads
+    100%. Found on the live corpus 2026-09-07: two of 23,064 papers sat in
+    exactly that state, unsearchable and unreported, since 2026-08-24.
+
+    Clearing the hash is what re-opens the work: ``_step_chunk``'s claim treats
+    NULL as distinct, and ``chunked_scope``'s equality then excludes the row
+    from ``chunked_done`` until it is genuinely re-chunked.
     """
     chunked_ids = select(ChunkedDocument.id).where(
         ChunkedDocument.extracted_document_id == extracted_document_id
@@ -302,6 +315,9 @@ def _purge_all_chunks(session: Session, extracted_document_id: int) -> None:
     session.query(Chunk).filter(Chunk.chunked_document_id.in_(chunked_ids)).delete(
         synchronize_session=False
     )
+    session.query(ChunkedDocument).filter(
+        ChunkedDocument.extracted_document_id == extracted_document_id
+    ).update({ChunkedDocument.source_content_hash: None}, synchronize_session=False)
 
 
 def _purge_superseded_chunks(
@@ -374,22 +390,20 @@ def compute_revision_counts(
         .filter(*live, *chunk_scope(revision))
         .count()
     )
-    embedding_conditions = (*live, *embedding_scope(revision))
+    # Off `chunk_embeddings` alone, the same predicate `_step_embed`'s claim and
+    # `cementic status` use (`embedding_scope_denormalised`). This one decides
+    # whether a revision may be promoted, so it must describe the same set as
+    # the joined form it replaces -- pinned by
+    # `test_status_embedding_counts_match_the_worker_against_postgres` and by
+    # the promotion tests, which run the whole build to completion.
+    embedding_conditions = embedding_scope_denormalised(collection, revision)
     done_embeddings = (
         session.query(ChunkEmbedding)
-        .join(Chunk, ChunkEmbedding.chunk_id == Chunk.id)
-        .join(ChunkedDocument, Chunk.chunked_document_id == ChunkedDocument.id)
-        .join(ExtractedDocument, ChunkedDocument.extracted_document_id == ExtractedDocument.id)
-        .join(SourceDocument, Chunk.document_id == SourceDocument.id)
         .filter(*embedding_conditions, ChunkEmbedding.status == "done")
         .count()
     )
     failed_embeddings = (
         session.query(ChunkEmbedding)
-        .join(Chunk, ChunkEmbedding.chunk_id == Chunk.id)
-        .join(ChunkedDocument, Chunk.chunked_document_id == ChunkedDocument.id)
-        .join(ExtractedDocument, ChunkedDocument.extracted_document_id == ExtractedDocument.id)
-        .join(SourceDocument, Chunk.document_id == SourceDocument.id)
         .filter(*embedding_conditions, ChunkEmbedding.status == "failed")
         .count()
     )

@@ -39,27 +39,59 @@ index, versioned revisions) are documented in [PLAN.md](PLAN.md).
   2026-09-07.** One query, not a timeout: the embedding counts joined
   `chunk_embeddings` through `chunks_v2` to reach three columns
   `chunk_embeddings` already carries, so every run scanned 2.6 GB of chunk text
-  and spilled the hash join to disk. 7.96 s of a 9.08 s run; the 0–2% CPU was
+  and spilled the hash join to disk. 7.96 s of a 9.08 s run; the 0-2% CPU was
   the CLI blocked on a socket while Postgres worked. Reading the denormalised
-  columns instead (`embedding_scope_denormalised`) takes it to 1.93–2.20 s end
-  to end. Two leftovers, both measured, neither user-visible:
+  columns instead (`embedding_scope_denormalised`) takes it to 1.93-2.20 s end
+  to end warm. The `total_chunks` count was rewritten the same day to count
+  from `ix_chunks_v2_chunked_document_chunk` rather than the heap: 90,515
+  buffers against 338,793, though its wall-clock effect is inside the noise
+  (0.6-2.3 s for both forms) and 342,820 heap fetches say part of it waits on a
+  vacuum. `compute_revision_counts` moved onto the same predicate, so the
+  worker and status no longer describe one set two ways.
 
-  - **The `total_chunks` count still scans `chunks_v2`** — 0.59 s warm and
-    322k buffer reads (~2.5 GB), now the largest statement on the path. A
-    `chunked_document_id IN (scoped ids)` rewrite measured 0.41 s and 60k
-    reads, but it drops the `chunks_v2.document_id = source_documents.id`
-    linkage, which is only safe by construction (`_write_back_chunks` sets
-    both from one extraction). *Do it when:* status latency matters again, or
-    something else forces a look at that query.
-  - **`compute_revision_counts` (`pipeline_worker.py:369-395`) still carries
-    the joined form** of both counts, for the worker loop and for revision
-    promotion. Same defect, same one-line fix, but it gates whether a revision
-    is complete, so it wants its own pass and its own pg test rather than
-    riding along with a status change.
-  - `SUM(chunked_documents.total_chunks)` is 2,298,661 against 2,298,558 real
-    chunk rows — 103 chunks recorded that no longer exist, so that column is
-    not a shortcut for the count above and may be stale elsewhere. Unmeasured
-    beyond the discrepancy itself.
+  **A cold cache still costs.** Five warm runs land at 1.97-2.27 s, but a run
+  straight after the pg suite churned the page cache took 10.1 s. The
+  reproducible win is the embedding count (8.0 s to 0.2 s for that statement);
+  the cold tail is smaller than it was and not gone. *Look again when:* a cold
+  `status` annoys you -- and measure which statement, rather than assuming it
+  is the same one.
+
+- ~~**Two papers were silently unsearchable.**~~ **Fixed 2026-09-07**, found
+  while chasing a 103-chunk discrepancy in `chunked_documents.total_chunks`.
+  When re-extraction fails, `_purge_all_chunks` drops the document's chunks but
+  left the chunking `done` with its old `source_content_hash`; a file that then
+  extracted to the *same* text matched its own stale hash, so `_step_chunk`
+  never re-claimed it. Zero chunks, zero embeddings, counted as 100% chunked,
+  reported by nothing. The purge now clears the hash, which re-opens the work
+  and keeps the row out of `chunked_done` until it is genuinely re-chunked.
+  Reproduced first as a failing test
+  (`test_a_document_is_rechunked_after_its_failed_re_extraction`).
+
+  **The two live rows still need repairing** -- the fix stops it recurring but
+  cannot re-chunk what is already stranded. One command, then let the worker
+  pick them up; it costs ~103 chunks of embedding work:
+
+  ```bash
+  cd ~/projects/cementic && ./.venv/bin/python -c "
+  from sqlalchemy import text
+  from cementic.config import get_config
+  from cementic.db import get_engine
+  with get_engine(get_config().database.url).begin() as conn:
+      print('invalidated', conn.execute(text('''
+        UPDATE chunked_documents SET source_content_hash = NULL WHERE id IN (
+          SELECT cd.id FROM chunked_documents cd
+          JOIN extracted_documents ed ON cd.extracted_document_id = ed.id
+          JOIN source_documents sd ON ed.document_id = sd.id
+          LEFT JOIN chunks_v2 c ON c.chunked_document_id = cd.id
+          WHERE cd.status = 'done' AND cd.total_chunks > 0
+            AND cd.source_content_hash = ed.content_hash AND sd.status <> 'deleted'
+          GROUP BY cd.id HAVING count(c.id) = 0)''')).rowcount)
+  "
+  ```
+
+  The selector is self-finding rather than hard-coded to the two ids, so it
+  also repairs any row that reached this state before the fix landed. Verified
+  read-only on 2026-09-07: it matches exactly those two documents.
 
 - Audit the CLI surface against `llm`'s embeddings commands
   (https://llm.datasette.io/en/stable/embeddings/cli.html), and cut what does not

@@ -1280,3 +1280,69 @@ def test_advisory_lock_is_released_not_just_returned_to_the_pool(pg_engine) -> N
 
     _release_pipeline_worker_lock(connection, "lockprobe")
     assert locks_held() == 0
+
+
+class TestChunksLostToAFailedReExtraction:
+    """A document must not end up permanently chunk-less and still read as done.
+
+    Found on the live corpus 2026-09-07: two papers of 23,064 held zero chunks
+    while their chunkings said `done` with total_chunks 41 and 62, were
+    hash-current, and were counted by `cementic status` as 100% chunked. They
+    were not searchable and nothing reported it.
+    """
+
+    def test_a_document_is_rechunked_after_its_failed_re_extraction(
+        self, sqlite_setup, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Re-extraction fails, then succeeds with the same text.
+
+        `_purge_all_chunks` drops the chunks when re-extraction fails -- right,
+        because the old text is gone. But it leaves the chunking `done` with its
+        old `source_content_hash`, so when the file extracts again to the *same*
+        text, `_step_chunk`'s claim sees a current hash and a terminal status and
+        never revisits it. The chunks are gone for good.
+        """
+        config, session_factory, pdf_fixtures_dir = sqlite_setup
+        collection = "test_rechunk_after_failure"
+        pdf_path = str(pdf_fixtures_dir / "test_doc_a.pdf")
+
+        pipeline, source_watcher = _setup_worker(config, session_factory, collection, monkeypatch)
+        # Embeddings are not this test's concern, and a working provider would
+        # need the Postgres-only vector tables (see test_blank_chunks above).
+        pipeline.embedding_client = FailingEmbeddingClient()
+
+        source_watcher._register_document(pdf_path)
+        revision_id = pipeline._ensure_target_revision()
+        _run_pipeline_until_idle(pipeline, revision_id)
+
+        with session_factory() as session:
+            assert session.query(Chunk).count() > 0, "fixture never chunked"
+            original_hash = session.query(ExtractedDocument).one().content_hash
+
+        # The file changes on disk and the new version does not extract.
+        with session_factory() as session:
+            doc = session.query(SourceDocument).filter_by(collection=collection).one()
+            doc.file_hash = "changed-on-disk"
+            doc.source_path = "/nonexistent/file.pdf"
+            session.commit()
+        _run_pipeline_until_idle(pipeline, revision_id)
+
+        with session_factory() as session:
+            assert session.query(Chunk).count() == 0, "the failed re-extraction should purge"
+
+        # The file comes back, extracting to exactly the text it had before.
+        with session_factory() as session:
+            doc = session.query(SourceDocument).filter_by(collection=collection).one()
+            doc.file_hash = "back-again"
+            doc.source_path = pdf_path
+            session.commit()
+        _run_pipeline_until_idle(pipeline, revision_id)
+
+        with session_factory() as session:
+            extracted = session.query(ExtractedDocument).one()
+            assert extracted.status == "done"
+            # The whole point: the same text as before, so the stale hash matches.
+            assert extracted.content_hash == original_hash, "fixture re-extracted different text"
+            chunks = session.query(Chunk).count()
+
+        assert chunks > 0, "the document extracted again but was never re-chunked"

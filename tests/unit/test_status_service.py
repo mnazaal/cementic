@@ -330,9 +330,9 @@ class TestEmbeddingCountStaysOffTheChunkTable:
     def test_an_older_revisions_chunks_are_excluded_by_the_flat_predicate(self) -> None:
         """The chunk profile is what separates two revisions sharing a model.
 
-        `embedding_scope`'s join excluded an older revision's chunks by walking
-        to their `ChunkedDocument`. The denormalised predicate has to make the
-        same cut from `chunk_embeddings.chunk_profile_id` alone, or a chunk-size
+        The joined form excluded an older revision's chunks by walking to their
+        `ChunkedDocument`. The predicate that replaced it has to make the same
+        cut from `chunk_embeddings.chunk_profile_id` alone, or a chunk-size
         change with an unchanged embedding model double-counts the corpus and
         `done + failed == total_chunks` stops meaning anything.
 
@@ -1019,6 +1019,9 @@ class TestLoadFileProgress:
                         chunk_id=chunk.id,
                         embedding_profile_id=revision.embedding_profile_id,
                         status=status,
+                        collection="col",
+                        extractor_profile_id=revision.extractor_profile_id,
+                        chunk_profile_id=revision.chunk_profile_id,
                     )
                 )
             session.commit()
@@ -1071,6 +1074,9 @@ class TestLoadFileProgress:
                             chunk_id=chunk.id,
                             embedding_profile_id=revision.embedding_profile_id,
                             status="done",
+                            collection="col",
+                            extractor_profile_id=revision.extractor_profile_id,
+                            chunk_profile_id=revision.chunk_profile_id,
                         )
                     )
                 session.commit()

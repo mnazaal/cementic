@@ -63,10 +63,19 @@ def _require_isolated_test_database() -> None:
         )
 
 
+#: What `db.py`'s `get_engine` passes, for the same reason: on a Kerberos host
+#: psycopg2's GSSAPI probe can fail or hang before authentication is attempted,
+#: and every fixture here then errors at setup with "Server not found in
+#: Kerberos database" -- 62 tests erroring at once, which reads as a mass
+#: regression rather than a connection option. The application engine was given
+#: this and the test engines were not, so only the suite saw it.
+_PG_CONNECT_ARGS: dict[str, object] = {"connect_timeout": 2, "gssencmode": "disable"}
+
+
 def _url_reachable(url) -> bool:
     engine = None
     try:
-        engine = create_engine(url, connect_args={"connect_timeout": 2})
+        engine = create_engine(url, connect_args=_PG_CONNECT_ARGS)
         with engine.connect() as conn:
             conn.execute(text("SELECT 1"))
         return True
@@ -88,7 +97,7 @@ def _ensure_test_database() -> None:
     admin = create_engine(
         target.set(database="postgres"),
         isolation_level="AUTOCOMMIT",
-        connect_args={"connect_timeout": 2},
+        connect_args=_PG_CONNECT_ARGS,
     )
     try:
         with admin.connect() as conn:
@@ -206,7 +215,7 @@ def pg_engine(_compose_postgres):
     if not _server_reachable():
         pytest.skip("PostgreSQL not reachable")
     _ensure_test_database()
-    engine = create_engine(_pg_url(), connect_args={"connect_timeout": 2})
+    engine = create_engine(_pg_url(), connect_args=_PG_CONNECT_ARGS)
     _drop_vector_tables(engine)
     Base.metadata.drop_all(engine)
     create_tables(engine)
