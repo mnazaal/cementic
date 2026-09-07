@@ -133,6 +133,14 @@ def seed_active_vector_collection(
                 chunk_id=chunk.id,
                 embedding_profile_id=embedding_profile.id,
                 status="done",
+                # Set as `materialize_pending_embeddings` sets them -- the only
+                # writer of these rows, and what `cementic status` now counts
+                # off. Leaving them NULL seeds a corpus whose progress reads as
+                # zero. Mirrors the same three columns `upsert_vectors` below
+                # already carries on the vector table.
+                collection=collection,
+                extractor_profile_id=extractor.id,
+                chunk_profile_id=chunk_profile.id,
             )
         )
         vector_rows.append((chunk.id, vector))
@@ -242,6 +250,9 @@ def seed_two_extractor_profiles_sharing_a_vector_table(
                 chunk_id=chunk.id,
                 embedding_profile_id=embedding_profile.id,
                 status="done",
+                collection=collection,
+                extractor_profile_id=extractor.id,
+                chunk_profile_id=chunk_profile.id,
             )
         )
         session.flush()

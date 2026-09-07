@@ -35,15 +35,31 @@ index, versioned revisions) are documented in [PLAN.md](PLAN.md).
   remains is a wasted round trip during indexing only, which a settled corpus
   never pays. *Do it when:* a bulk import or rebuild is next on the cards.
 
-- Find out why `cementic status` blocks for tens of seconds. Measured
-  2026-09-06 on the `papers` collection: 12 s, 18 s, 44 s, 50 s, 60 s, 83 s and
-  128 s across seven runs, at 0–2% CPU — it is waiting on something, not
-  computing. Reproduces on the pre-change uv-tool install too, so it is not
-  from this pass, and `check_health` timed at 0.15 s when called directly, so
-  the two-minute daemon probe is not obviously the answer either. PLAN.md
-  records this as fixed ("`status` no longer blocks 120 s to return an answer
-  the pid file already had"), which the measurements contradict. Worth a
-  root-cause pass before anything else in this file: it is the command run most.
+- ~~**Find out why `cementic status` blocks for tens of seconds.**~~ **Done
+  2026-09-07.** One query, not a timeout: the embedding counts joined
+  `chunk_embeddings` through `chunks_v2` to reach three columns
+  `chunk_embeddings` already carries, so every run scanned 2.6 GB of chunk text
+  and spilled the hash join to disk. 7.96 s of a 9.08 s run; the 0–2% CPU was
+  the CLI blocked on a socket while Postgres worked. Reading the denormalised
+  columns instead (`embedding_scope_denormalised`) takes it to 1.93–2.20 s end
+  to end. Two leftovers, both measured, neither user-visible:
+
+  - **The `total_chunks` count still scans `chunks_v2`** — 0.59 s warm and
+    322k buffer reads (~2.5 GB), now the largest statement on the path. A
+    `chunked_document_id IN (scoped ids)` rewrite measured 0.41 s and 60k
+    reads, but it drops the `chunks_v2.document_id = source_documents.id`
+    linkage, which is only safe by construction (`_write_back_chunks` sets
+    both from one extraction). *Do it when:* status latency matters again, or
+    something else forces a look at that query.
+  - **`compute_revision_counts` (`pipeline_worker.py:369-395`) still carries
+    the joined form** of both counts, for the worker loop and for revision
+    promotion. Same defect, same one-line fix, but it gates whether a revision
+    is complete, so it wants its own pass and its own pg test rather than
+    riding along with a status change.
+  - `SUM(chunked_documents.total_chunks)` is 2,298,661 against 2,298,558 real
+    chunk rows — 103 chunks recorded that no longer exist, so that column is
+    not a shortcut for the count above and may be stale elsewhere. Unmeasured
+    beyond the discrepancy itself.
 
 - Audit the CLI surface against `llm`'s embeddings commands
   (https://llm.datasette.io/en/stable/embeddings/cli.html), and cut what does not

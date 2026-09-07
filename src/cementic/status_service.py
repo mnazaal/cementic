@@ -23,7 +23,7 @@ from cementic.revisions import (
     bucket_revisions_by_status,
     chunk_scope,
     chunked_scope,
-    embedding_scope,
+    embedding_scope_denormalised,
     extracted_scope,
     get_active_revision,
 )
@@ -355,8 +355,13 @@ def load_pipeline_status_bulk(config: Config, collections: list[str]) -> dict[st
                 .all()
             }
 
+            # Single table by design, like `_step_embed`'s claim: the joined
+            # form of this count scans every chunk to reach three columns that
+            # `chunk_embeddings` already carries. See
+            # `embedding_scope_denormalised` for why the two conditions it
+            # cannot express exclude nothing.
             embedding_conditions = [
-                and_(SourceDocument.collection == collection, *embedding_scope(revision))
+                and_(*embedding_scope_denormalised(collection, revision))
                 for collection, revision in targets
             ]
             embedding_status_map = {
@@ -367,17 +372,10 @@ def load_pipeline_status_bulk(config: Config, collections: list[str]) -> dict[st
             }
             for collection, status, count in (
                 session.query(
-                    SourceDocument.collection, ChunkEmbedding.status, func.count(ChunkEmbedding.id)
+                    ChunkEmbedding.collection, ChunkEmbedding.status, func.count(ChunkEmbedding.id)
                 )
-                .select_from(ChunkEmbedding)
-                .join(Chunk, ChunkEmbedding.chunk_id == Chunk.id)
-                .join(ChunkedDocument, Chunk.chunked_document_id == ChunkedDocument.id)
-                .join(
-                    ExtractedDocument, ChunkedDocument.extracted_document_id == ExtractedDocument.id
-                )
-                .join(SourceDocument, Chunk.document_id == SourceDocument.id)
-                .filter(SourceDocument.status != "deleted", or_(*embedding_conditions))
-                .group_by(SourceDocument.collection, ChunkEmbedding.status)
+                .filter(or_(*embedding_conditions))
+                .group_by(ChunkEmbedding.collection, ChunkEmbedding.status)
                 .all()
             ):
                 embedding_status_map[status][collection] = count

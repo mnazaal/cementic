@@ -117,7 +117,16 @@ def _seed_collection_with_documents(
         status = "failed" if i < n_failed_embeddings else "done"
         session.add(
             ChunkEmbedding(
-                chunk_id=chunk.id, embedding_profile_id=revision.embedding_profile_id, status=status
+                chunk_id=chunk.id,
+                embedding_profile_id=revision.embedding_profile_id,
+                status=status,
+                # Set exactly as `materialize_pending_embeddings` sets them --
+                # the only writer of these rows. Status counts them off these
+                # columns instead of the four-table join, so a fixture that
+                # leaves them NULL builds a row the pipeline cannot produce.
+                collection=collection,
+                extractor_profile_id=revision.extractor_profile_id,
+                chunk_profile_id=revision.chunk_profile_id,
             )
         )
     return revision
@@ -249,6 +258,131 @@ class TestStatusAgreesWithWorkerCounts:
         assert status.extracted_done == 0
         assert status.extraction_pct == 0.0
         assert status.extracted_done == worker_counts.extracted_done
+
+    def test_embedding_counts_match_the_workers_joined_definition(self) -> None:
+        """The two paths now reach the same set by different SQL.
+
+        Status reads `chunk_embeddings`' denormalised columns; the worker's
+        `compute_revision_counts` still walks the four-table join. That is a
+        deliberate split (see TODO.md), and it is exactly the shape that let
+        the two drift apart before. Nothing else in this class asserts an
+        embedding count, so without this the split is unguarded.
+        """
+        engine, session_factory = self._session_factory()
+        with session_factory() as session:
+            revision = _seed_collection_with_documents(
+                session, "embedded", n_documents=4, n_failed_embeddings=1
+            )
+            session.commit()
+            worker_counts = compute_revision_counts(session, "embedded", revision)
+
+        status = self._status_for(engine, session_factory, "embedded")
+        assert status.done_embeddings == 3
+        assert status.failed_embeddings == 1
+        assert status.done_embeddings == worker_counts.done_embeddings
+        assert status.failed_embeddings == worker_counts.failed_embeddings
+        assert status.total_chunks == worker_counts.total_chunks
+
+
+class TestEmbeddingCountStaysOffTheChunkTable:
+    """The embedding counts must be read from `chunk_embeddings` alone.
+
+    Reaching the collection and the two profiles by joining through
+    `chunks_v2` makes the count scan every chunk -- 2.6 GB of chunk text on the
+    23k-document corpus, to fetch three integers a row that `chunk_embeddings`
+    already carries. Measured 2026-09-07: 8.0 s of `cementic status`'s 9.1 s,
+    and the reason the command ranged from 12 s to 128 s with the page cache.
+    Asserted structurally rather than by clock, like the CLI's own former
+    wall-clock budgets, so it does not depend on machine load or corpus size.
+    """
+
+    def _session_factory(self):
+        engine = create_engine("sqlite:///:memory:")
+        Base.metadata.create_all(engine)
+        return engine, sessionmaker(bind=engine, expire_on_commit=False)
+
+    def test_the_embedding_count_query_never_joins_the_chunk_table(self) -> None:
+        engine, session_factory = self._session_factory()
+        with session_factory() as session:
+            _seed_collection_with_documents(session, "papers", n_documents=2)
+            session.commit()
+
+        statements: list[str] = []
+
+        def _record(conn, cursor, statement, *args, **kwargs) -> None:
+            statements.append(" ".join(statement.split()))
+
+        event.listen(engine, "before_cursor_execute", _record)
+        with (
+            patch("cementic.status_service.get_engine", return_value=engine),
+            patch("cementic.status_service.get_session_factory", return_value=session_factory),
+        ):
+            status = load_pipeline_status_bulk(Config(), ["papers"])["papers"]
+
+        assert status.done_embeddings == 2
+        joined = [
+            statement
+            for statement in statements
+            if "chunk_embeddings" in statement and "chunks_v2" in statement
+        ]
+        assert joined == [], f"embedding count joined the chunk table: {joined}"
+
+    def test_an_older_revisions_chunks_are_excluded_by_the_flat_predicate(self) -> None:
+        """The chunk profile is what separates two revisions sharing a model.
+
+        `embedding_scope`'s join excluded an older revision's chunks by walking
+        to their `ChunkedDocument`. The denormalised predicate has to make the
+        same cut from `chunk_embeddings.chunk_profile_id` alone, or a chunk-size
+        change with an unchanged embedding model double-counts the corpus and
+        `done + failed == total_chunks` stops meaning anything.
+
+        A forward guard, not a red-green test: the joined form made this cut
+        too, so it passes against the code this replaced.
+        """
+        engine, session_factory = self._session_factory()
+        with session_factory() as session:
+            revision = _seed_collection_with_documents(session, "papers", n_documents=1)
+            old_chunk_profile = ChunkProfile(fingerprint="chunk-old", config_json="{}")
+            session.add(old_chunk_profile)
+            session.flush()
+            # The same document chunked under the previous chunk size, still
+            # carrying its own chunks and their embeddings for this model.
+            extracted = session.query(ExtractedDocument).one()
+            old_chunked = ChunkedDocument(
+                extracted_document_id=extracted.id,
+                chunk_profile_id=old_chunk_profile.id,
+                source_content_hash=extracted.content_hash,
+                status="done",
+            )
+            session.add(old_chunked)
+            session.flush()
+            old_chunk = Chunk(
+                document_id=extracted.document_id,
+                chunked_document_id=old_chunked.id,
+                chunk_index=0,
+                content="c",
+            )
+            session.add(old_chunk)
+            session.flush()
+            session.add(
+                ChunkEmbedding(
+                    chunk_id=old_chunk.id,
+                    embedding_profile_id=revision.embedding_profile_id,
+                    status="done",
+                    collection="papers",
+                    extractor_profile_id=revision.extractor_profile_id,
+                    chunk_profile_id=old_chunk_profile.id,
+                )
+            )
+            session.commit()
+
+        with (
+            patch("cementic.status_service.get_engine", return_value=engine),
+            patch("cementic.status_service.get_session_factory", return_value=session_factory),
+        ):
+            status = load_pipeline_status_bulk(Config(), ["papers"])["papers"]
+
+        assert status.done_embeddings == 1
 
 
 class TestLoadPipelineStatusBulk:

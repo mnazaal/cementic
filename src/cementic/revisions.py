@@ -148,6 +148,53 @@ def embedding_scope(revision: PipelineRevision) -> tuple[Any, ...]:
     )
 
 
+def embedding_scope_denormalised(collection: str, revision: PipelineRevision) -> tuple[Any, ...]:
+    """The same embedding set as ``embedding_scope``, read off one table.
+
+    ``embedding_scope`` reaches the collection and the two profiles by joining
+    ``chunk_embeddings`` -> ``chunks_v2`` -> ``chunked_documents`` ->
+    ``extracted_documents`` -> ``source_documents``, so counting over it scans
+    all of ``chunks_v2`` -- 2.6 GB of chunk text read to fetch three integers a
+    row. Measured 2026-09-07 on the 2,298,558-row ``papers`` corpus: 8.0 s of
+    ``cementic status``'s 9.1 s, and 368k buffers against 29k here, which is
+    why the command ranged from 12 s to 128 s depending on the page cache.
+    ``_step_embed``'s claim already reads these columns for the same reason.
+
+    The two conditions with no denormalised column are dropped rather than
+    approximated, because no reachable state was found in which either
+    excludes a row this predicate keeps:
+
+    - ``SourceDocument.status != "deleted"`` -- all three writers of that
+      status call ``_purge_document_chunks`` in the same transaction
+      (``source_watcher.py:397-401``, ``:637-640``, ``:679-682``), and the
+      embedding rows go with the chunks through ``chunks_v2``'s
+      ``ON DELETE CASCADE`` (``ChunkEmbedding.chunk_id``). Enforced by
+      PostgreSQL, not by SQLite, so only a ``-m pg`` test can prove it.
+    - ``ChunkedDocument.status == "done"`` -- ``_step_chunk`` re-claims a
+      *done* chunking only when its ``source_content_hash`` has gone stale
+      (``pipeline_worker.py:810-817``), and ``_write_back_extraction`` has by
+      then already purged those chunks in the transaction that wrote the new
+      hash (``_purge_superseded_chunks``). Every other claim starts from a
+      chunking with no chunks, and ``_write_back_chunks`` deletes and
+      re-inserts within one transaction. So the ``processing`` window between
+      claim and write-back holds no chunks to carry an embedding row.
+
+    That second argument is a walk of the failure paths, not a proof: it would
+    break the moment some path flips a done chunking to non-done without
+    purging first, and ``cementic status`` would then read over 100% embedded.
+    Both were also checked against the live corpus on 2026-09-07 -- zero
+    embedding rows under a deleted document or a non-done chunking, and zero
+    rows whose denormalised columns disagree with the joined truth -- but an
+    idle corpus cannot show a transient window either way.
+    """
+    return (
+        ChunkEmbedding.collection == collection,
+        ChunkEmbedding.extractor_profile_id == revision.extractor_profile_id,
+        ChunkEmbedding.chunk_profile_id == revision.chunk_profile_id,
+        ChunkEmbedding.embedding_profile_id == revision.embedding_profile_id,
+    )
+
+
 def get_active_revision(session: Session, collection: str) -> PipelineRevision | None:
     """Return the active revision for one collection."""
     return (

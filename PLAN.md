@@ -1028,6 +1028,20 @@ took 12–128 s at 0–2% CPU, on this build and on an install predating it. Wha
 was fixed was one path; something else in the command still waits. Queued in
 `TODO.md` as a root-cause item.
 
+**Root-caused and fixed 2026-09-07.** The remaining wait was never a timeout:
+it was one query. The embedding counts reached the collection and the two
+profiles by joining `chunk_embeddings` -> `chunks_v2` -> `chunked_documents` ->
+`extracted_documents` -> `source_documents`, so counting them scanned all of
+`chunks_v2` — 2.6 GB of chunk text read to fetch three integers a row, with the
+hash join spilling to 32 disk batches. Per-statement timing of one run: 7.96 s
+of a 9.08 s total in that single statement, the rest under 0.1 s each; the CPU
+sat at 0–2% because the work was in the Postgres backend, not the CLI. The
+count now reads the denormalised columns `chunk_embeddings` already carries for
+`_step_embed`'s claim (`embedding_scope_denormalised`, `revisions.py`).
+Interleaved on the live corpus, same connection, both forms returning the same
+row: 1.15 s joined against 0.20 s flat warm, 7.96 s against 0.21 s cold.
+`cementic status -c papers` end to end: 1.93–2.20 s across five runs.
+
 - ~~**`check_health` still calls a live-but-broken daemon healthy.**~~
   **RESOLVED 2026-08-18** by the release plan's batch 1a (`04e974a`):
   `DaemonHealth.WEDGED` (`embedding_runtime.py:758-772`) plus the two-stage

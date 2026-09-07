@@ -20,12 +20,14 @@ from cementic.db import (
     PipelineRevision,
     SourceDocument,
 )
+from cementic.pipeline_worker import compute_revision_counts
 from cementic.revisions import (
     ensure_revision_ann_index,
     ensure_revision_ann_index_up_front,
     ensure_revision_vector_table,
     materialize_pending_embeddings,
 )
+from cementic.status_service import load_pipeline_status
 from cementic.vector_store import (
     create_table_sql,
     ensure_vector_table_schema,
@@ -586,3 +588,67 @@ def test_the_embedding_claim_never_scans_more_than_a_batch(pg_session) -> None:
     assert "Sort" not in plan, f"a sort defeats early termination:\n{plan}"
     scanned = max(int(float(part.split()[0])) for part in plan.split("actual rows=")[1:])
     assert scanned <= 32, f"claim read {scanned} rows for a 32-row batch:\n{plan}"
+
+
+@pytest.mark.pg
+def test_deleting_a_document_takes_its_embedding_rows_with_it(pg_session) -> None:
+    """The cascade `cementic status`'s embedding count now relies on.
+
+    Status counts off `chunk_embeddings`' denormalised columns, which carry no
+    `deleted` flag, so dropping `SourceDocument.status != "deleted"` from that
+    count is safe only because the watcher's purge removes the chunks and the
+    embedding rows follow through `chunks_v2`'s ON DELETE CASCADE. The unit
+    suite cannot show this: it runs on SQLite, which does not enforce foreign
+    keys unless `PRAGMA foreign_keys=ON` is issued, and nothing issues it. So
+    this is the only place the argument is checked against a real database.
+    """
+    cleanup_pg_tables(pg_session)
+    revision = seed_active_vector_collection(
+        pg_session,
+        collection="cascade",
+        source_path="/docs/gone.pdf",
+        chunks=[(f"chunk {i}", [0.1] * VECTOR_DIM) for i in range(3)],
+    )
+    pg_session.commit()
+    assert pg_session.query(ChunkEmbedding).count() == 3
+
+    document_id = pg_session.query(SourceDocument.id).scalar()
+    # Exactly what `_purge_document_chunks` does, in the transaction that marks
+    # the document deleted -- see `source_watcher.py:397-401`.
+    pg_session.query(Chunk).filter(Chunk.document_id == document_id).delete(
+        synchronize_session=False
+    )
+    pg_session.query(SourceDocument).filter(SourceDocument.id == document_id).update(
+        {"status": "deleted"}, synchronize_session=False
+    )
+    pg_session.commit()
+
+    assert pg_session.query(ChunkEmbedding).count() == 0
+    assert compute_revision_counts(pg_session, "cascade", revision).done_embeddings == 0
+
+
+@pytest.mark.pg
+def test_status_embedding_counts_match_the_worker_against_postgres(
+    pg_session, pg_config
+) -> None:
+    """The two count paths must agree on a real database, not only on SQLite.
+
+    Status reads the denormalised columns; `compute_revision_counts` still
+    walks the four-table join. They are meant to describe the same set.
+    """
+    cleanup_pg_tables(pg_session)
+    revision = seed_active_vector_collection(
+        pg_session,
+        collection="agreement",
+        source_path="/docs/a.pdf",
+        chunks=[(f"chunk {i}", [0.1] * VECTOR_DIM) for i in range(5)],
+    )
+    pg_session.commit()
+    worker_counts = compute_revision_counts(pg_session, "agreement", revision)
+
+    status = load_pipeline_status(pg_config, "agreement")
+
+    assert status.done_embeddings == 5
+    assert status.done_embeddings == worker_counts.done_embeddings
+    assert status.failed_embeddings == worker_counts.failed_embeddings
+    assert status.total_chunks == worker_counts.total_chunks
