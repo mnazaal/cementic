@@ -67,8 +67,11 @@ missing pipeline-failure-to-status connection
 
 ## Later
 
-- Hybrid lexical + vector search for exact author names, acronyms, citations, and
-  equation labels.
+- Hybrid lexical + vector search for exact author names, acronyms, citations and
+  equation labels. **Now an active thread, not a someday item** — the mechanism is
+  measured (vector-only recall@10 is 0.047 on rare exact tokens; hybrid is 1.000)
+  and the remaining question is the fusion rule. See PLAN.md's
+  "Execution order — hybrid retrieval".
 - A multi-profile embedding daemon pool if old-model search and new-model
   indexing need to run concurrently. *Trigger receded:* the migration that
   would have put both on one port was rejected (`PLAN.md`), so nothing needs

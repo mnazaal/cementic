@@ -3,13 +3,12 @@
 <!-- session-handoff:begin (2026-09-05) -->
 ## Where the work stands
 
-**Entry point: nothing is mid-flight.** No thread was left open — the session
-closed three and started none. Pick the next item from `TODO.md`'s roadmap; the
-one that changed status is **the over-budget chunk pre-filter**, which lost its
-last dependency (the model migration that would have re-derived `chunk_size` is
-rejected) and gained evidence: v2-moe's 512-token window refused 5 batches of
-2,000 chunks during the 2026-09-05 comparison run, so overflow is routine
-rather than rare.
+**Entry point (corrected 2026-09-07): hybrid retrieval is mid-flight.** The
+line that stood here said nothing was, which was true when written and is not
+now. Read **Execution order — hybrid retrieval** and start at its step 1; the
+evidence behind it is in **In progress — hybrid lexical + vector retrieval**
+and `notes/design-hybrid-retrieval.html`. `TODO.md` still holds the feature
+backlog for when this thread closes.
 
 **Repo state.** `main` is at `641334d`, clean and pushed; the handoff commit
 was merged and its branch deleted, so nothing is unmerged. Five agent branches
@@ -201,7 +200,56 @@ is the contract for the *text* extraction family, not a universal law; per-type
 backend choice is what raises text-extraction quality (e.g. docling/marker) where
 it matters.
 
-## Execution order — CLOSED, the gate failed (2026-09-05)
+## Execution order — hybrid retrieval (2026-09-07)
+
+The live one. The measurement is done and the mechanism is confirmed (see
+**In progress — hybrid lexical + vector retrieval** below; full record with
+predictions in `notes/design-hybrid-retrieval.html`). What is unsettled is the
+*shape*, and the first two steps may settle it in twenty minutes.
+
+1. **Confirm the rank-1 collapse is a tie-break artifact.** Over set A, count
+   how often the gold document's RRF score exactly equals the vector arm's top
+   score. Both arms' rank-1 documents score `1/(k+1)`, and
+   `notes/probe_hybrid_retrieval.py` breaks ties by insertion order, which
+   always favours the vector arm.
+   *Exit:* one percentage. ≥90% confirms the diagnosis; a low number means RRF
+   is genuinely unsuited here and step 3 moves up.
+   *Anti-scope:* implement no fusion variant and touch no production code —
+   this is a question about the probe's own arithmetic.
+
+2. **Fix the tie-break and re-measure.** Break ties on summed rank rather than
+   insertion order; re-run sets A and B with recall@1 as the primary metric.
+   *Exit:* hybrid recall@1 on both sets.
+   *Decision rule, fixed before the run:* if hybrid lands within 0.05 of the
+   better single arm on both sets, plain RRF is sufficient — skip to step 4 and
+   never build routing.
+
+3. **Only if step 2 fails — query-shape routing.** A single rare token is a
+   different query from a sentence: detect it (one token, document frequency
+   under a threshold, ~30 ms through the index) and let the lexical arm lead
+   rather than blending. Pre-registered separately, sweep bounds declared up
+   front, scored on a *fresh* query sample rather than the tuned one.
+   *Exit:* recall@1 on fresh sets A and B.
+   *Anti-scope:* a threshold on token count and document frequency, not a
+   learned query classifier.
+
+4. **Repair the null control.** Set C's gold document is drawn from the same
+   unordered sample the lexical arm ranks within, so both favour the same
+   physically-early rows and its +0.093 measures row ordering rather than exact
+   matching.
+   *Exit:* set C re-run with the gold drawn independently of retrieval order,
+   or a line here stating that no null-control claim is made.
+
+5. **Production shape.** The lexical index becomes per-revision, built and
+   reconciled by `collection reindex` exactly as the ANN index is, and stays
+   *out* of the embedding profile payload — a text-derived index cannot change
+   a vector, and fingerprinting it would re-version 2.3M rows for nothing.
+   *Exit:* `cementic search` returns fused results on `papers` with
+   `./scripts/check.sh` green.
+   *Anti-scope:* one index and one fusion rule; no per-collection tuning
+   surface until something demands it.
+
+## Execution order — v1.5 migration: CLOSED, the gate failed (2026-09-05)
 
 The migration this sequenced is **not happening**: v1.5 retrieves measurably
 worse than v2-moe on this corpus. Steps 1 and 2 ran; 3 to 6 are void. Kept
@@ -234,6 +282,63 @@ below, and `TODO.md` holds the feature backlog as before.
    are not being spent.
 
 ## Design decisions and open items
+
+### In progress — hybrid lexical + vector retrieval (2026-09-07)
+
+**The mechanism is confirmed and large; the fusion rule is not.** A dense
+embedding compresses a chunk into one vector, and a rare exact token — an
+author surname, an acronym, an equation label — is not recoverable from it.
+Measured on `papers`, n=150 per set, predictions registered before the run
+(`notes/design-hybrid-retrieval.html`):
+
+| set | arm | recall@1 | recall@10 |
+| --- | --- | --- | --- |
+| A rare exact tokens | vector | 0.020 | 0.047 |
+| | lexical (ceiling) | 0.713 | 1.000 |
+| | hybrid RRF | 0.047 | 1.000 |
+| B semantic title→body | vector | 0.713 | 0.787 |
+| | lexical | 0.173 | 0.207 |
+| | hybrid RRF | 0.540 | 0.840 |
+
+Vector-only found the right paper 7 times in 150. Hybrid found it every time:
++0.953 recall@10 against a pre-registered build threshold of +0.15, with the
+falsifier (vector ≥ 0.85, which would have killed the feature outright) never
+in sight.
+
+**Cost is not a constraint.** A GIN index on `to_tsvector('english', content)`
+built concurrently in 8.3 min and occupies 617 MB; lexical queries run in
+1–173 ms. The 0.98 GB projected from a 100k-chunk sample was 60% high — GIN
+posting lists compress better at corpus scale.
+
+**What is unsettled is rank 1.** Plain RRF at k=60 drops set B from 0.713 to
+0.540, and reaches only 0.047 on set A where the lexical arm alone gets 0.713 —
+each arm alone beats their combination at the top slot, which is the slot a
+search tool is read from. The pre-registered decision rule guarded set B on
+recall@10 only and would have waved this through: the rule was
+under-specified, not the result disappointing. Step 1 of the execution order
+tests whether it is an artifact of the probe's tie-break rather than a property
+of RRF.
+
+**Risk — the precondition is unmeasured.** All of this assumes real queries are
+identifier-shaped. Nobody has looked at one; sets A and C are synthetic by
+construction. If such queries are a small fraction of real use then this is a
+well-measured solution to a problem the corpus does not have, and set A's 0.047
+does not change that. Cheap counter: log query strings and timestamps locally
+and read the mix in a few weeks. Does not block steps 1–2; does gate step 5.
+
+**Risk — the probe index is unmanaged.** `chunks_v2_fts_probe` sits on the live
+database outside the revision machinery, so a rebuild will not recreate it.
+Harmless while the corpus is static, and step 5 is what resolves it. If the
+thread is abandoned, `drop index chunks_v2_fts_probe` reverses it completely.
+
+**Two performance traps, both measured rather than reasoned**, kept because
+each cost an hour: `select distinct document_id … limit n` makes the planner
+walk `ix_chunks_v2_document` and apply the text match as a filter, never
+touching the GIN index — a token matching *nothing* then costs 8 s+ to prove
+absence, and `enable_seqscan = off` does not fix it because the bad plan is an
+index scan too. And `ts_rank` over every match of a common term recomputes a
+tsvector per row and hangs for minutes; ranking must happen over a capped
+candidate pool.
 
 ### Decided — external command extractor (2026-09-03) — DONE
 
