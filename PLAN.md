@@ -207,40 +207,100 @@ The live one. The measurement is done and the mechanism is confirmed (see
 predictions in `notes/design-hybrid-retrieval.html`). What is unsettled is the
 *shape*, and the first two steps may settle it in twenty minutes.
 
-1. **Confirm the rank-1 collapse is a tie-break artifact.** Over set A, count
-   how often the gold document's RRF score exactly equals the vector arm's top
-   score. Both arms' rank-1 documents score `1/(k+1)`, and
-   `notes/probe_hybrid_retrieval.py` breaks ties by insertion order, which
-   always favours the vector arm.
-   *Exit:* one percentage. ≥90% confirms the diagnosis; a low number means RRF
-   is genuinely unsuited here and step 3 moves up.
-   *Anti-scope:* implement no fusion variant and touch no production code —
-   this is a question about the probe's own arithmetic.
+1. ~~**Confirm the rank-1 collapse is a tie-break artifact.**~~ **DONE
+   2026-09-07.** Set A, n=150: 68.0% lost an *exact* score tie (winner was a
+   vector-only document in 101 of 102), 28.7% genuinely outscored, 3.3% already
+   rank 1. The pre-registered bar was ≥90%, so the diagnosis is **not**
+   confirmed as stated — but the decomposition is exact: 68.0 + 3.3 = 71.3,
+   which is lexical-only's recall@1 to the digit, and the 28.7% complement is
+   precisely the queries where gold is not lexical rank 1.
 
-2. **Fix the tie-break and re-measure.** Break ties on summed rank rather than
-   insertion order; re-run sets A and B with recall@1 as the primary metric.
-   *Exit:* hybrid recall@1 on both sets.
-   *Decision rule, fixed before the run:* if hybrid lands within 0.05 of the
-   better single arm on both sets, plain RRF is sufficient — skip to step 4 and
-   never build routing.
+2. ~~**Fix the tie-break and re-measure.**~~ **DONE 2026-09-07 — the rule
+   failed, so step 3 stands.** Step 1 reframed this: the tie is not a bug.
+   Both arms' rank-1 documents score `1/(k+1)` because RRF is symmetric, so
+   there is no neutral tie-break — choosing one *is* a bet on an arm. Measured
+   with the bet placed on lexical:
 
-3. **Only if step 2 fails — query-shape routing.** A single rare token is a
-   different query from a sentence: detect it (one token, document frequency
-   under a threshold, ~30 ms through the index) and let the lexical arm lead
-   rather than blending. Pre-registered separately, sweep bounds declared up
-   front, scored on a *fresh* query sample rather than the tuned one.
-   *Exit:* recall@1 on fresh sets A and B.
-   *Anti-scope:* a threshold on token count and document frequency, not a
-   learned query classifier.
+   | set | vector | lexical | hybrid RRF | hybrid + lexical ties |
+   | --- | --- | --- | --- | --- |
+   | A recall@1 | 0.027 | 0.713 | 0.047 | **0.713** PASS |
+   | B recall@1 | 0.713 | 0.173 | 0.540 | **0.567** FAIL (−0.147) |
+   | A recall@10 | 0.047 | 1.000 | 1.000 | 1.000 |
+   | B recall@10 | 0.787 | 0.207 | 0.840 | 0.840 |
 
-4. **Repair the null control.** Set C's gold document is drawn from the same
-   unordered sample the lexical arm ranks within, so both favour the same
-   physically-early rows and its +0.093 measures row ordering rather than exact
-   matching.
-   *Exit:* set C re-run with the gold drawn independently of retrieval order,
-   or a line here stating that no null-control claim is made.
+   The rule required both sets within 0.05 of the best single arm. A lands on
+   it exactly; B misses by 0.147. **The finding worth keeping is the split:**
+   fusion is unambiguously right for the result *list* (recall@10 improves on
+   both sets, 0.047→1.000 and 0.787→0.840) and cannot work for the *top slot*,
+   because the tie-break that maximises A is the one that costs B. So the
+   design is *fuse the list, route the ordering* — narrower than a routing
+   subsystem.
 
-5. **Production shape.** The lexical index becomes per-revision, built and
+3. ~~**Find where lexical stops beating vector, as a function of document
+   frequency.**~~ **DONE 2026-09-07 — shape found, exact threshold not
+   identified.** Set D, single tokens on a fresh sampling stream, 40 per band,
+   gold = the document the token was drawn from:
+
+   | document frequency | lexical | vector | lexical − vector |
+   | --- | --- | --- | --- |
+   | 1–5 | 0.500 | 0.050 | **+0.450** |
+   | 6–20 | 0.200 | 0.050 | **+0.150** |
+   | 21–100 | 0.050 | 0.000 | +0.050 |
+   | 101–500 | 0.000 | 0.025 | −0.025 |
+   | 501–2000 | 0.000 | 0.000 | 0.000 |
+
+   The pre-registered rule put \(T\) at the top of the last band winning by
+   ≥ 0.05, which reads as \(T = 100\) — but that band's margin is **2 queries
+   out of 40** and the design was never powered to resolve it. Honest reading:
+   the *shape* is unambiguous and the exact threshold is not. Lexical's edge
+   decays monotonically and is gone by 100, so any \(T\) in 20–100 captures
+   almost all of the benefit. **Use \(T = 20\)** — the conservative end, routing
+   only where lexical wins decisively.
+
+   Two things this also settled. Set A was **optimistically constructed**: it
+   required the gold document to appear in the lexical top 50, which is why its
+   lexical recall@1 is 0.713 where set D's unfiltered 1–5 band gives 0.500. The
+   vector arm reads 0.050 against set A's 0.027 — so the core finding (vector
+   fails on rare tokens, lexical does not) survives both constructions, but
+   set A's absolute numbers are the flattering ones. And the falsifier did not
+   fire: vector stays at or below 0.050 in every band, including on freshly
+   sampled tokens.
+
+4. ~~**Repair the null control.**~~ **CLOSED 2026-09-07 — set D already is
+   one, and a better one.** Set C was confounded (its gold document came from
+   the same unordered sample the lexical arm ranks within, so both favoured the
+   same physically-early rows). It does not need repairing, because set D
+   supplies the null condition properly: the 501–2000 band *is* "common tokens,
+   where exact matching cannot identify a document", and lexical's advantage
+   there is **+0.000**. Better still, set D gives a dose-response — the
+   advantage runs +0.450, +0.150, +0.050, −0.025, 0.000 as frequency rises,
+   while the vector arm stays flat at 0.000–0.050 throughout. A mechanism that
+   scales with the quantity it is supposed to depend on, and vanishes where it
+   should, is stronger evidence than a single null cell. No set C claim is
+   made and none is needed.
+
+5a. ~~**The pure core.**~~ **DONE 2026-09-07 — `hybrid.py`, verified against
+   both sets.** `combine(vector, lexical, lead=...)`: the leading arm owns rank
+   1, reciprocal rank fusion owns everything below. One position is routed, not
+   the whole ordering — taking more of the leading arm's list gives back the
+   recall@10 that fusion earns. Measured end to end through the production
+   functions, n=150 per set:
+
+   | set | arm | recall@1 | recall@10 | routing |
+   | --- | --- | --- | --- | --- |
+   | A rare tokens | best single (lexical) | 0.713 | 1.000 | |
+   | | **routed** | **0.713** (+0.000) | **1.000** (+0.000) | 150/150 lexical |
+   | B semantic | best single (vector) | 0.713 | 0.787 | |
+   | | fused only | 0.540 | 0.840 | |
+   | | **routed** | **0.713** (+0.000) | **0.853** (+0.013) | 150/150 vector |
+
+   Both optima at once, which is what the split was designed for: rank 1 and
+   recall@10 are decided in different places, so they stop trading against each
+   other. Set B's routed recall@10 beats even pure fusion, because leading with
+   the vector arm's first result costs nothing there and the fused tail still
+   contributes the documents only the lexical arm found.
+
+5b. **The shell — still to do.** The lexical index becomes per-revision, built and
    reconciled by `collection reindex` exactly as the ANN index is, and stays
    *out* of the embedding profile payload — a text-derived index cannot change
    a vector, and fingerprinting it would re-version 2.3M rows for nothing.
