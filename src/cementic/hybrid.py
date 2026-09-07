@@ -27,10 +27,20 @@ from __future__ import annotations
 
 from collections import defaultdict
 
-#: Reciprocal-rank-fusion smoothing constant. 60 is the value from the original
-#: RRF paper and the de-facto default; it is deliberately not tuned here, since
-#: k trades rank-1 sharpness against robustness and the rank-1 question is
-#: settled by `lead` instead.
+#: Reciprocal-rank-fusion smoothing constant, and the reason it is not tuned.
+#:
+#: 60 comes from the paper that introduced RRF -- Cormack, Clarke and Büttcher,
+#: "Reciprocal Rank Fusion outperforms Condorcet and individual Rank Learning
+#: Methods" (2009) -- where it is not a derived constant but a pilot-tuned one:
+#: "k = 60 was fixed during a pilot investigation and not altered during
+#: subsequent validation", and their sweep "indicated that k = 60 was
+#: near-optimal, but that the choice was not critical". It is also the
+#: documented default in Elasticsearch and OpenSearch.
+#:
+#: So sweeping k here would be searching a flat region the authors already
+#: reported as flat. The question k might otherwise have been asked to settle --
+#: which arm wins rank 1 -- is settled by `lead` instead, and no value of k can
+#: settle it: the tie it would need to break is exact and symmetric.
 RRF_K = 60
 
 
