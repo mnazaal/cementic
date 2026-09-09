@@ -680,3 +680,56 @@ class TestRetiringAStaleIdentityNeverLosesTheWork:
 
         assert surviving.status == "pending", "retired the row holding the only chunks"
         assert chunks == 1, "purged the only chunks the collection had"
+
+
+class TestRepathingDoesNotDependOnTheContentHash:
+    """A moved file is the same document even if it was edited on the way.
+
+    Matching a moved document by content hash covers a corpus that only moved.
+    Measured on the live corpus 2026-09-09, that assumption cost thousands of
+    documents: 3,338 papers had been rewritten between the two scans, so their
+    recorded hash no longer identified the file their row still pointed at, and
+    each registered a second time under the real path.
+
+    The watcher already knows the mapping that produced the stale path -- it
+    resolved the configured root itself -- so it can name the old path outright
+    instead of inferring it from the bytes.
+    """
+
+    def test_a_moved_and_edited_file_repaths_rather_than_duplicating(
+        self, watcher_config: Config, watcher_db, temp_dir: Path
+    ) -> None:
+        _engine, session_factory, _db_path = watcher_db
+        original = temp_dir / "Papers"
+        original.mkdir()
+        paper = original / "paper.md"
+        paper.write_text("first version", encoding="utf-8")
+
+        sw = SourceWatcher(watcher_config)
+        sw.Session = session_factory
+        sw.collection = "papers"
+        sw._watched_roots = [original.resolve()]
+        sw._register_document(str(paper))
+        with session_factory() as session:
+            original_id = (
+                session.query(SourceDocument).filter_by(source_path=str(paper)).one().id
+            )
+
+        moved = temp_dir / "sync" / "Papers"
+        moved.parent.mkdir()
+        original.rename(moved)
+        original.symlink_to(moved)
+        (moved / "paper.md").write_text("second version", encoding="utf-8")
+
+        # The next run, configured with the same directory as before -- which is
+        # now the symlink. This is what `_start_watcher` records.
+        sw._configure_watched_roots([str(original)])
+        sw._scan_existing(sw._watched_roots[0])
+
+        with session_factory() as session:
+            live = session.query(SourceDocument).filter(SourceDocument.status != "deleted").all()
+            paths = [document.source_path for document in live]
+            ids = [document.id for document in live]
+
+        assert paths == [str(moved / "paper.md")], f"expected one repathed document, got {paths}"
+        assert ids == [original_id], "repathed the row away rather than moving it"

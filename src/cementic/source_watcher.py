@@ -60,6 +60,46 @@ def _is_missing(source_path: str) -> bool:
     return False
 
 
+def _alternate_paths(file_path: str, aliases: list[tuple[Path, Path]]) -> list[str]:
+    """The paths this file would have had under the roots as they were configured.
+
+    A watched root given as a symlink is stored resolved, so every document
+    under it is keyed on the real path. When the link is what moved -- the tree
+    relocated and a link left behind -- the rows written before the move are
+    keyed on the *old* real path, which is the configured path with the same
+    tail. The watcher resolved that mapping itself, so it can name the old path
+    outright rather than inferring it from the file's bytes, which is what a
+    content hash does and what an edited file defeats. Pure; no filesystem.
+    """
+    path = Path(file_path)
+    return [
+        str(configured / path.relative_to(resolved))
+        for configured, resolved in aliases
+        if path.is_relative_to(resolved)
+    ]
+
+
+def _document_under_a_prior_root(
+    session: Session, collection: str, alternate_paths: list[str]
+) -> SourceDocument | None:
+    """Find this file's document under a path a watched root used to have.
+
+    An exact-path lookup on the unique `(collection, source_path)` index, so it
+    costs the same whether the collection holds ten documents or a million.
+    """
+    if not alternate_paths:
+        return None
+    return (
+        session.query(SourceDocument)
+        .filter(
+            SourceDocument.collection == collection,
+            SourceDocument.source_path.in_(alternate_paths),
+            SourceDocument.status != "deleted",
+        )
+        .first()
+    )
+
+
 def _identity_is_stale(source_path: str) -> bool:
     """Whether a stored path is no longer the real path of the file it names.
 
@@ -376,6 +416,10 @@ class SourceWatcher:
         self.Session: Any = None
         self.collection = "default"
         self._watched_roots: list[Path] = []
+        #: (configured, resolved) for each watched root that is not its own real
+        #: path. What a document registered before the root became a link is
+        #: keyed on, and the only record of that mapping.
+        self._root_aliases: list[tuple[Path, Path]] = []
         self._last_current_file_publish = 0.0
         #: Why startup aborted, or None. The "already running" path returns
         #: normally, so without this the runner exits 0 on a worker that never
@@ -451,30 +495,46 @@ class SourceWatcher:
             self._logger, self.state_manager, message, *args, publish=publish
         )
 
+    def _configure_watched_roots(self, directories: list[str]) -> list[str]:
+        """Resolve the watched roots, remembering what each resolved from.
+
+        Returns the directories that are not usable. The roots are resolved
+        because document identity is: a file is stored under its real path.
+        Keeping the configured form beside it is what lets a registration
+        recognise a document written before a root became a symlink.
+        """
+        self._watched_roots = []
+        self._root_aliases = []
+        missing: list[str] = []
+        for directory in directories:
+            resolved = Path(directory).resolve()
+            if not resolved.is_dir():
+                missing.append(directory)
+                continue
+            self._watched_roots.append(resolved)
+            configured = Path(os.path.abspath(directory))
+            if configured != resolved:
+                self._root_aliases.append((configured, resolved))
+        return missing
+
     def _start_watcher(self, directories: list[str]) -> None:
         observer = Observer()
         # Resolve the roots before building the handler: it filters ignored
         # directory names relative to a root, so handing it an empty root list
         # would make it fall back to matching against whole absolute paths.
-        self._watched_roots = []
-        missing: list[str] = []
-        for directory in directories:
-            path = Path(directory).resolve()
-            if path.is_dir():
-                self._watched_roots.append(path)
-            else:
-                missing.append(directory)
-                # A warning, not _fatal: with other directories surviving the
-                # watcher still has work, but the poisoned fatal_reason made
-                # the runner exit 1 for a "startup failure" when that run
-                # finally shut down cleanly hours later. The all-missing case
-                # raises below and stays fatal.
-                self._logger.error("Watch directory does not exist: %s", directory)
-                print(
-                    f"Watch directory does not exist: {directory}",
-                    file=sys.stderr,
-                    flush=True,
-                )
+        missing = self._configure_watched_roots(directories)
+        for directory in missing:
+            # A warning, not _fatal: with other directories surviving the
+            # watcher still has work, but the poisoned fatal_reason made
+            # the runner exit 1 for a "startup failure" when that run
+            # finally shut down cleanly hours later. The all-missing case
+            # raises below and stays fatal.
+            self._logger.error("Watch directory does not exist: %s", directory)
+            print(
+                f"Watch directory does not exist: {directory}",
+                file=sys.stderr,
+                flush=True,
+            )
 
         event_handler = DocumentEventHandler(
             self._on_file_detected,
@@ -798,7 +858,14 @@ class SourceWatcher:
                         .first()
                     )
                     if document is None:
-                        document = _document_reached_by_another_path(
+                        # The alias first: it is an indexed exact-path lookup
+                        # and it holds whether or not the file was edited on
+                        # its way, which the hash probe below cannot say.
+                        document = _document_under_a_prior_root(
+                            session,
+                            self.collection,
+                            _alternate_paths(file_path, self._root_aliases),
+                        ) or _document_reached_by_another_path(
                             session, self.collection, file_path, file_hash
                         )
                         if document is not None:
