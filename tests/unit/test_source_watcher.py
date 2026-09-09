@@ -178,7 +178,10 @@ class TestSourceWatcher:
         session.add(extracted)
         session.flush()
         chunked = ChunkedDocument(
-            extracted_document_id=extracted.id, chunk_profile_id=chunk_profile.id, status="done"
+            extracted_document_id=extracted.id,
+            chunk_profile_id=chunk_profile.id,
+            status="done",
+            source_content_hash="content-hash",
         )
         session.add(chunked)
         session.flush()
@@ -201,6 +204,14 @@ class TestSourceWatcher:
         assert document.status == "deleted"
         assert document.file_hash is None
         assert session.query(Chunk).count() == 0
+        # And the chunking is re-opened: leaving a current hash on a chunking
+        # with no chunks is what strands the document for good if the file
+        # comes back unchanged. Read from the database: the invalidation is a
+        # bulk update, so the instance in this session still holds the old
+        # value until it is expired.
+        chunked_id = chunked.id
+        session.expire_all()
+        assert session.get(ChunkedDocument, chunked_id).source_content_hash is None
 
     def test_setup_logging_reuses_existing_file_handler(self, temp_dir):
         """Repeated construction should not duplicate file handlers."""

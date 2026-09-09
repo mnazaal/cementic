@@ -6,6 +6,7 @@ Exercises extraction, chunking, embedding error paths and daemon lifecycle.
 
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -1346,3 +1347,60 @@ class TestChunksLostToAFailedReExtraction:
             chunks = session.query(Chunk).count()
 
         assert chunks > 0, "the document extracted again but was never re-chunked"
+
+
+class TestChunksLostToADeletedAndRestoredFile:
+    """A delete event purges the chunks; the file coming back must re-chunk."""
+
+    def test_a_document_is_rechunked_after_it_is_deleted_and_restored(
+        self, sqlite_setup, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Delete then re-create the same file, unchanged.
+
+        Watchers see this constantly: a sync client or an editor writes a temp
+        file and renames it over the original, so an *unchanged* document
+        arrives as delete followed by create. The delete purges the chunks --
+        right, because search filters on the vector row alone and a deleted
+        document's vectors have to actually go -- but it left the chunking
+        `done` with a current `source_content_hash`. The re-registered file
+        then extracts to the same text, matches its own stale hash, and
+        `_step_chunk` never re-claims it: zero chunks, counted as 100% chunked,
+        reported by nothing. Found on the live corpus 2026-09-09, 18,101 of
+        46,139 papers in exactly that state.
+        """
+        config, session_factory, pdf_fixtures_dir = sqlite_setup
+        collection = "test_rechunk_after_delete"
+        source_path = Path(config.storage.artifacts_path).parent / "test_doc_a.pdf"
+        shutil.copy(pdf_fixtures_dir / "test_doc_a.pdf", source_path)
+
+        pipeline, source_watcher = _setup_worker(config, session_factory, collection, monkeypatch)
+        # As in the failed-re-extraction test above: a working provider would
+        # need the Postgres-only vector tables, and chunking is the subject.
+        pipeline.embedding_client = FailingEmbeddingClient()
+
+        source_watcher._register_document(str(source_path))
+        revision_id = pipeline._ensure_target_revision()
+        _run_pipeline_until_idle(pipeline, revision_id)
+
+        with session_factory() as session:
+            chunks_before = session.query(Chunk).count()
+            assert chunks_before > 0, "fixture never chunked"
+
+        # The file goes away, and the watcher purges its chunks and vectors.
+        source_path.unlink()
+        source_watcher._on_file_deleted(str(source_path))
+
+        with session_factory() as session:
+            assert session.query(Chunk).count() == 0, "the delete should purge"
+
+        # It comes back byte-identical, so every hash downstream still matches.
+        shutil.copy(pdf_fixtures_dir / "test_doc_a.pdf", source_path)
+        source_watcher._register_document(str(source_path))
+        _run_pipeline_until_idle(pipeline, revision_id)
+
+        with session_factory() as session:
+            document = session.query(SourceDocument).filter_by(collection=collection).one()
+            assert document.status == "pending", "fixture never re-registered the file"
+            chunks_after = session.query(Chunk).count()
+
+        assert chunks_after == chunks_before, "the file came back but was never re-chunked"

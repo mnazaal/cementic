@@ -14,13 +14,22 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from watchdog.events import DirMovedEvent, FileMovedEvent, FileSystemEvent, FileSystemEventHandler
 from watchdog.observers import Observer
 
 from cementic.config import Config, get_config
-from cementic.db import Chunk, SourceDocument, create_tables, get_engine, get_session_factory
+from cementic.db import (
+    Chunk,
+    ChunkedDocument,
+    ExtractedDocument,
+    SourceDocument,
+    create_tables,
+    get_engine,
+    get_session_factory,
+)
 from cementic.extract import supported_extensions
 from cementic.state import DaemonState, StateManager
 from cementic.supervisor import is_managed_process_alive, process_start_token
@@ -66,10 +75,25 @@ def _purge_document_chunks(session: Session, document_ids: list[int]) -> None:
     Search now filters on the vector row alone, so a deleted document's vectors
     have to actually go -- otherwise they would be returned.
 
-    Deleting the chunks is enough: ``chunk_embeddings`` and every per-profile
-    ``embedding_vectors_p*`` table carry ``ON DELETE CASCADE`` from
-    ``chunks_v2``, so one statement clears all of them for every profile at
-    once, including profiles this collection no longer uses.
+    Deleting the chunks is enough to clear the vectors: ``chunk_embeddings``
+    and every per-profile ``embedding_vectors_p*`` table carry
+    ``ON DELETE CASCADE`` from ``chunks_v2``, so one statement clears all of
+    them for every profile at once, including profiles this collection no
+    longer uses.
+
+    It is not enough for the *chunkings*, which must be invalidated too. A
+    watcher sees delete-then-create for an unchanged file constantly -- a sync
+    client or an editor writing a temp file and renaming it over the original
+    -- and the file that comes back extracts to the same text it had before.
+    ``_step_chunk`` re-claims a ``done`` chunking only when its
+    ``source_content_hash`` differs from the extraction's, so a chunking left
+    with a current hash and no chunks is never revisited: the document is
+    unsearchable for good, while ``chunked_scope`` still counts it done and
+    ``cementic status`` reads 100%. Clearing the hash re-opens the work, and
+    keeps the row out of ``chunked_done`` until it is genuinely re-chunked --
+    the same repair ``_purge_all_chunks`` makes for the re-extraction path.
+    Measured on the live corpus 2026-09-09: 18,101 of 46,139 papers stranded
+    this way, 1.8M chunks' worth, none of them reported by anything.
     """
     if not document_ids:
         return
@@ -85,6 +109,17 @@ def _purge_document_chunks(session: Session, document_ids: list[int]) -> None:
         batch = document_ids[start : start + _DELETE_BATCH_SIZE]
         session.query(Chunk).filter(Chunk.document_id.in_(batch)).delete(
             synchronize_session=False
+        )
+        chunked_ids = (
+            select(ChunkedDocument.id)
+            .join(
+                ExtractedDocument,
+                ChunkedDocument.extracted_document_id == ExtractedDocument.id,
+            )
+            .where(ExtractedDocument.document_id.in_(batch))
+        )
+        session.query(ChunkedDocument).filter(ChunkedDocument.id.in_(chunked_ids)).update(
+            {ChunkedDocument.source_content_hash: None}, synchronize_session=False
         )
 
 
@@ -390,6 +425,13 @@ class SourceWatcher:
                 if self._is_under_watched_roots(document.source_path)
                 and _is_missing(document.source_path)
             ]
+            # Rows the scan could not repath, because the file changed while it
+            # moved. The scan runs first and claims every one it can identify,
+            # so anything still holding a stale path here is a second identity
+            # for a document the collection already has under its real path.
+            # Unlike the missing ones these are invisible to the literal
+            # containment test -- a path under the pre-move location is under no
+            # watched root -- which is why they survived every restart.
             # Read the paths before committing: ORM attributes expire on commit
             # and these instances are detached once the session closes.
             missing_paths = [document.source_path for document in missing]
