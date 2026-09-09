@@ -169,7 +169,7 @@ def collect_doctor_report(config: Config) -> dict[str, Any]:
                     }
                 }
             active_canaries = _active_embedding_canaries(conn)
-            stranded_chunkings = int(conn.execute(text(_STRANDED_CHUNKINGS_SQL)).scalar() or 0)
+            stranded_chunkings = _stranded_chunkings(conn)
     except Exception as error:
         checks["database"] = {
             "status": "fail",
@@ -666,7 +666,10 @@ def _active_embedding_canaries(
 #: vectors, by cascade) were deleted, and the chunking kept a `source_content_hash`
 #: matching its extraction -- which is exactly the condition `_step_chunk` reads
 #: as "already done". `total_chunks > 0` keeps a legitimately empty document out
-#: of the count.
+#: of the count. Deliberately unscoped: every collection at once, and every
+#: chunk profile, so a chunking emptied under a profile no revision uses any
+#: more still counts. For a diagnostic that is the right side to err on -- the
+#: alternative hides a real loss behind a profile the reader has forgotten.
 _STRANDED_CHUNKINGS_SQL = """
 SELECT count(*)
 FROM chunked_documents cd
@@ -678,6 +681,23 @@ WHERE cd.status = 'done'
   AND sd.status <> 'deleted'
   AND NOT EXISTS (SELECT 1 FROM chunks_v2 c WHERE c.chunked_document_id = cd.id)
 """
+
+
+def _stranded_chunkings(conn: Any) -> int | None:
+    """Count them, or None when the pipeline tables are not there to count.
+
+    Guarded like `_active_embedding_canaries` below, and for the same reason: a
+    database that has never indexed anything has no `chunked_documents`, which
+    is the ordinary state of a fresh install running `doctor` for the first
+    time. Unguarded, the raise lands in the caller's `except` and reports a
+    server that just answered `SELECT 1` as an unreachable database, telling
+    the user to go and create one.
+    """
+    try:
+        return int(conn.execute(text(_STRANDED_CHUNKINGS_SQL)).scalar() or 0)
+    except Exception:
+        conn.rollback()
+        return None
 
 
 def _stranded_chunkings_check(count: int | None) -> dict[str, Any]:
@@ -695,7 +715,10 @@ def _stranded_chunkings_check(count: int | None) -> dict[str, Any]:
     if count is None:
         return {
             "status": "warning",
-            "message": "could not be checked; the database was not reachable",
+            "message": (
+                "could not be checked; the database is unreachable or has never "
+                "indexed anything"
+            ),
         }
     return {
         "status": "ok" if count == 0 else "warning",

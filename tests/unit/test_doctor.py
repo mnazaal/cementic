@@ -4,6 +4,7 @@ import json
 from unittest.mock import MagicMock, patch
 
 import pytest
+from sqlalchemy import create_engine, text
 
 from cementic.config import Config, ExtractionConfig
 from cementic.doctor import (
@@ -15,6 +16,7 @@ from cementic.doctor import (
     _extraction_commands_check,
     _extractor_drift_check,
     _ocr_check,
+    _stranded_chunkings,
     _stranded_chunkings_check,
     collect_doctor_report,
 )
@@ -121,6 +123,38 @@ class TestExtensionFailureIsNotADatabaseFailure:
             "could not inspect extensions" in payload["message"] for payload in extensions.values()
         )
         assert report["ok"] is False
+
+
+class TestMissingPipelineTablesIsNotADatabaseFailure:
+    @patch("cementic.doctor._daemon_state", return_value=(True, True, "reachable"))
+    @patch("cementic.doctor._extension_check", return_value={"status": "ok", "message": "ok"})
+    @patch("cementic.doctor.get_engine")
+    def test_a_database_without_the_pipeline_tables_stays_ok(
+        self, mock_get_engine, mock_ext, mock_daemon
+    ) -> None:
+        """Same regression as the class above, one probe later.
+
+        A Postgres that answers `SELECT 1` but holds no `chunked_documents` is
+        the ordinary state of a fresh install: `cementic init postgres` has run
+        and `cementic start` has not. An unguarded stranded-chunkings probe
+        reported that as an unreachable database and told the user to go and
+        create one.
+        """
+        def execute(statement, *args, **kwargs):
+            if "chunked_documents" in str(statement):
+                raise RuntimeError('relation "chunked_documents" does not exist')
+            return MagicMock()
+
+        conn = MagicMock()
+        conn.execute.side_effect = execute
+        mock_get_engine.return_value.connect.return_value.__enter__.return_value = conn
+
+        report = collect_doctor_report(Config())
+
+        assert report["checks"]["database"]["status"] == "ok"
+        assert report["checks"]["database"]["reachable"] is True
+        assert report["checks"]["stranded_chunkings"]["status"] == "warning"
+        assert "never indexed anything" in report["checks"]["stranded_chunkings"]["message"]
 
 
 class TestDaemonCheck:
@@ -684,3 +718,125 @@ class TestStrandedChunkingsCheck:
 
         assert report["status"] == "warning"
         assert "stranded" not in report
+
+
+class TestStrandedChunkingsProbe:
+    """The query itself, not the sentence it produces.
+
+    The formatter tests above take a count as an argument, so they say nothing
+    about whether the count is right or whether asking for it is safe. Both
+    matter: an unguarded probe here reports a healthy server as an unreachable
+    database, which is what `_active_embedding_canaries` guards against three
+    functions below.
+    """
+
+    def _engine_with_schema(self):
+        from cementic.db import Base
+
+        engine = create_engine("sqlite://")
+        Base.metadata.create_all(engine)
+        return engine
+
+    def test_a_database_without_the_tables_reads_as_unknown_not_zero(self) -> None:
+        """A fresh install has no `chunked_documents`; doctor may not create it."""
+        engine = create_engine("sqlite://")
+        with engine.connect() as conn:
+            assert conn.execute(text("SELECT 1")).scalar() == 1
+            assert _stranded_chunkings(conn) is None
+            # The connection is still usable: an unrolled-back failed statement
+            # would poison every check after this one on PostgreSQL.
+            assert conn.execute(text("SELECT 1")).scalar() == 1
+
+    def test_a_chunking_with_no_chunks_is_counted(self) -> None:
+        engine = self._engine_with_schema()
+        with engine.begin() as conn:
+            _insert_chunking(conn, content_hash="h", total_chunks=7, chunks=0)
+        with engine.connect() as conn:
+            assert _stranded_chunkings(conn) == 1
+
+    def test_a_chunking_that_owns_its_chunks_is_not_counted(self) -> None:
+        engine = self._engine_with_schema()
+        with engine.begin() as conn:
+            _insert_chunking(conn, content_hash="h", total_chunks=2, chunks=2)
+        with engine.connect() as conn:
+            assert _stranded_chunkings(conn) == 0
+
+    def test_a_document_that_chunked_to_nothing_is_not_counted(self) -> None:
+        """`total_chunks = 0` is a legitimately empty document, not a loss."""
+        engine = self._engine_with_schema()
+        with engine.begin() as conn:
+            _insert_chunking(conn, content_hash="h", total_chunks=0, chunks=0)
+        with engine.connect() as conn:
+            assert _stranded_chunkings(conn) == 0
+
+    def test_a_chunking_awaiting_re_chunk_is_not_counted(self) -> None:
+        """A hash already cleared is work the pipeline will pick up by itself."""
+        engine = self._engine_with_schema()
+        with engine.begin() as conn:
+            _insert_chunking(conn, content_hash=None, total_chunks=7, chunks=0)
+        with engine.connect() as conn:
+            assert _stranded_chunkings(conn) == 0
+
+    def test_a_deleted_document_is_not_counted(self) -> None:
+        engine = self._engine_with_schema()
+        with engine.begin() as conn:
+            _insert_chunking(
+                conn, content_hash="h", total_chunks=7, chunks=0, document_status="deleted"
+            )
+        with engine.connect() as conn:
+            assert _stranded_chunkings(conn) == 0
+
+
+def _insert_chunking(
+    conn,
+    *,
+    content_hash: str | None,
+    total_chunks: int,
+    chunks: int,
+    document_status: str = "pending",
+) -> None:
+    """One document through to its chunking, with `chunks` chunks attached."""
+    conn.execute(
+        text(
+            "INSERT INTO source_documents (id, collection, source_path, status, "
+            "created_at, updated_at) VALUES (1, 'c', '/p.pdf', :status, "
+            "'2026-01-01', '2026-01-01')"
+        ),
+        {"status": document_status},
+    )
+    conn.execute(
+        text(
+            "INSERT INTO extractor_profiles (id, fingerprint, name, config_json, created_at) "
+            "VALUES (1, 'f', 'n', '{}', '2026-01-01')"
+        )
+    )
+    conn.execute(
+        text(
+            "INSERT INTO chunk_profiles (id, fingerprint, config_json, created_at) "
+            "VALUES (1, 'f', '{}', '2026-01-01')"
+        )
+    )
+    conn.execute(
+        text(
+            "INSERT INTO extracted_documents (id, document_id, extractor_profile_id, "
+            "content_hash, status, created_at, updated_at) VALUES "
+            "(1, 1, 1, 'h', 'done', '2026-01-01', '2026-01-01')"
+        )
+    )
+    conn.execute(
+        text(
+            "INSERT INTO chunked_documents (id, extracted_document_id, chunk_profile_id, "
+            "source_content_hash, status, total_chunks, created_at, updated_at) VALUES "
+            "(1, 1, 1, :hash, 'done', :total, '2026-01-01', '2026-01-01')"
+        ),
+        {"hash": content_hash, "total": total_chunks},
+    )
+    for index in range(chunks):
+        conn.execute(
+            text(
+                "INSERT INTO chunks_v2 (document_id, chunked_document_id, chunk_index, "
+                "content, created_at, updated_at) VALUES (1, 1, :i, 't', "
+                "'2026-01-01', '2026-01-01')"
+            ),
+            {"i": index},
+        )
