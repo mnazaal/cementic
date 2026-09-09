@@ -3,20 +3,19 @@
 <!-- session-handoff:begin (2026-09-07, evening) -->
 ## Where the work stands
 
-**Entry point: one command left to run, in `TODO.md`.** The two papers this
-session found stranded are still stranded -- the code fix stops it recurring
-but cannot re-chunk what is already lost. `TODO.md`'s "Two papers were silently
-unsearchable" entry carries the exact command, self-finding rather than
-hard-coded to those ids. Run it, then `cementic start` picks them up (~103
-chunks of embedding work). Everything else below is finished.
+**Superseded 2026-09-09 on these two paragraphs only; everything below them is
+still this block's own record of the status-latency session.** The stranded
+papers were the visible edge of a much larger fault -- see "Decided -- what
+makes two rows the same document (2026-09-09)" below, and `TODO.md`'s repair
+entry, which now names 3 documents rather than 2.
 
-**Repo state.** `main` at `012b490` and pushed; the status-latency fix is in.
-This pass sits unmerged on `claude/status-followups`. A hook rejects agents
-committing to `main`, so the merge and push are yours:
+**Repo state.** `claude/status-followups` was merged and pushed; `main` is at
+`0deeb88`. The 2026-09-09 work sits unmerged on
+`claude/watcher-document-identity` (four commits, `./scripts/check.sh` green).
+A hook rejects agents committing to `main`, so the merge and push are yours:
 ```bash
-git checkout main && git merge --ff-only claude/status-followups && git push
+git checkout main && git merge --ff-only claude/watcher-document-identity && git push
 ```
-Nothing is running: no background jobs, no cluster work, scratchpad empty.
 
 **What shipped.** `cementic status -c papers` went from 12-128 s to 1.93-2.20 s.
 It was never a timeout: one count joined `chunk_embeddings` through `chunks_v2`
@@ -530,6 +529,53 @@ absence, and `enable_seqscan = off` does not fix it because the bad plan is an
 index scan too. And `ts_rank` over every match of a common term recomputes a
 tsvector per row and hangs for minutes; ranking must happen over a capped
 candidate pool.
+
+### Decided — what makes two rows the same document (2026-09-09) — DONE
+
+**Implemented on `claude/watcher-document-identity` (four commits).** Written
+after the live corpus held 46,139 documents where 23,077 belong, and 18,103 of
+them matched nothing in search. Both halves of that came from the same place:
+identity and the work attached to it are keyed on the path, and nothing checked
+that the key still meant what it meant when it was written.
+
+**Chunks may not be deleted without invalidating the chunking.** `_step_chunk`
+re-claims a `done` chunking only when its `source_content_hash` differs from
+the extraction's, so a chunking left with a current hash and no chunks is never
+revisited. `0deeb88` fixed that for the failed-re-extraction purge; the
+watcher's delete purge had the same hole, and a delete-then-create of an
+unchanged file — a sync client, an editor renaming a temp file over the
+original — is an ordinary event, so it fired 18,101 times. The rule is now: any
+code path that removes chunks clears the hash in the same statement.
+
+**A document is the same document when it is the same file, not the same
+path.** A watched root given as a symlink is stored resolved, so moving a tree
+and leaving a link behind re-registers every file under a path cementic has
+never seen, and the pre-move rows keep resolving through the link so nothing
+retires them. Registration now repaths instead of inserting a twin.
+
+*Matching the moved row by content hash was tried first and is not enough.*
+It assumes the corpus only moved. On this corpus 3,338 papers had also been
+rewritten between the two scans, so their recorded hash no longer identified
+the file their row still pointed at, and a rescan created 7,512 duplicates
+before it was stopped. The watcher resolved the root itself, so it can name the
+pre-move path outright — an exact lookup on the unique index, indifferent to
+how much the file has changed. The hash probe stays as the fallback for a move
+no root alias explains.
+
+**Retiring a stale row may never delete the only copy of the work.** The
+reconcile retires a row whose path is no longer its own real path — previously
+invisible to it, since `_is_under_watched_roots` compares literally and a
+pre-move path is under no watched root. Guarded: retire only when the row holds
+no chunks, or when the document now at its real path holds chunks of its own.
+Without that guard, a restart on the damaged corpus would have deleted 2.3M
+chunks and bought hours of re-embedding to reach the state it was already in
+(measured: 18,104 rows held the only copy, 4,958 were safe to retire).
+
+**The silence cost more than the bugs.** Both instances of the lost-chunk class
+were invisible for weeks because `cementic status` read 100% chunked
+throughout. `cementic doctor` now counts chunkings that are done and own no
+chunks (0.17s against 46k documents), so a third path lands in a report rather
+than nowhere.
 
 ### Decided — external command extractor (2026-09-03) — DONE
 

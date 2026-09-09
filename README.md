@@ -89,7 +89,9 @@ or auto-downloads the configured `llama.cpp` model into the cementic user data
 directory when it is missing. Auto-download is the recommended path; use
 `cementic doctor` to check the resolved model path without downloading.
 If Postgres is not reachable, doctor suggests generating the local setup or
-pointing cementic at your own Postgres.
+pointing cementic at your own Postgres. It also reports faults in an existing
+corpus without changing anything — a document counted as chunked that holds no
+chunks, for instance, which matches nothing in search until it is re-chunked.
 
 After the doctor check, run `cementic embedding start` once. It is optional —
 any command that needs embeddings starts the daemon on demand — but a cold
@@ -712,9 +714,11 @@ task prefixes:
 - **Moving the watched directory itself is invisible until restart.** The
   filesystem watch delivers no event when the watched root is renamed or moved
   away, so cementic keeps watching the old location. The next
-  `cementic start` reconciles: documents whose files are gone drop out of
-  search. (Moving or deleting *subdirectories* inside the watched tree is
-  handled live.)
+  `cementic start` reconciles: a document whose file is gone drops out of
+  search, and one still reachable under a new real path — a tree moved with a
+  symlink left at the old location, say — is repathed rather than indexed
+  again, keeping its extraction, chunks and vectors. (Moving or deleting
+  *subdirectories* inside the watched tree is handled live.)
 - **Model identity is matched by filename.** The task-prefix policy for Nomic
   models is selected from the model file's name; renaming the GGUF (or
   mirroring it under another name) silently switches to plain, unprefixed

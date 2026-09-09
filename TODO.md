@@ -67,9 +67,12 @@ index, versioned revisions) are documented in [PLAN.md](PLAN.md).
   Reproduced first as a failing test
   (`test_a_document_is_rechunked_after_its_failed_re_extraction`).
 
-  **The two live rows still need repairing** -- the fix stops it recurring but
-  cannot re-chunk what is already stranded. One command, then let the worker
-  pick them up; it costs ~103 chunks of embedding work:
+  **The stranded rows still need repairing** -- the fix stops it recurring but
+  cannot re-chunk what is already stranded. 3 documents as of 2026-09-09, not
+  the 2 this entry was written for: the other 18,101 came from the watcher
+  purge below and went with its cleanup. Check the count before running this,
+  with `cementic doctor`'s `stranded_chunkings` line. One command, then let the
+  worker pick them up:
 
   ```bash
   cd ~/projects/cementic && ./.venv/bin/python -c "
@@ -89,9 +92,23 @@ index, versioned revisions) are documented in [PLAN.md](PLAN.md).
   "
   ```
 
-  The selector is self-finding rather than hard-coded to the two ids, so it
-  also repairs any row that reached this state before the fix landed. Verified
-  read-only on 2026-09-07: it matches exactly those two documents.
+  The selector is self-finding rather than hard-coded to any ids, so it repairs
+  every row in this state. That cuts both ways: on 2026-09-08 it would have
+  matched 18,103 rows and queued 1.8M chunks of re-embedding, most of it for
+  documents that were duplicates. Run `cementic doctor` first and satisfy
+  yourself the count is the one you mean to repair.
+
+- ~~**The corpus doubled, and 18,101 papers went unsearchable.**~~ **Fixed
+  2026-09-09** on `claude/watcher-document-identity`; the live corpus was
+  repaired the same day. `~/data/Documents/Papers` became a symlink to
+  `~/sync/Material/Papers`, so the watcher resolved every file to a path it had
+  never seen and indexed the whole corpus a second time -- and the watcher's
+  chunk purge left each chunking `done` with a current hash and no chunks, the
+  same class of bug as the entry above through a different purge. Root causes,
+  the design that replaced path-and-hash identity, and what was rejected on the
+  way are in PLAN.md, "Decided -- what makes two rows the same document".
+  `cementic doctor` now reports the lost-chunk state rather than leaving it to
+  be noticed.
 
 - Audit the CLI surface against `llm`'s embeddings commands
   (https://llm.datasette.io/en/stable/embeddings/cli.html), and cut what does not
