@@ -60,6 +60,117 @@ def _is_missing(source_path: str) -> bool:
     return False
 
 
+def _identity_is_stale(source_path: str) -> bool:
+    """Whether a stored path is no longer the real path of the file it names.
+
+    Every stored ``source_path`` is resolved at registration, so this can only
+    become true after the fact: the tree was moved and a symlink left behind,
+    or a parent directory became a link. The file is still there, but it is
+    reachable under a different name -- and that name is a *different document*
+    to a pipeline keyed on ``(collection, source_path)``. Both then extract,
+    chunk and embed the same bytes.
+
+    A path that cannot be resolved is not stale, it is missing, which
+    ``_is_missing`` decides separately. Keeping the two apart matters: missing
+    is a deletion, stale is a rename, and they call for opposite repairs.
+    """
+    try:
+        resolved = Path(source_path).resolve(strict=True)
+    except OSError:
+        return False
+    return str(resolved) != source_path
+
+
+def _document_reached_by_another_path(
+    session: Session, collection: str, file_path: str, file_hash: str
+) -> SourceDocument | None:
+    """Find the document that is this same file under a path it no longer has.
+
+    Called when nothing is registered at ``file_path`` yet. A row whose stored
+    path still resolves to exactly this file is not a second document, it is
+    this one under its old name, so the registration repaths it instead of
+    inserting a twin -- which keeps its extraction, chunks and vectors, and
+    makes moving a corpus free rather than a full re-index.
+
+    Candidates are drawn by content hash (indexed) rather than by scanning
+    every live document: the whole-corpus case runs this once per file during
+    the initial scan, so an O(documents) probe per file would be O(n^2) over
+    the collection. The cost is one missed case -- a file whose *content* also
+    changed while it was moved -- which registers as a new document and leaves
+    the old one to ``_reconcile_deletions``. That is one file re-indexed, not a
+    corpus duplicated.
+    """
+    candidates = (
+        session.query(SourceDocument)
+        .filter(
+            SourceDocument.collection == collection,
+            SourceDocument.file_hash == file_hash,
+            SourceDocument.status != "deleted",
+            SourceDocument.source_path != file_path,
+        )
+        .all()
+    )
+    for candidate in candidates:
+        try:
+            resolved = Path(candidate.source_path).resolve(strict=True)
+        except OSError:
+            continue
+        if str(resolved) == file_path:
+            return candidate
+    return None
+
+
+def _documents_holding_chunks(session: Session, document_ids: list[int]) -> set[int]:
+    """Which of these documents own at least one chunk."""
+    holding: set[int] = set()
+    for start in range(0, len(document_ids), _DELETE_BATCH_SIZE):
+        batch = document_ids[start : start + _DELETE_BATCH_SIZE]
+        holding.update(
+            document_id
+            for (document_id,) in session.query(Chunk.document_id)
+            .filter(Chunk.document_id.in_(batch))
+            .distinct()
+            .all()
+        )
+    return holding
+
+
+def _retirable_stale_documents(
+    session: Session, candidates: list[SourceDocument], live: list[SourceDocument]
+) -> list[SourceDocument]:
+    """Stale identities that can be retired without losing the only copy.
+
+    Retiring a row deletes its chunks, so the rule is: retire the stale
+    identity when it holds no chunks, or when the document now living at its
+    real path holds chunks of its own. Otherwise leave it alone -- the file is
+    still there and the next scan will repath it, whereas dropping the row now
+    would delete the only chunks the collection has for that text and buy a
+    re-extract and re-embed of every one of them.
+
+    That case is not hypothetical: it is the shape of the 2026-09-08 corpus,
+    where the pre-move rows held every chunk and their post-move twins held
+    almost none.
+    """
+    if not candidates:
+        return []
+    by_path = {document.source_path: document for document in live}
+    twins: dict[int, SourceDocument] = {}
+    for candidate in candidates:
+        twin = by_path.get(str(Path(candidate.source_path).resolve()))
+        if twin is not None and twin.id != candidate.id:
+            twins[candidate.id] = twin
+    holding = _documents_holding_chunks(
+        session,
+        [candidate.id for candidate in candidates] + [twin.id for twin in twins.values()],
+    )
+    return [
+        candidate
+        for candidate in candidates
+        if candidate.id not in holding
+        or (candidate.id in twins and twins[candidate.id].id in holding)
+    ]
+
+
 #: Documents per chunk-delete statement. Bounds the IN list and the row count
 #: of any single delete; the transaction around them is the caller's.
 _DELETE_BATCH_SIZE = 500
@@ -400,13 +511,16 @@ class SourceWatcher:
             self._reconcile_deletions()
 
     def _reconcile_deletions(self) -> None:
-        """Mark documents whose files vanished while cementic was not running.
+        """Retire documents that no longer name a file of their own.
 
-        Deletion is otherwise only noticed through a live filesystem event, so a
+        Two ways that happens while cementic is not running. The file vanished,
+        which is otherwise only noticed through a live filesystem event, so a
         file removed between runs kept ``status="pending"`` forever and kept
-        matching searches with a path that no longer exists. Scoped to the
-        currently-watched roots so documents indexed from other directories (or
-        other collections) are never touched.
+        matching searches with a path that no longer exists. Or the file moved
+        and the stored path now resolves elsewhere, which makes the row a second
+        identity for a document the collection already holds under its real
+        path. Both are scoped to the currently-watched roots, so documents
+        indexed from other directories (or other collections) are never touched.
         """
         if not self._watched_roots:
             return
@@ -432,18 +546,41 @@ class SourceWatcher:
             # Unlike the missing ones these are invisible to the literal
             # containment test -- a path under the pre-move location is under no
             # watched root -- which is why they survived every restart.
+            # By id, not by `in missing`: that is a list scan per document with
+            # ORM identity comparison, and this loop runs over every live
+            # document in the collection at every startup.
+            missing_ids = {document.id for document in missing}
+            stale = _retirable_stale_documents(
+                session,
+                [
+                    document
+                    for document in documents
+                    if document.id not in missing_ids
+                    and _identity_is_stale(document.source_path)
+                    and self._resolves_under_watched_roots(document.source_path)
+                ],
+                documents,
+            )
+            retired = missing + stale
             # Read the paths before committing: ORM attributes expire on commit
             # and these instances are detached once the session closes.
             missing_paths = [document.source_path for document in missing]
-            for document in missing:
+            stale_paths = [document.source_path for document in stale]
+            for document in retired:
                 document.status = "deleted"
                 document.file_hash = None
-            if missing:
-                _purge_document_chunks(session, [document.id for document in missing])
+            if retired:
+                _purge_document_chunks(session, [document.id for document in retired])
                 session.commit()
         for source_path in missing_paths:
             self._logger.info(
                 "Marked document deleted while stopped: %s (collection=%s)",
+                source_path,
+                self.collection,
+            )
+        for source_path in stale_paths:
+            self._logger.info(
+                "Marked document deleted, its path is no longer its own: %s (collection=%s)",
                 source_path,
                 self.collection,
             )
@@ -578,6 +715,21 @@ class SourceWatcher:
         path = Path(file_path)
         return any(path.is_relative_to(root) for root in self._watched_roots)
 
+    def _resolves_under_watched_roots(self, file_path: str) -> bool:
+        """Whether a stored path reaches a file under a root this run watches.
+
+        The literal test above is the right one for a path that is still its
+        own real path, which is every path at the moment it is stored. This one
+        is for the path that has stopped being that: the row belongs to this
+        run's corpus, it just names it by a route that no longer is the file's
+        own name.
+        """
+        try:
+            resolved = Path(file_path).resolve(strict=True)
+        except OSError:
+            return False
+        return any(resolved.is_relative_to(root) for root in self._watched_roots)
+
     def _normalize_watched_path(self, file_path: str, *, must_exist: bool) -> str | None:
         path = Path(file_path)
         try:
@@ -645,6 +797,18 @@ class SourceWatcher:
                         .filter_by(source_path=file_path, collection=self.collection)
                         .first()
                     )
+                    if document is None:
+                        document = _document_reached_by_another_path(
+                            session, self.collection, file_path, file_hash
+                        )
+                        if document is not None:
+                            self._logger.info(
+                                "Document moved: %s -> %s (collection=%s)",
+                                document.source_path,
+                                file_path,
+                                self.collection,
+                            )
+                            document.source_path = file_path
                     if document is None:
                         document = SourceDocument(
                             source_path=file_path, collection=self.collection

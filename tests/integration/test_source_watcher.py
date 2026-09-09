@@ -11,7 +11,15 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from cementic.config import Config
-from cementic.db import Base, SourceDocument
+from cementic.db import (
+    Base,
+    Chunk,
+    ChunkedDocument,
+    ChunkProfile,
+    ExtractedDocument,
+    ExtractorProfile,
+    SourceDocument,
+)
 from cementic.source_watcher import DocumentEventHandler, SourceWatcher
 
 
@@ -491,3 +499,184 @@ class TestDirectoryMoveDeletion:
             observer.join(timeout=5)
 
         assert deleted_dirs and deleted_dirs[0].endswith("sub")
+
+
+class TestATreeMovedBehindASymlink:
+    """A moved corpus reached through a symlink is still one corpus.
+
+    Document identity is the resolved real path: `_start_watcher` resolves each
+    watched root and `_normalize_watched_path` resolves each file. That is
+    right while the tree stays put, but it makes identity move when the tree
+    does. Moving a corpus and leaving a symlink at the old location -- the
+    ordinary way to move a directory without breaking anything pointed at it --
+    re-registers every file under its new real path, while the old rows keep
+    resolving through the symlink so `_reconcile_deletions` never retires them.
+    Both copies then extract, chunk and embed independently. Observed live on
+    2026-09-08: 23,064 papers became 46,139, and every one of them was embedded
+    a second time.
+    """
+
+    def test_a_moved_tree_reached_through_a_symlink_registers_once(
+        self, watcher_config: Config, watcher_db, temp_dir: Path
+    ) -> None:
+        _engine, session_factory, _db_path = watcher_db
+        original = temp_dir / "Papers"
+        original.mkdir()
+        paper = original / "paper.md"
+        paper.write_text("content", encoding="utf-8")
+
+        sw = SourceWatcher(watcher_config)
+        sw.Session = session_factory
+        sw.collection = "papers"
+        sw._watched_roots = [original.resolve()]
+        sw._register_document(str(paper))
+
+        # The tree moves; a symlink keeps the old path working, so the
+        # configured root still resolves to a real directory.
+        moved = temp_dir / "sync" / "Papers"
+        moved.parent.mkdir()
+        original.rename(moved)
+        original.symlink_to(moved)
+
+        # The next run: same configured root, now resolving somewhere else.
+        sw._watched_roots = [original.resolve()]
+        sw._scan_existing(sw._watched_roots[0])
+        sw._reconcile_deletions()
+
+        with session_factory() as session:
+            live = [
+                document.source_path
+                for document in session.query(SourceDocument)
+                .filter(SourceDocument.status != "deleted")
+                .all()
+            ]
+
+        assert sorted(live) == [str(moved / "paper.md")], (
+            f"one file on disk, but {len(live)} live documents: {sorted(live)}"
+        )
+
+    def test_a_stale_path_is_retired_even_when_the_file_changed(
+        self, watcher_config: Config, watcher_db, temp_dir: Path
+    ) -> None:
+        """The repath needs a matching content hash; retiring the twin must not.
+
+        A file edited while its tree moved registers under the real path as a
+        genuinely new document, and the row holding the old path is left. It is
+        then immortal: `_is_under_watched_roots` compares literally, so a path
+        under the pre-move location is under no watched root, and
+        `_reconcile_deletions` never looks at it. It keeps its vectors in every
+        search under a path nothing will ever write to again.
+        """
+        _engine, session_factory, _db_path = watcher_db
+        original = temp_dir / "Papers"
+        original.mkdir()
+        paper = original / "paper.md"
+        paper.write_text("first version", encoding="utf-8")
+
+        sw = SourceWatcher(watcher_config)
+        sw.Session = session_factory
+        sw.collection = "papers"
+        sw._watched_roots = [original.resolve()]
+        sw._register_document(str(paper))
+
+        moved = temp_dir / "sync" / "Papers"
+        moved.parent.mkdir()
+        original.rename(moved)
+        original.symlink_to(moved)
+        # Edited after the move, so the content hash no longer identifies it.
+        (moved / "paper.md").write_text("second version", encoding="utf-8")
+
+        sw._watched_roots = [original.resolve()]
+        sw._scan_existing(sw._watched_roots[0])
+        sw._reconcile_deletions()
+
+        with session_factory() as session:
+            live = [
+                document.source_path
+                for document in session.query(SourceDocument)
+                .filter(SourceDocument.status != "deleted")
+                .all()
+            ]
+
+        assert sorted(live) == [str(moved / "paper.md")], (
+            f"one file on disk, but {len(live)} live documents: {sorted(live)}"
+        )
+
+
+def _give_document_a_chunk(session, source_path: str, collection: str) -> None:
+    """Attach one chunk to a document, through the profile chain it needs."""
+    document = (
+        session.query(SourceDocument)
+        .filter_by(source_path=source_path, collection=collection)
+        .one()
+    )
+    extractor = ExtractorProfile(name="x", fingerprint=f"ex-{document.id}", config_json="{}")
+    chunk_profile = ChunkProfile(fingerprint=f"cp-{document.id}", config_json="{}")
+    session.add_all([extractor, chunk_profile])
+    session.flush()
+    extracted = ExtractedDocument(
+        document_id=document.id, extractor_profile_id=extractor.id, status="done"
+    )
+    session.add(extracted)
+    session.flush()
+    chunked = ChunkedDocument(
+        extracted_document_id=extracted.id, chunk_profile_id=chunk_profile.id, status="done"
+    )
+    session.add(chunked)
+    session.flush()
+    session.add(
+        Chunk(
+            document_id=document.id,
+            chunked_document_id=chunked.id,
+            chunk_index=0,
+            content="text",
+        )
+    )
+    session.commit()
+
+
+class TestRetiringAStaleIdentityNeverLosesTheWork:
+    """Retiring a stale row deletes its chunks, so it must not hold the only copy.
+
+    The 2026-09-08 corpus is exactly this shape: the pre-move rows hold every
+    chunk and vector, their post-move twins hold almost none. Retiring on
+    staleness alone would delete 2.3M chunks and buy a full re-extract and
+    re-embed of the corpus -- hours of GPU to reach the state it was already in.
+    """
+
+    def test_a_stale_row_holding_the_only_chunks_is_kept(
+        self, watcher_config: Config, watcher_db, temp_dir: Path
+    ) -> None:
+        _engine, session_factory, _db_path = watcher_db
+        original = temp_dir / "Papers"
+        original.mkdir()
+        paper = original / "paper.md"
+        paper.write_text("first version", encoding="utf-8")
+
+        sw = SourceWatcher(watcher_config)
+        sw.Session = session_factory
+        sw.collection = "papers"
+        sw._watched_roots = [original.resolve()]
+        sw._register_document(str(paper))
+        with session_factory() as session:
+            _give_document_a_chunk(session, str(paper), "papers")
+
+        # Moved, and edited, so the twin registers separately and holds nothing.
+        moved = temp_dir / "sync" / "Papers"
+        moved.parent.mkdir()
+        original.rename(moved)
+        original.symlink_to(moved)
+        (moved / "paper.md").write_text("second version", encoding="utf-8")
+
+        sw._watched_roots = [original.resolve()]
+        sw._scan_existing(sw._watched_roots[0])
+        sw._reconcile_deletions()
+
+        with session_factory() as session:
+            surviving = (
+                session.query(SourceDocument).filter_by(source_path=str(paper)).one()
+            )
+            chunks = session.query(Chunk).count()
+
+        assert surviving.status == "pending", "retired the row holding the only chunks"
+        assert chunks == 1, "purged the only chunks the collection had"

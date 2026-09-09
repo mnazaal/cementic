@@ -74,6 +74,11 @@ class SourceDocument(Base):
             "source_path",
             unique=True,
         ),
+        # Drives the move lookup in `_document_reached_by_another_path`, which
+        # runs once per file during a full scan: without it that probe is a
+        # sequential scan of the collection per file, O(documents^2) over a
+        # bulk import.
+        Index("ix_source_documents_collection_file_hash", "collection", "file_hash"),
     )
 
 
@@ -424,6 +429,15 @@ _ACTIVE_REVISION_UNIQUE_DDL = (
 )
 
 
+#: `create_all` cannot retrofit an index onto a table that already exists, and
+#: the collections this matters for are exactly the ones that predate it. Same
+#: reasoning as the active-revision index above.
+_SOURCE_FILE_HASH_INDEX_DDL = (
+    "CREATE INDEX IF NOT EXISTS ix_source_documents_collection_file_hash "
+    "ON source_documents (collection, file_hash)"
+)
+
+
 #: Name of the full-text index the lexical half of hybrid search reads.
 LEXICAL_INDEX_NAME = "ix_chunks_v2_fts"
 
@@ -556,6 +570,7 @@ def create_tables(engine: Engine) -> None:
     try:
         with engine.begin() as conn:
             conn.execute(text(_ACTIVE_REVISION_UNIQUE_DDL))
+            conn.execute(text(_SOURCE_FILE_HASH_INDEX_DDL))
     except (IntegrityError, ProgrammingError, OperationalError):
         # `CREATE UNIQUE INDEX IF NOT EXISTS` checks the catalog before taking
         # its lock, so the two workers `cementic start` spawns can both pass the

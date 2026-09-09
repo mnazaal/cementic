@@ -115,8 +115,16 @@ class TestSourceWatcher:
             def filter_by(self, **kwargs):
                 return self
 
+            # The move lookup: no other document in this collection shares the
+            # hash, so registration falls through to inserting a new row.
+            def filter(self, *args):
+                return self
+
             def first(self):
                 return document
+
+            def all(self):
+                return []
 
         class SessionMock:
             def __enter__(self):
