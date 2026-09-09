@@ -603,8 +603,10 @@ class TestATreeMovedBehindASymlink:
         )
 
 
-def _give_document_a_chunk(session, source_path: str, collection: str) -> None:
-    """Attach one chunk to a document, through the profile chain it needs."""
+def _give_document_a_chunk(
+    session, source_path: str, collection: str, chunks: int = 1
+) -> None:
+    """Attach chunks to a document, through the profile chain it needs."""
     document = (
         session.query(SourceDocument)
         .filter_by(source_path=source_path, collection=collection)
@@ -624,14 +626,15 @@ def _give_document_a_chunk(session, source_path: str, collection: str) -> None:
     )
     session.add(chunked)
     session.flush()
-    session.add(
-        Chunk(
-            document_id=document.id,
-            chunked_document_id=chunked.id,
-            chunk_index=0,
-            content="text",
+    for index in range(chunks):
+        session.add(
+            Chunk(
+                document_id=document.id,
+                chunked_document_id=chunked.id,
+                chunk_index=index,
+                content="text",
+            )
         )
-    )
     session.commit()
 
 
@@ -680,6 +683,88 @@ class TestRetiringAStaleIdentityNeverLosesTheWork:
 
         assert surviving.status == "pending", "retired the row holding the only chunks"
         assert chunks == 1, "purged the only chunks the collection had"
+
+    def test_a_stale_row_is_kept_when_its_twin_is_only_partly_chunked(
+        self, watcher_config: Config, watcher_db, temp_dir: Path
+    ) -> None:
+        """A twin one chunk in does not cover the document.
+
+        Retiring on "the twin holds chunks" reads a membership test as
+        coverage. A twin part-way through a long document satisfies it while
+        holding almost none of the text, and the stale row's chunks -- and by
+        cascade its vectors -- go with it. Left standing instead, the pair costs
+        a re-index; deleted, the embedding time is unrecoverable.
+        """
+        _engine, session_factory, _db_path = watcher_db
+        original = temp_dir / "Papers"
+        original.mkdir()
+        paper = original / "paper.md"
+        paper.write_text("first version", encoding="utf-8")
+
+        sw = SourceWatcher(watcher_config)
+        sw.Session = session_factory
+        sw.collection = "papers"
+        sw._watched_roots = [original.resolve()]
+        sw._register_document(str(paper))
+        with session_factory() as session:
+            _give_document_a_chunk(session, str(paper), "papers", chunks=40)
+
+        moved = temp_dir / "sync" / "Papers"
+        moved.parent.mkdir()
+        original.rename(moved)
+        original.symlink_to(moved)
+        (moved / "paper.md").write_text("second version", encoding="utf-8")
+
+        sw._watched_roots = [original.resolve()]
+        sw._scan_existing(sw._watched_roots[0])
+        # The twin has started chunking and holds one chunk of the forty the
+        # stale row holds.
+        with session_factory() as session:
+            _give_document_a_chunk(session, str(moved / "paper.md"), "papers", chunks=1)
+
+        sw._reconcile_deletions()
+
+        with session_factory() as session:
+            stale = session.query(SourceDocument).filter_by(source_path=str(paper)).one()
+            chunks = session.query(Chunk).filter_by(document_id=stale.id).count()
+
+        assert stale.status == "pending", "retired a row its twin does not cover"
+        assert chunks == 40, "purged chunks the twin had not replaced"
+
+    def test_a_stale_row_with_no_successor_is_kept(
+        self, watcher_config: Config, watcher_db, temp_dir: Path
+    ) -> None:
+        """Nothing registered the file at its real path, so nothing replaces it.
+
+        A scan skips files for several ordinary reasons -- the size cap, an
+        unreadable subtree, a suffix no longer extracted. Retiring on staleness
+        alone would drop those documents out of search with no successor.
+        """
+        _engine, session_factory, _db_path = watcher_db
+        original = temp_dir / "Papers"
+        original.mkdir()
+        paper = original / "paper.md"
+        paper.write_text("content", encoding="utf-8")
+
+        sw = SourceWatcher(watcher_config)
+        sw.Session = session_factory
+        sw.collection = "papers"
+        sw._watched_roots = [original.resolve()]
+        sw._register_document(str(paper))
+
+        moved = temp_dir / "sync" / "Papers"
+        moved.parent.mkdir()
+        original.rename(moved)
+        original.symlink_to(moved)
+
+        # No scan: the file is never registered under its real path.
+        sw._watched_roots = [original.resolve()]
+        sw._reconcile_deletions()
+
+        with session_factory() as session:
+            document = session.query(SourceDocument).filter_by(source_path=str(paper)).one()
+
+        assert document.status == "pending", "retired a document nothing replaced"
 
 
 class TestRepathingDoesNotDependOnTheContentHash:
@@ -733,3 +818,106 @@ class TestRepathingDoesNotDependOnTheContentHash:
 
         assert paths == [str(moved / "paper.md")], f"expected one repathed document, got {paths}"
         assert ids == [original_id], "repathed the row away rather than moving it"
+
+
+class TestFoldingATwinBackIntoItsMove:
+    """A twin already sitting at the real path must not make the duplicate permanent.
+
+    The repath only fires when nothing is registered at the path being scanned.
+    Once a scan has inserted a twin there -- which is what the corpus of
+    2026-09-09 was left holding after a partial rescan -- every later scan
+    short-circuits on that row, and the pre-move row keeps the chunks under a
+    path nothing writes to. Retiring the pre-move row would delete them, so the
+    empty twin gives way instead.
+    """
+
+    def test_an_empty_twin_gives_way_to_the_row_holding_the_work(
+        self, watcher_config: Config, watcher_db, temp_dir: Path
+    ) -> None:
+        _engine, session_factory, _db_path = watcher_db
+        original = temp_dir / "Papers"
+        original.mkdir()
+        paper = original / "paper.md"
+        paper.write_text("first version", encoding="utf-8")
+
+        sw = SourceWatcher(watcher_config)
+        sw.Session = session_factory
+        sw.collection = "papers"
+        sw._watched_roots = [original.resolve()]
+        sw._register_document(str(paper))
+        with session_factory() as session:
+            _give_document_a_chunk(session, str(paper), "papers", chunks=40)
+            original_id = (
+                session.query(SourceDocument).filter_by(source_path=str(paper)).one().id
+            )
+
+        moved = temp_dir / "sync" / "Papers"
+        moved.parent.mkdir()
+        original.rename(moved)
+        original.symlink_to(moved)
+        (moved / "paper.md").write_text("second version", encoding="utf-8")
+
+        # A previous run already registered the file under its real path, the
+        # way the live corpus acquired its twins: no alias recorded yet, and
+        # the file edited, so neither repath could recognise it.
+        sw._watched_roots = [moved.resolve()]
+        sw._root_aliases = []
+        sw._register_document(str(moved / "paper.md"))
+        sw._configure_watched_roots([str(original)])
+        with session_factory() as session:
+            assert session.query(SourceDocument).filter(
+                SourceDocument.status != "deleted"
+            ).count() == 2, "fixture did not produce the twin this test is about"
+
+        # The next scan.
+        sw._scan_existing(sw._watched_roots[0])
+        sw._reconcile_deletions()
+
+        with session_factory() as session:
+            live = session.query(SourceDocument).filter(SourceDocument.status != "deleted").all()
+            chunks = session.query(Chunk).count()
+
+        assert [document.source_path for document in live] == [str(moved / "paper.md")]
+        assert live[0].id == original_id, "kept the empty twin and dropped the work"
+        assert chunks == 40, "lost the chunks while folding the twin back in"
+
+    def test_two_rows_that_both_hold_chunks_are_left_alone(
+        self, watcher_config: Config, watcher_db, temp_dir: Path
+    ) -> None:
+        """Which one to discard is not a question a registration can answer."""
+        _engine, session_factory, _db_path = watcher_db
+        original = temp_dir / "Papers"
+        original.mkdir()
+        paper = original / "paper.md"
+        paper.write_text("first version", encoding="utf-8")
+
+        sw = SourceWatcher(watcher_config)
+        sw.Session = session_factory
+        sw.collection = "papers"
+        sw._watched_roots = [original.resolve()]
+        sw._register_document(str(paper))
+        with session_factory() as session:
+            _give_document_a_chunk(session, str(paper), "papers", chunks=40)
+
+        moved = temp_dir / "sync" / "Papers"
+        moved.parent.mkdir()
+        original.rename(moved)
+        original.symlink_to(moved)
+        (moved / "paper.md").write_text("second version", encoding="utf-8")
+
+        sw._watched_roots = [moved.resolve()]
+        sw._root_aliases = []
+        sw._register_document(str(moved / "paper.md"))
+        with session_factory() as session:
+            _give_document_a_chunk(session, str(moved / "paper.md"), "papers", chunks=12)
+        sw._configure_watched_roots([str(original)])
+
+        sw._scan_existing(sw._watched_roots[0])
+        sw._reconcile_deletions()
+
+        with session_factory() as session:
+            live = session.query(SourceDocument).filter(SourceDocument.status != "deleted").count()
+            chunks = session.query(Chunk).count()
+
+        assert live == 2, "discarded one of two rows that both hold work"
+        assert chunks == 52, "deleted chunks while declining to choose"

@@ -84,8 +84,18 @@ def _document_under_a_prior_root(
 ) -> SourceDocument | None:
     """Find this file's document under a path a watched root used to have.
 
-    An exact-path lookup on the unique `(collection, source_path)` index, so it
-    costs the same whether the collection holds ten documents or a million.
+    A path lookup driven by the unique `(collection, source_path)` index -- one
+    path per alias, so usually one -- rather than a scan, so it costs the same
+    whether the collection holds ten documents or a million.
+
+    This matches on names, and cannot do better: if a root that was a real
+    directory is later repointed at an unrelated tree with the same relative
+    filenames, the old row is repathed onto a different file, and no filesystem
+    check can tell that from the tree having moved -- the old file is
+    unreachable either way. It self-corrects rather than corrupts: the
+    registration writes the new `file_hash`, which is what `_step_extract`
+    claims on, so the wrong text is re-extracted and re-chunked. Ordered by id
+    so the choice is at least stable when several aliases match.
     """
     if not alternate_paths:
         return None
@@ -96,8 +106,52 @@ def _document_under_a_prior_root(
             SourceDocument.source_path.in_(alternate_paths),
             SourceDocument.status != "deleted",
         )
+        # Ordered because there can be more than one alternate: two configured
+        # roots resolving under one another produce several, and an unordered
+        # `first()` would then repath a different row on each run. Oldest wins,
+        # which is the one carrying the extraction and chunks.
+        .order_by(SourceDocument.id)
         .first()
     )
+
+
+def _merge_prior_root_document(
+    session: Session,
+    collection: str,
+    file_path: str,
+    alternate_paths: list[str],
+    occupant: SourceDocument,
+) -> SourceDocument | None:
+    """Fold a document registered under a prior root into the row at this path.
+
+    The repath in `_register_document` only fires when nothing is registered at
+    `file_path`. Once a scan has already inserted a twin there, every later
+    scan short-circuits on that row and the pre-move row keeps its chunks under
+    a path nothing writes to -- a duplicate that outlives any number of clean
+    runs, which is what the corpus of 2026-09-09 was left holding.
+
+    Resolved the way the manual repair resolved it: the twin holds nothing, so
+    it is deleted, and the row holding the extraction, chunks and vectors takes
+    over its path. Returns None unless the case is exactly that -- an empty
+    occupant and a prior-root row with work -- because two rows that both hold
+    chunks are a question this cannot answer without discarding one of them.
+
+    The deleted twin's own extraction artifact is left on disk. Every path that
+    drops a document here leaves its artifact (a document marked `deleted`
+    keeps one too); `collection remove` and revision pruning are what sweep
+    them. Bounded: it is one file per document that was registered twice.
+    """
+    if not alternate_paths or _documents_holding_chunks(session, [occupant.id]):
+        return None
+    prior = _document_under_a_prior_root(session, collection, alternate_paths)
+    if prior is None or not _documents_holding_chunks(session, [prior.id]):
+        return None
+    session.delete(occupant)
+    # Before the path is reassigned: the unique index on
+    # (collection, source_path) would otherwise refuse it.
+    session.flush()
+    prior.source_path = file_path
+    return prior
 
 
 def _identity_is_stale(source_path: str) -> bool:
@@ -160,6 +214,11 @@ def _document_reached_by_another_path(
     return None
 
 
+#: Documents per chunk statement. Bounds the IN list and the row count of any
+#: single delete; the transaction around them is the caller's.
+_DELETE_BATCH_SIZE = 500
+
+
 def _documents_holding_chunks(session: Session, document_ids: list[int]) -> set[int]:
     """Which of these documents own at least one chunk."""
     holding: set[int] = set()
@@ -178,42 +237,34 @@ def _documents_holding_chunks(session: Session, document_ids: list[int]) -> set[
 def _retirable_stale_documents(
     session: Session, candidates: list[SourceDocument], live: list[SourceDocument]
 ) -> list[SourceDocument]:
-    """Stale identities that can be retired without losing the only copy.
+    """Stale identities that can be retired without deleting anything.
 
-    Retiring a row deletes its chunks, so the rule is: retire the stale
-    identity when it holds no chunks, or when the document now living at its
-    real path holds chunks of its own. Otherwise leave it alone -- the file is
-    still there and the next scan will repath it, whereas dropping the row now
-    would delete the only chunks the collection has for that text and buy a
-    re-extract and re-embed of every one of them.
+    Two conditions, deliberately strict. The row must hold no chunks, which
+    makes retiring it a no-op on the chunk tables -- the reconcile cannot
+    delete a chunk under any circumstances. And the collection must already
+    hold a document at the row's real path, so a row nothing has replaced is
+    left alone: a scan that skipped that file (the size cap, an unreadable
+    subtree, a suffix no longer extracted) would otherwise have it retired with
+    no successor.
 
-    That case is not hypothetical: it is the shape of the 2026-09-08 corpus,
-    where the pre-move rows held every chunk and their post-move twins held
-    almost none.
+    An earlier form also retired a stale row whose twin *held chunks*, reasoning
+    that the twin covered the text. It does not. Holding chunks is a membership
+    test, and a twin one chunk into a five-hundred-chunk document satisfies it
+    while covering almost none of it -- and the stale row's chunks and vectors
+    went with it. The asymmetry decides this: a duplicate pair left standing is
+    visible in the document count and costs a re-index, while the deleted
+    vectors are hours of embedding that nothing can bring back.
     """
     if not candidates:
         return []
-    by_path = {document.source_path: document for document in live}
-    twins: dict[int, SourceDocument] = {}
-    for candidate in candidates:
-        twin = by_path.get(str(Path(candidate.source_path).resolve()))
-        if twin is not None and twin.id != candidate.id:
-            twins[candidate.id] = twin
-    holding = _documents_holding_chunks(
-        session,
-        [candidate.id for candidate in candidates] + [twin.id for twin in twins.values()],
-    )
+    live_paths = {document.source_path for document in live}
+    holding = _documents_holding_chunks(session, [candidate.id for candidate in candidates])
     return [
         candidate
         for candidate in candidates
         if candidate.id not in holding
-        or (candidate.id in twins and twins[candidate.id].id in holding)
+        and str(Path(candidate.source_path).resolve()) in live_paths
     ]
-
-
-#: Documents per chunk-delete statement. Bounds the IN list and the row count
-#: of any single delete; the transaction around them is the caller's.
-_DELETE_BATCH_SIZE = 500
 
 
 def _purge_document_chunks(session: Session, document_ids: list[int]) -> None:
@@ -599,13 +650,13 @@ class SourceWatcher:
                 if self._is_under_watched_roots(document.source_path)
                 and _is_missing(document.source_path)
             ]
-            # Rows the scan could not repath, because the file changed while it
-            # moved. The scan runs first and claims every one it can identify,
-            # so anything still holding a stale path here is a second identity
-            # for a document the collection already has under its real path.
-            # Unlike the missing ones these are invisible to the literal
-            # containment test -- a path under the pre-move location is under no
-            # watched root -- which is why they survived every restart.
+            # Rows the scan could not repath. The scan runs first and claims
+            # every one it can identify, so anything still holding a stale path
+            # here is a second identity for a document the collection already
+            # has under its real path. Unlike the missing ones these are
+            # invisible to the literal containment test -- a path under the
+            # pre-move location is under no watched root -- which is why they
+            # survived every restart.
             # By id, not by `in missing`: that is a list scan per document with
             # ORM identity comparison, and this loop runs over every live
             # document in the collection at every startup.
@@ -857,14 +908,26 @@ class SourceWatcher:
                         .filter_by(source_path=file_path, collection=self.collection)
                         .first()
                     )
+                    alternates = _alternate_paths(file_path, self._root_aliases)
+                    if document is not None:
+                        merged = _merge_prior_root_document(
+                            session, self.collection, file_path, alternates, document
+                        )
+                        if merged is not None:
+                            self._logger.info(
+                                "Document folded back into its move: %s -> %s "
+                                "(collection=%s)",
+                                merged.source_path,
+                                file_path,
+                                self.collection,
+                            )
+                            document = merged
                     if document is None:
-                        # The alias first: it is an indexed exact-path lookup
-                        # and it holds whether or not the file was edited on
-                        # its way, which the hash probe below cannot say.
+                        # The alias first: it is an indexed lookup and it holds
+                        # whether or not the file was edited on its way, which
+                        # the hash probe below cannot say.
                         document = _document_under_a_prior_root(
-                            session,
-                            self.collection,
-                            _alternate_paths(file_path, self._root_aliases),
+                            session, self.collection, alternates
                         ) or _document_reached_by_another_path(
                             session, self.collection, file_path, file_hash
                         )

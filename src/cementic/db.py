@@ -572,13 +572,25 @@ def create_tables(engine: Engine) -> None:
             conn.execute(text(_ACTIVE_REVISION_UNIQUE_DDL))
             conn.execute(text(_SOURCE_FILE_HASH_INDEX_DDL))
     except (IntegrityError, ProgrammingError, OperationalError):
-        # `CREATE UNIQUE INDEX IF NOT EXISTS` checks the catalog before taking
+        # `CREATE [UNIQUE] INDEX IF NOT EXISTS` checks the catalog before taking
         # its lock, so the two workers `cementic start` spawns can both pass the
         # check and race: the loser gets a duplicate-key error on pg_class. The
-        # index either exists now or the failure was real -- re-check rather
+        # indexes either exist now or the failure was real -- re-check rather
         # than guess, since an unhandled raise here kills the worker at startup.
-        if not _active_revision_index_exists(engine):
+        # Both are re-checked: swallowing a real failure of the file-hash index
+        # costs a sequential scan per file during a bulk import, which is
+        # invisible until the import takes hours.
+        if not _active_revision_index_exists(engine) or not _source_file_hash_index_exists(
+            engine
+        ):
             raise
+
+
+def _source_file_hash_index_exists(engine: Engine) -> bool:
+    """Whether the index the move lookup reads is present."""
+    return "ix_source_documents_collection_file_hash" in {
+        index["name"] for index in inspect(engine).get_indexes("source_documents")
+    }
 
 
 def _active_revision_index_exists(engine: Engine) -> bool:
