@@ -821,10 +821,17 @@ class SourceWatcher:
         """Whether a stored path lies under a root this run is watching.
 
         Deliberately does not resolve: the path is already stored resolved, and
-        the file may no longer exist.
+        the file may no longer exist. That is also why the configured form of
+        each root counts as watched. A row written before a root became a
+        symlink is stored under the path that root used to resolve to, and if
+        its file is then deleted there is nothing left to resolve -- so a test
+        that only knows today's real roots cannot see it, and the document
+        stays in search under a path that no longer exists. Found live on
+        2026-09-09: 38 documents in exactly that state, holding chunks.
         """
         path = Path(file_path)
-        return any(path.is_relative_to(root) for root in self._watched_roots)
+        roots = self._watched_roots + [configured for configured, _ in self._root_aliases]
+        return any(path.is_relative_to(root) for root in roots)
 
     def _resolves_under_watched_roots(self, file_path: str) -> bool:
         """Whether a stored path reaches a file under a root this run watches.

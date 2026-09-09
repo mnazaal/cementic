@@ -921,3 +921,51 @@ class TestFoldingATwinBackIntoItsMove:
 
         assert live == 2, "discarded one of two rows that both hold work"
         assert chunks == 52, "deleted chunks while declining to choose"
+
+
+class TestAFileThatVanishedFromAMovedTree:
+    """A pre-move path whose file is gone must still be reconcilable.
+
+    Found on the live corpus after the repair, 2026-09-09: 38 documents sat
+    `pending` under the pre-move root, holding chunks, for files deleted from
+    disk. Neither branch of the reconcile could see them. The missing-file
+    branch is gated on `_is_under_watched_roots`, which compares literally, and
+    a pre-move path is under no resolved root; the stale-identity branch is
+    gated on `resolve(strict=True)`, which raises for a file that is gone. So
+    they stayed searchable, under paths that no longer exist, indefinitely.
+    """
+
+    def test_it_is_marked_deleted_and_its_chunks_purged(
+        self, watcher_config: Config, watcher_db, temp_dir: Path
+    ) -> None:
+        _engine, session_factory, _db_path = watcher_db
+        original = temp_dir / "Papers"
+        original.mkdir()
+        paper = original / "paper.md"
+        paper.write_text("content", encoding="utf-8")
+
+        sw = SourceWatcher(watcher_config)
+        sw.Session = session_factory
+        sw.collection = "papers"
+        sw._watched_roots = [original.resolve()]
+        sw._register_document(str(paper))
+        with session_factory() as session:
+            _give_document_a_chunk(session, str(paper), "papers", chunks=3)
+
+        moved = temp_dir / "sync" / "Papers"
+        moved.parent.mkdir()
+        original.rename(moved)
+        original.symlink_to(moved)
+        # And the file itself is deleted from the moved tree.
+        (moved / "paper.md").unlink()
+
+        sw._configure_watched_roots([str(original)])
+        sw._scan_existing(sw._watched_roots[0])
+        sw._reconcile_deletions()
+
+        with session_factory() as session:
+            document = session.query(SourceDocument).filter_by(source_path=str(paper)).one()
+            chunks = session.query(Chunk).count()
+
+        assert document.status == "deleted", "a document whose file is gone stayed live"
+        assert chunks == 0, "its chunks stayed in the index under a dead path"
