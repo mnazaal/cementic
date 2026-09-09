@@ -562,14 +562,26 @@ pre-move path outright — an exact lookup on the unique index, indifferent to
 how much the file has changed. The hash probe stays as the fallback for a move
 no root alias explains.
 
-**Retiring a stale row may never delete the only copy of the work.** The
-reconcile retires a row whose path is no longer its own real path — previously
-invisible to it, since `_is_under_watched_roots` compares literally and a
-pre-move path is under no watched root. Guarded: retire only when the row holds
-no chunks, or when the document now at its real path holds chunks of its own.
-Without that guard, a restart on the damaged corpus would have deleted 2.3M
-chunks and bought hours of re-embedding to reach the state it was already in
-(measured: 18,104 rows held the only copy, 4,958 were safe to retire).
+**Retiring a stale row may not delete chunks at all.** The reconcile retires a
+row whose path is no longer its own real path — previously invisible to it,
+since `_is_under_watched_roots` compares literally and a pre-move path is under
+no watched root. The first guard written for it retired a row whose twin *held
+chunks*, on the reasoning that the twin covered the text. An independent review
+killed that: holding chunks is a membership test, so a twin one chunk into a
+five-hundred-chunk document satisfies it while covering almost none of it. The
+rule now is that the row must hold no chunks and a live document must already
+hold its real path — retiring deletes nothing, and nothing unreplaced is
+retired. Ungated, a restart on the damaged corpus would have deleted 2.3M
+chunks and bought hours of re-embedding to reach the state it was already in.
+
+**Which then required folding the twin back in.** With retirement that strict,
+a duplicate pair would be permanent: the repath only fires when nothing is
+registered at the scanned path, so a twin already sitting there short-circuits
+every later scan. So an empty twin gives way to the row that holds the work —
+the same resolution the manual repair applied to the live corpus — and a pair
+that both hold chunks is left for a human, because choosing between them means
+discarding one. Both halves came out of the review; the branch shipped the
+first guard and the permanent duplicate it implied.
 
 **The silence cost more than the bugs.** Both instances of the lost-chunk class
 were invisible for weeks because `cementic status` read 100% chunked
