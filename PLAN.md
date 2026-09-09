@@ -1,80 +1,89 @@
 # cementic — architecture & design
 
-<!-- session-handoff:begin (2026-09-07, evening) -->
+<!-- session-handoff:begin (2026-09-10) -->
 ## Where the work stands
 
-**Superseded 2026-09-09 on these two paragraphs only; everything below them is
-still this block's own record of the status-latency session.** The stranded
-papers were the visible edge of a much larger fault -- see "Decided -- what
-makes two rows the same document (2026-09-09)" below, and `TODO.md`'s repair
-entry, which now names 3 documents rather than 2.
+**Entry point: `TODO.md`'s "Near term" list. Nothing is half-finished.** Two
+gates in it are now open and were not last session. The CLI-surface audit
+against `llm` said *do it when the hybrid thread closes* — it has: hybrid is
+wired into `search.py`, `ensure_lexical_index` runs in `create_tables`, and
+`ix_chunks_v2_fts` exists on the live database (verified 2026-09-10, which is
+why the execution-order section below no longer claims step 5b is pending).
+The tokenizer pre-filter said *when a bulk import is next on the cards*; a
+whole-corpus re-extraction just ran, so that trigger has come and gone — read
+its entry before assuming it is still waiting.
 
-**Repo state.** `claude/status-followups` was merged and pushed; `main` is at
-`0deeb88`. The 2026-09-09 work sits unmerged on
-`claude/watcher-document-identity` (four commits, `./scripts/check.sh` green).
-A hook rejects agents committing to `main`, so the merge and push are yours:
+**Repo state.** `main` = `origin/main` = `cae580c` and the nine commits of this
+session are pushed. This block is the one thing that is not: it sits on
+`claude/session-handoff-2026-09-10`, because a hook rejects agent commits to
+`main`, so the merge is yours and may still be pending when you read this:
 ```bash
-git checkout main && git merge --ff-only claude/watcher-document-identity && git push
+git checkout main && git merge --ff-only claude/session-handoff-2026-09-10 && git push
 ```
 
-**What shipped.** `cementic status -c papers` went from 12-128 s to 1.93-2.20 s.
-It was never a timeout: one count joined `chunk_embeddings` through `chunks_v2`
-to reach three columns `chunk_embeddings` already carries, so every run read
-2.6 GB of chunk text. Then the follow-ups: the `total_chunks` count now counts
-from an index instead of the heap, `compute_revision_counts` moved onto the
-same predicate so the worker and status stopped describing one set two ways,
-the pg suite's GSSAPI flake is fixed, and a silent data-loss bug was found and
-fixed. Numbers live in `TODO.md` and in `embedding_scope_denormalised`'s
-docstring; this block does not restate them.
+**Running, and safe to ignore.** `cementic@papers.service` is up with a small
+embedding backlog draining (~1,400 vectors at handoff, minutes of work; the
+corpus reads 99.9% embedded). Nothing else is running — no watch loops, no
+cluster work.
 
-**Corrections -- distrust these sections' history, not their current text.**
-- PLAN's "`status` no longer blocks 120 s" was true but about a different wait:
-  `3df0814` really did remove a daemon poll. No surviving timeout constant
-  explained 12-128 s, which is why a static audit could not close this and
-  per-statement timing could. Reach for the measurement earlier next time.
-- This session's own first read was wrong too: the 103-chunk discrepancy was
-  written up as "inert, nothing reads that column, do not investigate". It was
-  the visible edge of two unsearchable papers. The user overruled the
-  recommendation to park it, and that call was correct.
+**What this session did.** Four defects, nine commits, and a live corpus
+repaired from 46,139 documents with 18,103 unsearchable back to 23,075 with
+none. The reasoning is in "Decided — what makes two rows the same document
+(2026-09-09)" below; this block does not restate it.
 
-**Deviations from the written plan, attributed.**
-- *User-directed:* investigating the 103-chunk gap, against a recommendation to
-  record and park it.
-- *Agent-decided:* `embedding_scope` was deleted rather than left beside its
-  replacement, once the last caller moved. Two definitions of one set is the
-  drift `revisions.py` already warns about.
-- *Agent-decided:* the `total_chunks` rewrite keeps the join to
-  `source_documents` through `extracted_documents`, rather than the
-  `chunked_document_id IN (...)` form measured earlier -- same index-only plan,
-  and it drops no predicate.
+**Corrections — distrust these sections' history, not their current text.**
+- The execution-order section for hybrid retrieval said step 5b (the imperative
+  shell) was the live remaining work. It had shipped a session earlier. Fixed
+  in the same commit as this block. The register reads as live and is not
+  re-checked; check it against the code before believing it.
+- `TODO.md`'s repair entry described two stranded papers as pending. They were
+  repaired 2026-09-10; `cementic doctor` reports zero. The entry stays because
+  the command is reusable, and it now says to check the count first.
+- An estimate of mine in chat, not in any document: the re-extraction tail was
+  predicted at "a few hundred thousand chunks, hours of GPU". Measured at
+  4,803. It was extrapolated from document count instead of measured.
+
+**Deviations from the plan, attributed.**
+- *User-directed:* running both corpus repair scripts, the merges and pushes,
+  and the service restarts. Every mutation of the live corpus was theirs to run.
+- *Agent-decided:* commits split by root cause rather than by file, using the
+  snapshot-and-peel procedure, because one module carried two independent bugs.
+- *Agent-decided, and reversed by review:* the first retirement guard kept a
+  stale row only when its twin held chunks. An audit showed that deletes work
+  when the twin is one chunk in. The rule now deletes nothing, and the
+  duplicate that strictness implied is resolved by folding the empty twin in.
+- *Agent-decided:* two independent reviewers on one brief rather than one. They
+  agreed on the top defect, which is the signal that justified the second.
 
 **Environment quirks that cost time.**
-- The Bash sandbox blocks 127.0.0.1:5432. `cementic search` under it exits 0
-  with "database not reachable", which reads as a dead container. Run anything
-  touching the DB with the sandbox disabled.
-- `pytest -m pg` intermittently errored *every* test at connect with a Kerberos
-  GSSAPI message. Fixed here (`conftest.py` now passes `gssencmode=disable`
-  like `db.py` always did), but if it returns, rerun before debugging code.
-- `psql` is not installed. Use `./.venv/bin/python` with `cementic.db.get_engine`
-  for ad-hoc SQL.
-- A working embedding client on SQLite hits the Postgres-only vector tables
-  (`to_regclass`). Worker tests that only care about chunking use
-  `FailingEmbeddingClient`.
+- The Bash sandbox blocks 127.0.0.1:5432 *and* the systemd user bus. Anything
+  touching the database or `systemctl --user` needs the sandbox disabled;
+  the bus failure reads as "Failed to connect to bus: Operation not permitted".
+- The unit runs `~/projects/cementic/.venv` — the working tree. An uncommitted
+  edit to `src/cementic/` is deployed the moment the unit restarts, which
+  `Restart=always` can do at any time. Stop the unit before editing anything
+  that mutates the corpus.
+- A subagent given a read-only brief ran `git checkout main` and merged a
+  branch into it. Ref-moving commands are not what "read-only" stops. Check
+  `git branch --show-current` after any delegated review, and before staging.
+- `psql` is not installed. Use `./.venv/bin/python` with `cementic.db.get_engine`.
 
-**Artifacts.** Every measurement behind the numbers above is in
-`~/.cache/cementic-status-debug/`: per-statement timings before and after,
-query plans, the interleaved A/B, and the invariant checks against the live
-corpus. `notes/` is still gitignored -- unchanged risk, unchanged decision.
+**Artifacts, and what to do with them.** Keep `~/.cache/cementic-check-final4.log`
+(the last full green gate). The two one-off repair scripts,
+`~/.cache/cementic-dedupe-papers.py` and `~/.cache/cementic-drop-rescan-twins.py`,
+are spent — both applied, both safe to delete; what they did is recorded below.
+Everything else from this session (peel snapshots in `$TMPDIR`, the reviewers'
+repro scripts in the scratchpad) is discarded deliberately: the behaviour each
+one probed is now covered by a test in the repo.
 
-**Exit criteria -- commands whose output confirms the above.**
+**Exit criteria — commands whose output confirms the above.**
 ```bash
-git status --short                      # empty
-git log --oneline -1 main               # 012b490, until this branch is merged
-./scripts/check.sh                      # six gates, all ok
-./.venv/bin/cementic status -c papers   # ~2s warm; a cold cache still costs ~10s
+git status --short                       # empty
+git log --oneline -1                     # cae580c, equal to origin/main
+./scripts/check.sh                       # six gates, all ok
+./.venv/bin/cementic doctor              # stranded_chunkings: ok
+./.venv/bin/cementic status -c papers    # 23,075 documents, embedded → 100%
 ```
-After the repair command in `TODO.md` and a worker run, `documents` stays
-23,064 while `embedded` rises by ~103.
 <!-- session-handoff:end -->
 
 ## Decision log
@@ -212,12 +221,15 @@ it matters.
 
 ## Execution order — hybrid retrieval (2026-09-07)
 
-The live one. Steps 1–5a are done: the mechanism is measured, the shape is
-settled (*the leading arm owns rank 1, fusion owns the rest*), and the pure
-core ships in `hybrid.py` verified against both query sets. What remains is
-step 5b — the imperative shell that builds the index and wires the core into
-`search.py`. Evidence and predictions are in **In progress — hybrid lexical +
-vector retrieval** below and `notes/design-hybrid-retrieval.html`.
+**CLOSED 2026-09-10.** Steps 1–5b are done: the mechanism is measured, the
+shape is settled (*the leading arm owns rank 1, fusion owns the rest*), the
+pure core ships in `hybrid.py` verified against both query sets, and the shell
+shipped a session later than this section claimed — `search.py` branches on
+`config.search.hybrid`, `ensure_lexical_index` runs inside `create_tables`, and
+`ix_chunks_v2_fts` is present on the live database. Evidence and predictions
+are in **In progress — hybrid lexical + vector retrieval** below and
+`notes/design-hybrid-retrieval.html`. Kept for the measurements; nothing here
+is outstanding.
 
 1. ~~**Confirm the rank-1 collapse is a tie-break artifact.**~~ **DONE
    2026-09-07.** Set A, n=150: 68.0% lost an *exact* score tie (winner was a
