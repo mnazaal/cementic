@@ -142,6 +142,7 @@ def collect_doctor_report(config: Config) -> dict[str, Any]:
     database_ok = False
     extension_ok = False
     active_extractor_profiles: list[tuple[str, dict[str, Any]]] | None = None
+    stranded_chunkings: int | None = None
     active_canaries: list[tuple[str, str, str, str, str | None]] | None = None
     try:
         engine = get_engine(config.database.url)
@@ -168,6 +169,7 @@ def collect_doctor_report(config: Config) -> dict[str, Any]:
                     }
                 }
             active_canaries = _active_embedding_canaries(conn)
+            stranded_chunkings = int(conn.execute(text(_STRANDED_CHUNKINGS_SQL)).scalar() or 0)
     except Exception as error:
         checks["database"] = {
             "status": "fail",
@@ -228,6 +230,7 @@ def collect_doctor_report(config: Config) -> dict[str, Any]:
         ),
     }
 
+    checks["stranded_chunkings"] = _stranded_chunkings_check(stranded_chunkings)
     checks["chunk_budget"] = _chunk_budget_check(config)
     checks["embedding_server"] = _embedding_server_check(config)
     server_ok = checks["embedding_server"]["status"] != "fail"
@@ -656,6 +659,55 @@ def _active_embedding_canaries(
         conn.rollback()
         return []
     return [(str(row[0]), str(row[1]), str(row[2]), str(row[3]), row[4]) for row in rows]
+
+
+#: Chunkings a revision count calls done that own no chunks. Every such
+#: document is unsearchable: its text was chunked once, the chunks (and their
+#: vectors, by cascade) were deleted, and the chunking kept a `source_content_hash`
+#: matching its extraction -- which is exactly the condition `_step_chunk` reads
+#: as "already done". `total_chunks > 0` keeps a legitimately empty document out
+#: of the count.
+_STRANDED_CHUNKINGS_SQL = """
+SELECT count(*)
+FROM chunked_documents cd
+JOIN extracted_documents ed ON cd.extracted_document_id = ed.id
+JOIN source_documents sd ON ed.document_id = sd.id
+WHERE cd.status = 'done'
+  AND cd.total_chunks > 0
+  AND cd.source_content_hash = ed.content_hash
+  AND sd.status <> 'deleted'
+  AND NOT EXISTS (SELECT 1 FROM chunks_v2 c WHERE c.chunked_document_id = cd.id)
+"""
+
+
+def _stranded_chunkings_check(count: int | None) -> dict[str, Any]:
+    """Report documents that are counted as chunked but hold no chunks.
+
+    This is the class of failure that has now been found twice -- once from a
+    failed re-extraction, once from a watcher purge -- and both times the cost
+    was not the bug but the silence: `cementic status` read 100% chunked while
+    the documents returned nothing, for weeks. Any future purge that forgets to
+    invalidate the chunking lands here instead of nowhere.
+
+    A warning rather than a failure: the installation is fit to run, a corpus
+    inside it needs repair, and doctor's overall verdict is about the former.
+    """
+    if count is None:
+        return {
+            "status": "warning",
+            "message": "could not be checked; the database was not reachable",
+        }
+    return {
+        "status": "ok" if count == 0 else "warning",
+        "stranded": count,
+        "message": (
+            "every chunking counted as done owns chunks"
+            if count == 0
+            else f"{count} document(s) are counted as chunked but hold no chunks, so they "
+            "match nothing in search; clear their chunkings' source_content_hash to "
+            "re-open the work and let the worker re-chunk them"
+        ),
+    }
 
 
 def _chunk_budget_check(config: Config) -> dict[str, Any]:

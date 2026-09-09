@@ -15,6 +15,7 @@ from cementic.doctor import (
     _extraction_commands_check,
     _extractor_drift_check,
     _ocr_check,
+    _stranded_chunkings_check,
     collect_doctor_report,
 )
 from cementic.embedding_runtime import AmbiguousDaemonPidsError, DaemonHealth
@@ -651,3 +652,35 @@ class TestEmbeddingCanaryCheck:
 
         assert _active_embedding_canaries(conn) == []
         conn.rollback.assert_called_once()
+
+
+class TestStrandedChunkingsCheck:
+    """Chunks lost without invalidating the chunking must not be silent again.
+
+    Two bugs have produced this state -- a failed re-extraction and a watcher
+    purge -- and both cost weeks rather than minutes because `cementic status`
+    read 100% chunked throughout. Each is fixed at its source; this is the
+    check that catches the third one.
+    """
+
+    def test_a_clean_corpus_reports_ok(self) -> None:
+        report = _stranded_chunkings_check(0)
+
+        assert report["status"] == "ok"
+        assert report["stranded"] == 0
+
+    def test_stranded_documents_are_reported_with_their_count(self) -> None:
+        report = _stranded_chunkings_check(18101)
+
+        assert report["status"] == "warning"
+        assert report["stranded"] == 18101
+        assert "18101" in report["message"]
+        assert "source_content_hash" in report["message"]
+
+    def test_an_unreachable_database_is_not_a_clean_corpus(self) -> None:
+        """The count is None when the probe never ran. Reporting that as zero
+        would be the same silence in a new place."""
+        report = _stranded_chunkings_check(None)
+
+        assert report["status"] == "warning"
+        assert "stranded" not in report
