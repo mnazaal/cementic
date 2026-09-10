@@ -485,18 +485,22 @@ have run.
 ### Step 2 — stop the CLI importing the database and HTTP layers
 
 The measured defect. Import time for `cementic.cli`, and for the set a light
-command actually needs, five runs each on this machine (import only, excluding
-interpreter startup):
+command actually needs, six runs each (import only, excluding interpreter
+startup). **Measure on an idle machine**: the first numbers taken for this plan
+were recorded while `check.sh` was running and were about 2× too high, which is
+corrected here.
 
-| | range |
-| --- | --- |
-| `import cementic.cli` today | 893–1079 ms |
-| light floor (typer, rich, pydantic-settings, the leaf cementic modules) | 365–388 ms |
+| | idle | under a concurrent test run |
+| --- | --- | --- |
+| `import cementic.cli` today | 375–456 ms | 893–1079 ms |
+| light floor (typer, rich, pydantic-settings, the leaf cementic modules) | 146–177 ms | 365–388 ms |
 
 The light floor was verified to have `sqlalchemy` and `requests` absent from
-`sys.modules`. So the step is worth roughly 570–690 ms on every invocation of
-`--version`, `config path`, `extract` and `chunk`, none of which touch a
-database.
+`sys.modules`. The stable figure is the **ratio, about 2.5×**; the absolute
+saving is roughly 230 ms idle and roughly 600 ms on a busy machine, on every
+invocation of `--version`, `config path`, `extract` and `chunk`, none of which
+touch a database. For scale, `cementic --version` end to end is 0.50–0.68 s
+idle, so this is most of what that command spends.
 
 **What changes: 17 module-level import statements move inside the functions that
 use them**, across `config.py`, `render.py`, `cli_shared.py`, `cli_collection.py`
@@ -557,16 +561,23 @@ block carrying documents and the active, ready and building labels, a strict
 superset of what `collection list` prints. It costs more, because it also probes
 workers and the daemon:
 
+Measured idle, after the 2026-09-10 vacuum described below:
+
 | | range |
 | --- | --- |
-| `cementic status --json` | 4.4–6.2 s |
-| `cementic collection list` | 1.6–1.8 s |
+| `cementic status --json` | 1.37–1.95 s |
+| `cementic collection list` | 0.65–0.96 s |
 
-So the cheap path earns its place. Note in passing that `status` at 4–6 s is
-well above the 1.93–2.20 s recorded after the 2026-09-07 query fix. That
-regression was investigated on the way past and is **not** part of this step:
-the cause looks like planner statistics last refreshed 2026-08-24, and it is
-written up with its test command under `TODO.md`'s `cementic status` entry.
+So the cheap path earns its place, though by about 2× rather than the 3× an
+earlier measurement suggested. That earlier pair (4.4–6.2 s against 1.6–1.8 s)
+was taken while `check.sh` ran *and* before the vacuum, and is superseded.
+
+**The `status` regression this step first surfaced is fixed.** It was planner
+statistics: `chunks_v2` and `chunk_embeddings` were last analyzed 2026-08-24,
+before the corpus doubled and before the 2026-09-09 repair. `VACUUM (ANALYZE)`
+on 2026-09-10 took `load_pipeline_status_bulk` from 2.8–2.9 s to 0.62 s and
+`status` end to end from ~4.1 s to ~1.6 s. Details and the operational lesson
+are in `TODO.md`'s `cementic status` entry.
 
 *What changes.* `collection list --json` emits JSONL from `CollectionSummary`
 (`collections.py:52`), one object per collection, with `ready_revision_label`

@@ -54,35 +54,42 @@ index, versioned revisions) are documented in [PLAN.md](PLAN.md).
   reproducible win is the embedding count (8.0 s to 0.2 s for that statement);
   the cold tail is smaller than it was and not gone.
 
-  **Reopened 2026-09-10: it regressed, and the likely cause is stale planner
-  statistics, not the query.** `cementic status` now takes 4.4-6.2 s warm
-  against the 1.93-2.20 s recorded above. Measured by component:
-  `check_health` is 449 ms and `load_pipeline_status_bulk` is 2.8-2.9 s, so it
-  is the queries, not the daemon probe. `pg_stat_user_tables` says
-  `chunks_v2` and `chunk_embeddings` were last analyzed **2026-08-24** -- before
+  **Reopened and closed 2026-09-10: it was stale planner statistics, and a
+  `VACUUM (ANALYZE)` fixed it.** Measured before and after, idle machine:
+
+  | | before | after |
+  | --- | --- | --- |
+  | `load_pipeline_status_bulk` | 2.8-2.9 s | 0.62 s |
+  | `check_health` | 449 ms | 142 ms |
+  | `cementic status` end to end | ~4.1-5.5 s | 1.59-1.81 s |
+
+  **The operational lesson, which is the part worth keeping.** A bulk delete on
+  this corpus does not get an autoanalyze on the big tables. `chunks_v2` and
+  `chunk_embeddings` were still carrying statistics from 2026-08-24 -- before
   the corpus doubled and before the 2026-09-09 repair deleted ~23k documents
-  worth of rows. Dead tuples now: 323,392 on `embedding_vectors_p6`, 207,678 on
-  `chunks_v2`, 80,833 on `chunk_embeddings`. Autovacuum has run since; auto*analyze*
-  on the two big tables has not. Cheapest test, and it needs your hand on the
-  live corpus rather than an agent's:
+  worth of rows -- while autovacuum had run on them as recently as 09-09. So
+  **any future corpus repair should end with `VACUUM (ANALYZE)` on the tables it
+  touched**, not just leave it to autovacuum.
 
-  ```bash
-  cd ~/projects/cementic && ./.venv/bin/python -c "
-  from sqlalchemy import text
-  from cementic.config import get_config
-  from cementic.db import get_engine
-  e = get_engine(get_config().database.url)
-  with e.connect().execution_options(isolation_level='AUTOCOMMIT') as c:
-      for t in ('chunks_v2', 'chunk_embeddings', 'embedding_vectors_p6'):
-          print('vacuuming', t, flush=True)
-          c.execute(text(f'VACUUM (ANALYZE) {t}'))
-  " && time ./.venv/bin/cementic status
-  ```
+  **Do not vacuum `embedding_vectors_p6` as part of that.** It was included in
+  the first attempt and had to be cancelled after 78 minutes without finishing.
+  Its heap is only 171 MB (the vectors are TOASTed, 19 GB total), but it carries
+  a **9,150 MB HNSW index**, and vacuuming an HNSW graph means traversing it to
+  repair links for every dead tuple. It also did not need it: autoanalyze had
+  covered it on 09-09, and its 323,392 dead tuples affect search, which measures
+  1-2 s and has no reported problem. Cancelling a `VACUUM` is safe and leaves
+  the table consistent -- `pg_cancel_backend` on the leader pid.
 
-  If that restores 2 s, the finding is that a bulk delete on this corpus needs a
-  manual analyze afterwards, and the repair procedures should say so. If it does
-  not, the regression is in a statement and the next step is `EXPLAIN (ANALYZE,
-  BUFFERS)` on the bulk loader, not more guessing.
+  The five tables `status` reads (`chunks_v2`, `chunk_embeddings`,
+  `chunked_documents`, `extracted_documents`, `source_documents`) all vacuum in
+  under 2.5 minutes combined, `chunks_v2` being 134 s of that. Reusable script:
+  `~/.cache/cementic-vacuum.py`, which records before/after `pg_stat_user_tables`
+  rows so the effect is provable rather than assumed.
+
+  **What remains is startup, not the database.** At 1.6 s, `status` now spends
+  roughly 0.4-0.5 s importing `cementic.cli` before it touches anything, and
+  0.62 s on queries. That floor is PLAN.md's "Execution order -- CLI surface
+  audit" step 2, and it caps how fast any command can be.
 
 - ~~**Two papers were silently unsearchable.**~~ **Fixed 2026-09-07**, found
   while chasing a 103-chunk discrepancy in `chunked_documents.total_chunks`.
