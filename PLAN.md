@@ -238,9 +238,10 @@ pure core ships in `hybrid.py` verified against both query sets, and the shell
 shipped a session later than this section claimed — `search.py` branches on
 `config.search.hybrid`, `ensure_lexical_index` runs inside `create_tables`, and
 `ix_chunks_v2_fts` is present on the live database. Evidence and predictions
-are in **In progress — hybrid lexical + vector retrieval** below and
+are in **Decided — hybrid lexical + vector retrieval** below and
 `notes/design-hybrid-retrieval.html`. Kept for the measurements; nothing here
-is outstanding.
+is outstanding except the one risk that section still carries, which is that
+the precondition for the whole feature was never measured.
 
 1. ~~**Confirm the rank-1 collapse is a tie-break artifact.**~~ **DONE
    2026-09-07.** Set A, n=150: 68.0% lost an *exact* score tie (winner was a
@@ -459,81 +460,215 @@ is outstanding.
 
 Ran the audit `TODO.md` had gated on the hybrid thread closing. Full evidence,
 including the `llm` comparison and the per-command usage matrix, is in
-`notes/design-cli-surface.html` (gitignored); this section holds the decisions
-and the order. Surface as audited: **21 leaf commands** against `llm`'s 9.
+`notes/design-cli-surface.html` (gitignored). Surface as audited: **21 leaf
+commands** against `llm`'s 9.
 
-**Decided — the boundary.** PostgreSQL, the ANN index, the versioned revisions
-and the warm daemon are not on trial. `llm` reaches a small surface partly by
-having no chunking, no extraction, no watching and a brute-force scan. What is
-on trial is the front door: command count, output contract, and what a script
-can do with the result.
+The rationale — why the audit cut nothing, what the boundary was, and which
+directions are closed — is in "Decided — the CLI surface after the `llm` audit"
+under Design decisions. This section is the order of work only.
 
-**Decided — the composability principle overstates the design.** `extract |
-chunk | embed` runs, and was run end to end during the audit, but nothing
-consumes its output: no command ingests embedded JSONL
-(`vector_store.upsert_vectors` is called only from `pipeline_worker.py:1138`)
-and `search`
-always derives its own vector (`search.py:282`). That is not a gap to fill. A
-cementic vector is only meaningful inside a revision pinning three profiles and
-their fingerprints, so a hand-injected vector would be unprovenanced. The
-filters are debugging and export tools; the Design principles section is what
-should change, not the code.
+**Ordering is not arbitrary.** Step 2 must precede step 4: `source_watcher` is
+the *one* cementic module `cli.py` does not import today, and step 4 adds a path
+to it. Done naively, step 4 undoes step 2. Step 3 must precede step 6, because
+both change output contracts and step 3 is where the convention gets fixed.
+Steps 5 and 6 are independent of everything else.
 
-**Decided — the supervisor stays, the inversion goes.** Six commands and ~630
-lines (`supervisor.py` 268, `filelock.py` 69, ~290 in `cli.py`) reimplement
-process supervision that systemd provides, and the only deployment on this
-machine bypasses all of it — `cementic@.service` runs `python -m
-cementic.runner` directly with `Restart=always` and health-checks the daemon
-with `curl`. Deleting `start`/`stop` is still wrong: they are the only path for
-a user without systemd, which is the reader the parked *Publish the repo* item
-contemplates. The defensible fix is to promote the two runner subcommands to
-documented commands so the used entry point stops being an internal module.
+### Step 1 — fix the two documentation defects — DONE 2026-09-10
 
-1. ~~**Fix the two documentation defects.**~~ **Done 2026-09-10**, in the same
-   commit as this section. README claimed `search --json` emits six fields; it
-   emits seven — `rank` was added by `64b24d4` (`search.py:202`) and never
-   reached the docs. And `scripts/verify_postgres_container.sh` called
-   `cementic status --doctor`, a flag removed when `doctor` was split out
-   (README:880 records the removal with no alias kept), so the script could not
-   have run.
+Shipped in the same commit as this section. README claimed `search --json` emits
+six fields; it emits seven — `rank` was added by `64b24d4` (`search.py:202`) and
+never reached the docs. And `scripts/verify_postgres_container.sh` called
+`cementic status --doctor`, a flag removed when `doctor` was split out
+(README:880 records the removal with no alias kept), so the script could not
+have run.
 
-2. **Make `cli.py`'s imports lazy.** It imports 33 of 34 modules at load time,
-   pulling SQLAlchemy, tiktoken, pydantic and requests. Measured: 1.29–1.36 s to
-   `import cementic.cli`, and 1.22–1.26 s for `cementic extract --help`. This is
-   the one place cementic's front door is measurably worse than `llm`'s for the
-   same job. The pattern exists already in `extract._get_pymupdf` and the guard
-   test at `tests/unit/test_cli_performance.py:41`.
+### Step 2 — stop the CLI importing the database and HTTP layers
 
-3. **Give the query commands a `--json`.** `collection list`, `collection
-   revisions`, `embedding status`. Skip `stop` — it is an action, not a query.
-   One convention: a list emits JSONL, a single object emits one document.
-   Today `--json` means three things (one document for `status`/`doctor`, JSONL
-   for `search`, unconditional JSON for `chunk`/`embed`/`config show`) and four
-   commands have no machine-readable form at all.
+The measured defect. Import time for `cementic.cli`, and for the set a light
+command actually needs, five runs each on this machine (import only, excluding
+interpreter startup):
 
-4. **Promote `cementic.runner`'s two subcommands to documented CLI commands**
-   and point the systemd units at them. The units keep calling the checkout's
-   interpreter — that pins PyMuPDF in the extractor fingerprint deliberately.
+| | range |
+| --- | --- |
+| `import cementic.cli` today | 893–1079 ms |
+| light floor (typer, rich, pydantic-settings, the leaf cementic modules) | 365–388 ms |
 
-5. **Rename the filter's `index` key to `chunk_index`.** The prose half of this
-   step is already done: the Design principles entry and the "Pipeline as
-   composable filters" section were narrowed in the same commit as this section.
-   What remains is code. The filter emits `index` (`cli.py:1155`) where the
-   database stores `chunk_index` (`db.py:187`), carries no document identity,
-   and keeps whitespace chunks the worker drops and renumbers
-   (`pipeline_worker.py:881`) — so its indices can disagree with the stored ones
-   for the same document.
+The light floor was verified to have `sqlalchemy` and `requests` absent from
+`sys.modules`. So the step is worth roughly 570–690 ms on every invocation of
+`--version`, `config path`, `extract` and `chunk`, none of which touch a
+database.
 
-6. **Add a document id to search results.** Already a `TODO.md` item; the audit
-   gives it a reason beyond neatness, since without it no `--json` consumer can
-   join a hit back to a document.
+**What changes: 17 module-level import statements move inside the functions that
+use them**, across `config.py`, `render.py`, `cli_shared.py`, `cli_collection.py`
+and `cli.py`. Two of those are the crux: `config.py:27`
+(`from sqlalchemy.engine import URL, make_url`) and `config.py:30`
+(`from cementic.vector_store import HNSW_ITERATIVE_SCAN_MODES`). Verified
+2026-09-10: `import cementic.config` alone pulls SQLAlchemy, and every light
+command reaches `_get_config` or `resolve_config_path`, so **leaving `config.py`
+alone caps the payoff at about 250 ms and fails the new guard test.** It is
+all-or-nothing per dependency: one surviving edge re-imports the whole layer.
 
-*Anti-scope, so nobody re-derives it:* no ingest command and no search-by-vector
-(the composability decision above says why); no deletion of `start`/`stop` or the supervisor; no
-dropping of PostgreSQL or the daemon to match `llm`'s zero-dependency shape,
-which is the engine and not the interface; and no unifying of the `--force`
-short forms (`-f/--force` on two commands, bare `--force` on four) — a breaking
-change to muscle memory for a consistency nobody has tripped over.
+Two edges are not plain moves. `render.py:25`'s `DaemonHealth` is a runtime enum
+comparison at `render.py:101`, so a `TYPE_CHECKING` guard does not work and it
+needs a real function-local import. And `search.MAX_SEARCH_RESULTS` is consumed
+at `cli.py:955` inside a `typer.Option(max=…)` default, evaluated at import
+time — so it must move to a module with no cementic imports, or be inlined as
+`max=50` with a test pinning the invariant.
+
+**Hidden cost, and the largest one in this plan.** Five tests patch by module
+attribute: `cementic.cli.Searcher`, `cementic.cli.list_collections`,
+`cementic.cli.check_health`, `cementic.cli_shared.get_engine`,
+`cementic.cli_shared.get_session_factory`
+(`tests/unit/test_cli_performance.py:96, 112–116, 180–181`). Moving an import
+into a function deletes the module attribute and `unittest.mock.patch` then
+raises `AttributeError`. All five must be repointed at their source modules in
+the same change.
+
+*Exit condition:* a new structural guard beside the existing PDF one, asserting
+that after `import cementic.cli` in a subprocess, none of `sqlalchemy`,
+`requests`, `tiktoken`, `cementic.pipeline_worker`, `cementic.collections` or
+`cementic.db` is in `sys.modules`. Structural, not clocked, so it does not flake
+under machine load. Probe for `sqlalchemy`, not `sqlalchemy.orm`: the cost is in
+`sqlalchemy/__init__.py`. Naming the cementic modules too makes a regression
+point at the module that reintroduced it. Plus `./scripts/check.sh` green,
+including the seven other budgets in `test_cli_performance.py`.
+
+*Anti-scope:* move imports and repoint the five patch targets. Do not restructure
+the module graph, do not defer `pydantic_settings` or `importlib.resources`
+(that is the next ~400 ms and a separate, larger change), and do not make
+`cli_collection` lazily loaded — `collection_app` is bound at `cli.py:79`, and
+deferring it needs a lazy Typer group.
+
+*Risk:* `config.py` already carries four function-local imports to dodge cycles
+with `embedding_runtime` and `extract`. Moving an import *into* a function
+cannot create a cycle, only break one, so the hazard is exposure rather than
+creation. If `HNSW_ITERATIVE_SCAN_MODES` is relocated rather than
+function-imported, it must land somewhere with no cementic imports, or it just
+reshuffles the knot.
+
+### Step 3 — machine-readable output for the three query commands
+
+`collection list`, `collection revisions`, `embedding status`. Skip `stop`: it
+is an action, not a query.
+
+**`collection list` is not made redundant by `status --json`, despite the
+overlap.** Verified 2026-09-10: `status --json` already emits a `collections`
+block carrying documents and the active, ready and building labels, a strict
+superset of what `collection list` prints. It costs more, because it also probes
+workers and the daemon:
+
+| | range |
+| --- | --- |
+| `cementic status --json` | 4.4–6.2 s |
+| `cementic collection list` | 1.6–1.8 s |
+
+So the cheap path earns its place. Note in passing that `status` at 4–6 s is
+well above the 1.93–2.20 s recorded after the 2026-09-07 query fix. That
+regression was investigated on the way past and is **not** part of this step:
+the cause looks like planner statistics last refreshed 2026-08-24, and it is
+written up with its test command under `TODO.md`'s `cementic status` entry.
+
+*What changes.* `collection list --json` emits JSONL from `CollectionSummary`
+(`collections.py:52`), one object per collection, with `ready_revision_label`
+and `building_revision_label` as **separate keys**. Do not reuse
+`render._in_flight_revision_text` (`render.py:181`): it collapses the two into
+one string and embeds rich markup. `collection revisions --json` emits JSONL
+built from the `PipelineRevision` ORM rows, and must be built **inside** the
+open session, because the profile relationships lazy-load; it can expose the
+full fingerprints the table truncates to eight characters. `embedding status
+--json` emits one document with the atoms latent in today's string:
+`state` in `running`/`stopped`/`ambiguous`, `pid`, and `recovered`.
+
+*Anti-scope, and it matters.* `embedding status` performs **no health probe**
+today — `llama_daemon_status` (`embedding_runtime.py:1055`) returns a string
+built from a pid and a recovered-flag. Do not add `probe_daemon` to it: that
+changes the command's cost and meaning, and `status`/`doctor` already own the
+health question. Add a structured helper alongside `llama_daemon_status` rather
+than changing its return type — four tests
+(`tests/unit/test_cli.py:1825–1864`) pin the literal string `"stopped"`.
+
+*Exit condition:* each of the three commands' `--json` output parses under `jq`,
+and `test_database_hint_is_one_unwrapped_stderr_line`
+(`tests/unit/test_cli.py:2533`) still passes — it asserts stdout is empty when
+`collection list` fails, and a `--json` error path must not break that stream
+purity.
+
+*Convention to settle here, once:* a command returning a list emits JSONL with a
+bare `json.dumps` per line, as `search` does (`cli.py:1004`); a command returning
+one object emits `json.dumps(doc, indent=2, default=str)`, as `status` does
+(`render.py:393`). `doctor` uses `sort_keys=True` instead; leave it alone rather
+than churn a third command to match.
+
+### Step 4 — promote the runner subcommands
+
+`cementic.runner` already has both commands with foreground semantics and a
+deliberate non-zero exit on fatal startup (`runner.py:93, 141`), specifically so
+a service manager can see it. This is surfacing existing code.
+
+*What changes.* Expose them as a `cementic run watcher` / `cementic run worker`
+group, then repoint `packaging/systemd/cementic-worker@.service:19` and
+`cementic-watcher@.service:26`. A group rather than two top-level commands,
+because the surface is already the audit's weakest point and this adds one entry
+rather than two.
+
+*Risk, and the reason for the ordering.* `cli.py` does not import
+`source_watcher` today. Mounting the runner eagerly would pull it in and undo
+step 2, so the group must load its implementation inside the command body.
+
+*Anti-scope:* do not change what the workers do, do not add a `--foreground`
+flag to `start`, and do not make `start` spawn the new commands — the supervisor
+matches processes by command line (`supervisor.find_pids_by_cmdline`), so
+changing the spawn string is a separate change with its own failure mode. Leave
+the user's own `~/dotfiles` unit for last, and keep it pointing at the
+checkout's interpreter: that pins the PyMuPDF version in the extractor
+fingerprint, and switching to the installed snapshot re-versions the corpus.
+
+*Exit condition:* `cementic run worker --collection papers` starts and stops
+cleanly in the foreground, the packaged units start under `systemctl --user`,
+and the step-2 guard test still passes.
+
+### Step 5 — rename the filter's chunk index key
+
+One line at `cli.py:1155`, from `{"index": …}` to `{"chunk_index": …}`, plus the
+tests asserting the key (`tests/unit/test_cli.py:465, 476, 2668–2699`) and the
+README pipe example. A breaking change to an output format with no known
+consumers, which is why it only gets more expensive to defer.
+
+*Anti-scope:* the key name only. Do not add document identity to the filter and
+do not make it drop whitespace chunks to match the worker — those divergences
+are documented under "Pipeline as composable filters" and are the honest
+description of a debugging tool.
+
+*Exit condition:* `cementic extract X | cementic chunk | cementic embed` still
+runs end to end, and no test or doc still says `index`.
+
+### Step 6 — a document id in search results
+
+*What changes, and it is a query change rather than a dict change.* Neither
+`vector_store.knn_sql` (`vector_store.py:147`) nor `lexical_sql`
+(`vector_store.py:182`) projects an id today. Both already join
+`source_documents`, so this is adding `sd.id AS document_id` to two SELECT
+lists, two constructor edits in `search.py` (:333 and :379), one key on the
+`SearchResult` TypedDict (`search.py:80`), and the README field list.
+
+*Decided: `document_id` only, not `chunk_id`.* `_merge_arms` dedupes by
+`source_path` and lets the vector arm win the projection (`search.py:407–412`),
+so a chunk id would be whichever chunk the winning arm happened to match —
+arbitrary, and unstable across a query the other arm leads. A document id is
+stable because path and document are one-to-one.
+
+*Exit condition:* `cementic search Q -c papers --json | jq -r .document_id`
+returns ids, and the README field count matches the emitted keys — the defect
+step 1 fixed was exactly that count drifting.
+
+*Anti-scope:* one id field. Not the artifact path, not the chunk index, not the
+revision label; each is a separate argument about what a result is for.
+
+*Anti-scope for the whole thread, so nobody re-derives it:* no ingest command and
+no search-by-vector (the composability decision above says why); no deletion of
+`start`/`stop` or the supervisor; no dropping of PostgreSQL or the daemon to
+match `llm`'s zero-dependency shape, which is the engine and not the interface;
+and no unifying of the `--force` short forms.
 
 ## Execution order — v1.5 migration: CLOSED, the gate failed (2026-09-05)
 
@@ -569,9 +704,64 @@ below, and `TODO.md` holds the feature backlog as before.
 
 ## Design decisions and open items
 
-### In progress — hybrid lexical + vector retrieval (2026-09-07)
+### Decided — the CLI surface after the `llm` audit (2026-09-10)
 
-**The mechanism is confirmed and large; the fusion rule is not.** A dense
+Evidence, the full command inventory and the `llm` comparison are in
+`notes/design-cli-surface.html` (gitignored). The steps are in "Execution order
+— CLI surface audit". This block holds only what a later reader would otherwise
+re-derive: why the audit cut nothing, and which directions are closed.
+
+**The comparison is the front door, not the engine.** `llm` needs no daemon, no
+PostgreSQL and no systemd, which is the shape this document's own principles
+ask for, so the pull to copy it is real. It buys that shape by not doing
+cementic's job: no chunking, no PDF extraction, no watching, and a search that
+registers a Python function and linear-scans every row — minutes on 2.3M chunks
+where cementic answers in 1–2 s. So the audit compared four things only: command
+count, output contract, what a script can do with the output, and what must be
+running first. *Rejected:* dropping PostgreSQL or the daemon. That ports `llm`'s
+premise (a small SQLite corpus) along with its mechanism.
+
+**Nothing was cut, and the criterion is worth stating because it was lenient.**
+All 21 leaf commands appear in README and in at least one test. The test applied
+was "does deleting this save anything", and for a thin wrapper the answer is
+almost always no. A stricter test — "does this cost a reader attention" — would
+have cut more, and the honest answer to that cost is better help output, not
+fewer capabilities: a user meets 8 leaf commands and 4 groups entered
+deliberately. *Reopen if:* you decide the surface is too large to hold in your
+head, in which case the target is the groups, not the leaves.
+
+**The composability principle overstated the design, so the principle changed.**
+`extract | chunk | embed` runs, but nothing consumes its output and nothing can.
+A vector is only searchable inside a revision pinning an extractor profile, a
+chunk profile and an embedding profile plus fingerprints, which is exactly what
+lets a new model build while the old one stays searchable. A hand-injected
+vector carries none of that, so an ingest command must either record a false
+provenance or take every profile id as an argument, at which point it is not a
+filter. *Rejected:* an ingest command, and `search --vector`. The Design
+principles entry was narrowed instead (2026-09-10).
+
+**The supervisor stays; the inversion it created does not.** Six commands and
+~630 lines (`supervisor.py` 268, `filelock.py` 69, `start`/`stop` handlers 290)
+reimplement supervision systemd provides, and this machine's deployment uses
+none of it — `cementic@.service` runs `python -m cementic.runner` with
+`Restart=always` and health-checks by `curl`. *Rejected:* deleting `start` and
+`stop`. The evidence says the author does not use them, not that nobody needs
+them; README leads with `start`, macOS has no systemd, and keeping working
+tested code costs nothing. The asymmetry decided it: deletion is irreversible
+with a hypothetical beneficiary, promotion is additive with a beneficiary
+running now. What remains is that the used entry point is an internal module the
+user's own unit names directly, and an internal module carries no stability
+promise — an ordinary refactor could break a live service silently.
+
+**Rejected — unifying the `--force` short forms.** `-f/--force` on `collection
+promote` and `reindex`, bare `--force` on `collection remove`, `stop`, `config
+init` and `init postgres`. A breaking change to muscle memory for a consistency
+nobody has tripped over. *Reopen when:* someone reports it.
+
+### Decided — hybrid lexical + vector retrieval (2026-09-07) — DONE
+
+**The mechanism is confirmed and large, and the fusion rule that settles it
+shipped 2026-09-09.** A dense
 embedding compresses a chunk into one vector, and a rare exact token — an
 author surname, an acronym, an equation label — is not recoverable from it.
 Measured on `papers`, n=150 per set, predictions registered before the run
@@ -596,27 +786,33 @@ built concurrently in 8.3 min and occupies 617 MB; lexical queries run in
 1–173 ms. The 0.98 GB projected from a 100k-chunk sample was 60% high — GIN
 posting lists compress better at corpus scale.
 
-**What is unsettled is rank 1.** Plain RRF at k=60 drops set B from 0.713 to
-0.540, and reaches only 0.047 on set A where the lexical arm alone gets 0.713 —
-each arm alone beats their combination at the top slot, which is the slot a
-search tool is read from. The pre-registered decision rule guarded set B on
-recall@10 only and would have waved this through: the rule was
-under-specified, not the result disappointing. Step 1 of the execution order
-tests whether it is an artifact of the probe's tie-break rather than a property
-of RRF.
+**Rank 1 was the hard part, and it is settled.** Plain RRF at k=60 drops set B
+from 0.713 to 0.540 and reaches only 0.047 on set A where the lexical arm alone
+gets 0.713 — each arm alone beats their combination at the top slot, which is
+the slot a search tool is read from. Steps 1 and 2 established why: the tie is
+not a bug, because RRF is symmetric and both arms' rank-1 documents score
+`1/(k+1)`, so there is no neutral tie-break and choosing one *is* a bet on an
+arm. The rule that shipped bets per query rather than globally.
+`_lexical_should_lead` (`search.py:422`) gives rank 1 to the lexical arm only
+for a single token that is syntactically identifier-shaped and matches at most
+`search.lexical_lead_max_documents` documents; fusion owns the rest of the list.
 
 **Risk — the precondition is unmeasured.** All of this assumes real queries are
 identifier-shaped. Nobody has looked at one; sets A and C are synthetic by
 construction. If such queries are a small fraction of real use then this is a
 well-measured solution to a problem the corpus does not have, and set A's 0.047
-does not change that. Cheap counter: log query strings and timestamps locally
-and read the mix in a few weeks. Does not block steps 1–2; does gate step 5.
+does not change that. **This gated step 5, which shipped anyway**, so the gate
+was passed by decision rather than by measurement — the strongest reason to
+distrust this section is that its own precondition was never checked. Cheap
+counter: log query strings and timestamps locally and read the mix.
+*Revisit when:* a week of real query logs exists, or hybrid is suspected of
+hurting an ordinary semantic search.
 
-**Risk — the probe index is unmanaged.** `chunks_v2_fts_probe` sits on the live
-database created by hand, so nothing recreates it after a `create_all` on a
-fresh database. Harmless while the corpus is static, and step 5b(ii) is what
-resolves it by giving the index a declared home. If the thread is abandoned,
-`drop index chunks_v2_fts_probe` reverses it completely.
+**Resolved — the probe index has a declared home.** The hand-made
+`chunks_v2_fts_probe` is gone and `ix_chunks_v2_fts` replaced it, created by
+`ensure_lexical_index` (`db.py:461`) from `create_tables` (`db.py:569`), so a
+fresh database gets one. Verified 2026-09-10 against the live database, which
+carries `ix_chunks_v2_fts` and no probe index.
 
 **Risk — the harness is not version controlled.** Every number in this section
 came from `notes/probe_hybrid_retrieval.py`, and `notes/` is gitignored by the

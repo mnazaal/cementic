@@ -52,9 +52,37 @@ index, versioned revisions) are documented in [PLAN.md](PLAN.md).
   **A cold cache still costs.** Five warm runs land at 1.97-2.27 s, but a run
   straight after the pg suite churned the page cache took 10.1 s. The
   reproducible win is the embedding count (8.0 s to 0.2 s for that statement);
-  the cold tail is smaller than it was and not gone. *Look again when:* a cold
-  `status` annoys you -- and measure which statement, rather than assuming it
-  is the same one.
+  the cold tail is smaller than it was and not gone.
+
+  **Reopened 2026-09-10: it regressed, and the likely cause is stale planner
+  statistics, not the query.** `cementic status` now takes 4.4-6.2 s warm
+  against the 1.93-2.20 s recorded above. Measured by component:
+  `check_health` is 449 ms and `load_pipeline_status_bulk` is 2.8-2.9 s, so it
+  is the queries, not the daemon probe. `pg_stat_user_tables` says
+  `chunks_v2` and `chunk_embeddings` were last analyzed **2026-08-24** -- before
+  the corpus doubled and before the 2026-09-09 repair deleted ~23k documents
+  worth of rows. Dead tuples now: 323,392 on `embedding_vectors_p6`, 207,678 on
+  `chunks_v2`, 80,833 on `chunk_embeddings`. Autovacuum has run since; auto*analyze*
+  on the two big tables has not. Cheapest test, and it needs your hand on the
+  live corpus rather than an agent's:
+
+  ```bash
+  cd ~/projects/cementic && ./.venv/bin/python -c "
+  from sqlalchemy import text
+  from cementic.config import get_config
+  from cementic.db import get_engine
+  e = get_engine(get_config().database.url)
+  with e.connect().execution_options(isolation_level='AUTOCOMMIT') as c:
+      for t in ('chunks_v2', 'chunk_embeddings', 'embedding_vectors_p6'):
+          print('vacuuming', t, flush=True)
+          c.execute(text(f'VACUUM (ANALYZE) {t}'))
+  " && time ./.venv/bin/cementic status
+  ```
+
+  If that restores 2 s, the finding is that a bulk delete on this corpus needs a
+  manual analyze afterwards, and the repair procedures should say so. If it does
+  not, the regression is in a statement and the next step is `EXPLAIN (ANALYZE,
+  BUFFERS)` on the bulk loader, not more guessing.
 
 - ~~**Two papers were silently unsearchable.**~~ **Fixed 2026-09-07**, found
   while chasing a 103-chunk discrepancy in `chunked_documents.total_chunks`.
