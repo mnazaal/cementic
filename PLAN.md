@@ -1,88 +1,92 @@
 # cementic — architecture & design
 
-<!-- session-handoff:begin (2026-09-10) -->
+<!-- session-handoff:begin (2026-09-10, second session that day) -->
 ## Where the work stands
 
-**Entry point: `TODO.md`'s "Near term" list. Nothing is half-finished.** Two
-gates in it are now open and were not last session. The CLI-surface audit
-against `llm` said *do it when the hybrid thread closes* — it has: hybrid is
-wired into `search.py`, `ensure_lexical_index` runs in `create_tables`, and
-`ix_chunks_v2_fts` exists on the live database (verified 2026-09-10, which is
-why the execution-order section below no longer claims step 5b is pending).
-The tokenizer pre-filter said *when a bulk import is next on the cards*; a
-whole-corpus re-extraction just ran, so that trigger has come and gone — read
-its entry before assuming it is still waiting.
+**Entry point: "Execution order — CLI surface audit" below, step 2.** Step 1 is
+done. Steps 2–6 are specified in full — what changes, the exit condition, the
+anti-scope, the hidden cost — so the next session implements rather than
+re-derives. Read the "Decided — the CLI surface after the `llm` audit" block
+first if you want to know *why* the audit cut nothing; skip it if you only want
+to build.
 
-**Repo state.** `main` = `origin/main` = `cae580c` and the nine commits of this
-session are pushed. This block is the one thing that is not: it sits on
-`claude/session-handoff-2026-09-10`, because a hook rejects agent commits to
-`main`, so the merge is yours and may still be pending when you read this:
+**Repo state.** `main` = `origin/main` = `24927b7`, everything merged and
+pushed. This handoff block sits on `claude/session-handoff-cli-audit`, because a
+hook rejects agent commits to `main`, so the merge is yours:
 ```bash
-git checkout main && git merge --ff-only claude/session-handoff-2026-09-10 && git push
+git checkout main && git merge --ff-only claude/session-handoff-cli-audit && git push
+git branch -d claude/status-vacuum   # merged, safe to delete
 ```
 
-**Running, and safe to ignore.** `cementic@papers.service` is up with a small
-embedding backlog draining (~1,400 vectors at handoff, minutes of work; the
-corpus reads 99.9% embedded). Nothing else is running — no watch loops, no
-cluster work.
+**Running, and safe to ignore.** `cementic@papers.service` is up; corpus is
+settled at 23,075 documents, 2,299,762 vectors, 100% embedded. No background
+jobs, no watch loops, nothing on a cluster.
 
-**What this session did.** Four defects, nine commits, and a live corpus
-repaired from 46,139 documents with 18,103 unsearchable back to 23,075 with
-none. The reasoning is in "Decided — what makes two rows the same document
-(2026-09-09)" below; this block does not restate it.
+**What this session did.** Ran the CLI-surface audit `TODO.md` had gated on the
+hybrid thread closing, then planned its follow-up work in detail, then fixed a
+`status` performance regression found on the way. Three commits, all on `main`.
+Nothing is half-finished.
 
 **Corrections — distrust these sections' history, not their current text.**
-- The execution-order section for hybrid retrieval said step 5b (the imperative
-  shell) was the live remaining work. It had shipped a session earlier. Fixed
-  in the same commit as this block. The register reads as live and is not
-  re-checked; check it against the code before believing it.
-- `TODO.md`'s repair entry described two stranded papers as pending. They were
-  repaired 2026-09-10; `cementic doctor` reports zero. The entry stays because
-  the command is reusable, and it now says to check the count first.
-- An estimate of mine in chat, not in any document: the re-extraction tail was
-  predicted at "a few hundred thousand chunks, hours of GPU". Measured at
-  4,803. It was extrapolated from document count instead of measured.
+- **Two figures I published were wrong, and are the reason to be careful here.**
+  The step-2 import timings and the step-3 cost comparison were first measured
+  while `check.sh` was running, which inflated them about 2×. Both are corrected
+  in place and now say what conditions they were taken under. The lesson is in
+  the step-2 text: measure on an idle machine, and cite the ratio rather than
+  the absolute when you cannot.
+- The hybrid section was titled "In progress" for a thread that closed on
+  2026-09-10, and two of its risks referenced execution-order steps that had
+  shipped. Retitled, one risk resolved against the live database, one restated.
+  The remaining open risk there is real: **the precondition for hybrid retrieval
+  was never measured** — nobody has looked at whether real queries are
+  identifier-shaped — and the feature shipped anyway.
+- README claimed `search --json` emits six fields; it emits seven.
+  `scripts/verify_postgres_container.sh` called `cementic status --doctor`, a
+  flag deleted months ago. Both fixed.
 
 **Deviations from the plan, attributed.**
-- *User-directed:* running both corpus repair scripts, the merges and pushes,
-  and the service restarts. Every mutation of the live corpus was theirs to run.
-- *Agent-decided:* commits split by root cause rather than by file, using the
-  snapshot-and-peel procedure, because one module carried two independent bugs.
-- *Agent-decided, and reversed by review:* the first retirement guard kept a
-  stale row only when its twin held chunks. An audit showed that deletes work
-  when the twin is one chunk in. The rule now deletes nothing, and the
-  duplicate that strictness implied is resolved by folding the empty twin in.
-- *Agent-decided:* two independent reviewers on one brief rather than one. They
-  agreed on the top defect, which is the signal that justified the second.
+- *User-directed:* running the vacuum, and every merge and push.
+- *Agent-decided:* cancelling the vacuum of `embedding_vectors_p6` after 78
+  minutes. It was not stale, it was not needed, and its 9,150 MB HNSW index
+  makes it an hours-long job. Recorded under `TODO.md`'s `cementic status`
+  entry so nobody includes it again.
+- *Agent-decided:* fixing the two documentation defects during the audit rather
+  than leaving them as step 1 of its own plan, because writing a document that
+  called them false while leaving them in place was worse.
+- *Agent-decided:* the audit cut nothing. That is the plan's weakest point and
+  it is argued explicitly in the Decided block, with the stricter criterion that
+  would have cut more and why it was not used.
 
 **Environment quirks that cost time.**
-- The Bash sandbox blocks 127.0.0.1:5432 *and* the systemd user bus. Anything
-  touching the database or `systemctl --user` needs the sandbox disabled;
-  the bus failure reads as "Failed to connect to bus: Operation not permitted".
-- The unit runs `~/projects/cementic/.venv` — the working tree. An uncommitted
-  edit to `src/cementic/` is deployed the moment the unit restarts, which
-  `Restart=always` can do at any time. Stop the unit before editing anything
-  that mutates the corpus.
-- A subagent given a read-only brief ran `git checkout main` and merged a
-  branch into it. Ref-moving commands are not what "read-only" stops. Check
-  `git branch --show-current` after any delegated review, and before staging.
-- `psql` is not installed. Use `./.venv/bin/python` with `cementic.db.get_engine`.
+- **The `agent-checkpoint` hook blocks every Bash command when the tree is
+  clean.** Its snapshot legitimately holds nothing new, but it cannot tell that
+  from a failed index, so it exits fatal and the gating hook refuses the turn.
+  Any edit to a tracked file clears it; the `Read`/`Edit`/`Write` tools are not
+  gated. Worth fixing in the script rather than working around.
+- The Bash sandbox blocks 127.0.0.1:5432 and the systemd user bus, so anything
+  touching the database or `systemctl --user` needs the sandbox disabled.
+- The masked device-node files at the repo root (`.bashrc`, `.zshrc`, …) are
+  sandbox artifacts, not real files. Ignore them in `git status`.
+- `zsh` does not word-split an unquoted variable. A loop of the form
+  `for c in "status -c x"; do cementic $c; done` passes the whole string as one
+  argument and every command looks like a usage error. This produced a false
+  "README's exit codes are wrong" finding before it was caught.
 
-**Artifacts, and what to do with them.** Keep `~/.cache/cementic-check-final4.log`
-(the last full green gate). The two one-off repair scripts,
-`~/.cache/cementic-dedupe-papers.py` and `~/.cache/cementic-drop-rescan-twins.py`,
-are spent — both applied, both safe to delete; what they did is recorded below.
-Everything else from this session (peel snapshots in `$TMPDIR`, the reviewers'
-repro scripts in the scratchpad) is discarded deliberately: the behaviour each
-one probed is now covered by a test in the repo.
+**Artifacts.** `~/.cache/cementic-vacuum.py` is worth keeping — it vacuums the
+five tables `status` reads and prints before/after `pg_stat_user_tables` rows.
+`notes/design-cli-surface.html` holds the audit evidence and the `llm`
+comparison (gitignored, so it exists only on this machine). The last full green
+gate is `~/.cache/cementic-check-vacuum.log`. Everything else this session
+produced — the help-tree dump and a sample Markdown file in the scratchpad — is
+discarded deliberately; the help tree regenerates from `--help` in one command.
 
 **Exit criteria — commands whose output confirms the above.**
 ```bash
-git status --short                       # empty
-git log --oneline -1                     # cae580c, equal to origin/main
+git status --short                       # empty apart from masked dotfiles
+git log --oneline -1                     # 24927b7, equal to origin/main
 ./scripts/check.sh                       # six gates, all ok
-./.venv/bin/cementic doctor              # stranded_chunkings: ok
-./.venv/bin/cementic status -c papers    # 23,075 documents, embedded → 100%
+./.venv/bin/cementic doctor              # every line ok
+./.venv/bin/cementic status              # ~1.6 s, papers 100% embedded
 ```
 <!-- session-handoff:end -->
 

@@ -20,9 +20,10 @@ index, versioned revisions) are documented in [PLAN.md](PLAN.md).
 - Add a direct ingestion command: `cementic add <path> -c <collection>`.
 - Add optional Markdown mirrors for extracted artifacts, alongside the existing
   compressed pipeline artifacts.
-- Enrich search results with document id and optional artifact path. (`collection`
-  already ships — a result carries collection, source_path, content, score,
-  distance and score_kind.)
+- Enrich search results with document id and optional artifact path. A result
+  today carries seven fields: collection, source_path, content, score, distance,
+  score_kind and rank. Specified as step 6 of PLAN.md's "Execution order — CLI
+  surface audit", including why `chunk_id` is deliberately not among them.
 
 - Pre-filter over-budget chunks against the model's own tokenizer, not just
   the cheap tiktoken estimate. `count_model_tokens` learned upstream
