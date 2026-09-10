@@ -28,7 +28,7 @@ UNIT_NAME="cementic-postgres-verify-${SUFFIX}.container"
 SERVICE_NAME="cementic-postgres-verify-${SUFFIX}.service"
 DB_PORT="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')"
 
-# cementic status --doctor resolves a *relative* model_path against the
+# cementic doctor resolves a *relative* model_path against the
 # current working directory first (see config.py: resolve_llama_model_path),
 # so this script must never `cd` away from the real project directory --
 # doing so makes the model-file check fail for reasons unrelated to Postgres.
@@ -129,9 +129,9 @@ wait_healthy "$CONTAINER_NAME" && ok "container reported healthy" || {
   fail "container never became healthy within 60s"
 }
 
-echo "== cementic status --doctor against the running container =="
-"$CEMENTIC_BIN" status --doctor || fail "cementic status --doctor failed against the container"
-ok "cementic status --doctor passed"
+echo "== cementic doctor against the running container =="
+"$CEMENTIC_BIN" doctor || fail "cementic doctor failed against the container"
+ok "cementic doctor passed"
 
 echo "== tearing down compose stack =="
 compose down -v || fail "podman compose down -v failed"
@@ -155,9 +155,9 @@ wait_healthy "$CONTAINER_NAME" && ok "Quadlet-managed container reported healthy
   fail "Quadlet-managed container never became healthy within 60s"
 }
 
-echo "== cementic status --doctor against the Quadlet-managed container =="
-"$CEMENTIC_BIN" status --doctor || fail "cementic status --doctor failed against the Quadlet-managed container"
-ok "cementic status --doctor passed against Quadlet-managed instance"
+echo "== cementic doctor against the Quadlet-managed container =="
+"$CEMENTIC_BIN" doctor || fail "cementic doctor failed against the Quadlet-managed container"
+ok "cementic doctor passed against Quadlet-managed instance"
 
 echo
 echo "ALL CHECKS PASSED"

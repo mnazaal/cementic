@@ -191,9 +191,10 @@ letters, digits, hyphens, and underscores, and be 100 characters or fewer.
 Every command that takes `-c`/`--collection` enforces this and rejects the
 name up front rather than at the database.
 
-`search --json` emits one JSON object per line, each with the same six
-fields: `collection`, `source_path`, `content`, `score`, `distance`, and
-`score_kind`.
+`search --json` emits one JSON object per line, each with the same seven
+fields: `collection`, `source_path`, `content`, `score`, `distance`,
+`score_kind`, and `rank` (the 1-based position in the final order, stamped
+once the order is settled so it cannot disagree with the list it describes).
 
 A query is rejected before it reaches the embedding model if it is longer
 than 8,000 characters, or if its estimated token count exceeds the indexed

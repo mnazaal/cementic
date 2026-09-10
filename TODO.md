@@ -110,19 +110,19 @@ index, versioned revisions) are documented in [PLAN.md](PLAN.md).
   `cementic doctor` now reports the lost-chunk state rather than leaving it to
   be noticed.
 
-- Audit the CLI surface against `llm`'s embeddings commands
-  (https://llm.datasette.io/en/stable/embeddings/cli.html), and cut what does not
-  earn its place. Raised 2026-09-07 after reading that tool: it is JSON-first,
+- ~~**Audit the CLI surface against `llm`'s embeddings commands.**~~ **Done
+  2026-09-10.** Raised 2026-09-07 after reading that tool
+  (https://llm.datasette.io/en/stable/embeddings/cli.html): it is JSON-first,
   pipeable, has a small obvious surface, and needs no daemon, no PostgreSQL and
-  no systemd — which is the shape PLAN.md's own "Unix composability" principle
-  asks for and cementic's front door does not have. It could not replace
-  cementic (verified from its source: `similar_by_vector` registers a Python
-  UDF and linear-scans every row, so 2.3M chunks would take minutes against
-  cementic's 1-2 s; and it has neither chunking nor PDF extraction) — the point
-  is the interface, not the engine. cementic already has the composable layer:
-  `extract | chunk | embed` are stdin/stdout filters. It is buried under the
-  daemon and the database. *Do it when:* the hybrid thread closes; this is a
-  separate piece of work and conflating the two would hide both.
+  no systemd. The audit's decisions and its six-step execution order are in
+  PLAN.md, "Execution order — CLI surface audit"; the evidence, the `llm`
+  comparison and the per-command usage matrix are in
+  `notes/design-cli-surface.html`. Headline: 21 leaf commands against `llm`'s 9,
+  nothing dead, and the real defects are elsewhere than the surface — a false
+  README claim about `search --json`, a container script calling a flag removed
+  months ago, 1.2 s of eager imports on every invocation, and a composability
+  principle the design will never support. Nothing was cut: the weakest
+  commands are thin wrappers whose deletion saves nothing.
 
 ## Images / multimodal
 

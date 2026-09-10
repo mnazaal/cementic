@@ -119,9 +119,14 @@ with a trigger", because nothing here was watching for them.
 - **Mechanism vs policy.** Versioning, the warm daemon, and artifact storage are
   mechanism; *which* model / extractor / index to use is policy expressed in
   config.
-- **Unix composability.** The pipeline stages are also stdin/stdout filters
-  (`extract | chunk | embed`), so a single document can be run end-to-end with no
-  database.
+- **Pipeline stages are also filters.** `extract | chunk | embed` are
+  stdin/stdout filters, so a single document can be run end-to-end with no
+  database. **Narrowed 2026-09-10** from "Unix composability": the chain has no
+  exit — nothing ingests embedded JSONL and `search` always derives its own
+  vector — and it cannot get one, because a cementic vector is only meaningful
+  inside a revision that pins three profiles and their fingerprints. These are
+  debugging and export tools, not a composable loop. See "Execution order — CLI
+  surface audit".
 
 ## Scale context
 
@@ -200,6 +205,12 @@ indexing and search.
 functions the worker calls — no per-document shell-out, so there are two entry
 points to one core. They let you debug a single document end-to-end without a
 database, test stages in isolation, or pipe a stage to an external tool.
+
+Their JSONL is not the stored shape, so do not read it as a picture of the
+database: the filter emits `index` where `chunks_v2` stores `chunk_index`, it
+carries no document identity, and it keeps the whitespace chunks the worker
+drops and renumbers. Step 5 of "Execution order — CLI surface audit" closes the
+key-name half of that.
 
 ### Markdown as the text intermediate representation
 
@@ -443,6 +454,86 @@ is outstanding.
    *Anti-scope for all of 5b:* one index, one fusion rule, one threshold. No
    per-collection tuning surface, no query classifier beyond the two-line
    predicate, and no re-opening of RRF `k`.
+
+## Execution order — CLI surface audit (2026-09-10)
+
+Ran the audit `TODO.md` had gated on the hybrid thread closing. Full evidence,
+including the `llm` comparison and the per-command usage matrix, is in
+`notes/design-cli-surface.html` (gitignored); this section holds the decisions
+and the order. Surface as audited: **21 leaf commands** against `llm`'s 9.
+
+**Decided — the boundary.** PostgreSQL, the ANN index, the versioned revisions
+and the warm daemon are not on trial. `llm` reaches a small surface partly by
+having no chunking, no extraction, no watching and a brute-force scan. What is
+on trial is the front door: command count, output contract, and what a script
+can do with the result.
+
+**Decided — the composability principle overstates the design.** `extract |
+chunk | embed` runs, and was run end to end during the audit, but nothing
+consumes its output: no command ingests embedded JSONL
+(`vector_store.upsert_vectors` is called only from `pipeline_worker.py:1138`)
+and `search`
+always derives its own vector (`search.py:282`). That is not a gap to fill. A
+cementic vector is only meaningful inside a revision pinning three profiles and
+their fingerprints, so a hand-injected vector would be unprovenanced. The
+filters are debugging and export tools; the Design principles section is what
+should change, not the code.
+
+**Decided — the supervisor stays, the inversion goes.** Six commands and ~630
+lines (`supervisor.py` 268, `filelock.py` 69, ~290 in `cli.py`) reimplement
+process supervision that systemd provides, and the only deployment on this
+machine bypasses all of it — `cementic@.service` runs `python -m
+cementic.runner` directly with `Restart=always` and health-checks the daemon
+with `curl`. Deleting `start`/`stop` is still wrong: they are the only path for
+a user without systemd, which is the reader the parked *Publish the repo* item
+contemplates. The defensible fix is to promote the two runner subcommands to
+documented commands so the used entry point stops being an internal module.
+
+1. ~~**Fix the two documentation defects.**~~ **Done 2026-09-10**, in the same
+   commit as this section. README claimed `search --json` emits six fields; it
+   emits seven — `rank` was added by `64b24d4` (`search.py:202`) and never
+   reached the docs. And `scripts/verify_postgres_container.sh` called
+   `cementic status --doctor`, a flag removed when `doctor` was split out
+   (README:880 records the removal with no alias kept), so the script could not
+   have run.
+
+2. **Make `cli.py`'s imports lazy.** It imports 33 of 34 modules at load time,
+   pulling SQLAlchemy, tiktoken, pydantic and requests. Measured: 1.29–1.36 s to
+   `import cementic.cli`, and 1.22–1.26 s for `cementic extract --help`. This is
+   the one place cementic's front door is measurably worse than `llm`'s for the
+   same job. The pattern exists already in `extract._get_pymupdf` and the guard
+   test at `tests/unit/test_cli_performance.py:41`.
+
+3. **Give the query commands a `--json`.** `collection list`, `collection
+   revisions`, `embedding status`. Skip `stop` — it is an action, not a query.
+   One convention: a list emits JSONL, a single object emits one document.
+   Today `--json` means three things (one document for `status`/`doctor`, JSONL
+   for `search`, unconditional JSON for `chunk`/`embed`/`config show`) and four
+   commands have no machine-readable form at all.
+
+4. **Promote `cementic.runner`'s two subcommands to documented CLI commands**
+   and point the systemd units at them. The units keep calling the checkout's
+   interpreter — that pins PyMuPDF in the extractor fingerprint deliberately.
+
+5. **Rename the filter's `index` key to `chunk_index`.** The prose half of this
+   step is already done: the Design principles entry and the "Pipeline as
+   composable filters" section were narrowed in the same commit as this section.
+   What remains is code. The filter emits `index` (`cli.py:1155`) where the
+   database stores `chunk_index` (`db.py:187`), carries no document identity,
+   and keeps whitespace chunks the worker drops and renumbers
+   (`pipeline_worker.py:881`) — so its indices can disagree with the stored ones
+   for the same document.
+
+6. **Add a document id to search results.** Already a `TODO.md` item; the audit
+   gives it a reason beyond neatness, since without it no `--json` consumer can
+   join a hit back to a document.
+
+*Anti-scope, so nobody re-derives it:* no ingest command and no search-by-vector
+(the composability decision above says why); no deletion of `start`/`stop` or the supervisor; no
+dropping of PostgreSQL or the daemon to match `llm`'s zero-dependency shape,
+which is the engine and not the interface; and no unifying of the `--force`
+short forms (`-f/--force` on two commands, bare `--force` on four) — a breaking
+change to muscle memory for a consistency nobody has tripped over.
 
 ## Execution order — v1.5 migration: CLOSED, the gate failed (2026-09-05)
 
