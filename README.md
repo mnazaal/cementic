@@ -998,33 +998,83 @@ claims — sustained **5.56 chunk/s**, which is 108 h for 2.16M chunks. The
 earlier 4–7 day range came from 4.27 chunk/s on the pre-denormalisation claim
 path.
 
-Two constraints bind at this size and neither is query latency. **Memory:** an
-HNSW index over 2.16M × 768 vectors is ~6.5 GB resident, against 15 GB of RAM
-with ~5 GB free — which is what the `diskann` seam exists for. Prefer HNSW for
+**The projection can now be checked against the outcome.** That corpus is
+built: 23,075 documents and **2,299,762 chunks**, each with one vector, against
+the 2.16M projected from pages — 6.4% high, and the document count grew by 829
+in the meantime. So the chunks-per-page ratio held.
+
+Two constraints bind at this size and neither is query latency. **Memory:** the
+HNSW index over the built corpus measures **8.9 GB** (`pg_relation_size`,
+2026-09-12), against 15 GB of RAM with ~5 GB free, so it cannot be held in cache
+— which is what the `diskann` seam exists for. The ~6.5 GB this line used to
+give was the raw-vector arithmetic (2.16M × 768 × 4 bytes), which is the data
+the graph indexes rather than the graph itself. Prefer HNSW for
 the initial build anyway: it is maintained per insert and therefore resumable
 across a multi-day job, where DiskANN builds at the ready transition in one
 unresumable pass. `cementic collection reindex` switches method afterwards
 without re-embedding, so the decision is cheap to revisit. **Disk:** the
 database lands near 30 GB.
 
-**Search latency** (warm daemon, 7,580 vectors, `hnsw.ef_search = 40`):
+**Search latency** (2026-09-12, the live 2,299,762-vector corpus, warm daemon,
+`hnsw.ef_search = 40`, hybrid on. Median of 7 interleaved runs per arm, one
+warm-up discarded, every run asserted to have returned ten results; range in
+brackets):
 
 | step | time |
 |---|---|
-| embed the query string | 35.3 ms |
-| pgvector kNN, top-10 | 2.6 ms (0.3 ms in-engine) |
-| **`Searcher.search()` total** | **38.7 ms** |
-| CLI end to end | ~650 ms — the rest is interpreter and import startup |
-| first query after a cold start | 6.2 s, loading the model |
+| embed the query string | 81 ms [78–89] |
+| the rest of a hybrid search — vector kNN, lexical arm, fusion | 342 ms |
+| **`Searcher.search()` total** | **423 ms [397–441]** |
+| the same query with `hybrid = false` | 119 ms [103–137] |
+| a rare single token, so the lexical arm leads | 354 ms [340–864] |
+| CLI end to end | ~1,040 ms [1,005–1,075] — the rest is interpreter and import startup |
+| first query after a cold start | 6.2 s, loading the model (2026-08-24 reading, not re-measured: it needs the live daemon stopped) |
 
-Search is embedding-bound, not index-bound. An earlier reading of this section
-put the embedding step at 197 ms; re-measured on the corpus above it is 35 ms,
-so treat the old figure as superseded rather than reconciled.
+**Search is no longer embedding-bound, and hybrid is what dominates.**
+Embedding is 81 ms of 423 — under a fifth. Turning hybrid off takes the same
+query to 119 ms, so the lexical arm and fusion cost about 300 ms, roughly 3.5×
+the vector-only path. That is the price of the recall it buys (0.047 → 1.000 on
+rare exact tokens, above); `hybrid = false` under `[search]` is the lever if a
+sub-150 ms search matters more.
 
-**ANN recall against exact search** (same corpus, 20 queries, top-10): mean
-0.990, worst 0.900, 18 of 20 identical to the exact ranking. The ANN query is
-8.9× faster than the exact one (2.7 ms against 24.1 ms), and the HNSW index is
-29 MB over 7,580 × 768.
+Two earlier readings of this block are superseded rather than reconciled: 38.7 ms
+total with embedding at 35.3 ms of it, measured at 7,580 vectors before hybrid
+search existed, and before that 197 ms for the embedding step. The corpus is now
+300× larger, so the old absolute numbers say nothing about it.
+
+**ANN recall against exact search, and the default `ef_search` is too low at
+this size** (2026-09-12, the live 2,299,762-vector corpus, 20 queries taken from
+the corpus at evenly spaced ids so a re-run measures the same thing, top-10,
+production tuning — `hnsw.ef_search = 40` with `hnsw.iterative_scan =
+relaxed_order`):
+
+| | recall@10 mean | worst | identical to exact |
+|---|---|---|---|
+| `ef_search = 40` (the default) | 0.935 | **0.000** | 17 of 20 |
+
+**The worst case is a real miss, not a tie.** One query's exact top-10 ran from
+distance 0.0177 — the query's own chunk, since the query text was drawn from the
+corpus — out to 0.32, while the ANN top-10 began at 0.43 and shared nothing with
+it. The graph failed to reach a neighbourhood containing a byte-identical row.
+The three queries that scored below 1.00 all reach **1.00 at `ef_search = 100`**,
+costing 3–7 ms against 40's 1–4 ms. Against a 423 ms hybrid search that is
+free, so raising the default is the obvious move and is not yet made; the
+measured figures above are for the default as it ships.
+
+`iterative_scan = relaxed_order` changed no result here and cost nothing
+measurable (1.35 ms against 1.30 ms warm, inside the spread). That is expected
+rather than disappointing: it earns its place when a collection is a thin slice
+of a shared vector table, and this corpus is the whole table.
+
+The ANN query is 1.3 ms warm against 17.2 s for the exact scan — four orders of
+magnitude, though it compares a warm index against a scan of ~19 GB of vectors
+that cannot be cached in 15 GB of RAM. The HNSW index is **8.9 GB** over
+2,299,762 × 768.
+
+The readings this replaces — mean 0.990, worst 0.900, 18 of 20 identical, 8.9×
+faster, a 29 MB index — were taken over 7,580 vectors. Recall is the figure that
+moved: a graph 300× larger with the same 40-candidate search list misses the
+tail.
 
 **Promotion does no index build.** Because the HNSW index is created up front
 and maintained per insert, `cementic collection promote` on the finished

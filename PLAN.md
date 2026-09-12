@@ -830,9 +830,20 @@ falsifier (vector ≥ 0.85, which would have killed the feature outright) never
 in sight.
 
 **Cost is not a constraint.** A GIN index on `to_tsvector('english', content)`
-built concurrently in 8.3 min and occupies 617 MB; lexical queries run in
-1–173 ms. The 0.98 GB projected from a 100k-chunk sample was 60% high — GIN
-posting lists compress better at corpus scale.
+built concurrently in 8.3 min; lexical queries run in 1–173 ms.
+
+**Corrected 2026-09-12 — the 617 MB recorded here is now 1,121 MB, and the
+"projection was 60% high" conclusion drawn from it does not survive.**
+Measured with `pg_relation_size('ix_chunks_v2_fts')` on the live database, at
+2,299,762 chunks against ~2,298,558 when the 617 MB was taken — so the corpus
+did **not** grow into it, and the 0.98 GB projected from a 100k-chunk sample was
+in fact 14% *low* rather than 60% high. The cause of the doubling is not
+established: dead tuples are 1,194 and the table was vacuumed 2026-09-10, so
+ordinary bloat does not cover it either, which leaves the possibility that the
+617 MB was read from the hand-made `chunks_v2_fts_probe` rather than from the
+index that shipped. *Settles it:* a fresh `CREATE INDEX CONCURRENTLY` and a
+size comparison — 8.3 min, and it drops the live index on the way, so it waits
+for a reason better than curiosity.
 
 **Rank 1 was the hard part, and it is settled.** Plain RRF at k=60 drops set B
 from 0.713 to 0.540 and reaches only 0.047 on set A where the lexical arm alone
