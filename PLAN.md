@@ -10,13 +10,9 @@ re-derives. Read the "Decided — the CLI surface after the `llm` audit" block
 first if you want to know *why* the audit cut nothing; skip it if you only want
 to build.
 
-**Repo state.** `main` = `origin/main` = `24927b7`, everything merged and
-pushed. This handoff block sits on `claude/session-handoff-cli-audit`, because a
-hook rejects agent commits to `main`, so the merge is yours:
-```bash
-git checkout main && git merge --ff-only claude/session-handoff-cli-audit && git push
-git branch -d claude/status-vacuum   # merged, safe to delete
-```
+**Repo state.** `main` = `origin/main` = `bccd23a`, everything merged and
+pushed, no branches outstanding. *(Corrected 2026-09-12: this described the
+pre-merge state and gave the merge commands. Both were carried out.)*
 
 **Running, and safe to ignore.** `cementic@papers.service` is up; corpus is
 settled at 23,075 documents, 2,299,762 vectors, 100% embedded. No background
@@ -83,7 +79,7 @@ discarded deliberately; the help tree regenerates from `--help` in one command.
 **Exit criteria — commands whose output confirms the above.**
 ```bash
 git status --short                       # empty apart from masked dotfiles
-git log --oneline -1                     # 24927b7, equal to origin/main
+git log --oneline -1                     # bccd23a, equal to origin/main
 ./scripts/check.sh                       # six gates, all ok
 ./.venv/bin/cementic doctor              # every line ok
 ./.venv/bin/cementic status              # ~1.6 s, papers 100% embedded
@@ -395,8 +391,12 @@ the precondition for the whole feature was never measured.
       the reason the sqlite unit suite keeps working. An empty table indexes
       instantly; an existing corpus needs `CREATE INDEX CONCURRENTLY`, which
       cannot run inside a transaction and so needs its own connection.
-      *Exit:* `cementic doctor` reports the index present on `papers`; the
-      sqlite-backed unit tests are untouched.
+      *Exit:* met, but not the way this line says. Verified 2026-09-12 by
+      querying `pg_indexes` — `ix_chunks_v2_fts` is present on `chunks_v2` on
+      the live database — because **`doctor` has no lexical-index check**. So
+      nothing surfaces a missing GIN index in a report, which is the same
+      silence the document-identity section calls out as costing more than the
+      bugs. The sqlite-backed unit tests are untouched.
 
    iii. ~~**The lexical query, scoped to the active revision.**~~ **DONE
       2026-09-07 (`45ed214`).** `lexical_sql` joins the *same* per-profile
@@ -424,31 +424,19 @@ the precondition for the whole feature was never measured.
       *Exit:* `cementic search` returns routed results on `papers`, and
       `./scripts/check.sh` is green.
 
-   v. **Stop the score column contradicting the order.** With fusion on the
-      terminal printed `0.270, 0.089, 0.267` — the list is ordered by rank
-      fusion while the column still shows each arm's own score. Settled against
-      a four-survey prior-art review (`notes/design-hybrid-retrieval.html`),
-      whose finding is that the convention splits by *audience*: every
-      human-facing tool surveyed (ripgrep, fzf, Recoll, DEVONthink, Zotero,
-      Obsidian, Spotlight, Windows Search, Everything, Google, Bing) withholds
-      a numeric score by default, while machine-facing systems put the fused
-      value in `score` and discard everything else.
-      - Add `rank` to `SearchResult`: the 1-based position in the returned
-        list, so order is stated rather than inferred from a number.
-      - Terminal shows the score only when it is still monotonic with the
-        order — that is, when the list was not fused. `--scores` forces it,
-        which is Recoll's off-by-default `%R` pattern.
-      - JSON keeps each result's *own* arm score with `score_kind` naming it,
-        plus `rank`. More than any surveyed library retains, and affordable
-        only because `score_kind` already exists.
-      *Exit:* a fused terminal listing shows no non-monotonic column, `--json`
-      still parses, and a pure-vector search prints its cosine exactly as
-      before.
-      *Anti-scope:* do not write the RRF sum into `score`. It is the
-      Elasticsearch/LlamaIndex convention and it is monotonic, but it replaces
-      a meaningful cosine 0.675 with a meaningless 0.0164 *including for
-      pure-vector queries where nothing was fused* — a regression in the common
-      case to fix a problem that exists only in the fused one.
+   v. ~~**Stop the score column contradicting the order.**~~ **DONE — shipped
+      in `64b24d4`**, which is where the four-survey prior-art review landed
+      (`notes/design-hybrid-retrieval.html`): human-facing tools withhold a
+      numeric score by default, machine-facing ones publish the fused value.
+      `rank` on `SearchResult`, the terminal column shown only when
+      `scores_explain_order` says it still explains the order, `--scores` to
+      force it (Recoll's off-by-default `%R`), and `score_kind` naming each
+      arm's own score in `--json`. README documents the behaviour.
+      *Anti-scope, still live:* do not write the RRF sum into `score`. It is
+      the Elasticsearch/LlamaIndex convention and it is monotonic, but it
+      replaces a meaningful cosine 0.675 with a meaningless 0.0164 *including
+      for pure-vector queries where nothing was fused* — a regression in the
+      common case to fix a problem that exists only in the fused one.
 
    vi. ~~**README.**~~ **DONE 2026-09-07.** The search section gains what hybrid does, when the lexical
       arm leads, and that a single common word is not an identifier query —
@@ -645,7 +633,9 @@ and the step-2 guard test still passes.
 ### Step 5 — rename the filter's chunk index key
 
 One line at `cli.py:1155`, from `{"index": …}` to `{"chunk_index": …}`, plus the
-tests asserting the key (`tests/unit/test_cli.py:465, 476, 2668–2699`) and the
+six test sites asserting or feeding the key (`tests/unit/test_cli.py:481, 2687,
+2712, 2718, 2795, 2806` — two of those are `chunk` stdin fixtures, not
+assertions, so a grep for the assertion alone under-counts the work) and the
 README pipe example. A breaking change to an output format with no known
 consumers, which is why it only gets more expensive to defer.
 
@@ -663,7 +653,7 @@ runs end to end, and no test or doc still says `index`.
 `vector_store.knn_sql` (`vector_store.py:147`) nor `lexical_sql`
 (`vector_store.py:182`) projects an id today. Both already join
 `source_documents`, so this is adding `sd.id AS document_id` to two SELECT
-lists, two constructor edits in `search.py` (:333 and :379), one key on the
+lists, two constructor edits in `search.py` (:337 and :380), one key on the
 `SearchResult` TypedDict (`search.py:80`), and the README field list.
 
 *Decided: `document_id` only, not `chunk_id`.* `_merge_arms` dedupes by
@@ -679,8 +669,9 @@ step 1 fixed was exactly that count drifting.
 *Anti-scope:* one id field. Not the artifact path, not the chunk index, not the
 revision label; each is a separate argument about what a result is for.
 
-*Anti-scope for the whole thread, so nobody re-derives it:* no ingest command and
-no search-by-vector (the composability decision above says why); no deletion of
+*Anti-scope for the whole thread, so nobody re-derives it:* no ingest command
+for embedded JSONL and no search-by-vector (the composability decision above
+says why — and note it does not reach `cementic add`); no deletion of
 `start`/`stop` or the supervisor; no dropping of PostgreSQL or the daemon to
 match `llm`'s zero-dependency shape, which is the engine and not the interface;
 and no unifying of the `--force` short forms.
@@ -752,8 +743,12 @@ chunk profile and an embedding profile plus fingerprints, which is exactly what
 lets a new model build while the old one stays searchable. A hand-injected
 vector carries none of that, so an ingest command must either record a false
 provenance or take every profile id as an argument, at which point it is not a
-filter. *Rejected:* an ingest command, and `search --vector`. The Design
-principles entry was narrowed instead (2026-09-10).
+filter. *Rejected:* an ingest command **for embedded JSONL**, and
+`search --vector`. The Design principles entry was narrowed instead
+(2026-09-10). **Scope, spelled out 2026-09-12 because the line above read
+wider than it is:** what is rejected is ingesting *vectors*. `TODO.md`'s
+`cementic add <path>` ingests a *file* through the ordinary pipeline, which
+creates its own provenance, and is untouched by this.
 
 **The supervisor stays; the inversion it created does not.** Six commands and
 ~630 lines (`supervisor.py` 268, `filelock.py` 69, `start`/`stop` handlers 290)
@@ -942,7 +937,7 @@ risk: a wrong flag that prints a constant cannot be detected automatically, so
 `doctor` prints what was recorded for a human to check.
 
 **Probe cost is a non-issue.** `build_extractor_profile_payload` is reached only
-via `get_or_create_extractor_profile` ← `revisions.py:184` ← revision creation.
+via `get_or_create_extractor_profile` ← `revisions.py:229` ← revision creation.
 Once per revision, not per document; no cache needed.
 
 **Fingerprint-neutral by gating.** Both new payload keys appear only when a
@@ -952,7 +947,8 @@ corpus rebuilds. Same trick as the conditional rapidocr entry in `profiles.py`.
 **`supported_extensions()` gains a `Config`.** The command extractor's
 extensions come from the `[extraction.commands]` keys, otherwise it could never
 add a file type cementic does not already know — its best use. Ripples to
-`source_watcher.py:324` and `:395`; `DocumentEventHandler` takes the resolved
+`source_watcher.py:350`, `:596` and `:700`; `DocumentEventHandler`
+(`source_watcher.py:328`) takes the resolved
 set as plain data, matching how `ignore_directories` is already passed. The
 command extractor is never a fallback: it must be named in `backends`.
 
@@ -1042,10 +1038,6 @@ So the honest gain is **4x the current window, not 16x**: 2048 tokens supports
 a `chunk_size` near 1,300 against today's 320, which cuts the corpus from
 ~2.3M chunks to roughly 575k and the vector table from 18 GB to ~4.5 GB. Still
 worth the migration; just not the number the plan was written around.
-
-One scaffold-time check remains: how v1.5 and v2-moe actually compare on
-retrieval over these papers. It precedes scheduling the five-day re-embed,
-because it is the only claim here still resting on a model card.
 
 **What rides along, in the order the pipeline runs them.**
 
@@ -1447,17 +1439,13 @@ bug and is one, but the fix costs more than the defect:
   no display). The fix is a column-type change in a project whose only schema
   mechanism is `create_all`, so old and new databases would diverge with nothing
   to reconcile them. Revisit if anything ever reads these columns.
-- **`connect_args` / `gssencmode` on non-psycopg URLs.** `DatabaseConfig` can
-  only produce `postgresql://`, and sqlite never reaches `get_engine` outside
-  tests that patch around it. Worth the `make_url` cleanup only if `db.py` is
-  open for another reason — *and it has been twice since* (`build_memory`, then
-  the atomic `force_rebuild` drop), so the stated precondition is now met.
-  Note the gap is wider than first recorded: the check is
-  `startswith("postgresql://")`, so it also misses driver-qualified URLs like
-  `postgresql+psycopg2://`, which a user setting `CEMENTIC_DB_URL` may well write.
-  **Audit 2026-08-23:** still live at `db.py:375`, and the entry now fails its
-  own test — a register of things deliberately not done cannot hold an item whose
-  stated trigger has already fired. Queued in `TODO.md` instead.
+- ~~**`connect_args` / `gssencmode` on non-psycopg URLs.**~~ **RESOLVED, and
+  this entry was doubly stale when checked on 2026-09-12.** The
+  `startswith("postgresql://")` prefix match it described is gone: `db.py`
+  parses the URL instead, and says so in the comment beside it, so
+  driver-qualified URLs like `postgresql+psycopg2://` are handled. The entry
+  also claimed it had been "queued in `TODO.md`", and no such item was ever
+  there.
 - **`ignore_directories` replacing the defaults.** Working as documented,
   including the "empty list indexes everything" escape hatch a union would
   break. If discoverability is the concern, add a separate
@@ -1497,9 +1485,10 @@ blocks the import.
 
 Checked against the real 22,246-file corpus and **not present**, so reachable in
 principle but not here: filenames containing `[` (would break
-`status --verbose`, `render.py:260`), non-UTF-8 filenames (`source_watcher.py:593`
-then `render.py:157`), and paths over ~2,600 bytes (btree limit on
-`ix_source_documents_collection_source`, `db.py:70`).
+`status --verbose`, `render.py:260`), non-UTF-8 filenames (the four bare
+`.decode()` calls at `source_watcher.py:411`, `:420`, `:442`, `:444`, then
+`render.py:157`), and paths over ~2,600 bytes (btree limit on
+`ix_source_documents_collection_source`, `db.py:72`).
 
 Live, in rough order of how likely they are to bite:
 
@@ -1520,10 +1509,14 @@ avoid; it is only free on a day something else is already rebuilding.
 
 Still live:
 
-- **A revision can reach `ready` mid-initial-scan** (`pipeline_worker.py:263`):
-  the watcher registers documents one at a time with no scan-complete marker, so
-  a drain of the first N looks complete. Promotion re-checks and refuses, so this
-  misleads rather than corrupts.
+- **A revision can reach `ready` mid-initial-scan** (`revision_is_complete`,
+  `pipeline_worker.py:263`): the watcher registers documents one at a time with
+  no scan-complete marker, so a drain of the first N looks complete. Promotion
+  re-checks and refuses, so this misleads rather than corrupts. **Narrowed
+  since it was written:** the all-zero case — the fresh-`cementic start` race
+  where the worker's first pass beats the watcher's first document — is now
+  refused outright and documented in the function. What remains is the first-N
+  drain of a scan already under way.
 
 Resolved by the systemd units rather than by code: the worker had no respawn
 after an OOM or reboot, so a multi-day run ended silently.

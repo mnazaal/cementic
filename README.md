@@ -558,7 +558,7 @@ Intel Core Ultra 5 125U with its integrated Arc GPU via Vulkan:
 **`-ngl 0` is not a CPU baseline.** llama.cpp offloads large matmuls to any
 visible GPU backend by default (`--no-op-offload` defaults to `0`), so with a GPU
 present `ngl 0` is already GPU-assisted. Only `-dev none` measures the CPU.
-Reading `ngl 0` as the baseline made a 6.5× speedup look like 1.22×.
+Reading `ngl 0` as the baseline made a 6.5× speedup look like 1.17×.
 
 Expect less end to end: through cementic's HTTP path the CPU arm reached ~281
 tok/s against a raw 382, so derate by roughly a quarter.
@@ -785,11 +785,14 @@ mypy `strict` — so only what the tools cannot check is written down here:
 - **Database.** SQLAlchemy 2.0 ORM with `Mapped[]`, `select()` over raw SQL,
   relationships with `back_populates`, indexes in `__table_args__`. Raw `text()`
   is confined to what the ORM cannot model: per-profile vector DDL and KNN in
-  `vector_store.py`, ANN index DDL and extension setup in `db.py`, advisory
-  locks in `pipeline_worker.py`, and the probes in `doctor.py` /
-  `status_service.py`. Values are always bound; the only interpolated fragments
-  are identifiers computed from an int profile id, and settings a config
-  validator has already closed (`index.method`, `build_memory`).
+  `vector_store.py`, ANN index DDL, full-text index DDL and extension setup in
+  `db.py`, the KNN/lexical execution and the document-frequency probe in
+  `search.py`, advisory locks in `pipeline_worker.py`, the per-collection vector
+  delete in `revisions.py`, and the probes in `doctor.py` / `status_service.py`.
+  Values are always bound; the only interpolated fragments are identifiers
+  computed from an int profile id, the `LEXICAL_TEXT_CONFIG` module constant,
+  and settings a config validator has already closed (`index.method`,
+  `build_memory`).
 - **Config.** Pydantic `BaseSettings`, one env prefix per section
   (`CEMENTIC_DB_`, …), sensible defaults, every field documented.
 - **CLI.** Help text and error messages are part of the product. A namespace
@@ -844,6 +847,7 @@ src/cementic/
 ├── index_strategies.py   # ANN index registry (hnsw/diskann) -> DDL
 ├── vector_store.py       # per-profile vector tables + KNN SQL
 ├── search.py             # semantic search over the active revision
+├── hybrid.py             # lexical + vector rank fusion (pure)
 ├── collections.py        # collection delete + revision promote/history
 ├── config.py             # Pydantic settings (TOML + env + flags)
 ├── db.py                 # SQLAlchemy models + engine/session

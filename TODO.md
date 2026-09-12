@@ -103,36 +103,15 @@ index, versioned revisions) are documented in [PLAN.md](PLAN.md).
   Reproduced first as a failing test
   (`test_a_document_is_rechunked_after_its_failed_re_extraction`).
 
-  **The stranded rows still need repairing** -- the fix stops it recurring but
-  cannot re-chunk what is already stranded. 3 documents as of 2026-09-09, not
-  the 2 this entry was written for: the other 18,101 came from the watcher
-  purge below and went with its cleanup. Check the count before running this,
-  with `cementic doctor`'s `stranded_chunkings` line. One command, then let the
-  worker pick them up:
-
-  ```bash
-  cd ~/projects/cementic && ./.venv/bin/python -c "
-  from sqlalchemy import text
-  from cementic.config import get_config
-  from cementic.db import get_engine
-  with get_engine(get_config().database.url).begin() as conn:
-      print('invalidated', conn.execute(text('''
-        UPDATE chunked_documents SET source_content_hash = NULL WHERE id IN (
-          SELECT cd.id FROM chunked_documents cd
-          JOIN extracted_documents ed ON cd.extracted_document_id = ed.id
-          JOIN source_documents sd ON ed.document_id = sd.id
-          LEFT JOIN chunks_v2 c ON c.chunked_document_id = cd.id
-          WHERE cd.status = 'done' AND cd.total_chunks > 0
-            AND cd.source_content_hash = ed.content_hash AND sd.status <> 'deleted'
-          GROUP BY cd.id HAVING count(c.id) = 0)''')).rowcount)
-  "
-  ```
-
-  The selector is self-finding rather than hard-coded to any ids, so it repairs
-  every row in this state. That cuts both ways: on 2026-09-08 it would have
-  matched 18,103 rows and queued 1.8M chunks of re-embedding, most of it for
-  documents that were duplicates. Run `cementic doctor` first and satisfy
-  yourself the count is the one you mean to repair.
+  **Nothing is stranded any more, so the repair this entry carried is gone.**
+  Checked 2026-09-12: `cementic doctor` reports `stranded_chunkings: ok — every
+  chunking counted as done owns chunks`. The 3 rows outstanding on 2026-09-09
+  went with that day's cleanup. The repair was a single self-finding `UPDATE`
+  that cleared `source_content_hash` on every `done` chunking owning no chunks;
+  it is in this file's history if the state ever recurs, and `doctor` is what
+  detects it. Deleted rather than left standing because it was dangerous to run
+  unread — on 2026-09-08 the same selector would have matched 18,103 rows and
+  queued 1.8M chunks of re-embedding, most of them duplicates.
 
 - ~~**The corpus doubled, and 18,101 papers went unsearchable.**~~ **Fixed
   2026-09-09** on `claude/watcher-document-identity`; the live corpus was
@@ -182,11 +161,13 @@ missing pipeline-failure-to-status connection
 
 ## Later
 
-- Hybrid lexical + vector search for exact author names, acronyms, citations and
-  equation labels. **Now an active thread, not a someday item** — the mechanism is
-  measured (vector-only recall@10 is 0.047 on rare exact tokens; hybrid is 1.000)
-  and the remaining question is the fusion rule. See PLAN.md's
-  "Execution order — hybrid retrieval".
+- ~~Hybrid lexical + vector search for exact author names, acronyms, citations
+  and equation labels.~~ **Shipped; the thread closed 2026-09-10.** The fusion
+  rule is *the leading arm owns rank 1, RRF owns the rest* — vector-only
+  recall@10 is 0.047 on rare exact tokens against hybrid's 1.000. The one open
+  risk is that the precondition was never measured: nobody has checked whether
+  real queries are identifier-shaped. Measurements and that risk are in PLAN.md,
+  "Decided — hybrid lexical + vector retrieval".
 - A multi-profile embedding daemon pool if old-model search and new-model
   indexing need to run concurrently. *Trigger receded:* the migration that
   would have put both on one port was rejected (`PLAN.md`), so nothing needs
@@ -225,7 +206,7 @@ give it a condition someone could actually notice.
   another reason — the change touches four modules and is not worth a slot on
   its own.
 - **Stop the extractor registry re-versioning corpora that cannot be affected.**
-  `extractor_registry_payload` (`extract.py:516`) hashes every built-in
+  `extractor_registry_payload` (`extract.py:518`) hashes every built-in
   extractor, so adding a `.docx` entry re-versions an all-PDF corpus and forces
   a full rebuild — 2.3M vectors, ~108 hours. The gating that already excludes
   config-driven extractors cannot simply be widened: narrowing the payload
