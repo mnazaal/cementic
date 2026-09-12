@@ -18,7 +18,13 @@ from cementic.config import (
     resolve_config_path,
     resolve_llama_model_path,
 )
-from cementic.db import REQUIRED_DB_EXTENSIONS, get_engine
+from cementic.db import (
+    LEXICAL_INDEX_NAME,
+    REQUIRED_DB_EXTENSIONS,
+    LexicalIndexFacts,
+    get_engine,
+    lexical_index_facts,
+)
 from cementic.embedding_runtime import (
     EMBED_PROBE_SECONDS,
     AmbiguousDaemonPidsError,
@@ -143,6 +149,7 @@ def collect_doctor_report(config: Config) -> dict[str, Any]:
     extension_ok = False
     active_extractor_profiles: list[tuple[str, dict[str, Any]]] | None = None
     stranded_chunkings: int | None = None
+    lexical_facts: LexicalIndexFacts | None = None
     active_canaries: list[tuple[str, str, str, str, str | None]] | None = None
     try:
         engine = get_engine(config.database.url)
@@ -170,6 +177,7 @@ def collect_doctor_report(config: Config) -> dict[str, Any]:
                 }
             active_canaries = _active_embedding_canaries(conn)
             stranded_chunkings = _stranded_chunkings(conn)
+            lexical_facts = lexical_index_facts(conn)
     except Exception as error:
         checks["database"] = {
             "status": "fail",
@@ -231,6 +239,9 @@ def collect_doctor_report(config: Config) -> dict[str, Any]:
     }
 
     checks["stranded_chunkings"] = _stranded_chunkings_check(stranded_chunkings)
+    checks["lexical_index"] = _lexical_index_check(
+        lexical_facts, hybrid=config.search.hybrid
+    )
     checks["chunk_budget"] = _chunk_budget_check(config)
     checks["embedding_server"] = _embedding_server_check(config)
     server_ok = checks["embedding_server"]["status"] != "fail"
@@ -729,6 +740,76 @@ def _stranded_chunkings_check(count: int | None) -> dict[str, Any]:
             else f"{count} document(s) are counted as chunked but hold no chunks, so they "
             "match nothing in search; clear their chunkings' source_content_hash to "
             "re-open the work and let the worker re-chunk them"
+        ),
+    }
+
+
+def _lexical_index_check(facts: LexicalIndexFacts | None, *, hybrid: bool) -> dict[str, Any]:
+    """Report whether exact-word search has the index it silently depends on.
+
+    Same class of failure as `_stranded_chunkings_check` above, one layer down.
+    Without this index the lexical half of hybrid search matches nothing and
+    `cementic search` still answers, from the vector arm alone -- so a corpus
+    indexed before hybrid landed loses exactly the queries hybrid exists to
+    serve (rare author surnames, acronyms, equation labels) while every command
+    reports ok. Nothing else in cementic looks at it: `ensure_lexical_index`
+    deliberately skips a table that already holds rows, because building there
+    blocks worker startup for minutes.
+
+    A warning rather than a failure, like the stranded-chunkings check: the
+    installation is fit to run and a corpus inside it needs one command.
+    """
+    repair = "`cementic collection reindex <collection>` builds it"
+    if facts is None:
+        return {
+            "status": "warning",
+            "message": (
+                "could not be checked; the database is unreachable or is not PostgreSQL"
+            ),
+        }
+    if facts.present and facts.valid:
+        return {
+            "status": "ok",
+            "present": True,
+            "message": (
+                f"{LEXICAL_INDEX_NAME} is present and valid"
+                if hybrid
+                else f"{LEXICAL_INDEX_NAME} is present; search.hybrid is off, so "
+                "nothing reads it"
+            ),
+        }
+    if facts.present:
+        return {
+            "status": "warning",
+            "present": True,
+            "message": (
+                f"{LEXICAL_INDEX_NAME} exists but is INVALID, left by an interrupted "
+                "build. The planner ignores it, so every exact-word query falls back "
+                f"to a sequential scan of every chunk; {repair} again from scratch"
+            ),
+        }
+    if not facts.has_chunks:
+        return {
+            "status": "ok",
+            "present": False,
+            "message": "no chunks yet; the index is created with the first ones",
+        }
+    if not hybrid:
+        return {
+            "status": "ok",
+            "present": False,
+            "message": (
+                f"{LEXICAL_INDEX_NAME} is missing, and search.hybrid is off so "
+                f"nothing reads it; {repair} if you turn hybrid on"
+            ),
+        }
+    return {
+        "status": "warning",
+        "present": False,
+        "message": (
+            f"{LEXICAL_INDEX_NAME} is missing on a corpus that already holds chunks, "
+            "so the exact-word half of every hybrid search matches nothing and only "
+            f"the vector arm answers; {repair} (about 8 minutes for 2.3M chunks)"
         ),
     }
 

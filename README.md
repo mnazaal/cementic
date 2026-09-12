@@ -391,6 +391,23 @@ ones.
 
 Turn the whole thing off with `hybrid = false` under `[search]`.
 
+**If you indexed before hybrid search existed, the lexical arm has no index to
+read.** cementic creates it when a collection starts empty, but never on a table
+that already holds chunks: the build takes minutes there, and doing it at worker
+startup would block `cementic start` for all of them. Without it `cementic search`
+still answers — from the vector arm alone — so the symptom is silence rather than
+an error. `cementic doctor`'s `lexical_index` line reports the state, and one
+command builds it:
+
+```bash
+cementic collection reindex papers   # ~8 minutes for 2.3M chunks
+```
+
+Search and indexing keep working while it builds. The same command repairs the
+other state worth knowing about: an interrupted build leaves an index PostgreSQL
+lists as present and the planner refuses to use, which `doctor` reports as
+`INVALID` and this rebuilds from scratch.
+
 #### Why results sometimes show no score
 
 When both arms contribute, the list is ordered by *rank fusion*, not by either

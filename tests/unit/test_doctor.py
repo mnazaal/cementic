@@ -7,6 +7,7 @@ import pytest
 from sqlalchemy import create_engine, text
 
 from cementic.config import Config, ExtractionConfig
+from cementic.db import LexicalIndexFacts
 from cementic.doctor import (
     _active_embedding_canaries,
     _canary_drift_check,
@@ -15,6 +16,7 @@ from cementic.doctor import (
     _embedding_server_check,
     _extraction_commands_check,
     _extractor_drift_check,
+    _lexical_index_check,
     _ocr_check,
     _stranded_chunkings,
     _stranded_chunkings_check,
@@ -718,6 +720,68 @@ class TestStrandedChunkingsCheck:
 
         assert report["status"] == "warning"
         assert "stranded" not in report
+
+
+class TestLexicalIndexCheck:
+    """The index exact-word search needs, which nothing else reports.
+
+    `cementic search` answers from the vector arm alone when this index is
+    absent, so the corpus loses precisely the queries hybrid retrieval was
+    built for and every command still reports ok. The states are separated
+    because they need different actions, and one of them -- an index the
+    catalog has and the planner refuses -- is invisible to a presence test.
+    """
+
+    def test_a_valid_index_reports_ok(self) -> None:
+        report = _lexical_index_check(
+            LexicalIndexFacts(present=True, valid=True, has_chunks=True), hybrid=True
+        )
+
+        assert report["status"] == "ok"
+        assert report["present"] is True
+
+    def test_an_invalid_index_is_a_warning_naming_the_consequence(self) -> None:
+        """Present-but-invalid is the worst state: it looks healthy and isn't."""
+        report = _lexical_index_check(
+            LexicalIndexFacts(present=True, valid=False, has_chunks=True), hybrid=True
+        )
+
+        assert report["status"] == "warning"
+        assert "INVALID" in report["message"]
+        assert "sequential scan" in report["message"]
+        assert "collection reindex" in report["message"]
+
+    def test_a_missing_index_on_a_populated_corpus_is_a_warning(self) -> None:
+        report = _lexical_index_check(
+            LexicalIndexFacts(present=False, valid=False, has_chunks=True), hybrid=True
+        )
+
+        assert report["status"] == "warning"
+        assert report["present"] is False
+        assert "collection reindex" in report["message"]
+
+    def test_a_missing_index_with_no_chunks_is_ok(self) -> None:
+        """An empty table gets the index at the next worker startup, for free."""
+        report = _lexical_index_check(
+            LexicalIndexFacts(present=False, valid=False, has_chunks=False), hybrid=True
+        )
+
+        assert report["status"] == "ok"
+
+    def test_hybrid_off_makes_a_missing_index_harmless(self) -> None:
+        """Nothing reads it, so warning about it would be noise."""
+        report = _lexical_index_check(
+            LexicalIndexFacts(present=False, valid=False, has_chunks=True), hybrid=False
+        )
+
+        assert report["status"] == "ok"
+        assert "hybrid is off" in report["message"]
+
+    def test_an_unreadable_state_is_not_a_healthy_one(self) -> None:
+        report = _lexical_index_check(None, hybrid=True)
+
+        assert report["status"] == "warning"
+        assert "present" not in report
 
 
 class TestStrandedChunkingsProbe:

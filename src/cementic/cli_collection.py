@@ -258,10 +258,13 @@ def reindex_collection_command(
         "ef_construction, which are fixed at build time)",
     ),
 ) -> None:
-    """Reconcile the active revision's ANN index with the current `[index]` config.
+    """Reconcile this collection's indexes with the current config.
 
-    The index is built once, when a revision first completes, so editing
+    The ANN index is built once, when a revision first completes, so editing
     `index.method` afterwards otherwise had no effect and no way to ask for one.
+    Also builds the shared full-text index hybrid search reads if it is missing
+    or was left invalid by an interrupted build -- that one is global rather
+    than per-collection, and this is its only front door.
     """
     collection = _validated_collection_name(collection)
 
@@ -275,6 +278,12 @@ def reindex_collection_command(
                 "building the index — this can take several minutes on a large corpus"
             )
             outcome = reindex_collection(session, collection, config=_get_config(), force=force)
+
+    # Only when it did work. Silence means the index was already there, and a
+    # line saying so on every run is how the one run that mattered gets
+    # skimmed past.
+    if outcome.lexical_index == "built":
+        console.print("full-text index: built")
 
     if outcome.status == "no_active":
         err_console.print("status: no active revision — nothing has been promoted yet")

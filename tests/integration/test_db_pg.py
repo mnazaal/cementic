@@ -7,6 +7,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import sessionmaker
 
 from cementic import vector_store
+from cementic.collections import _reconcile_lexical_index
 from cementic.db import (
     LEXICAL_INDEX_NAME,
     LEXICAL_TEXT_CONFIG,
@@ -16,12 +17,14 @@ from cementic.db import (
     EmbeddingProfile,
     ExtractedDocument,
     ExtractorProfile,
+    LexicalIndexFacts,
     SourceDocument,
     _lexical_index_ddl,
     _lexical_index_exists,
     create_tables,
     ensure_embedding_ann_index,
     ensure_vector_extensions,
+    lexical_index_facts,
 )
 from cementic.index_strategies import IndexParams
 
@@ -427,6 +430,62 @@ class TestLexicalIndexPg:
         create_tables(pg_engine)
 
         assert _lexical_index_exists(pg_engine)
+
+    def test_facts_read_a_healthy_index_as_present_and_valid(self, pg_engine):
+        create_tables(pg_engine)
+
+        with pg_engine.connect() as conn:
+            facts = lexical_index_facts(conn)
+
+        assert facts == LexicalIndexFacts(present=True, valid=True, has_chunks=False)
+
+    def test_reconcile_builds_a_missing_index_and_then_leaves_it_alone(self, pg_engine):
+        """The repair path `cementic collection reindex` now runs.
+
+        A corpus indexed before hybrid search landed has rows in `chunks_v2`,
+        which is exactly the case `ensure_lexical_index` refuses to build for,
+        so before this had a caller the index could not be created at all.
+        """
+        create_tables(pg_engine)
+        with pg_engine.begin() as conn:
+            conn.execute(text(f"DROP INDEX {LEXICAL_INDEX_NAME}"))
+
+        assert _reconcile_lexical_index(pg_engine) == "built"
+        with pg_engine.connect() as conn:
+            assert lexical_index_facts(conn) == LexicalIndexFacts(
+                present=True, valid=True, has_chunks=False
+            )
+        assert _reconcile_lexical_index(pg_engine) == "present"
+
+    def test_reconcile_repairs_an_invalid_index_in_one_run(self, pg_engine):
+        """An interrupted build leaves an index the planner ignores.
+
+        Reproduced by marking a real index invalid in the catalog, because that
+        is the state an interrupted CONCURRENTLY build leaves behind. The bug
+        this pins: `CREATE INDEX CONCURRENTLY IF NOT EXISTS` matches the name,
+        so without dropping first the rebuild no-ops and the index stays
+        useless however many times it is run.
+        """
+        create_tables(pg_engine)
+        with pg_engine.begin() as conn:
+            conn.execute(
+                text(
+                    "UPDATE pg_index SET indisvalid = false "
+                    "WHERE indexrelid = to_regclass(:name)"
+                ),
+                {"name": LEXICAL_INDEX_NAME},
+            )
+        with pg_engine.connect() as conn:
+            assert lexical_index_facts(conn) == LexicalIndexFacts(
+                present=True, valid=False, has_chunks=False
+            )
+
+        assert _reconcile_lexical_index(pg_engine) == "built"
+
+        with pg_engine.connect() as conn:
+            assert lexical_index_facts(conn) == LexicalIndexFacts(
+                present=True, valid=True, has_chunks=False
+            )
 
     def test_the_planner_actually_uses_it(self, pg_engine):
         """The index is only worth having if the query reaches it.

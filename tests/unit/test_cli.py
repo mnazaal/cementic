@@ -1520,6 +1520,40 @@ class TestBackgroundCommands:
 
     @patch("cementic.cli_shared.get_session_factory")
     @patch("cementic.cli_shared.get_engine")
+    def test_collection_reindex_reports_a_built_full_text_index(
+        self, mock_get_engine, mock_get_session_factory
+    ):
+        """The repair `cementic doctor` sends the user here for.
+
+        Reported only when it happened: the index is global, so on most runs
+        there is nothing to do, and a line printed every time is one the run
+        that mattered gets skimmed past.
+        """
+        mock_session = MagicMock()
+        mock_session.__enter__.return_value = mock_session
+        mock_session.__exit__.return_value = False
+        mock_get_session_factory.return_value = lambda: mock_session
+
+        built = ReindexOutcome(
+            "reindexed", method="hnsw", previous_method="hnsw", lexical_index="built"
+        )
+        with patch("cementic.cli_collection.reindex_collection", return_value=built):
+            result = runner.invoke(app, ["collection", "reindex", "research"])
+
+        assert result.exit_code == 0
+        assert "full-text index: built" in result.output
+
+        already_there = ReindexOutcome(
+            "reindexed", method="hnsw", previous_method="hnsw", lexical_index="present"
+        )
+        with patch("cementic.cli_collection.reindex_collection", return_value=already_there):
+            quiet = runner.invoke(app, ["collection", "reindex", "research"])
+
+        assert quiet.exit_code == 0
+        assert "full-text index" not in quiet.output
+
+    @patch("cementic.cli_shared.get_session_factory")
+    @patch("cementic.cli_shared.get_engine")
     def test_collection_promote_blocked_by_failures(
         self, mock_get_engine, mock_get_session_factory
     ):

@@ -3,16 +3,18 @@
 from unittest.mock import MagicMock, patch
 
 import pytest
-from sqlalchemy import create_engine, inspect
+from sqlalchemy import create_engine, inspect, text
 
 from cementic.db import (
     REQUIRED_DB_EXTENSIONS,
     _ensure_ann_access_method,
+    build_lexical_index,
     create_tables,
     ensure_embedding_ann_index,
     ensure_lexical_index,
     ensure_vector_extensions,
     get_engine,
+    lexical_index_facts,
 )
 from cementic.index_strategies import IndexParams
 
@@ -198,3 +200,43 @@ class TestEnsureLexicalIndex:
         create_tables(engine)
 
         assert "chunks_v2" in inspect(engine).get_table_names()
+
+
+class TestLexicalIndexFacts:
+    """The state probe `cementic doctor` reports from.
+
+    Its own failure mode is the one `_stranded_chunkings` guards against: an
+    unrolled-back failed statement poisons the transaction, so every later
+    check on the same connection fails for an unrelated reason.
+    """
+
+    def test_a_non_postgres_backend_reads_as_unknown_not_absent(self):
+        """`pg_index` is PostgreSQL-only. Unknown and missing need different
+        reports, and the unit suite runs on sqlite."""
+        engine = create_engine("sqlite://")
+        create_tables(engine)
+
+        with engine.connect() as conn:
+            assert lexical_index_facts(conn) is None
+            # Still usable: this is what the rollback is for.
+            assert conn.execute(text("SELECT 1")).scalar() == 1
+
+    def test_build_drops_an_invalid_index_before_rebuilding(self):
+        """`CREATE INDEX CONCURRENTLY IF NOT EXISTS` matches on the name, so an
+        invalid leftover would survive the retry that is supposed to clear it."""
+        engine = MagicMock()
+        engine.dialect.name = "postgresql"
+
+        with (
+            patch("cementic.db._lexical_index_exists", side_effect=[True, True]),
+            # Invalid when inspected, valid once rebuilt -- the second reading is
+            # the post-build check that otherwise drops it and raises.
+            patch("cementic.db._lexical_index_is_valid", side_effect=[False, True]),
+        ):
+            build_lexical_index(engine)
+
+        dropped = [
+            str(call.args[0])
+            for call in engine.begin.return_value.__enter__.return_value.execute.call_args_list
+        ]
+        assert any("DROP INDEX" in statement for statement in dropped), dropped

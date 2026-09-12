@@ -12,7 +12,14 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from cementic.config import Config
-from cementic.db import Chunk, ExtractedDocument, PipelineRevision, SourceDocument
+from cementic.db import (
+    Chunk,
+    ExtractedDocument,
+    PipelineRevision,
+    SourceDocument,
+    build_lexical_index,
+    lexical_index_facts,
+)
 from cementic.pipeline_worker import (
     PipelineCounts,
     compute_revision_counts,
@@ -340,16 +347,45 @@ def promote_ready_revision(
 
 @dataclass(frozen=True)
 class ReindexOutcome:
-    """Result of reconciling a collection's ANN index with current config.
+    """Result of reconciling a collection's indexes with current config.
 
     ``status`` is one of ``"reindexed"``, ``"no_active"`` (nothing promoted yet)
     or ``"no_vectors"`` (the active revision embedded nothing, so there is no
-    table to index).
+    table to index) -- all three about the ANN index.
+
+    ``lexical_index`` reports the shared full-text index separately, because it
+    is not per-collection and so cannot share those three: ``"built"``,
+    ``"present"`` (nothing to do) or ``"unavailable"`` (not PostgreSQL).
     """
 
     status: str
     method: str | None = None
     previous_method: str | None = None
+    lexical_index: str = "unavailable"
+
+
+def _reconcile_lexical_index(engine: Engine) -> str:
+    """Build the shared full-text index when search cannot use the one present.
+
+    This command is the only front door to `build_lexical_index`. The index is
+    global -- one for every collection and revision, because chunk text does
+    not depend on the embedding model -- so it belongs to no revision and
+    `ensure_lexical_index` skips it at worker startup once `chunks_v2` holds
+    rows, where the build would block startup for minutes. Without a caller
+    here, a corpus indexed before hybrid search landed had no way to build it
+    at all and no report that it was missing; `cementic doctor`'s
+    `lexical_index` check is the report, and this is what the report points at.
+
+    Idempotent: present-and-valid returns without touching the database.
+    """
+    if engine.dialect.name != "postgresql":
+        return "unavailable"
+    with engine.connect() as conn:
+        facts = lexical_index_facts(conn)
+    if facts is not None and facts.present and facts.valid:
+        return "present"
+    build_lexical_index(engine)
+    return "built"
 
 
 def reindex_collection(
@@ -367,16 +403,23 @@ def reindex_collection(
     first, so a changed ``hnsw_m``/``ef_construction`` is picked up too: those
     are baked in at build time and ``CREATE INDEX IF NOT EXISTS`` would silently
     keep the old graph.
+
+    Reconciles the shared full-text index first, and does so on every run
+    including the two that report nothing to do below: it is global rather than
+    per-revision, so "this collection has no active revision" says nothing
+    about whether the corpus can be searched by exact word.
     """
+    engine = cast(Engine, session.get_bind())
+    lexical = _reconcile_lexical_index(engine)
+
     revision = get_active_revision(session, collection)
     if revision is None:
-        return ReindexOutcome("no_active")
+        return ReindexOutcome("no_active", lexical_index=lexical)
 
     profile_id = revision.embedding_profile_id
-    engine = cast(Engine, session.get_bind())
     with engine.connect() as conn:
         if not vector_table_exists(conn, profile_id):
-            return ReindexOutcome("no_vectors")
+            return ReindexOutcome("no_vectors", lexical_index=lexical)
         previous_method = index_access_method(conn, vector_index_name(profile_id))
 
     # The drop rides along inside ensure_revision_ann_index's own connection and
@@ -388,7 +431,10 @@ def reindex_collection(
     # inside ensure_revision_ann_index, and this session only ever read.
     ensure_revision_ann_index(session, revision, config, force_rebuild=force)
     return ReindexOutcome(
-        "reindexed", method=config.index.method, previous_method=previous_method
+        "reindexed",
+        method=config.index.method,
+        previous_method=previous_method,
+        lexical_index=lexical,
     )
 
 

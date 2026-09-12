@@ -391,12 +391,12 @@ the precondition for the whole feature was never measured.
       the reason the sqlite unit suite keeps working. An empty table indexes
       instantly; an existing corpus needs `CREATE INDEX CONCURRENTLY`, which
       cannot run inside a transaction and so needs its own connection.
-      *Exit:* met, but not the way this line says. Verified 2026-09-12 by
-      querying `pg_indexes` — `ix_chunks_v2_fts` is present on `chunks_v2` on
-      the live database — because **`doctor` has no lexical-index check**. So
-      nothing surfaces a missing GIN index in a report, which is the same
-      silence the document-identity section calls out as costing more than the
-      bugs. The sqlite-backed unit tests are untouched.
+      *Exit:* met 2026-09-12, and the exit criterion had to be built before it
+      could be met. `doctor` had no lexical-index check, so a missing GIN index
+      was reported by nothing — the same silence the document-identity section
+      calls out as costing more than the bugs. It now has one; see "Decided —
+      the full-text index reports its own absence" below. The sqlite-backed
+      unit tests are untouched.
 
    iii. ~~**The lexical query, scoped to the active revision.**~~ **DONE
       2026-09-07 (`45ed214`).** `lexical_sql` joins the *same* per-profile
@@ -767,6 +767,44 @@ promise — an ordinary refactor could break a live service silently.
 promote` and `reindex`, bare `--force` on `collection remove`, `stop`, `config
 init` and `init postgres`. A breaking change to muscle memory for a consistency
 nobody has tripped over. *Reopen when:* someone reports it.
+
+### Decided — the full-text index reports its own absence (2026-09-12) — DONE
+
+Found by sweeping this document against the code: step 5b.ii above claimed
+`cementic doctor` reported the lexical index, and nothing did. Three gaps, one
+per layer, and they compounded — the index could be absent, unreported, and
+unbuildable at the same time.
+
+**Nothing could build it.** `build_lexical_index` had zero callers.
+`ensure_lexical_index` deliberately skips a populated `chunks_v2` (building
+there blocks worker startup for minutes), so a corpus indexed before hybrid
+landed could not get the index from any command, only from hand-written Python.
+It is now reached by `cementic collection reindex`, which is where a user
+already goes when an index is wrong. *Rejected:* a new leaf command. The CLI
+audit named the surface the weakest point in the design, and this is a
+once-per-corpus repair. *Also rejected:* making the index per-revision and
+reconciled like the ANN index — 5b already settled that a text-derived index
+cannot depend on a model, so it stays a table-level index that this command
+merely ensures.
+
+**Nothing reported it.** `doctor`'s `lexical_index` check names the state
+rather than a boolean, because the three cases need different actions: missing
+on a corpus that holds chunks is a warning with the repair command; missing on
+an empty table is fine, since the next startup builds it for free; and
+`search.hybrid = false` makes it moot, so warning would be noise. A warning
+rather than a failure, like `stranded_chunkings`: the installation is fit to
+run and a corpus inside it needs one command.
+
+**Presence was the wrong question, which is the part worth keeping.** An
+interrupted `CREATE INDEX CONCURRENTLY` leaves an index that `pg_indexes`
+lists and the planner refuses to read, so every exact-word query silently
+falls back to scanning 2.3M rows — a check that asked only "is it there"
+would have passed on it. Worse, `CREATE INDEX CONCURRENTLY IF NOT EXISTS`
+matches on the *name*, so the retry no-opped against the leftover and the old
+code needed two runs to recover: one to drop, one to build. It now drops an
+invalid index before rebuilding. Pinned by a PostgreSQL test that marks a real
+index invalid in the catalog, mutation-checked by removing the drop — without
+it the test fails with the two-run `RuntimeError`.
 
 ### Decided — hybrid lexical + vector retrieval (2026-09-07) — DONE
 

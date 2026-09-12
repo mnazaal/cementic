@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 # mypy: disable-error-code=import-untyped
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
@@ -454,6 +455,56 @@ def _lexical_index_exists(engine: Engine) -> bool:
     }
 
 
+@dataclass(frozen=True)
+class LexicalIndexFacts:
+    """What the full-text index's state is, for a reader that only reports.
+
+    Three facts rather than one verdict, because presence alone cannot tell the
+    healthy state from the worst one: an interrupted CONCURRENTLY build leaves
+    an index the catalog reports as present and the planner refuses to use.
+    ``has_chunks`` separates "missing on a corpus that needs it" from "missing
+    on an empty table", where `ensure_lexical_index` creates it at the next
+    worker startup for free.
+    """
+
+    present: bool
+    valid: bool
+    has_chunks: bool
+
+
+def lexical_index_facts(conn: Any) -> LexicalIndexFacts | None:
+    """Read the index's state on an open connection, or None when it cannot be.
+
+    The single home for both questions, shared by the writer path below and by
+    `cementic doctor`'s report. None means the state is unknown rather than
+    absent -- `pg_index` is PostgreSQL-only, and the unit suite runs on sqlite.
+
+    Each failure is rolled back before returning: an unrolled-back failed
+    statement poisons the transaction, so on PostgreSQL it would turn every
+    later check on the same connection into a second, unrelated failure.
+    """
+    try:
+        valid = conn.execute(
+            text("SELECT indisvalid FROM pg_index WHERE indexrelid = to_regclass(:name)"),
+            {"name": LEXICAL_INDEX_NAME},
+        ).scalar()
+    except Exception:
+        conn.rollback()
+        return None
+    try:
+        has_chunks = (
+            conn.execute(text(f"SELECT 1 FROM {Chunk.__tablename__} LIMIT 1")).first() is not None
+        )
+    except Exception:
+        # A database that has never indexed anything has no `chunks_v2`, which
+        # is an empty corpus rather than an unknown state.
+        conn.rollback()
+        has_chunks = False
+    return LexicalIndexFacts(
+        present=valid is not None, valid=bool(valid), has_chunks=has_chunks
+    )
+
+
 def _table_has_rows(conn: Any, table: str) -> bool:
     return conn.execute(text(f"SELECT 1 FROM {table} LIMIT 1")).first() is not None
 
@@ -533,6 +584,15 @@ def build_lexical_index(engine: Engine) -> None:
         return
     if _lexical_index_exists(engine) and _lexical_index_is_valid(engine):
         return
+    if _lexical_index_exists(engine):
+        # An invalid index has to go before the build, not after it. `CREATE
+        # INDEX CONCURRENTLY IF NOT EXISTS` matches on the *name*, so it
+        # no-ops against the leftover of an interrupted build and the retry
+        # inherits the same useless index -- which used to need two runs to
+        # clear, one to drop and one to build. Dropping it costs nothing: the
+        # planner already refuses to read it.
+        with engine.begin() as conn:
+            conn.execute(text(f"DROP INDEX IF EXISTS {LEXICAL_INDEX_NAME}"))
     with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
         conn.execute(text(_lexical_index_ddl(Chunk.__tablename__, concurrently=True)))
 
@@ -552,14 +612,8 @@ def build_lexical_index(engine: Engine) -> None:
 def _lexical_index_is_valid(engine: Engine) -> bool:
     """Whether the full-text index finished building (PostgreSQL only)."""
     with engine.connect() as conn:
-        valid = conn.execute(
-            text(
-                "SELECT indisvalid FROM pg_index "
-                "WHERE indexrelid = to_regclass(:name)"
-            ),
-            {"name": LEXICAL_INDEX_NAME},
-        ).scalar()
-    return bool(valid)
+        facts = lexical_index_facts(conn)
+    return facts is not None and facts.valid
 
 
 def create_tables(engine: Engine) -> None:
