@@ -264,8 +264,10 @@ def query_tuning_statements(
     """``SET LOCAL`` statements for the method's query-time knobs (pure).
 
     An HNSW scan yields at most ``ef_search`` candidates, so a configured value
-    below the requested ``top_k`` caps the result count with no indication: the
-    default 40 is under the documented maximum of 50 results.
+    below the requested ``top_k`` caps the result count with no indication. The
+    default is 100, above the documented maximum of 50 results, so only a
+    lowered setting can hit this -- it was reachable with the previous default
+    of 40, which is why the guard exists.
 
     Iterative scanning matters because the filters are applied *during* the
     index scan: without it the scan stops after ``ef_search`` candidates

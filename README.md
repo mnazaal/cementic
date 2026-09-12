@@ -322,7 +322,7 @@ matching `CEMENTIC_*` variable (see [Environment variables](#environment-variabl
 | | `chunk_overlap` | `80` | Token overlap between neighbouring chunks |
 | `index` | `method` | `hnsw` | `hnsw` or `diskann` |
 | | `hnsw_m`, `hnsw_ef_construction` | `16`, `64` | Build-time graph knobs; fixed into the index, so changing them needs `collection reindex --force` |
-| | `hnsw_ef_search` | `40` | Query-time candidate list; raised automatically to at least `top_k` |
+| | `hnsw_ef_search` | `100` | Query-time candidate list; raised automatically to at least `top_k` |
 | | `hnsw_iterative_scan` | `relaxed_order` | `off`, `relaxed_order`, or `strict_order`; needs pgvector 0.8+ |
 | | `diskann_num_neighbors`, `diskann_search_list_size` | `50`, `100` | DiskANN build knobs |
 | | `diskann_query_rescore` | `50` | DiskANN query-time rescoring depth |
@@ -1031,57 +1031,64 @@ without re-embedding, so the decision is cheap to revisit. **Disk:** the
 database lands near 30 GB.
 
 **Search latency** (2026-09-12, the live 2,299,762-vector corpus, warm daemon,
-`hnsw.ef_search = 40`, hybrid on. Median of 7 interleaved runs per arm, one
-warm-up discarded, every run asserted to have returned ten results; range in
-brackets):
+hybrid on, at the settings that ship — `hnsw.ef_search = 100` and a freshly
+rebuilt full-text index. Median of 7 interleaved runs per arm, one warm-up
+discarded, every run asserted to have returned ten results; range in brackets):
 
 | step | time |
 |---|---|
-| embed the query string | 88 ms [81–95] |
-| the rest of a hybrid search — vector kNN, lexical arm, fusion | 291 ms |
-| **`Searcher.search()` total** | **379 ms [360–440]** |
-| the same query with `hybrid = false` | 111 ms [93–126] |
-| a rare single token, so the lexical arm leads | 350 ms [336–411] |
-| CLI end to end | ~1,013 ms [970–1,115] — the rest is interpreter and import startup |
+| embed the query string | 86 ms [74–90] |
+| the rest of a hybrid search — vector kNN, lexical arm, fusion | 321 ms |
+| **`Searcher.search()` total** | **407 ms [383–411]** |
+| the same query with `hybrid = false` | 117 ms [108–122] |
+| a rare single token, so the lexical arm leads | 358 ms [318–1,237] |
+| CLI end to end | ~997 ms [965–1,055] — the rest is interpreter and import startup |
 | first query after a cold start | 6.2 s, loading the model (2026-08-24 reading, not re-measured: it needs the live daemon stopped) |
 
 **Search is no longer embedding-bound, and hybrid is what dominates.**
-Embedding is 88 ms of 379 — under a quarter. Turning hybrid off takes the same
-query to 111 ms, so the lexical arm and fusion cost about 270 ms, roughly 3.4×
+Embedding is 86 ms of 407 — about a fifth. Turning hybrid off takes the same
+query to 117 ms, so the lexical arm and fusion cost about 290 ms, roughly 3.5×
 the vector-only path. That is the price of the recall it buys (0.047 → 1.000 on
 rare exact tokens, above); `hybrid = false` under `[search]` is the lever if a
 sub-150 ms search matters more.
 
-These readings are from *after* the full-text index was rebuilt (see below). The
-same measurement on the bloated index gave 423 ms total and 342 ms for the
-non-embedding part at the same machine load — about 50 ms worse, which is
-**inside the 80 ms spread of a single arm's own repeats**, so the rebuild's
-effect on latency is not established at seven runs. The index halving is
-measured; the speedup is not.
+Two other states were measured at the same machine load, and neither difference
+clears the noise. Before the full-text index was rebuilt (see below): 423 ms
+total. At the old `ef_search = 40`: 379 ms total, 111 ms with hybrid off. The
+~6 ms the vector-only path gained from the larger candidate list is the one
+change consistent with its cause; the rest sits inside a single arm's own
+spread, so no speedup or slowdown is claimed for either the rebuild or the
+default.
 
 Two earlier readings of this block are superseded rather than reconciled: 38.7 ms
 total with embedding at 35.3 ms of it, measured at 7,580 vectors before hybrid
 search existed, and before that 197 ms for the embedding step. The corpus is now
 300× larger, so the old absolute numbers say nothing about it.
 
-**ANN recall against exact search, and the default `ef_search` is too low at
-this size** (2026-09-12, the live 2,299,762-vector corpus, 20 queries taken from
-the corpus at evenly spaced ids so a re-run measures the same thing, top-10,
-production tuning — `hnsw.ef_search = 40` with `hnsw.iterative_scan =
-relaxed_order`):
+**ANN recall against exact search, and why the default `ef_search` changed**
+(2026-09-12, the live 2,299,762-vector corpus, 20 queries taken from the corpus
+at evenly spaced ids so a re-run measures the same thing, top-10, both arms
+carrying the production `hnsw.iterative_scan = relaxed_order`):
 
-| | recall@10 mean | worst | identical to exact |
-|---|---|---|---|
-| `ef_search = 40` (the default) | 0.935 | **0.000** | 17 of 20 |
+| | recall@10 mean | worst | below 1.00 | identical to exact |
+|---|---|---|---|---|
+| `ef_search = 40` (the old default) | 0.935 | **0.000** | 3 of 20 | 17 of 20 |
+| `ef_search = 100` (the default now) | **1.000** | **1.000** | 0 of 20 | 20 of 20 |
 
-**The worst case is a real miss, not a tie.** One query's exact top-10 ran from
+**The worst case was a real miss, not a tie.** One query's exact top-10 ran from
 distance 0.0177 — the query's own chunk, since the query text was drawn from the
 corpus — out to 0.32, while the ANN top-10 began at 0.43 and shared nothing with
-it. The graph failed to reach a neighbourhood containing a byte-identical row.
-The three queries that scored below 1.00 all reach **1.00 at `ef_search = 100`**,
-costing 3–7 ms against 40's 1–4 ms. Against a 379 ms hybrid search that is
-free, so raising the default is the obvious move and is not yet made; the
-measured figures above are for the default as it ships.
+it. At 40 the graph failed to reach a neighbourhood containing a byte-identical
+row. At 100 it reproduced the exact ranking on every query in the sample, for
+3–7 ms against 40's 1–4 ms — invisible inside a 407 ms hybrid search, which is
+what made the decision easy.
+
+`ef_search` is a query-time setting, so this changed nothing on disk and no
+index was rebuilt for it; lowering it again is one config line. **Twenty queries
+cannot estimate how often the tail fails** — one catastrophic case in twenty
+says the failure is real, not how common it is — so the honest summary is that
+100 removed every miss this sample could find, at a cost too small to measure
+against the rest of a search.
 
 `iterative_scan = relaxed_order` changed no result here and cost nothing
 measurable (1.35 ms against 1.30 ms warm, inside the spread). That is expected

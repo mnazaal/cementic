@@ -743,7 +743,14 @@ class IndexConfig(_SectionSettings):
     hnsw_ef_construction: int = Field(
         default=64, ge=1, description="HNSW build-time candidate list size"
     )
-    hnsw_ef_search: int = Field(default=40, ge=1, description="HNSW query-time candidate list size")
+    hnsw_ef_search: int = Field(
+        default=100,
+        ge=1,
+        description="HNSW query-time candidate list size. Raised from 40 to 100 on "
+        "2026-09-12: measured over 2.3M vectors, 40 returned recall@10 of 0.935 and "
+        "missed one query's true neighbours entirely, while 100 reproduced the exact "
+        "ranking on all 20 queries for 3-7 ms against 1-4 ms.",
+    )
     hnsw_iterative_scan: str = Field(
         default="relaxed_order",
         description="HNSW iterative scan mode: relaxed_order (default), "
