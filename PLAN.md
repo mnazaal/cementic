@@ -830,20 +830,41 @@ falsifier (vector ≥ 0.85, which would have killed the feature outright) never
 in sight.
 
 **Cost is not a constraint.** A GIN index on `to_tsvector('english', content)`
-built concurrently in 8.3 min; lexical queries run in 1–173 ms.
+builds concurrently in 6.0–6.3 min and occupies **617 MB fresh**; lexical
+queries run in 1–173 ms. The 0.98 GB projected from a 100k-chunk sample was 60%
+high — GIN posting lists compress better at corpus scale.
 
-**Corrected 2026-09-12 — the 617 MB recorded here is now 1,121 MB, and the
-"projection was 60% high" conclusion drawn from it does not survive.**
-Measured with `pg_relation_size('ix_chunks_v2_fts')` on the live database, at
-2,299,762 chunks against ~2,298,558 when the 617 MB was taken — so the corpus
-did **not** grow into it, and the 0.98 GB projected from a 100k-chunk sample was
-in fact 14% *low* rather than 60% high. The cause of the doubling is not
-established: dead tuples are 1,194 and the table was vacuumed 2026-09-10, so
-ordinary bloat does not cover it either, which leaves the possibility that the
-617 MB was read from the hand-made `chunks_v2_fts_probe` rather than from the
-index that shipped. *Settles it:* a fresh `CREATE INDEX CONCURRENTLY` and a
-size comparison — 8.3 min, and it drops the live index on the way, so it waits
-for a reason better than curiosity.
+**Resolved 2026-09-12 — maintaining this index per insert costs 82% of its
+size, which the build-up-front decision never measured.** The live index read
+1,121 MB where a rebuild of the same rows reads 617 MB, and the 504 MB
+difference is recoverable: `REINDEX INDEX CONCURRENTLY` returned it to 617 MB in
+6.0 min with search up throughout. Three candidate causes were tested rather
+than argued, because the first two were wrong:
+
+| | measured |
+| --- | --- |
+| fresh build, `maintenance_work_mem = 64MB` (the server default) | 617 MB, 6.3 min |
+| fresh build, `maintenance_work_mem = 1GB` | 617 MB, 6.0 min |
+| the live index, built up front and maintained across 2.3M inserts | 1,121 MB |
+
+So build memory is irrelevant (both arms identical), corpus growth cannot
+explain it (2,299,762 chunks against ~2,298,558 when the 617 MB was taken), and
+neither can dead tuples (1,194, table vacuumed 2026-09-10). What remains is the
+index absorbing 2.3M incremental inserts plus the 2026-09-09 repair's deletes,
+which is step 5b.i's decision working as designed and carrying a size cost
+nobody had put a number on. Both shadow builds ran beside the live index and
+were dropped, so nothing was taken out of service to learn this.
+
+**What this changes.** The up-front decision stands — its argument was wall
+clock and correctness-at-every-moment, and those hold — but it now reads: +82%
+index size until rebuilt, recoverable in 6 min whenever a bulk import ends.
+That step is in README's hybrid section as `REINDEX INDEX CONCURRENTLY`,
+deliberately manual: size is not a correctness fault, `doctor` cannot judge it
+without building the alternative, and `collection reindex` only rebuilds an
+index that is missing or invalid. *Reopen if:* a later measurement shows the
+maintained index costs latency as well as space. It did not here — 291 ms
+against 342 ms for the non-embedding half of a search, inside one arm's own
+80 ms spread, so no speedup is claimed.
 
 **Rank 1 was the hard part, and it is settled.** Plain RRF at k=60 drops set B
 from 0.713 to 0.540 and reaches only 0.047 on set A where the lexical arm alone

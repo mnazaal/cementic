@@ -90,8 +90,10 @@ directory when it is missing. Auto-download is the recommended path; use
 `cementic doctor` to check the resolved model path without downloading.
 If Postgres is not reachable, doctor suggests generating the local setup or
 pointing cementic at your own Postgres. It also reports faults in an existing
-corpus without changing anything — a document counted as chunked that holds no
-chunks, for instance, which matches nothing in search until it is re-chunked.
+corpus without changing anything: a document counted as chunked that holds no
+chunks, which matches nothing in search until it is re-chunked, and a missing or
+invalid full-text index, which silently costs exact-word search. Both are
+states where every other command still reports success.
 
 After the doctor check, run `cementic embedding start` once. It is optional —
 any command that needs embeddings starts the daemon on demand — but a cold
@@ -400,13 +402,26 @@ an error. `cementic doctor`'s `lexical_index` line reports the state, and one
 command builds it:
 
 ```bash
-cementic collection reindex papers   # ~8 minutes for 2.3M chunks
+cementic collection reindex papers   # ~6 minutes for 2.3M chunks
 ```
 
 Search and indexing keep working while it builds. The same command repairs the
 other state worth knowing about: an interrupted build leaves an index PostgreSQL
 lists as present and the planner refuses to use, which `doctor` reports as
 `INVALID` and this rebuilds from scratch.
+
+**After a bulk import, rebuild it once.** The index is created before the chunks
+arrive and maintained per insert, which keeps exact-word search correct at every
+moment during a multi-day import but leaves the index larger than the same data
+needs. Measured 2026-09-12 on the 2.3M-chunk corpus: **1,121 MB as maintained,
+617 MB rebuilt** — 45% recovered in 6 minutes. Neither `doctor` nor `collection
+reindex` will tell you or fix it, because size is not a correctness fault and
+cannot be judged without building the alternative, so it is a deliberate manual
+step:
+
+```sql
+REINDEX INDEX CONCURRENTLY ix_chunks_v2_fts;
+```
 
 #### Why results sometimes show no score
 
@@ -1022,20 +1037,27 @@ brackets):
 
 | step | time |
 |---|---|
-| embed the query string | 81 ms [78–89] |
-| the rest of a hybrid search — vector kNN, lexical arm, fusion | 342 ms |
-| **`Searcher.search()` total** | **423 ms [397–441]** |
-| the same query with `hybrid = false` | 119 ms [103–137] |
-| a rare single token, so the lexical arm leads | 354 ms [340–864] |
-| CLI end to end | ~1,040 ms [1,005–1,075] — the rest is interpreter and import startup |
+| embed the query string | 88 ms [81–95] |
+| the rest of a hybrid search — vector kNN, lexical arm, fusion | 291 ms |
+| **`Searcher.search()` total** | **379 ms [360–440]** |
+| the same query with `hybrid = false` | 111 ms [93–126] |
+| a rare single token, so the lexical arm leads | 350 ms [336–411] |
+| CLI end to end | ~1,013 ms [970–1,115] — the rest is interpreter and import startup |
 | first query after a cold start | 6.2 s, loading the model (2026-08-24 reading, not re-measured: it needs the live daemon stopped) |
 
 **Search is no longer embedding-bound, and hybrid is what dominates.**
-Embedding is 81 ms of 423 — under a fifth. Turning hybrid off takes the same
-query to 119 ms, so the lexical arm and fusion cost about 300 ms, roughly 3.5×
+Embedding is 88 ms of 379 — under a quarter. Turning hybrid off takes the same
+query to 111 ms, so the lexical arm and fusion cost about 270 ms, roughly 3.4×
 the vector-only path. That is the price of the recall it buys (0.047 → 1.000 on
 rare exact tokens, above); `hybrid = false` under `[search]` is the lever if a
 sub-150 ms search matters more.
+
+These readings are from *after* the full-text index was rebuilt (see below). The
+same measurement on the bloated index gave 423 ms total and 342 ms for the
+non-embedding part at the same machine load — about 50 ms worse, which is
+**inside the 80 ms spread of a single arm's own repeats**, so the rebuild's
+effect on latency is not established at seven runs. The index halving is
+measured; the speedup is not.
 
 Two earlier readings of this block are superseded rather than reconciled: 38.7 ms
 total with embedding at 35.3 ms of it, measured at 7,580 vectors before hybrid
@@ -1057,7 +1079,7 @@ distance 0.0177 — the query's own chunk, since the query text was drawn from t
 corpus — out to 0.32, while the ANN top-10 began at 0.43 and shared nothing with
 it. The graph failed to reach a neighbourhood containing a byte-identical row.
 The three queries that scored below 1.00 all reach **1.00 at `ef_search = 100`**,
-costing 3–7 ms against 40's 1–4 ms. Against a 423 ms hybrid search that is
+costing 3–7 ms against 40's 1–4 ms. Against a 379 ms hybrid search that is
 free, so raising the default is the obvious move and is not yet made; the
 measured figures above are for the default as it ships.
 

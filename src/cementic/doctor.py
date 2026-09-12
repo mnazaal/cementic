@@ -809,7 +809,7 @@ def _lexical_index_check(facts: LexicalIndexFacts | None, *, hybrid: bool) -> di
         "message": (
             f"{LEXICAL_INDEX_NAME} is missing on a corpus that already holds chunks, "
             "so the exact-word half of every hybrid search matches nothing and only "
-            f"the vector arm answers; {repair} (about 8 minutes for 2.3M chunks)"
+            f"the vector arm answers; {repair} (about 6 minutes for 2.3M chunks)"
         ),
     }
 
