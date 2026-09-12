@@ -10,9 +10,12 @@ re-derives. Read the "Decided — the CLI surface after the `llm` audit" block
 first if you want to know *why* the audit cut nothing; skip it if you only want
 to build.
 
-**Repo state.** `main` = `origin/main` = `bccd23a`, everything merged and
-pushed, no branches outstanding. *(Corrected 2026-09-12: this described the
-pre-merge state and gave the merge commands. Both were carried out.)*
+**Repo state.** Five commits sit on `claude/lexical-index-report`, fast-forward
+clean, waiting on your merge — a documentation staleness sweep, the full-text
+index fix, two re-measurement passes, and the `hnsw.ef_search` default. After
+`git merge --ff-only` and a push, `main` = `origin/main` with nothing
+outstanding. *(This line described `24927b7` and gave merge commands for two
+branches that no longer exist; corrected 2026-09-12.)*
 
 **Running, and safe to ignore.** `cementic@papers.service` is up; corpus is
 settled at 23,075 documents, 2,299,762 vectors, 100% embedded. No background
@@ -79,9 +82,9 @@ discarded deliberately; the help tree regenerates from `--help` in one command.
 **Exit criteria — commands whose output confirms the above.**
 ```bash
 git status --short                       # empty apart from masked dotfiles
-git log --oneline -1                     # bccd23a, equal to origin/main
+git log --oneline -1                     # this block's own commit, equal to origin/main
 ./scripts/check.sh                       # six gates, all ok
-./.venv/bin/cementic doctor              # every line ok
+./.venv/bin/cementic doctor              # every line ok, lexical_index included
 ./.venv/bin/cementic status              # ~1.6 s, papers 100% embedded
 ```
 <!-- session-handoff:end -->
