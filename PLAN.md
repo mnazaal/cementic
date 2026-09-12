@@ -1,90 +1,123 @@
 # cementic — architecture & design
 
-<!-- session-handoff:begin (2026-09-10, second session that day) -->
+<!-- session-handoff:begin (2026-09-12) -->
 ## Where the work stands
 
-**Entry point: "Execution order — CLI surface audit" below, step 2.** Step 1 is
-done. Steps 2–6 are specified in full — what changes, the exit condition, the
-anti-scope, the hidden cost — so the next session implements rather than
-re-derives. Read the "Decided — the CLI surface after the `llm` audit" block
-first if you want to know *why* the audit cut nothing; skip it if you only want
-to build.
+**First action: merge the branch. Then the entry point is "Execution order —
+CLI surface audit" below, step 2** (stop the CLI importing the database and HTTP
+layers). Step 2 was the entry point last session too and nothing in it was done
+this session — the session went to a documentation staleness sweep, one silent
+failure it uncovered, and the re-measurements those forced. Steps 2–6 are still
+specified in full, so the next session implements rather than re-derives.
 
-**Repo state.** Five commits sit on `claude/lexical-index-report`, fast-forward
-clean, waiting on your merge — a documentation staleness sweep, the full-text
-index fix, two re-measurement passes, and the `hnsw.ef_search` default. After
-`git merge --ff-only` and a push, `main` = `origin/main` with nothing
-outstanding. *(This line described `24927b7` and gave merge commands for two
-branches that no longer exist; corrected 2026-09-12.)*
+**Repo state.** Seven commits on `claude/lexical-index-report`, fast-forward
+clean against `main`, working tree clean. A hook rejects agent commits to
+`main`, so the merge is yours:
+```bash
+git checkout main && git merge --ff-only claude/lexical-index-report && git push
+git branch -d claude/lexical-index-report   # after the push
+```
 
-**Running, and safe to ignore.** `cementic@papers.service` is up; corpus is
-settled at 23,075 documents, 2,299,762 vectors, 100% embedded. No background
-jobs, no watch loops, nothing on a cluster.
+**Live system, and two things about it changed today.** `cementic@papers.service`
+is up; corpus settled at 23,075 documents / 2,299,762 vectors / 100% embedded.
+The full-text index was rebuilt (1,121 MB → 617 MB) and `hnsw.ef_search` now
+defaults to 100 rather than 40. No background jobs, nothing on a cluster.
 
-**What this session did.** Ran the CLI-surface audit `TODO.md` had gated on the
-hybrid thread closing, then planned its follow-up work in detail, then fixed a
-`status` performance regression found on the way. Three commits, all on `main`.
-Nothing is half-finished.
+**What this session did**, all of it recorded in the docs rather than here:
+swept every PLAN/TODO entry that read as open (six were stale), repaired 8 of 41
+code anchors, fixed five README defects, closed a silent failure in three layers
+(`doctor`'s new `lexical_index` check, `build_lexical_index` reachable from
+`cementic collection reindex`, and an invalid index now dropped before rebuild),
+then re-measured every search figure the sweep exposed as 300× out of scale.
+Measurements live in README's "Measurements behind the defaults"; the reasoning
+lives in PLAN's "Decided — the full-text index reports its own absence" and the
+GIN paragraph under the hybrid section.
 
 **Corrections — distrust these sections' history, not their current text.**
-- **Two figures I published were wrong, and are the reason to be careful here.**
-  The step-2 import timings and the step-3 cost comparison were first measured
-  while `check.sh` was running, which inflated them about 2×. Both are corrected
-  in place and now say what conditions they were taken under. The lesson is in
-  the step-2 text: measure on an idle machine, and cite the ratio rather than
-  the absolute when you cannot.
-- The hybrid section was titled "In progress" for a thread that closed on
-  2026-09-10, and two of its risks referenced execution-order steps that had
-  shipped. Retitled, one risk resolved against the live database, one restated.
-  The remaining open risk there is real: **the precondition for hybrid retrieval
-  was never measured** — nobody has looked at whether real queries are
-  identifier-shaped — and the feature shipped anyway.
-- README claimed `search --json` emits six fields; it emits seven.
-  `scripts/verify_postgres_container.sh` called `cementic status --doctor`, a
-  flag deleted months ago. Both fixed.
+- **A correction I wrote mid-session was itself wrong, and it is the cautionary
+  one.** I recorded PLAN's 617 MB GIN figure as superseded by a measured
+  1,121 MB. PLAN was right: 617 MB is what a *fresh build* costs, and the live
+  index was 82% bloated by being maintained per insert since the import. Two
+  hypotheses were tested and killed (build memory, corpus growth) before the
+  third held. The lesson is that a figure and its replacement can measure
+  different things.
+- Six PLAN/TODO entries read as live work and were already done — hybrid step
+  5v (shipped in `64b24d4`), the `gssencmode` item, the stranded-row repair,
+  TODO's hybrid thread, the v1.5 comparison, and the handoff block's own repo
+  state. Deleted rather than annotated.
+- README's search-latency, recall and index-size figures were all taken on a
+  7,580-vector corpus that no longer exists, and predate hybrid search. The
+  7,306-vs-7,580 discrepancy that exposed this was not resolvable by picking
+  one: they describe two different corpus states.
+- `ef_search = 40` was not merely imperfect at 2.3M vectors — one query in
+  twenty missed a byte-identical chunk entirely.
 
-**Deviations from the plan, attributed.**
-- *User-directed:* running the vacuum, and every merge and push.
-- *Agent-decided:* cancelling the vacuum of `embedding_vectors_p6` after 78
-  minutes. It was not stale, it was not needed, and its 9,150 MB HNSW index
-  makes it an hours-long job. Recorded under `TODO.md`'s `cementic status`
-  entry so nobody includes it again.
-- *Agent-decided:* fixing the two documentation defects during the audit rather
-  than leaving them as step 1 of its own plan, because writing a document that
-  called them false while leaving them in place was worse.
-- *Agent-decided:* the audit cut nothing. That is the plan's weakest point and
-  it is argued explicitly in the Decided block, with the stricter criterion that
-  would have cut more and why it was not used.
+**Deviations, attributed.**
+- *User-directed:* raising `ef_search` after a 20-query sweep rather than a
+  60-query one, folding that change into this branch rather than a separate one,
+  and every merge.
+- *Agent-decided:* running `REINDEX INDEX CONCURRENTLY` on the live index. It is
+  a repair, it kept search up throughout, and the alternative was publishing a
+  latency figure measured on a state we knew was unrepresentative.
+- *Agent-decided:* killing the first ANN-recall run two queries in, because its
+  ANN arm omitted the production `relaxed_order` tuning and would have published
+  a number for a path nobody runs.
+- *Agent-decided:* the post-import lexical rebuild is documented as a manual
+  `REINDEX`, not wired into `collection reindex`. Size is not a correctness
+  fault and cannot be judged without building the alternative.
 
 **Environment quirks that cost time.**
-- **The `agent-checkpoint` hook blocks every Bash command when the tree is
-  clean.** Its snapshot legitimately holds nothing new, but it cannot tell that
-  from a failed index, so it exits fatal and the gating hook refuses the turn.
-  Any edit to a tracked file clears it; the `Read`/`Edit`/`Write` tools are not
-  gated. Worth fixing in the script rather than working around.
-- The Bash sandbox blocks 127.0.0.1:5432 and the systemd user bus, so anything
-  touching the database or `systemctl --user` needs the sandbox disabled.
-- The masked device-node files at the repo root (`.bashrc`, `.zshrc`, …) are
-  sandbox artifacts, not real files. Ignore them in `git status`.
-- `zsh` does not word-split an unquoted variable. A loop of the form
-  `for c in "status -c x"; do cementic $c; done` passes the whole string as one
-  argument and every command looks like a usage error. This produced a false
-  "README's exit codes are wrong" finding before it was caught.
+- **An exact kNN scan evicts the page cache the ANN index needs.** Interleaving
+  one with a latency arm produced a 326 ms reading for a query that measures
+  1.3 ms warm — a 250× error that looked like a finding about
+  `hnsw.iterative_scan`. Measure recall interleaved (deterministic, cache-blind)
+  and latency separately, warm.
+- **A background job's wrapper reported exit 0 while the job failed instantly.**
+  Read the log, never the harness's status line.
+- Machine load must be under ~2 before recording any timing; a REINDEX leaves
+  the load above 5 for several minutes afterwards, entirely in I/O wait.
+- `$TMPDIR` differs between sandboxed and unsandboxed Bash calls, so a file
+  written by one is not found by the other. Use an absolute scratchpad path.
+- `pkill -f <pattern>` matches its own shell; bracket a character.
+- **The Bash sandbox blocks 127.0.0.1:5432 and the systemd user bus**, so every
+  command in the exit criteria below except `git` needs the sandbox disabled —
+  `check.sh`, `doctor`, `status`, `search`, and anything touching the database
+  or `systemctl --user`. A blocked connection is reported as "database not
+  reachable", which reads like a broken corpus.
+- The masked device-node files at the repo root (`.bashrc`, `.zshrc`, `.claude/`,
+  …) are sandbox artifacts, not real files. They are why `git status --short`
+  is expected to show untracked entries and why the criterion says "empty apart
+  from masked dotfiles".
+- The `agent-checkpoint` hook blocking Bash on a clean tree was recorded last
+  session; it did not fire this session, so treat it as unconfirmed rather than
+  fixed.
 
-**Artifacts.** `~/.cache/cementic-vacuum.py` is worth keeping — it vacuums the
-five tables `status` reads and prints before/after `pg_stat_user_tables` rows.
-`notes/design-cli-surface.html` holds the audit evidence and the `llm`
-comparison (gitignored, so it exists only on this machine). The last full green
-gate is `~/.cache/cementic-check-vacuum.log`. Everything else this session
-produced — the help-tree dump and a sample Markdown file in the scratchpad — is
-discarded deliberately; the help tree regenerates from `--help` in one command.
+**Artifacts.** Four measurement harnesses were promoted from the scratchpad to
+`notes/`: `probe_search_latency.py`, `probe_ann_recall.py`, `probe_ef_search.py`,
+`probe_gin_index_size.py` (that last one builds shadow indexes beside the live
+one, which is how the GIN question was settled without taking search down).
+`notes/` is gitignored, so these exist only on this machine — the same risk PLAN
+already records for `probe_hybrid_retrieval.py`. Logs: `~/.cache/cementic-ef-search.log`,
+`-ann-recall.log`, `-gin-size.log`, `-gin-reindex.log`, and the last green gate
+run at `~/.cache/cementic-check-ef.log`. The two peel snapshots used to split
+one commit were discarded deliberately.
+
+**Open, and deliberately not closed.**
+- **How often `ef_search = 40` would have failed is unknown.** One catastrophic
+  case in twenty says the failure is real, not its rate. The 60-query sweep is
+  ~17 minutes with `notes/probe_ef_search.py`.
+- The hybrid precondition is still unmeasured: nobody has checked whether real
+  queries are identifier-shaped, and no query logging exists. See PLAN's hybrid
+  risk entry.
+- `doctor` gained a `lexical_index` check but nothing reports index *bloat*.
 
 **Exit criteria — commands whose output confirms the above.**
 ```bash
 git status --short                       # empty apart from masked dotfiles
-git log --oneline -1                     # this block's own commit, equal to origin/main
+git log --oneline -1                     # this block's own commit, equal to origin/main after your merge
 ./scripts/check.sh                       # six gates, all ok
-./.venv/bin/cementic doctor              # every line ok, lexical_index included
+./.venv/bin/cementic doctor              # every line ok, including lexical_index
+./.venv/bin/cementic config show | grep ef_search   # 100
 ./.venv/bin/cementic status              # ~1.6 s, papers 100% embedded
 ```
 <!-- session-handoff:end -->
