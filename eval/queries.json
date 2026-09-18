@@ -1,6 +1,7 @@
 {
   "collection": "papers",
   "depth": 50,
+  "perturb_seed": 20260918,
   "queries": [
     {
       "gold": "Savani et al-2024-Diffusing Differentiable Representations.pdf",
@@ -901,6 +902,906 @@
       "gold": "Lesort-2023-Spurious Features in Continual Learning.pdf",
       "kind": "phrase",
       "query": "major goals of the recent out-of-distribution"
+    },
+    {
+      "gold": "Xu et al-2026-Does SGD Seek Flatness or Sharpness An Exactly Solvable Model.pdf",
+      "kind": "phrase-reordered",
+      "query": "apparently contradictory has phenomenon become increasingly"
+    },
+    {
+      "gold": "Savani et al-2024-Diffusing Differentiable Representations.pdf",
+      "kind": "phrase-reordered",
+      "query": "diffrep to produce most the likely"
+    },
+    {
+      "gold": "Jaeger et al-2025-CaRL Learning Scalable Planning Policies with Simple Rewards.pdf",
+      "kind": "phrase-reordered",
+      "query": "approaches rule-based work well for regular"
+    },
+    {
+      "gold": "Hermans et al-2020-Likelihood-free MCMC with Amortized Approximate Ratio Estimators.pdf",
+      "kind": "phrase-reordered",
+      "query": "ratio posterior of densities between consecutive"
+    },
+    {
+      "gold": "Jing et al-2022-Understanding Dimensional Collapse in Contrastive Self-supervised Learning.pdf",
+      "kind": "phrase-reordered",
+      "query": "augmentations max- by imizing the agreement"
+    },
+    {
+      "gold": "Yaghoobi et al-2023-Parallel square-root statistical linear regression for inference in nonlinear state space models.pdf",
+      "kind": "phrase-reordered",
+      "query": "densities prior of the SSM depend"
+    },
+    {
+      "gold": "Ellam et al-2018-Stochastic Modelling of Urban Structure.pdf",
+      "kind": "phrase-reordered",
+      "query": "key features of and cities regions"
+    },
+    {
+      "gold": "Deldjoo et al-2024-A Review of Modern Recommender Systems Using Generative Models (Gen-RecSys).pdf",
+      "kind": "phrase-reordered",
+      "query": "Societal Considerations ACM Format Reference Yashar"
+    },
+    {
+      "gold": "Ben-Michael et al-2024-Does AI help humans make better decisions A statistical evaluation framework for experimental and o.pdf",
+      "kind": "phrase-reordered",
+      "query": "Harvard School Law Massachusetts Avenue Griswold"
+    },
+    {
+      "gold": "Chen et al-2023-Structured Neural Networks for Density Estimation and Causal Inference.pdf",
+      "kind": "phrase-reordered",
+      "query": "learning Ok et computational al healthcare"
+    },
+    {
+      "gold": "Chen et al-2022-Federated Learning Attacks and Defenses - A Survey.pdf",
+      "kind": "phrase-reordered",
+      "query": "Terms learning federated attacks defenses challenges"
+    },
+    {
+      "gold": "Ganapathy-Bennett-2021-Cybernetics and the Future of Work.pdf",
+      "kind": "phrase-reordered",
+      "query": "subsystems technological social economic and environmental"
+    },
+    {
+      "gold": "Stromme-2023-Sampling From a Schr\u00f6dinger Bridge.pdf",
+      "kind": "phrase-reordered",
+      "query": "bility on measures Rd with finite"
+    },
+    {
+      "gold": "Lee et al-2011-Dual-Tree Fast Gauss Transforms.pdf",
+      "kind": "phrase-reordered",
+      "query": "qi Kh R qi rj Normalize"
+    },
+    {
+      "gold": "Neklyudov et al-2021-Particle Dynamics for Learning EBMs.pdf",
+      "kind": "phrase-reordered",
+      "query": "different targeting objectives Grathwohl et al"
+    },
+    {
+      "gold": "Markovi\u0107 et al-2023-Bayesian sparsification for deep neural networks with Bayesian model reduction.pdf",
+      "kind": "phrase-reordered",
+      "query": "facilitating training the of expansive parametric"
+    },
+    {
+      "gold": "Mattsson et al-2020-Examining the causal structures of deep neural networks using information theory.pdf",
+      "kind": "phrase-reordered",
+      "query": "varied such domains as speech synthesis"
+    },
+    {
+      "gold": "Mondal-Aggarwal-2023-Reinforcement Learning with Delayed, Composite, and Partially Anonymous Reward.pdf",
+      "kind": "phrase-reordered",
+      "query": "fed instantly back to the learner"
+    },
+    {
+      "gold": "Braunstein et al-2011-Inference and learning in sparse systems with multiple states.pdf",
+      "kind": "phrase-reordered",
+      "query": "culty of systematic making measurements"
+    },
+    {
+      "gold": "Bloor et al-2025-Gaussian Process Q-Learning for Finite-Horizon Markov Decision Processes.pdf",
+      "kind": "phrase-reordered",
+      "query": "globally the to exact GP state-action"
+    },
+    {
+      "gold": "Nasution et al-2025-Flow Matching for Tabular Data Synthesis.pdf",
+      "kind": "phrase-reordered",
+      "query": "decision-making in healthcare economics social sciences"
+    },
+    {
+      "gold": "Stoian et al-2021-Towards Practical Learned Indexing.pdf",
+      "kind": "phrase-reordered",
+      "query": "i radix the layer is hard"
+    },
+    {
+      "gold": "Kaliszyk-Urban-2014-Learning-assisted Theorem Proving with Millions of Lemmas.pdf",
+      "kind": "phrase-reordered",
+      "query": "experiments with automated external theorem provers"
+    },
+    {
+      "gold": "Chan et al-2021-Human irrationality - both bad and good for reward inference.pdf",
+      "kind": "phrase-reordered",
+      "query": "ed a deluge irrationalities of i"
+    },
+    {
+      "gold": "Kim et al-2024-(Deep) Generative Geodesics.pdf",
+      "kind": "phrase-reordered",
+      "query": "Extended Abstract of Geometry-grounded the Representation"
+    },
+    {
+      "gold": "Koch-Janusz-Ringel-2018-Mutual information, neural networks and the renormalization group.pdf",
+      "kind": "phrase-reordered",
+      "query": "conceptual step particularly strongly for interacting"
+    },
+    {
+      "gold": "Amiaud-Plachy et al-2026-Bayes-PD Exploring a Sequence to Binding Bayesian Neural Network model trained on Phage Display dat.pdf",
+      "kind": "phrase-reordered",
+      "query": "target designated see negative selection"
+    },
+    {
+      "gold": "Bengio-Chapados-2003-Extensions to Metric-Based Model Selection.pdf",
+      "kind": "phrase-reordered",
+      "query": "vice-versa if is G not rich"
+    },
+    {
+      "gold": "Wasserman-2016-Topological Data Analysis.pdf",
+      "kind": "phrase-reordered",
+      "query": "VISUALIZATION AND EMBEDDINGS The APPLICATIONS Cosmic"
+    },
+    {
+      "gold": "Mengersen-Tweedie-1996-Rates of convergence of the Hastings and Metropolis algorithms.pdf",
+      "kind": "phrase-reordered",
+      "query": "discrete-time chain Markov evolv- k"
+    },
+    {
+      "gold": "Chandak et al-2023-Off-Policy Evaluation for Action-Dependent Non-Stationary Environments.pdf",
+      "kind": "phrase-reordered",
+      "query": "active can changes occur together Khetarpal"
+    },
+    {
+      "gold": "Anantheswaran et al-2024-Investigating the Robustness of LLMs on Math Word Problems.pdf",
+      "kind": "phrase-reordered",
+      "query": "Gupta et typically al feature simplified"
+    },
+    {
+      "gold": "Halpern-Piermont-2020-Dynamic Awareness.pdf",
+      "kind": "phrase-reordered",
+      "query": "aware his tire en- subjective view"
+    },
+    {
+      "gold": "Shimizu-Bollen-2014-Bayesian Estimation of Causal Direction in Acyclic Structural Equation Models with Individual-specif.pdf",
+      "kind": "phrase-reordered",
+      "query": "one uniquely cannot estimate the underlying"
+    },
+    {
+      "gold": "Daems et al-2023-Variational Inference for SDEs Driven by Fractional Noise.pdf",
+      "kind": "phrase-reordered",
+      "query": "objects observers and the deformations subtle"
+    },
+    {
+      "gold": "Abramson et al-2022-Improving Multimodal Interactive Agents with Reinforcement Learning from Human.pdf",
+      "kind": "phrase-reordered",
+      "query": "G Improving Nov Multimodal Interactive Agents"
+    },
+    {
+      "gold": "Belakaria et al-2023-Bayesian Optimization Over Iterative Learners with Structured Responses - A.pdf",
+      "kind": "phrase-reordered",
+      "query": "Feurer et al Fusi al et"
+    },
+    {
+      "gold": "Grinwald et al-2023-Visualizing the Diversity of Representations Learned by Bayesian Neural Networks.pdf",
+      "kind": "phrase-reordered",
+      "query": "XAI global methods can be applied"
+    },
+    {
+      "gold": "Grill et al-2020-Monte-Carlo Tree Search as Regularized Policy Optimization.pdf",
+      "kind": "phrase-reordered",
+      "query": "selection takes criteria inspiration from bandits"
+    },
+    {
+      "gold": "Agarwal et al-2023-Causal Matrix Completion.pdf",
+      "kind": "phrase-reordered",
+      "query": "normality asymptotic of the SNN estimator"
+    },
+    {
+      "gold": "Ninniri et al-2025-Graph Diffusion that can Insert and Delete.pdf",
+      "kind": "phrase-reordered",
+      "query": "challenges deep graph generators et Faez"
+    },
+    {
+      "gold": "Chen et al-2021-Auto-differentiable Ensemble Kalman Filters.pdf",
+      "kind": "phrase-reordered",
+      "query": "c inaccurate partially-known or dynamical models"
+    },
+    {
+      "gold": "Hoffman-Ma-2019-Langevin Dynamics as Nonparametric Variational Inference.pdf",
+      "kind": "phrase-reordered",
+      "query": "statements like this impre- are cise"
+    },
+    {
+      "gold": "Zahavy et al-2016-Is a picture worth a thousand words - A Deep Multi-Modal Fusion Architecture for.pdf",
+      "kind": "phrase-reordered",
+      "query": "equipment and the product shelf s"
+    },
+    {
+      "gold": "Berner et al-2023-Adaptive Dynamical Networks.pdf",
+      "kind": "phrase-reordered",
+      "query": "adaptive networks is more much chal-"
+    },
+    {
+      "gold": "Choi-Wolfer-2023-Markov chain entropy games and the geometry of their Nash equilibria.pdf",
+      "kind": "phrase-reordered",
+      "query": "Berlin Heidelberg highlights and the powerful"
+    },
+    {
+      "gold": "Tay et al-2020-Sparse Sinkhorn Attention.pdf",
+      "kind": "phrase-reordered",
+      "query": "idea of differentiable of sorting internal"
+    },
+    {
+      "gold": "Le et al-2011-On optimization methods for deep learning.pdf",
+      "kind": "phrase-reordered",
+      "query": "SGDs that is they are simple"
+    },
+    {
+      "gold": "Huang et al-2018-Generalized Score Functions for Causal Discovery.pdf",
+      "kind": "phrase-reordered",
+      "query": "INTRODUCTION Traditionally interventions or experiments randomized"
+    },
+    {
+      "gold": "Witty et al-2020-Causal Inference using Gaussian Processes with Structured Latent Confounders.pdf",
+      "kind": "phrase-reordered",
+      "query": "effects of requires interventions untestable assumptions"
+    },
+    {
+      "gold": "Laydevant et al-2021-Training Dynamical Binary Neural Networks with Equilibrium Propagation.pdf",
+      "kind": "phrase-reordered",
+      "query": "von hardware Neumann with a delocalized"
+    },
+    {
+      "gold": "Schmidhuber-2015-On Learning to Think - Algorithmic Information Theory for Novel Combinations of.pdf",
+      "kind": "phrase-reordered",
+      "query": "NNs Unsupervised Supervised Learning SL UL"
+    },
+    {
+      "gold": "Loconte et al-2023-Negative Mixture Models via Squaring - Representation and Learning.pdf",
+      "kind": "phrase-reordered",
+      "query": "metallico standard c d GMM- NGMM-"
+    },
+    {
+      "gold": "Ivison et al-2024-Unpacking DPO and PPO Disentangling Best Practices for Learning from Preference Feedback.pdf",
+      "kind": "phrase-reordered",
+      "query": "instruction following code and math summarisation"
+    },
+    {
+      "gold": "Anselmi et al-2022-Reinforcement Learning in a Birth and Death Process - Breaking the Dependence on.pdf",
+      "kind": "phrase-reordered",
+      "query": "policy is lower by bounded DSAT"
+    },
+    {
+      "gold": "Zhang-Hyv\u00e4rinen-2010-Distinguishing Causes from Effects using Nonlinear Acyclic Causal Models.pdf",
+      "kind": "phrase-reordered",
+      "query": "unnecessary remove connections among the observed"
+    },
+    {
+      "gold": "Cowan-2001-The magical number 4 in short-term memory - A reconsideration of mental storage.pdf",
+      "kind": "phrase-reordered",
+      "query": "time BEHAVIORAL AND SCIENCES BRAIN Printed"
+    },
+    {
+      "gold": "Hao et al-2021-Online Sparse Reinforcement Learning.pdf",
+      "kind": "phrase-reordered",
+      "query": "role of sparsity in RL online"
+    },
+    {
+      "gold": "Sheinkman-Wade-2025-Understanding the Trade-offs in Accuracy and Uncertainty Quantification Architecture and Inference.pdf",
+      "kind": "phrase-reordered",
+      "query": "et rizhevsky al Dosovitskiy et al"
+    },
+    {
+      "gold": "Lesort-2023-Spurious Features in Continual Learning.pdf",
+      "kind": "phrase-reordered",
+      "query": "major goals the of recent out-of-distribution"
+    },
+    {
+      "gold": "Xu et al-2026-Does SGD Seek Flatness or Sharpness An Exactly Solvable Model.pdf",
+      "kind": "phrase-dropped",
+      "query": "apparently contradictory phenomenon has increasingly"
+    },
+    {
+      "gold": "Savani et al-2024-Diffusing Differentiable Representations.pdf",
+      "kind": "phrase-dropped",
+      "query": "diffrep to produce most likely"
+    },
+    {
+      "gold": "Jaeger et al-2025-CaRL Learning Scalable Planning Policies with Simple Rewards.pdf",
+      "kind": "phrase-dropped",
+      "query": "rule-based approaches work well regular"
+    },
+    {
+      "gold": "Hermans et al-2020-Likelihood-free MCMC with Amortized Approximate Ratio Estimators.pdf",
+      "kind": "phrase-dropped",
+      "query": "ratio of posterior between consecutive"
+    },
+    {
+      "gold": "Jing et al-2022-Understanding Dimensional Collapse in Contrastive Self-supervised Learning.pdf",
+      "kind": "phrase-dropped",
+      "query": "augmentations by imizing the agreement"
+    },
+    {
+      "gold": "Yaghoobi et al-2023-Parallel square-root statistical linear regression for inference in nonlinear state space models.pdf",
+      "kind": "phrase-dropped",
+      "query": "prior of the SSM depend"
+    },
+    {
+      "gold": "Ellam et al-2018-Stochastic Modelling of Urban Structure.pdf",
+      "kind": "phrase-dropped",
+      "query": "key features of cities regions"
+    },
+    {
+      "gold": "Deldjoo et al-2024-A Review of Modern Recommender Systems Using Generative Models (Gen-RecSys).pdf",
+      "kind": "phrase-dropped",
+      "query": "Societal Considerations ACM Format Yashar"
+    },
+    {
+      "gold": "Ben-Michael et al-2024-Does AI help humans make better decisions A statistical evaluation framework for experimental and o.pdf",
+      "kind": "phrase-dropped",
+      "query": "Harvard Law School Massachusetts Griswold"
+    },
+    {
+      "gold": "Chen et al-2023-Structured Neural Networks for Density Estimation and Causal Inference.pdf",
+      "kind": "phrase-dropped",
+      "query": "learning Ok et computational healthcare"
+    },
+    {
+      "gold": "Chen et al-2022-Federated Learning Attacks and Defenses - A Survey.pdf",
+      "kind": "phrase-dropped",
+      "query": "Terms federated learning defenses challenges"
+    },
+    {
+      "gold": "Ganapathy-Bennett-2021-Cybernetics and the Future of Work.pdf",
+      "kind": "phrase-dropped",
+      "query": "subsystems technological economic and environmental"
+    },
+    {
+      "gold": "Stromme-2023-Sampling From a Schr\u00f6dinger Bridge.pdf",
+      "kind": "phrase-dropped",
+      "query": "bility measures on Rd finite"
+    },
+    {
+      "gold": "Lee et al-2011-Dual-Tree Fast Gauss Transforms.pdf",
+      "kind": "phrase-dropped",
+      "query": "qi R Kh qi Normalize"
+    },
+    {
+      "gold": "Neklyudov et al-2021-Particle Dynamics for Learning EBMs.pdf",
+      "kind": "phrase-dropped",
+      "query": "targeting different Grathwohl et al"
+    },
+    {
+      "gold": "Markovi\u0107 et al-2023-Bayesian sparsification for deep neural networks with Bayesian model reduction.pdf",
+      "kind": "phrase-dropped",
+      "query": "facilitating the training of parametric"
+    },
+    {
+      "gold": "Mattsson et al-2020-Examining the causal structures of deep neural networks using information theory.pdf",
+      "kind": "phrase-dropped",
+      "query": "varied such as speech synthesis"
+    },
+    {
+      "gold": "Mondal-Aggarwal-2023-Reinforcement Learning with Delayed, Composite, and Partially Anonymous Reward.pdf",
+      "kind": "phrase-dropped",
+      "query": "instantly fed back the learner"
+    },
+    {
+      "gold": "Braunstein et al-2011-Inference and learning in sparse systems with multiple states.pdf",
+      "kind": "phrase-dropped",
+      "query": "culty making systematic measurements"
+    },
+    {
+      "gold": "Bloor et al-2025-Gaussian Process Q-Learning for Finite-Horizon Markov Decision Processes.pdf",
+      "kind": "phrase-dropped",
+      "query": "globally to the exact state-action"
+    },
+    {
+      "gold": "Nasution et al-2025-Flow Matching for Tabular Data Synthesis.pdf",
+      "kind": "phrase-dropped",
+      "query": "decision-making in economics healthcare sciences"
+    },
+    {
+      "gold": "Stoian et al-2021-Towards Practical Learned Indexing.pdf",
+      "kind": "phrase-dropped",
+      "query": "i the radix is hard"
+    },
+    {
+      "gold": "Kaliszyk-Urban-2014-Learning-assisted Theorem Proving with Millions of Lemmas.pdf",
+      "kind": "phrase-dropped",
+      "query": "experiments external automated theorem provers"
+    },
+    {
+      "gold": "Chan et al-2021-Human irrationality - both bad and good for reward inference.pdf",
+      "kind": "phrase-dropped",
+      "query": "ed deluge of irrationalities i"
+    },
+    {
+      "gold": "Kim et al-2024-(Deep) Generative Geodesics.pdf",
+      "kind": "phrase-dropped",
+      "query": "Extended Abstract of the Representation"
+    },
+    {
+      "gold": "Koch-Janusz-Ringel-2018-Mutual information, neural networks and the renormalization group.pdf",
+      "kind": "phrase-dropped",
+      "query": "conceptual step for strongly interacting"
+    },
+    {
+      "gold": "Amiaud-Plachy et al-2026-Bayes-PD Exploring a Sequence to Binding Bayesian Neural Network model trained on Phage Display dat.pdf",
+      "kind": "phrase-dropped",
+      "query": "designated target negative selection"
+    },
+    {
+      "gold": "Bengio-Chapados-2003-Extensions to Metric-Based Model Selection.pdf",
+      "kind": "phrase-dropped",
+      "query": "vice-versa if is not rich"
+    },
+    {
+      "gold": "Wasserman-2016-Topological Data Analysis.pdf",
+      "kind": "phrase-dropped",
+      "query": "VISUALIZATION AND APPLICATIONS The Cosmic"
+    },
+    {
+      "gold": "Mengersen-Tweedie-1996-Rates of convergence of the Hastings and Metropolis algorithms.pdf",
+      "kind": "phrase-dropped",
+      "query": "discrete-time Markov evolv- k"
+    },
+    {
+      "gold": "Chandak et al-2023-Off-Policy Evaluation for Action-Dependent Non-Stationary Environments.pdf",
+      "kind": "phrase-dropped",
+      "query": "active changes can together Khetarpal"
+    },
+    {
+      "gold": "Anantheswaran et al-2024-Investigating the Robustness of LLMs on Math Word Problems.pdf",
+      "kind": "phrase-dropped",
+      "query": "Gupta et typically feature simplified"
+    },
+    {
+      "gold": "Halpern-Piermont-2020-Dynamic Awareness.pdf",
+      "kind": "phrase-dropped",
+      "query": "aware his en- tire view"
+    },
+    {
+      "gold": "Shimizu-Bollen-2014-Bayesian Estimation of Causal Direction in Acyclic Structural Equation Models with Individual-specif.pdf",
+      "kind": "phrase-dropped",
+      "query": "one cannot uniquely the underlying"
+    },
+    {
+      "gold": "Daems et al-2023-Variational Inference for SDEs Driven by Fractional Noise.pdf",
+      "kind": "phrase-dropped",
+      "query": "objects observers the subtle deformations"
+    },
+    {
+      "gold": "Abramson et al-2022-Improving Multimodal Interactive Agents with Reinforcement Learning from Human.pdf",
+      "kind": "phrase-dropped",
+      "query": "G Nov Improving Multimodal Agents"
+    },
+    {
+      "gold": "Belakaria et al-2023-Bayesian Optimization Over Iterative Learners with Structured Responses - A.pdf",
+      "kind": "phrase-dropped",
+      "query": "Feurer et Fusi et al"
+    },
+    {
+      "gold": "Grinwald et al-2023-Visualizing the Diversity of Representations Learned by Bayesian Neural Networks.pdf",
+      "kind": "phrase-dropped",
+      "query": "global XAI methods can applied"
+    },
+    {
+      "gold": "Grill et al-2020-Monte-Carlo Tree Search as Regularized Policy Optimization.pdf",
+      "kind": "phrase-dropped",
+      "query": "selection takes inspiration from bandits"
+    },
+    {
+      "gold": "Agarwal et al-2023-Causal Matrix Completion.pdf",
+      "kind": "phrase-dropped",
+      "query": "asymptotic normality the SNN estimator"
+    },
+    {
+      "gold": "Ninniri et al-2025-Graph Diffusion that can Insert and Delete.pdf",
+      "kind": "phrase-dropped",
+      "query": "challenges deep graph Faez et"
+    },
+    {
+      "gold": "Chen et al-2021-Auto-differentiable Ensemble Kalman Filters.pdf",
+      "kind": "phrase-dropped",
+      "query": "c inaccurate partially-known dynamical models"
+    },
+    {
+      "gold": "Hoffman-Ma-2019-Langevin Dynamics as Nonparametric Variational Inference.pdf",
+      "kind": "phrase-dropped",
+      "query": "statements like this impre- cise"
+    },
+    {
+      "gold": "Zahavy et al-2016-Is a picture worth a thousand words - A Deep Multi-Modal Fusion Architecture for.pdf",
+      "kind": "phrase-dropped",
+      "query": "equipment and the product shelf"
+    },
+    {
+      "gold": "Berner et al-2023-Adaptive Dynamical Networks.pdf",
+      "kind": "phrase-dropped",
+      "query": "adaptive networks much more chal-"
+    },
+    {
+      "gold": "Choi-Wolfer-2023-Markov chain entropy games and the geometry of their Nash equilibria.pdf",
+      "kind": "phrase-dropped",
+      "query": "Berlin Heidelberg and the powerful"
+    },
+    {
+      "gold": "Tay et al-2020-Sparse Sinkhorn Attention.pdf",
+      "kind": "phrase-dropped",
+      "query": "idea differentiable sorting of internal"
+    },
+    {
+      "gold": "Le et al-2011-On optimization methods for deep learning.pdf",
+      "kind": "phrase-dropped",
+      "query": "SGDs is they are simple"
+    },
+    {
+      "gold": "Huang et al-2018-Generalized Score Functions for Causal Discovery.pdf",
+      "kind": "phrase-dropped",
+      "query": "INTRODUCTION interventions or randomized experiments"
+    },
+    {
+      "gold": "Witty et al-2020-Causal Inference using Gaussian Processes with Structured Latent Confounders.pdf",
+      "kind": "phrase-dropped",
+      "query": "effects interventions requires untestable assumptions"
+    },
+    {
+      "gold": "Laydevant et al-2021-Training Dynamical Binary Neural Networks with Equilibrium Propagation.pdf",
+      "kind": "phrase-dropped",
+      "query": "von Neumann with a delocalized"
+    },
+    {
+      "gold": "Schmidhuber-2015-On Learning to Think - Algorithmic Information Theory for Novel Combinations of.pdf",
+      "kind": "phrase-dropped",
+      "query": "NNs Unsupervised Learning SL UL"
+    },
+    {
+      "gold": "Loconte et al-2023-Negative Mixture Models via Squaring - Representation and Learning.pdf",
+      "kind": "phrase-dropped",
+      "query": "metallico standard GMM- d NGMM-"
+    },
+    {
+      "gold": "Ivison et al-2024-Unpacking DPO and PPO Disentangling Best Practices for Learning from Preference Feedback.pdf",
+      "kind": "phrase-dropped",
+      "query": "instruction following math and summarisation"
+    },
+    {
+      "gold": "Anselmi et al-2022-Reinforcement Learning in a Birth and Death Process - Breaking the Dependence on.pdf",
+      "kind": "phrase-dropped",
+      "query": "policy is lower bounded DSAT"
+    },
+    {
+      "gold": "Zhang-Hyv\u00e4rinen-2010-Distinguishing Causes from Effects using Nonlinear Acyclic Causal Models.pdf",
+      "kind": "phrase-dropped",
+      "query": "remove unnecessary among the observed"
+    },
+    {
+      "gold": "Cowan-2001-The magical number 4 in short-term memory - A reconsideration of mental storage.pdf",
+      "kind": "phrase-dropped",
+      "query": "time AND BRAIN SCIENCES Printed"
+    },
+    {
+      "gold": "Hao et al-2021-Online Sparse Reinforcement Learning.pdf",
+      "kind": "phrase-dropped",
+      "query": "role of in online RL"
+    },
+    {
+      "gold": "Sheinkman-Wade-2025-Understanding the Trade-offs in Accuracy and Uncertainty Quantification Architecture and Inference.pdf",
+      "kind": "phrase-dropped",
+      "query": "rizhevsky et al Dosovitskiy al"
+    },
+    {
+      "gold": "Lesort-2023-Spurious Features in Continual Learning.pdf",
+      "kind": "phrase-dropped",
+      "query": "major goals of the out-of-distribution"
+    },
+    {
+      "gold": "Xu et al-2026-Does SGD Seek Flatness or Sharpness An Exactly Solvable Model.pdf",
+      "kind": "phrase-typo",
+      "query": "apparently cotnradictory phenomenon has become increasingly"
+    },
+    {
+      "gold": "Savani et al-2024-Diffusing Differentiable Representations.pdf",
+      "kind": "phrase-typo",
+      "query": "differp to produce the most likely"
+    },
+    {
+      "gold": "Jaeger et al-2025-CaRL Learning Scalable Planning Policies with Simple Rewards.pdf",
+      "kind": "phrase-typo",
+      "query": "rule-based approachse work well for regular"
+    },
+    {
+      "gold": "Hermans et al-2020-Likelihood-free MCMC with Amortized Approximate Ratio Estimators.pdf",
+      "kind": "phrase-typo",
+      "query": "ratio of posterior densities between cosnecutive"
+    },
+    {
+      "gold": "Jing et al-2022-Understanding Dimensional Collapse in Contrastive Self-supervised Learning.pdf",
+      "kind": "phrase-typo",
+      "query": "augmentatiosn by max- imizing the agreement"
+    },
+    {
+      "gold": "Yaghoobi et al-2023-Parallel square-root statistical linear regression for inference in nonlinear state space models.pdf",
+      "kind": "phrase-typo",
+      "query": "prior denstiies of the SSM depend"
+    },
+    {
+      "gold": "Ellam et al-2018-Stochastic Modelling of Urban Structure.pdf",
+      "kind": "phrase-typo",
+      "query": "key featrues of cities and regions"
+    },
+    {
+      "gold": "Deldjoo et al-2024-A Review of Modern Recommender Systems Using Generative Models (Gen-RecSys).pdf",
+      "kind": "phrase-typo",
+      "query": "Societal Conisderations ACM Reference Format Yashar"
+    },
+    {
+      "gold": "Ben-Michael et al-2024-Does AI help humans make better decisions A statistical evaluation framework for experimental and o.pdf",
+      "kind": "phrase-typo",
+      "query": "Harvard Law School Massachustets Avenue Griswold"
+    },
+    {
+      "gold": "Chen et al-2023-Structured Neural Networks for Density Estimation and Causal Inference.pdf",
+      "kind": "phrase-typo",
+      "query": "learning Ok et al comptuational healthcare"
+    },
+    {
+      "gold": "Chen et al-2022-Federated Learning Attacks and Defenses - A Survey.pdf",
+      "kind": "phrase-typo",
+      "query": "Terms federated learning attacks defenses cahllenges"
+    },
+    {
+      "gold": "Ganapathy-Bennett-2021-Cybernetics and the Future of Work.pdf",
+      "kind": "phrase-typo",
+      "query": "subsystems social technologiacl economic and environmental"
+    },
+    {
+      "gold": "Stromme-2023-Sampling From a Schr\u00f6dinger Bridge.pdf",
+      "kind": "phrase-typo",
+      "query": "bility meausres on Rd with finite"
+    },
+    {
+      "gold": "Lee et al-2011-Dual-Tree Fast Gauss Transforms.pdf",
+      "kind": "phrase-typo",
+      "query": "qi R Kh qi rj Normaliez"
+    },
+    {
+      "gold": "Neklyudov et al-2021-Particle Dynamics for Learning EBMs.pdf",
+      "kind": "phrase-typo",
+      "query": "targeting different objectvies Grathwohl et al"
+    },
+    {
+      "gold": "Markovi\u0107 et al-2023-Bayesian sparsification for deep neural networks with Bayesian model reduction.pdf",
+      "kind": "phrase-typo",
+      "query": "faciltiating the training of expansive parametric"
+    },
+    {
+      "gold": "Mattsson et al-2020-Examining the causal structures of deep neural networks using information theory.pdf",
+      "kind": "phrase-typo",
+      "query": "varied domains such as speech sytnhesis"
+    },
+    {
+      "gold": "Mondal-Aggarwal-2023-Reinforcement Learning with Delayed, Composite, and Partially Anonymous Reward.pdf",
+      "kind": "phrase-typo",
+      "query": "insatntly fed back to the learner"
+    },
+    {
+      "gold": "Braunstein et al-2011-Inference and learning in sparse systems with multiple states.pdf",
+      "kind": "phrase-typo",
+      "query": "culty of making systematic measuremenst"
+    },
+    {
+      "gold": "Bloor et al-2025-Gaussian Process Q-Learning for Finite-Horizon Markov Decision Processes.pdf",
+      "kind": "phrase-typo",
+      "query": "glboally to the exact GP state-action"
+    },
+    {
+      "gold": "Nasution et al-2025-Flow Matching for Tabular Data Synthesis.pdf",
+      "kind": "phrase-typo",
+      "query": "decision-making in economics healthacre social sciences"
+    },
+    {
+      "gold": "Stoian et al-2021-Towards Practical Learned Indexing.pdf",
+      "kind": "phrase-typo",
+      "query": "i the ardix layer is hard"
+    },
+    {
+      "gold": "Kaliszyk-Urban-2014-Learning-assisted Theorem Proving with Millions of Lemmas.pdf",
+      "kind": "phrase-typo",
+      "query": "exepriments with external automated theorem provers"
+    },
+    {
+      "gold": "Chan et al-2021-Human irrationality - both bad and good for reward inference.pdf",
+      "kind": "phrase-typo",
+      "query": "ed a deluge of irrationalitise i"
+    },
+    {
+      "gold": "Kim et al-2024-(Deep) Generative Geodesics.pdf",
+      "kind": "phrase-typo",
+      "query": "Extended Abstract of the Geometry-grounded Representatino"
+    },
+    {
+      "gold": "Koch-Janusz-Ringel-2018-Mutual information, neural networks and the renormalization group.pdf",
+      "kind": "phrase-typo",
+      "query": "conceptual step patricularly for strongly interacting"
+    },
+    {
+      "gold": "Amiaud-Plachy et al-2026-Bayes-PD Exploring a Sequence to Binding Bayesian Neural Network model trained on Phage Display dat.pdf",
+      "kind": "phrase-typo",
+      "query": "desingated target see negative selection"
+    },
+    {
+      "gold": "Bengio-Chapados-2003-Extensions to Metric-Based Model Selection.pdf",
+      "kind": "phrase-typo",
+      "query": "vice-versa if G is not rcih"
+    },
+    {
+      "gold": "Wasserman-2016-Topological Data Analysis.pdf",
+      "kind": "phrase-typo",
+      "query": "VISUAILZATION AND EMBEDDINGS APPLICATIONS The Cosmic"
+    },
+    {
+      "gold": "Mengersen-Tweedie-1996-Rates of convergence of the Hastings and Metropolis algorithms.pdf",
+      "kind": "phrase-typo",
+      "query": "discrete-time Makrov chain evolv- k"
+    },
+    {
+      "gold": "Chandak et al-2023-Off-Policy Evaluation for Action-Dependent Non-Stationary Environments.pdf",
+      "kind": "phrase-typo",
+      "query": "active changes can occur together Khetarapl"
+    },
+    {
+      "gold": "Anantheswaran et al-2024-Investigating the Robustness of LLMs on Math Word Problems.pdf",
+      "kind": "phrase-typo",
+      "query": "Gupta et al typically feature simpilfied"
+    },
+    {
+      "gold": "Halpern-Piermont-2020-Dynamic Awareness.pdf",
+      "kind": "phrase-typo",
+      "query": "aware his en- tire subjectvie view"
+    },
+    {
+      "gold": "Shimizu-Bollen-2014-Bayesian Estimation of Causal Direction in Acyclic Structural Equation Models with Individual-specif.pdf",
+      "kind": "phrase-typo",
+      "query": "one cannot uniquely estimate the unedrlying"
+    },
+    {
+      "gold": "Daems et al-2023-Variational Inference for SDEs Driven by Fractional Noise.pdf",
+      "kind": "phrase-typo",
+      "query": "objects observers and the subtle deformaitons"
+    },
+    {
+      "gold": "Abramson et al-2022-Improving Multimodal Interactive Agents with Reinforcement Learning from Human.pdf",
+      "kind": "phrase-typo",
+      "query": "G Nov Improving Multimodal Intreactive Agents"
+    },
+    {
+      "gold": "Belakaria et al-2023-Bayesian Optimization Over Iterative Learners with Structured Responses - A.pdf",
+      "kind": "phrase-typo",
+      "query": "Feruer et al Fusi et al"
+    },
+    {
+      "gold": "Grinwald et al-2023-Visualizing the Diversity of Representations Learned by Bayesian Neural Networks.pdf",
+      "kind": "phrase-typo",
+      "query": "global XAI mehtods can be applied"
+    },
+    {
+      "gold": "Grill et al-2020-Monte-Carlo Tree Search as Regularized Policy Optimization.pdf",
+      "kind": "phrase-typo",
+      "query": "selection criteria takes isnpiration from bandits"
+    },
+    {
+      "gold": "Agarwal et al-2023-Causal Matrix Completion.pdf",
+      "kind": "phrase-typo",
+      "query": "asymptoitc normality of the SNN estimator"
+    },
+    {
+      "gold": "Ninniri et al-2025-Graph Diffusion that can Insert and Delete.pdf",
+      "kind": "phrase-typo",
+      "query": "chalelnges deep graph generators Faez et"
+    },
+    {
+      "gold": "Chen et al-2021-Auto-differentiable Ensemble Kalman Filters.pdf",
+      "kind": "phrase-typo",
+      "query": "c inaccurtae or partially-known dynamical models"
+    },
+    {
+      "gold": "Hoffman-Ma-2019-Langevin Dynamics as Nonparametric Variational Inference.pdf",
+      "kind": "phrase-typo",
+      "query": "staetments like this are impre- cise"
+    },
+    {
+      "gold": "Zahavy et al-2016-Is a picture worth a thousand words - A Deep Multi-Modal Fusion Architecture for.pdf",
+      "kind": "phrase-typo",
+      "query": "eqiupment and the product s shelf"
+    },
+    {
+      "gold": "Berner et al-2023-Adaptive Dynamical Networks.pdf",
+      "kind": "phrase-typo",
+      "query": "adaptiev networks is much more chal-"
+    },
+    {
+      "gold": "Choi-Wolfer-2023-Markov chain entropy games and the geometry of their Nash equilibria.pdf",
+      "kind": "phrase-typo",
+      "query": "Berlin Heideblerg and highlights the powerful"
+    },
+    {
+      "gold": "Tay et al-2020-Sparse Sinkhorn Attention.pdf",
+      "kind": "phrase-typo",
+      "query": "idea of diffeerntiable sorting of internal"
+    },
+    {
+      "gold": "Le et al-2011-On optimization methods for deep learning.pdf",
+      "kind": "phrase-typo",
+      "query": "SGDs is that they are simlpe"
+    },
+    {
+      "gold": "Huang et al-2018-Generalized Score Functions for Causal Discovery.pdf",
+      "kind": "phrase-typo",
+      "query": "INTRODUCTION Traditioanlly interventions or randomized experiments"
+    },
+    {
+      "gold": "Witty et al-2020-Causal Inference using Gaussian Processes with Structured Latent Confounders.pdf",
+      "kind": "phrase-typo",
+      "query": "effects of interevntions requires untestable assumptions"
+    },
+    {
+      "gold": "Laydevant et al-2021-Training Dynamical Binary Neural Networks with Equilibrium Propagation.pdf",
+      "kind": "phrase-typo",
+      "query": "von Neumann hardware with a delocailzed"
+    },
+    {
+      "gold": "Schmidhuber-2015-On Learning to Think - Algorithmic Information Theory for Novel Combinations of.pdf",
+      "kind": "phrase-typo",
+      "query": "NNs Supervised Unsupervsied Learning SL UL"
+    },
+    {
+      "gold": "Loconte et al-2023-Negative Mixture Models via Squaring - Representation and Learning.pdf",
+      "kind": "phrase-typo",
+      "query": "meatllico standard c GMM- d NGMM-"
+    },
+    {
+      "gold": "Ivison et al-2024-Unpacking DPO and PPO Disentangling Best Practices for Learning from Preference Feedback.pdf",
+      "kind": "phrase-typo",
+      "query": "instruction following code math and summariastion"
+    },
+    {
+      "gold": "Anselmi et al-2022-Reinforcement Learning in a Birth and Death Process - Breaking the Dependence on.pdf",
+      "kind": "phrase-typo",
+      "query": "policy is lower bonuded by DSAT"
+    },
+    {
+      "gold": "Zhang-Hyv\u00e4rinen-2010-Distinguishing Causes from Effects using Nonlinear Acyclic Causal Models.pdf",
+      "kind": "phrase-typo",
+      "query": "remove unneecssary connections among the observed"
+    },
+    {
+      "gold": "Cowan-2001-The magical number 4 in short-term memory - A reconsideration of mental storage.pdf",
+      "kind": "phrase-typo",
+      "query": "time BHEAVIORAL AND BRAIN SCIENCES Printed"
+    },
+    {
+      "gold": "Hao et al-2021-Online Sparse Reinforcement Learning.pdf",
+      "kind": "phrase-typo",
+      "query": "role of sparisty in online RL"
+    },
+    {
+      "gold": "Sheinkman-Wade-2025-Understanding the Trade-offs in Accuracy and Uncertainty Quantification Architecture and Inference.pdf",
+      "kind": "phrase-typo",
+      "query": "rizhevsky et al Dsoovitskiy et al"
+    },
+    {
+      "gold": "Lesort-2023-Spurious Features in Continual Learning.pdf",
+      "kind": "phrase-typo",
+      "query": "major goals of the rceent out-of-distribution"
     }
   ],
   "seed": 20260918

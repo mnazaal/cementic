@@ -3,21 +3,23 @@
 <!-- session-handoff:begin (2026-09-18) -->
 ## Where the work stands
 
-**First action: merge the branch. Then the entry point is "Execution order —
-retrieval quality and the rebuild it rides" below, Phase 1 step 2** (a rerank
-stage on the existing llama-server). Phase 0 is DONE, and its baseline is what
-makes step 2 the entry point rather than step 1.
+**The entry point is "Execution order — retrieval quality and the rebuild it
+rides" below, Phase 1 step 2** (a rerank stage on the existing llama-server).
+Phase 0 is DONE, and its baseline is what makes step 2 the entry point rather
+than step 1.
 
-**Repo state.** The session's work — `48a1148`, the harness, the baseline and
-the plan below — is **already merged and pushed**: `main` and `origin/main` are
-both at it. Only this handoff is outstanding, as one commit on
-`claude/session-handoff`, fast-forward clean against `main`. A hook rejects
-agent commits to `main`, so the merge is yours:
-```bash
-git checkout main && git merge --ff-only claude/session-handoff && git push
-```
-Delete `claude/session-handoff` and the already-merged
-`claude/retrieval-eval-harness` after the push succeeds, not before.
+*(Corrected 2026-09-19: this line used to read "First action: merge the branch."
+That merge landed — `main` is at `4315697` and both session branches are gone —
+and the 2026-09-19 session confirmed Phase 0's bar holds. The rest of this block
+is from 2026-09-18 and was not rewritten; the query set it describes as 180
+queries is now 360, since `perturb` added three derived phrase sets.)*
+
+**Repo state.** ~~The session's work — `48a1148`, the harness, the baseline and
+the plan below — is already merged and pushed. Only this handoff is outstanding,
+as one commit on `claude/session-handoff`; merge and delete both branches.~~
+**Done — superseded 2026-09-19.** `main` = `origin/main` = `4315697` and both
+branches are deleted. The one durable line here: **a hook rejects agent commits
+to `main`**, so agent work lands on a branch and the merge is always yours.
 
 **Live system, unchanged this session.** `cementic@papers.service` up; 23,075
 documents; `doctor` fully green including the embedding canary (worst cosine
@@ -820,6 +822,40 @@ reordered, paraphrased, one word off — is not represented. The direction is
 solid, the magnitude is inflated, and a perturbed-phrase variant is what would
 settle it.
 
+**SETTLED 2026-09-19 — the bar is not inflated, and the worry was aimed at the
+wrong perturbation.** `perturb` derives three sets from the same 60 phrases,
+each keeping its source's gold label, so the comparison is paired and a move is
+attributable to the perturbation rather than to a different draw. Both control
+arms reproduced their baselines exactly in the same run (rare-token 0.633 /
+0.817 / 0.689, title 0.783 / 0.883 / 0.817, phrase 0.117 / 1.000 / 0.348).
+
+| set | fused r@1 | fused r@10 | fused MRR | lexical-only r@1 | lexical returned nothing |
+| --- | --- | --- | --- | --- | --- |
+| phrase (verbatim) | 0.117 | 1.000 | 0.348 | 0.967 | 0/60 |
+| phrase-reordered | 0.117 | 0.950 | 0.350 | 0.967 | 0/60 |
+| phrase-dropped | 0.083 | 0.967 | 0.290 | 0.833 | 0/60 |
+| phrase-typo | 0.100 | 0.233 | 0.147 | **0.000** | **60/60** |
+
+*The 0.967 bar survives, so Phase 1 step 2's target stands unchanged.* Word
+order costs it nothing at all — `lexical_sql` scores with `ts_rank`, not
+`ts_rank_cd` (`vector_store.py:203`), so the lexical arm cannot see word order
+and reordering is a no-op by construction rather than by luck. Dropping an
+interior word costs 0.967 -> 0.833.
+
+*What the exercise actually found is a hole nobody owned: nothing in the system
+does fuzzy matching.* `plainto_tsquery` builds a hard conjunction, so one
+transposed character leaves one lexeme matching no chunk and the whole AND
+returns zero rows — measured directly, not inferred: `'prior' & 'densiti' &
+'ssm' & 'depend'` matches 6 chunks and `'prior' & 'denstii' & 'ssm' & 'depend'`
+matches 0. Stemming does not rescue a transposition. Fused typo recall@10 is
+0.233 and the lexical arm contributes 0.000 of it, so the vector arm carries
+imperfect recall alone and gets 23% of gold documents into the top 10.
+
+*The perturbed sets are diagnostics, not gates.* A reranker cannot reorder an
+empty candidate pool, so gating Phase 1 step 2 on the typo set would fail it for
+a defect it has no power over. Report them beside the bar; do not add them to
+it.
+
 *Known artefact:* one accepted phrase is `augmentations by max- imizing the
 agreement` — PDF line-break hyphenation surviving into stored chunk text. It
 splits words across both arms' term space. A de-hyphenation pass at extract
@@ -864,6 +900,41 @@ survey's top recommendation. With a reranker the lexical arm only has to recall
 a document into the pool, not order it; `ts_rank` is a weak ranker and an
 adequate filter. That avoids a Postgres search extension, a second index and a
 changed container image.
+
+**The withdrawal stands; its stated reason does not (corrected 2026-09-19.)**
+"An adequate filter" is false wherever the query is not spelled exactly as the
+document spells it: the perturbed sets above measured the lexical arm returning
+*zero rows* for 60 of 60 typo'd phrases, which is not a weak filter but an
+absent one. BM25 would fail identically — it scores the terms a query already
+matched and would inherit the same conjunction — so swapping the ranker was
+never the fix and the withdrawal survives on its merits. The correct statement
+is that `ts_rank`'s *ranking* is adequate under a reranker, and its *recall* is
+adequate only for exactly-spelled queries. See "Open — fuzzy matching" below,
+which is where the real gap went.
+
+**Step 3 (opened 2026-09-19) — Open — fuzzy matching, unowned and unscheduled.**
+No rebuild, no re-versioning, independent of everything above; ordered last
+within Phase 1 because it is the only item here with no measured target yet.
+
+The gap, measured: a query one character off its document retrieves nothing
+lexically (60/60 typo'd phrases returned zero rows) and lands at fused recall@10
+0.233 on the vector arm alone. Every number this project has ever reported is on
+queries spelled exactly as the corpus spells them, so the whole eval is blind to
+the case — which is the one a person searching their own library from memory is
+most likely to produce.
+
+*Not yet a decision.* Three candidates, none costed: `pg_trgm` similarity as a
+fallback only when the lexical arm returns zero rows (narrow, adds an extension
+and an index); relaxing `plainto_tsquery`'s conjunction to an OR-with-threshold
+(no extension, but it changes recall on every query, not just typo'd ones); or
+accepting the vector arm as the only typo path and measuring how far a better
+Phase 2a model moves 0.233.
+
+*Ends when:* one of the three is chosen with a measured recall@10 on
+`phrase-typo` to justify it, or the item is closed as "not worth it" with the
+0.233 recorded as the accepted floor. **Do not start this before Phase 1 step 2
+— a reranker changes what the lexical arm is for, and a fuzzy fallback tuned
+against today's fusion would be tuned against something about to be deleted.**
 
 ### Phase 2 — the single rebuild, batched
 

@@ -6,19 +6,23 @@ rides" calls Phase 0. It exists so that a change to the ranker, the chunker or
 the embedding model can be scored rather than argued about, and so the score
 survives the rebuild that produced it.
 
-Two commands, because they cost different things and only one of them is
-allowed to move between runs:
+Three commands, because they cost different things and only the two that write
+are allowed to move the query set:
 
-    build   Draw query sets from the corpus and write them to a JSON file.
-            Thousands of document-frequency queries; minutes. Run once.
-    score   Read that file, run each query through the real search path, and
-            print recall@1 / recall@10 / MRR per set. Needs the embedding
-            server; seconds per query.
+    build     Draw query sets from the corpus and write them to a JSON file.
+              Thousands of document-frequency queries; minutes. Run once.
+    perturb   Derive imperfectly-recalled variants of the phrase set and add
+              them to that file. Pure rewrite, no corpus, no model; instant.
+    score     Read that file, run each query through the real search path, and
+              print recall@1 / recall@10 / MRR per set. Needs the embedding
+              server; seconds per query.
 
 Splitting them is the point. A judgment re-derived on every run is not a
 judgment, it is a coin flip with a seed -- so `build`'s output is checked into
 git and `score` never writes to it. Comparing two systems means running `score`
-twice against the *same* file, including across a re-index.
+twice against the *same* file, including across a re-index. `perturb` writes,
+but only ever appends its own derived kinds and regenerates them in place, so
+the sets `build` drew stay byte-identical.
 
 Judgments are mechanical. Nobody hand-labels anything: each query is drawn from
 a document that is by construction the answer, which is what makes the gold
@@ -26,6 +30,7 @@ label free and the query set re-buildable on a different corpus.
 
 Usage:
     python scripts/measure_retrieval_quality.py build -o eval/queries.json
+    python scripts/measure_retrieval_quality.py perturb -q eval/queries.json
     python scripts/measure_retrieval_quality.py score -q eval/queries.json
 
 The database is not reachable from an agent sandbox; run these unsandboxed.
@@ -105,6 +110,20 @@ FUNCTION_WORDS = frozenset(
     above below into onto up down out off again further more most other some such only own
     same too very can will just should now""".split()
 )
+
+#: Seed for the perturbed sets. Separate from SEED because `perturb` derives
+#: from an existing query file rather than from the corpus, so it must stay
+#: reproducible even when the corpus has moved under it.
+PERTURB_SEED = 20260918
+
+#: Shortest word `transpose_characters` will damage. Below four characters a
+#: transposition is as likely to produce another real word as a typo.
+TYPO_MIN_WORD = 4
+
+#: The kinds `perturb` writes, derived from the `phrase` set. Listed so the
+#: command can drop and regenerate its own output: running it twice must not
+#: perturb the perturbations.
+PERTURBED_KINDS = ("phrase-reordered", "phrase-dropped", "phrase-typo")
 
 
 @dataclass(frozen=True)
@@ -200,6 +219,124 @@ def phrase_candidates(chunk: str) -> list[str]:
                 if window[0].lower() in FUNCTION_WORDS or window[-1].lower() in FUNCTION_WORDS:
                     continue
                 out.append(" ".join(window))
+    return out
+
+
+def has_function_word_edge(words: list[str]) -> bool:
+    """Whether a word list begins or ends on a function word (pure).
+
+    The rule `phrase_candidates` applies when drawing a window, factored out so
+    the perturbations apply the same one to their output. A perturbation that
+    leaves "the" at the edge has turned a phrase into a fragment, which is the
+    defect the original rule exists to prevent.
+    """
+    return bool(words) and (
+        words[0].lower() in FUNCTION_WORDS or words[-1].lower() in FUNCTION_WORDS
+    )
+
+
+def swap_adjacent_words(phrase: str, rng: random.Random) -> str | None:
+    """Swap one adjacent pair of words (pure given `rng`); None if impossible.
+
+    Models a user who remembers the words but not the order. Predicted to be a
+    no-op for the lexical arm: `plainto_tsquery` builds an order-free AND of
+    stemmed lexemes, so the set of matching documents is unchanged and only
+    `ts_rank`'s ordering within it can move. That prediction is the reason to
+    measure it -- if the lexical arm's phrase advantage survives reordering,
+    the advantage is bag-of-words matching rather than phrase matching.
+    """
+    words = phrase.split()
+    positions = list(range(len(words) - 1))
+    rng.shuffle(positions)
+    for i in positions:
+        swapped = list(words)
+        swapped[i], swapped[i + 1] = swapped[i + 1], swapped[i]
+        if swapped != words and not has_function_word_edge(swapped):
+            return " ".join(swapped)
+    return None
+
+
+def drop_interior_word(phrase: str, rng: random.Random) -> str | None:
+    """Delete one non-edge word (pure given `rng`); None if impossible.
+
+    Models a user who half-remembers the phrase. Only interior words are
+    eligible, so the result keeps the edges that made the original read as
+    something a person types. Predicted to *grow* the lexical match set: one
+    fewer term in the AND matches more documents, so the gold document stops
+    being the only exact match and ranking has to do the work.
+    """
+    words = phrase.split()
+    if len(words) < 3:
+        return None
+    positions = list(range(1, len(words) - 1))
+    rng.shuffle(positions)
+    for i in positions:
+        kept = words[:i] + words[i + 1 :]
+        if not has_function_word_edge(kept):
+            return " ".join(kept)
+    return None
+
+
+def transpose_characters(phrase: str, rng: random.Random) -> str | None:
+    """Transpose two adjacent characters in the longest word (pure given `rng`).
+
+    Models a typo or a misremembered spelling. The longest word is chosen
+    because it carries the most information: damaging "the" changes nothing a
+    stemmer would not absorb. Predicted to be the harshest of the three --
+    Postgres has no fuzzy matching here, so the damaged lexeme fails its half
+    of the AND and the gold document can leave the candidate pool entirely,
+    which would show up as recall@10 falling rather than recall@1.
+    """
+    words = phrase.split()
+    candidates = sorted(
+        (i for i, w in enumerate(words) if len(w) >= TYPO_MIN_WORD and w.isalpha()),
+        key=lambda i: len(words[i]),
+        reverse=True,
+    )
+    for i in candidates:
+        word = words[i]
+        offsets = [j for j in range(len(word) - 1) if word[j] != word[j + 1]]
+        if not offsets:
+            continue
+        j = rng.choice(offsets)
+        typo = word[:j] + word[j + 1] + word[j] + word[j + 2 :]
+        damaged = list(words)
+        damaged[i] = typo
+        if not has_function_word_edge(damaged):
+            return " ".join(damaged)
+    return None
+
+
+#: Perturbation per derived kind. A mapping rather than a chain of ifs so that
+#: `perturb` reports coverage per kind without knowing what any of them do.
+PERTURBATIONS = {
+    "phrase-reordered": swap_adjacent_words,
+    "phrase-dropped": drop_interior_word,
+    "phrase-typo": transpose_characters,
+}
+
+
+def perturbed_queries(queries: list[Query]) -> list[Query]:
+    """Derive the perturbed sets from the `phrase` set (pure).
+
+    Paired by construction: every derived query keeps the gold label of the
+    verbatim phrase it came from, so a drop in recall is attributable to the
+    perturbation and not to having drawn a different sample of documents. That
+    pairing is the whole design -- an independently drawn "imperfect phrase"
+    set would confound the perturbation with the draw.
+
+    Seeded per source phrase rather than per run, so the output does not depend
+    on the order the sets are visited in.
+    """
+    out: list[Query] = []
+    for kind, perturb in PERTURBATIONS.items():
+        for query in queries:
+            if query.kind != "phrase":
+                continue
+            rng = random.Random(f"{PERTURB_SEED}:{kind}:{query.query}")
+            perturbed = perturb(query.query, rng)
+            if perturbed is not None and perturbed != query.query:
+                out.append(Query(query=perturbed, gold=query.gold, kind=kind))
     return out
 
 
@@ -399,6 +536,36 @@ def command_build(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_perturb(args: argparse.Namespace) -> int:
+    """Add the perturbed sets to an existing query file, in place.
+
+    No corpus access: this rewrites queries that are already checked in, which
+    is what keeps the verbatim sets byte-identical across the edit. It is
+    idempotent -- the derived kinds are dropped and regenerated, so running it
+    twice does not perturb the perturbations.
+    """
+    path = Path(args.queries)
+    payload = json.loads(path.read_text())
+    queries = [Query(**q) for q in payload["queries"]]
+
+    original = [q for q in queries if q.kind not in PERTURBED_KINDS]
+    derived = perturbed_queries(original)
+    sources = sum(1 for q in original if q.kind == "phrase")
+    if not sources:
+        print(f"no 'phrase' queries in {path}; nothing to derive from", file=sys.stderr)
+        return 1
+
+    for kind in PERTURBED_KINDS:
+        got = sum(1 for q in derived if q.kind == kind)
+        print(f"  {kind}: {got}/{sources} derived", flush=True)
+
+    payload["perturb_seed"] = PERTURB_SEED
+    payload["queries"] = [asdict(q) for q in original + derived]
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    print(f"\nwrote {len(payload['queries'])} queries to {path}", flush=True)
+    return 0
+
+
 def command_score(args: argparse.Namespace) -> int:
     payload = json.loads(Path(args.queries).read_text())
     queries = [Query(**q) for q in payload["queries"]]
@@ -448,6 +615,10 @@ def main() -> int:
     build.add_argument("-n", type=int, default=60, help="queries per set")
     build.add_argument("-o", "--out", default="eval/queries.json")
     build.set_defaults(func=command_build)
+
+    perturb = sub.add_parser("perturb", help="add perturbed phrase sets to a query file")
+    perturb.add_argument("-q", "--queries", default="eval/queries.json")
+    perturb.set_defaults(func=command_perturb)
 
     score = sub.add_parser("score", help="score the active revision against a query file")
     score.add_argument("-q", "--queries", default="eval/queries.json")
