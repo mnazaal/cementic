@@ -137,7 +137,10 @@ def promote_collection(
         help="Promote even if the ready revision built with failed documents or chunks",
     ),
 ) -> None:
-    """Promote the ready pipeline revision for one collection."""
+    """Make a ready revision searchable.
+
+    Search switches to the ready revision only after this command succeeds.
+    """
     collection = _validated_collection_name(collection)
 
     with _reporting_db_errors("collection promote"):
@@ -245,7 +248,7 @@ def _print_unremoved_artifacts(unremoved: list[str]) -> None:
 
 @collection_app.command(
     "reindex",
-    short_help="Rebuild a collection's ANN index from current index config",
+    short_help="Rebuild a collection's search indexes",
     no_args_is_help=True,
 )
 def reindex_collection_command(
@@ -258,13 +261,10 @@ def reindex_collection_command(
         "ef_construction, which are fixed at build time)",
     ),
 ) -> None:
-    """Reconcile this collection's indexes with the current config.
+    """Rebuild search indexes after an index configuration change.
 
-    The ANN index is built once, when a revision first completes, so editing
-    `index.method` afterwards otherwise had no effect and no way to ask for one.
-    Also builds the shared full-text index hybrid search reads if it is missing
-    or was left invalid by an interrupted build -- that one is global rather
-    than per-collection, and this is its only front door.
+    It does not re-embed documents. It also creates or repairs the full-text
+    index hybrid search uses.
     """
     collection = _validated_collection_name(collection)
 

@@ -1,7 +1,8 @@
 # cementic configuration
 #
 # Precedence (low -> high): built-in defaults < this file < CEMENTIC_* env vars
-# < command-line flags. Every value below is optional; delete what you don't need.
+# < command-line flags. Every setting is shown below; delete a value to use its
+# built-in default instead.
 
 [database]
 # Postgres with the pgvector and pgvectorscale extensions. Generate a local
@@ -11,82 +12,104 @@ host = "localhost"
 port = 5432
 name = "cementic"
 user = "cementic"
-# password = "cementic"   # override outside local development
+password = "cementic" # Override outside local development.
+# url_override = "postgresql://user:password@host:5432/database"
+# `url_override` wins over the settings above.
 
 [pipeline]
 embedding_provider = "llama-cpp"
-# Counted with tiktoken, while llama_cpp.n_ctx (512) counts the model's own
-# tokens -- for the default model one of these is up to 1.33 of the other, so
-# chunk_size must stay well under n_ctx or chunks embed truncated. Re-measure
-# with scripts/measure_chunk_context_fit.py before raising it.
+# Counted with tiktoken, while llama_cpp.n_ctx counts the model's tokenizer.
+# Keep this well below n_ctx; the default 320/512 pair has measured margin.
 chunk_size = 320
 chunk_overlap = 80
 
 [index]
-# ANN index: "hnsw" (lower latency, more RAM) or "diskann" (disk-resident, low RAM)
+# "hnsw" has lower query latency and uses more RAM. "diskann" is disk-resident.
 method = "hnsw"
-# Keep scanning until top_k rows survive the filter, rather than stopping after
-# ef_search candidates. Leave on unless you are on pgvector older than 0.8,
-# where it is ignored anyway.
+hnsw_m = 16
+hnsw_ef_construction = 64
+hnsw_ef_search = 100
+# "off", "relaxed_order", or "strict_order"; pgvector 0.8+ is required.
 hnsw_iterative_scan = "relaxed_order"
-# maintenance_work_mem for index builds only. PostgreSQL's 64MB default makes an
-# HNSW build spill to disk and slow sharply; lower this on a small server.
+diskann_num_neighbors = 50
+diskann_search_list_size = 100
+diskann_query_rescore = 50
+# PostgreSQL maintenance_work_mem used only during index builds.
 build_memory = "2GB"
 
 [search]
-# Search meaning and exact words together. Without this, a query that is a rare
-# exact token -- an author surname, an acronym, an equation label -- finds the
-# right document in the top 10 about 5% of the time; with it, essentially always.
+# Combine semantic and exact-word search.
 hybrid = true
-# A single-word query matching at most this many documents is answered from the
-# exact-match ranking; anything broader is led by vector search. A word in
-# thousands of documents does not identify one, so famous names do not qualify.
 lexical_lead_max_documents = 20
 
 [llama_cpp]
-# Model identity is the file's content digest, so any spelling of the path
-# that resolves to the same file is the same profile. Pointing at a
-# *different* file re-embeds the corpus.
+# cementic starts and supervises an OpenAI-compatible embedding server. Point
+# daemon_command at a GPU-capable llama-server build to use one.
 model_path = "models/nomic-embed-text-v2-moe.Q8_0.gguf"
-# cementic spawns and supervises an OpenAI-compatible embedding server. By
-# default that is `llama-server` on PATH; override this to name a specific
-# build (e.g. a Vulkan one for a GPU) or to add flags. `embedding
-# start/stop/status`, on-demand autostart, and crashed-daemon recovery apply
-# either way -- there is no separate built-in server they behave differently for.
-# Placeholders per argument:
-#   {model} {alias} {host} {port} {n_ctx} {n_gpu_layers} {verbosity}
-# Needs an env var? Prefix with env(1), as the LD_LIBRARY_PATH line shows.
+n_ctx = 512
+n_gpu_layers = 0
+embedding_dim = 768 # Fallback only; the live model is probed.
+verbose = false
+daemon_host = "127.0.0.1"
+daemon_port = 11555
+daemon_start_timeout_seconds = 120
+llama_embed_timeout_seconds = 120
+daemon_autostart = true
+# daemon_pid_file = "~/.local/share/cementic/llama_cpp_daemon.pid"
+# daemon_log_file = "~/.local/share/cementic/llama_cpp_daemon.log"
+# The default is `llama-server` on PATH with this model, alias, host, port,
+# context, GPU-layer, and verbosity configuration. Override it with argv when
+# needed. Available placeholders: {model}, {alias}, {host}, {port}, {n_ctx},
+# {n_gpu_layers}, {verbosity}.
 # daemon_command = [
-#   "env", "LD_LIBRARY_PATH=/path/to/llama.cpp/build",
-#   "/path/to/llama-server",
-#   "--host", "{host}", "--port", "{port}",
-#   "--model", "{model}", "--alias", "{alias}",
-#   "--embeddings",
-#   "--ctx-size", "{n_ctx}", "--batch-size", "{n_ctx}", "--ubatch-size", "{n_ctx}",
-#   "--n-gpu-layers", "99",
+#   "llama-server", "--host", "{host}", "--port", "{port}",
+#   "--model", "{model}", "--alias", "{alias}", "--embeddings",
+#   "--ctx-size", "{n_ctx}", "--batch-size", "{n_ctx}",
+#   "--ubatch-size", "{n_ctx}", "--n-gpu-layers", "{n_gpu_layers}",
+#   "--verbosity", "{verbosity}",
 # ]
 
 [extraction]
+# Enable OCR only with the layout-aware PDF extractor and optional rapidocr.
 use_ocr = false
-
-# Optional: extract a file type with an external command instead of a built-in
-# extractor. Contract: argv in, text on stdout, nothing else. A tool that writes
-# files (ocrmypdf) needs a wrapper script that prints. Naming a type here also
-# makes it indexable, so this is how to add a type cementic has no extractor for.
-# command_versions is required for every entry: its output enters the extraction
-# fingerprint, so upgrading the tool re-versions revisions rather than silently
-# changing extracted text. It cannot be inferred -- `pdftotext -v` works while
-# `pdftotext --version` prints an error and exits 0.
-# [extraction.backends] pdf = "command"
+# Use per-type tables for overrides. Unset types use the registry default.
+# [extraction.backends]
+# pdf = "pymupdf-raw" # The default is "pymupdf4llm".
 # [extraction.commands]
-# pdf = ["pdftotext", "-layout", "{path}", "-"]
+# epub = ["your-extractor", "{path}"]
 # [extraction.command_versions]
-# pdf = ["pdftotext", "-v"]
+# epub = ["your-extractor", "--version"]
+# Every command needs a matching version command. Commands write text to stdout.
 
-# Optional: choose a specific extractor per file type. Unset types use the
-# registry default. Keys are bare file types; values are registered extractor
-# names (currently for pdf: "pymupdf4llm" (default, layout-aware Markdown) or
-# "pymupdf-raw" (text layer only, ~275x faster -- see README, "Choosing a PDF
-# extractor"); "plaintext" for txt/md/markdown).
-[extraction.backends]
-# pdf = "pymupdf4llm"
+[storage]
+# artifacts_path = "~/.local/share/cementic/artifacts"
+# The default is under cementic's platform-specific user data directory.
+
+[source_watcher]
+# log_file = "~/.local/share/cementic/source_watcher.log"
+# state_path = "~/.local/share/cementic/source_watcher_state.json"
+# Replaces the defaults. Set [] to index every directory.
+ignore_directories = [
+  ".bzr", ".git", ".hg", ".mypy_cache", ".pytest_cache", ".ruff_cache",
+  ".svn", ".tox", ".venv", "__pycache__", "build", "dist", "node_modules",
+  "site-packages", "target", "venv",
+]
+
+[pipeline_worker]
+# log_file = "~/.local/share/cementic/pipeline_worker.log"
+# state_path = "~/.local/share/cementic/pipeline_worker_state.json"
+batch_size = 32
+# Limits per-request indexing work while a recent search has priority.
+embed_submit_batch_size = 4
+poll_interval = 1.0
+search_lease_ttl_seconds = 10.0 # Set 0 to disable search priority.
+search_yield_cap_seconds = 60.0
+
+[bootstrap]
+# Download a missing model only when its path is under cementic's user data
+# directory. A model path outside cementic's user data directory must already
+# exist; cementic will not download there.
+auto_download_llama_model = true
+llama_model_url = "https://huggingface.co/nomic-ai/nomic-embed-text-v2-moe-GGUF/resolve/main/nomic-embed-text-v2-moe.Q8_0.gguf"
+# Set this to "" to disable integrity verification for a custom model URL.
+llama_model_sha256 = "06e7a7e594a26985523c18383aba4aad39fe6e14f08ffc6ab5b554e1ccdc3cff"

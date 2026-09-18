@@ -31,7 +31,7 @@ run() {
 }
 
 postgres_reachable() {
-    python - <<'PY'
+    uv run python - <<'PY'
 import sys
 try:
     from tests.integration.conftest import _server_reachable
@@ -44,13 +44,13 @@ PY
 # CI's first step on every job; a version bump that skips `uv lock` fails all
 # of CI while every local gate stays green -- which is how v0.2.0 shipped red.
 run lockfile          uv lock --check
-run ruff              ruff check src/ tests/
-run mypy              mypy src/
-run unit              pytest tests/unit -q
-run integration       pytest tests/integration -m "not pg" -q
+run ruff              uv run ruff check src/ tests/
+run mypy              uv run mypy src/
+run unit              uv run pytest tests/unit -q
+run integration       uv run pytest tests/integration -m "not pg" -q
 
 if postgres_reachable; then
-    run integration-pg pytest tests/integration -m pg -q
+    run integration-pg uv run pytest tests/integration -m pg -q
 else
     printf '%-28s%s\n' "integration-pg" "SKIPPED (no PostgreSQL reachable)"
     skipped+=("integration-pg")

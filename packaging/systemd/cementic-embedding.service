@@ -2,9 +2,10 @@
 #
 # cementic identifies its embedding server only by the model id at /v1/models,
 # so any OpenAI-compatible server carrying the right --alias will do. That is
-# how the GPU is reached without a code change; see README, "Running embeddings
-# on a GPU". Set llama_cpp.daemon_autostart = false so cementic does not spawn
-# its own CPU-only daemon alongside this one.
+# how the GPU is reached without a code change; see
+# docs/configuration.md#choose-an-embedding-runtime. Set
+# llama_cpp.daemon_autostart = false so cementic does not spawn its own CPU-only
+# daemon alongside this one.
 #
 # Install:
 #   mkdir -p ~/.config/systemd/user

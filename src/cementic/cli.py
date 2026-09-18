@@ -163,7 +163,7 @@ def config_path() -> None:
 def config_init(
     force: bool = typer.Option(False, "--force", help="Overwrite an existing config file"),
 ) -> None:
-    """Write an annotated default config to the user config directory."""
+    """Write the complete annotated reference for settings and defaults."""
     path = default_config_path()
     if path.exists() and not force:
         err_console.print(f"config already exists at {path} (use --force to overwrite)")
@@ -422,7 +422,11 @@ def start_background(
         help="Collection name for indexed documents",
     ),
 ) -> None:
-    """Start source watcher and pipeline worker in the background."""
+    """Start background indexing.
+
+    Only one background indexing session can run at a time. Pass multiple
+    directories to index them into one collection; stop before switching collections.
+    """
     collection = _validated_collection_name(collection)
 
     missing = [d for d in directories if not Path(d).is_dir()]
@@ -710,7 +714,10 @@ def doctor(
         help="Output the report as JSON",
     ),
 ) -> None:
-    """Run read-only runtime readiness diagnostics."""
+    """Check configuration, Postgres, embeddings, and index health.
+
+    This command changes nothing.
+    """
     try:
         report = collect_doctor_report(_get_config())
     except typer.Exit:
@@ -892,7 +899,11 @@ def stop_background(
 
 @embedding_app.command("start", short_help="Start embedding runtime")
 def start_embedding_runtime() -> None:
-    """Start the configured embedding runtime service."""
+    """Start the configured embedding runtime service.
+
+    Starting it is optional; use this before a first search to pay the model's
+    cold-start cost.
+    """
     config = _get_config()
     if config.pipeline.embedding_provider != "llama-cpp":
         err_console.print(
@@ -975,7 +986,10 @@ def search(
         help="Output results as JSONL (one JSON object per line)",
     ),
 ) -> None:
-    """Search indexed documents."""
+    """Search the active revision of indexed documents.
+
+    A new collection can return partial results while it builds.
+    """
     filters = _build_collection_filters(collections, trailing_collections)
     if filters is not None:
         filters = [_validated_collection_name(c) for c in filters]

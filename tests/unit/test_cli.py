@@ -85,7 +85,22 @@ class TestConfigCommands:
         first = runner.invoke(app, ["config", "init"])
         assert first.exit_code == 0
         assert target.exists()
-        assert "[pipeline]" in target.read_text()
+        content = target.read_text()
+        for section in (
+            "database",
+            "pipeline",
+            "index",
+            "search",
+            "llama_cpp",
+            "extraction",
+            "storage",
+            "source_watcher",
+            "pipeline_worker",
+            "bootstrap",
+        ):
+            assert f"[{section}]" in content
+        assert "auto_download_llama_model" in content
+        assert "outside cementic's user data directory" in content
 
         again = runner.invoke(app, ["config", "init"])
         assert again.exit_code == 1  # refuses to overwrite
@@ -222,7 +237,7 @@ class TestRootHelp:
         result = runner.invoke(app, ["search"])
         assert "USAGE:" in result.output
         assert "search" in result.output
-        assert "Search indexed documents" in result.output
+        assert "Search the active revision of indexed documents" in result.output
 
     def test_status_shows_help_with_no_args(self, monkeypatch, capsys):
         monkeypatch.setattr(cementic_cli.sys, "argv", ["cementic", "status"])
@@ -2487,6 +2502,24 @@ class TestHelpFlags:
         result = runner.invoke(app, ["--help"])
         assert "EXAMPLES:" in result.output
         assert "github.com/mnazaal/cementic" in result.output
+
+    @pytest.mark.parametrize(
+        ("target", "expected"),
+        [
+            (["start"], "Only one background indexing session can run at a time."),
+            (["doctor"], "This command changes nothing."),
+            (["search"], "A new collection can return partial results while it builds."),
+            (["collection", "promote"], "only after this command succeeds."),
+            (["collection", "reindex"], "It does not re-embed documents."),
+            (["embedding", "start"], "cold-start cost."),
+            (["config", "init"], "complete annotated reference for settings and defaults."),
+        ],
+    )
+    def test_action_help_explains_load_bearing_behavior(self, target, expected):
+        """Action help states the consequence users need before running it."""
+        result = runner.invoke(app, [*target, "--help"])
+        assert result.exit_code == 0, result.output
+        assert expected in result.output
 
 
 class _FakeEmbedProvider:
