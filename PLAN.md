@@ -1,124 +1,119 @@
 # cementic — architecture & design
 
-<!-- session-handoff:begin (2026-09-12) -->
+<!-- session-handoff:begin (2026-09-18) -->
 ## Where the work stands
 
 **First action: merge the branch. Then the entry point is "Execution order —
-CLI surface audit" below, step 2** (stop the CLI importing the database and HTTP
-layers). Step 2 was the entry point last session too and nothing in it was done
-this session — the session went to a documentation staleness sweep, one silent
-failure it uncovered, and the re-measurements those forced. Steps 2–6 are still
-specified in full, so the next session implements rather than re-derives.
+retrieval quality and the rebuild it rides" below, Phase 1 step 2** (a rerank
+stage on the existing llama-server). Phase 0 is DONE, and its baseline is what
+makes step 2 the entry point rather than step 1.
 
-**Repo state.** Seven commits on `claude/lexical-index-report`, fast-forward
-clean against `main`, working tree clean. A hook rejects agent commits to
-`main`, so the merge is yours:
+**Repo state.** The session's work — `48a1148`, the harness, the baseline and
+the plan below — is **already merged and pushed**: `main` and `origin/main` are
+both at it. Only this handoff is outstanding, as one commit on
+`claude/session-handoff`, fast-forward clean against `main`. A hook rejects
+agent commits to `main`, so the merge is yours:
 ```bash
-git checkout main && git merge --ff-only claude/lexical-index-report && git push
-git branch -d claude/lexical-index-report   # after the push
+git checkout main && git merge --ff-only claude/session-handoff && git push
 ```
+Delete `claude/session-handoff` and the already-merged
+`claude/retrieval-eval-harness` after the push succeeds, not before.
 
-**Live system, and two things about it changed today.** `cementic@papers.service`
-is up; corpus settled at 23,075 documents / 2,299,762 vectors / 100% embedded.
-The full-text index was rebuilt (1,121 MB → 617 MB) and `hnsw.ef_search` now
-defaults to 100 rather than 40. No background jobs, nothing on a cluster.
+**Live system, unchanged this session.** `cementic@papers.service` up; 23,075
+documents; `doctor` fully green including the embedding canary (worst cosine
+0.999860521). Nothing was indexed, re-embedded or re-configured. No background
+jobs, nothing on a cluster.
 
-**What this session did**, all of it recorded in the docs rather than here:
-swept every PLAN/TODO entry that read as open (six were stale), repaired 8 of 41
-code anchors, fixed five README defects, closed a silent failure in three layers
-(`doctor`'s new `lexical_index` check, `build_lexical_index` reachable from
-`cementic collection reindex`, and an invalid index now dropped before rebuild),
-then re-measured every search figure the sweep exposed as 300× out of scale.
-Measurements live in README's "Measurements behind the defaults"; the reasoning
-lives in PLAN's "Decided — the full-text index reports its own absence" and the
-GIN paragraph under the hybrid section.
+**What this session did.** Surveyed txtai (`~/projects/txtai`, Apache-2.0, HEAD
+2026-09-15) for transferable design, turned the survey into the Phase 0/1/2 plan
+below, then built and ran Phase 0. The reasoning lives in that section, not here.
+
+**The one result a cold reader must not miss.** The baseline says the two arms
+already *retrieve* the right document and then fail to rank it first: recall@10
+is 0.817 / 0.883 / 1.000 across rare-token / title / phrase, while recall@1 on
+phrases is 0.117. The lexical arm alone ranks the phrase gold first for 58 of
+60. So over-fetching (Phase 1 step 1) addresses a problem this corpus does not
+have, and the live question is ordering. The table and the rejected routing-rule
+simulation are in Phase 0 below.
 
 **Corrections — distrust these sections' history, not their current text.**
-- **A correction I wrote mid-session was itself wrong, and it is the cautionary
-  one.** I recorded PLAN's 617 MB GIN figure as superseded by a measured
-  1,121 MB. PLAN was right: 617 MB is what a *fresh build* costs, and the live
-  index was 82% bloated by being maintained per insert since the import. Two
-  hypotheses were tested and killed (build memory, corpus growth) before the
-  third held. The lesson is that a figure and its replacement can measure
-  different things.
-- Six PLAN/TODO entries read as live work and were already done — hybrid step
-  5v (shipped in `64b24d4`), the `gssencmode` item, the stranded-row repair,
-  TODO's hybrid thread, the v1.5 comparison, and the handoff block's own repo
-  state. Deleted rather than annotated.
-- README's search-latency, recall and index-size figures were all taken on a
-  7,580-vector corpus that no longer exists, and predate hybrid search. The
-  7,306-vs-7,580 discrepancy that exposed this was not resolvable by picking
-  one: they describe two different corpus states.
-- `ef_search = 40` was not merely imperfect at 2.3M vectors — one query in
-  twenty missed a byte-identical chunk entirely.
+- **The v1.5 migration section's closing line is superseded.** It parked three
+  riders because "there is no longer a rebuild to ride on"; a rebuild is now
+  authorised and those three are Phase 2b. The line is annotated in place.
+- **The survey's top recommendation was withdrawn by measurement.** Benchmarking
+  `ts_rank` against BM25 ranked first before Phase 0 ran. With a reranker the
+  lexical arm only needs to *recall* into the pool, and the baseline shows it
+  already does. Recorded as withdrawn in Phase 1 step 2; do not re-propose it
+  without new evidence.
+- `chunk_size` is **320**, not 352. An earlier draft of Phase 2a said 352;
+  `cementic doctor` is the authority and the section now cites it.
 
 **Deviations, attributed.**
-- *User-directed:* raising `ef_search` after a 20-query sweep rather than a
-  60-query one, folding that change into this branch rather than a separate one,
-  and every merge.
-- *Agent-decided:* running `REINDEX INDEX CONCURRENTLY` on the live index. It is
-  a repair, it kept search up throughout, and the alternative was publishing a
-  latency figure measured on a state we knew was unrepresentative.
-- *Agent-decided:* killing the first ANN-recall run two queries in, because its
-  ANN arm omitted the production `relaxed_order` tuning and would have published
-  a number for a path nobody runs.
-- *Agent-decided:* the post-import lexical rebuild is documented as a manual
-  `REINDEX`, not wired into `collection reindex`. Size is not a correctness
-  fault and cannot be judged without building the alternative.
+- *User-directed:* full plan scope including the ~108 h rebuild; synthetic-only
+  judgments with no human labelling; the plan landing in `PLAN.md`; filename
+  gold labels rather than absolute paths.
+- *Agent-decided:* rebuilding the query set (5.6 min) after inspection found two
+  defects in the first one — a known-item gate of 20 matching documents where
+  the original probe used 5, and a phrase extractor whose 3-character floor
+  deleted short words ("...to emerge..." became "...emerge..."). Both are now
+  recorded in the constants that carry them.
+- *Agent-decided:* discarding `arms.json` rather than promoting it (see below).
 
 **Environment quirks that cost time.**
-- **An exact kNN scan evicts the page cache the ANN index needs.** Interleaving
-  one with a latency arm produced a 326 ms reading for a query that measures
-  1.3 ms warm — a 250× error that looked like a finding about
-  `hnsw.iterative_scan`. Measure recall interleaved (deterministic, cache-blind)
-  and latency separately, warm.
-- **A background job's wrapper reported exit 0 while the job failed instantly.**
-  Read the log, never the harness's status line.
-- Machine load must be under ~2 before recording any timing; a REINDEX leaves
-  the load above 5 for several minutes afterwards, entirely in I/O wait.
-- `$TMPDIR` differs between sandboxed and unsandboxed Bash calls, so a file
-  written by one is not found by the other. Use an absolute scratchpad path.
-- `pkill -f <pattern>` matches its own shell; bracket a character.
-- **The Bash sandbox blocks 127.0.0.1:5432 and the systemd user bus**, so every
-  command in the exit criteria below except `git` needs the sandbox disabled —
-  `check.sh`, `doctor`, `status`, `search`, and anything touching the database
-  or `systemctl --user`. A blocked connection is reported as "database not
-  reachable", which reads like a broken corpus.
-- The masked device-node files at the repo root (`.bashrc`, `.zshrc`, `.claude/`,
-  …) are sandbox artifacts, not real files. They are why `git status --short`
-  is expected to show untracked entries and why the criterion says "empty apart
-  from masked dotfiles".
-- The `agent-checkpoint` hook blocking Bash on a clean tree was recorded last
-  session; it did not fire this session, so treat it as unconfirmed rather than
-  fixed.
+- A foreground command scoring all 180 queries exceeded the harness's 120 s cap
+  and was auto-backgrounded mid-run. Estimate and background from the outset: a
+  full `score` is ~113 s warm and ~187 s cold, and any per-arm diagnostic that
+  re-runs every query is ~5 min.
+- The Bash sandbox blocks 127.0.0.1:5432 and reports it as "database not
+  reachable". Every command touching the database, `doctor` or `search` needs
+  the sandbox disabled. (Unchanged from last session; confirmed again.)
+- `scripts/` is **not** covered by `check.sh`'s gates, which run `ruff check
+  src/ tests/` and `mypy src/`. The new harness is clean only because ruff was
+  run on it by hand. Decide whether that stays true before the next script.
+- A heredoc containing a branch-deletion command trips the agent-checkpoint
+  hook even as documentation text. Write such blocks with the file tool.
+- **`$TMPDIR` is `/tmp/claude-3118271` — a shared per-user root, not
+  session-scoped — and a sibling agent session's file can already be sitting
+  there.** This session spliced *another project's* handoff block into this
+  file because a script preferred `$TMPDIR/handoff.md` over the scratchpad copy
+  it had just written. Caught by reading the result; recovered with `git restore
+  --source=HEAD -- PLAN.md`, since the damage never reached a commit. Use the
+  absolute session scratchpad path, never `$TMPDIR`, and assert on the content
+  before writing it into a standing document.
 
-**Artifacts.** Four measurement harnesses were promoted from the scratchpad to
-`notes/`: `probe_search_latency.py`, `probe_ann_recall.py`, `probe_ef_search.py`,
-`probe_gin_index_size.py` (that last one builds shadow indexes beside the live
-one, which is how the GIN question was settled without taking search down).
-`notes/` is gitignored, so these exist only on this machine — the same risk PLAN
-already records for `probe_hybrid_retrieval.py`. Logs: `~/.cache/cementic-ef-search.log`,
-`-ann-recall.log`, `-gin-size.log`, `-gin-reindex.log`, and the last green gate
-run at `~/.cache/cementic-check-ef.log`. The two peel snapshots used to split
-one commit were discarded deliberately.
+**Artifacts.**
+- Promoted into the repo: `scripts/measure_retrieval_quality.py` and
+  `eval/queries.json` (180 queries, the fixed instrument — `score` never
+  rewrites it, and comparing two systems means scoring the same file twice).
+- **Discarded deliberately:** the scratchpad's `arms.json` (789 KB, cached
+  per-query lexical and fused rankings plus exact-match counts). It made the
+  routing-rule simulation free, but it predates the gold-label fix and still
+  carries absolute home paths, so promoting it would reintroduce the disclosure
+  that fix removed. Regenerate in ~5 min from `eval/queries.json` if another
+  ranking simulation is wanted.
+- Logs, outside the repo: `~/.cache/cementic-eval-build.log`,
+  `-eval-score.log`, `-eval-score2.log`, `-eval-arms.log`, `-unit.log`.
 
 **Open, and deliberately not closed.**
-- **How often `ef_search = 40` would have failed is unknown.** One catastrophic
-  case in twenty says the failure is real, not its rate. The 60-query sweep is
-  ~17 minutes with `notes/probe_ef_search.py`.
-- The hybrid precondition is still unmeasured: nobody has checked whether real
-  queries are identifier-shaped, and no query logging exists. See PLAN's hybrid
-  risk entry.
-- `doctor` gained a `lexical_index` check but nothing reports index *bloat*.
+- **The phrase set's magnitude is inflated and nobody has fixed it.** Its
+  queries are verbatim substrings gated to <=5 exact matches, so exact matching
+  must win; a user recalling a phrase imperfectly is not represented. The
+  direction is solid, 0.967 is an upper bound. A perturbed-phrase variant is the
+  cheapest thing that would settle it.
+- `check.sh`'s six gates were **not** run this session. `src/` is untouched by
+  the commit, and unit (1137 passed), ruff and mypy were run instead. The PG
+  gate would have contended with the scoring runs for the single Postgres.
+- PDF line-break hyphenation survives into stored chunk text (`max- imizing`),
+  found incidentally in one of 60 phrase queries. Nobody has audited chunk text
+  quality; a de-hyphenation pass is a candidate Phase 2 rider.
 
 **Exit criteria — commands whose output confirms the above.**
 ```bash
 git status --short                       # empty apart from masked dotfiles
-git log --oneline -1                     # this block's own commit, equal to origin/main after your merge
-./scripts/check.sh                       # six gates, all ok
-./.venv/bin/cementic doctor              # every line ok, including lexical_index
-./.venv/bin/cementic config show | grep ef_search   # 100
-./.venv/bin/cementic status              # ~1.6 s, papers 100% embedded
+git log --oneline -1                     # equal to origin/main after your merge
+./.venv/bin/cementic doctor              # every line ok
+./.venv/bin/python scripts/measure_retrieval_quality.py score -q eval/queries.json
+# expect recall@1 0.633 / 0.783 / 0.117 for rare-token / title / phrase
 ```
 <!-- session-handoff:end -->
 
@@ -857,6 +852,12 @@ to manage incomparable scores and hand-route rank 1: `lead`,
 probe, `lexical_lead_max_documents`, `scores_explain_order`, and `score_kind`
 plumbed through to the renderer. If the reranker beats `lead` on Phase 0 they
 all go and net surface shrinks. If it does not, the reranker goes.
+
+*The bar it must clear is in Phase 0 above, and it is not "beat today's
+numbers":* a reranker earns its place only by beating the better of the two
+routing bets in every bucket — recall@1 >= 0.650 rare-token, >= 0.783 title,
+>= 0.967 phrase. If it cannot, the rarity-routing rule is the cheaper honest
+answer and this step is dropped.
 
 *Withdrawn by this step:* benchmarking `ts_rank` against BM25, which was the
 survey's top recommendation. With a reranker the lexical arm only has to recall
