@@ -53,9 +53,23 @@ from cementic.config import get_config
 from cementic.db import LEXICAL_TEXT_CONFIG, get_engine
 from cementic.search import Searcher
 
-#: Ranking depth requested from search. Matches `search.MAX_SEARCH_RESULTS`, so
-#: recall@10 and MRR are measured over the deepest list the CLI can return.
-DEPTH = 50
+#: Default ranking depth requested from search. Matches
+#: `search.MAX_SEARCH_RESULTS`, so recall@10 and MRR are measured over the
+#: deepest list the CLI can return.
+#:
+#: **This is not what `cementic search` does by default, and the gap is not
+#: cosmetic (found 2026-09-19).** `search()` passes `top_k` straight through as
+#: the per-arm fetch limit for both arms *and* into `query_tuning_statements`,
+#: so it sets ANN effort as well as list length. The CLI defaults to 10
+#: (`cli.py:965`). Scoring at 50 therefore measures a system that over-fetches
+#: 5x relative to the shipped default -- which is exactly the change Phase 1
+#: step 1 proposes, already switched on. Use `--depth 10` for the shipped
+#: configuration and `--depth 50` for the over-fetched one; the number is
+#: printed with every table because the two are not comparable.
+DEFAULT_DEPTH = 50
+
+#: Depth `cementic search` uses unless asked otherwise (`cli.py:965`).
+PRODUCTION_DEPTH = 10
 
 #: Fixed so `build` is reproducible. Changing it draws a different query set,
 #: which makes the scores incomparable with every earlier run -- that is what
@@ -340,9 +354,18 @@ def perturbed_queries(queries: list[Query]) -> list[Query]:
     return out
 
 
-def format_table(name: str, rows: dict[str, tuple[float, float, float]], n: int) -> str:
-    """Render one set's scores (pure)."""
-    lines = [f"\n{name}  (n={n})", f"  {'arm':<10} {'recall@1':>9} {'recall@10':>10} {'MRR':>7}"]
+def format_table(
+    name: str, rows: dict[str, tuple[float, float, float]], n: int, depth: int
+) -> str:
+    """Render one set's scores (pure).
+
+    The depth is in the heading because scores taken at different depths are
+    not comparable, and a table that omits it invites exactly that comparison.
+    """
+    lines = [
+        f"\n{name}  (n={n}, depth={depth})",
+        f"  {'arm':<10} {'recall@1':>9} {'recall@10':>10} {'MRR':>7}",
+    ]
     for arm, (r1, r10, mrr) in rows.items():
         lines.append(f"  {arm:<10} {r1:>9.3f} {r10:>10.3f} {mrr:>7.3f}")
     return "\n".join(lines)
@@ -523,7 +546,9 @@ def command_build(args: argparse.Namespace) -> int:
     payload = {
         "collection": args.collection,
         "seed": SEED,
-        "depth": DEPTH,
+        # Recorded for provenance only. `score --depth` is what decides the
+        # depth a run measures at, because one query set is scored at several.
+        "depth": DEFAULT_DEPTH,
         "queries": [asdict(q) for q in queries],
     }
     out = Path(args.out)
@@ -586,7 +611,9 @@ def command_score(args: argparse.Namespace) -> int:
             ranked = deduplicate(
                 [
                     document_key(r["source_path"])
-                    for r in searcher.search(query.query, top_k=DEPTH, collections=[collection])
+                    for r in searcher.search(
+                        query.query, top_k=args.depth, collections=[collection]
+                    )
                 ]
             )
             r1, r10, mrr = metrics(ranked, query.gold)
@@ -597,12 +624,13 @@ def command_score(args: argparse.Namespace) -> int:
                 print(f"  {kind}: {i}/{len(group)} ({time.perf_counter() - t0:.0f}s)", flush=True)
         n = len(group)
         overall[kind] = (totals[0] / n, totals[1] / n, totals[2] / n)
-        print(format_table(kind, {"search": overall[kind]}, n), flush=True)
+        print(format_table(kind, {"search": overall[kind]}, n, args.depth), flush=True)
 
-    print(f"\ntotal {time.perf_counter() - t0:.0f}s", flush=True)
+    print(f"\ntotal {time.perf_counter() - t0:.0f}s at depth {args.depth}", flush=True)
     if args.json:
-        print(json.dumps({k: {"recall@1": v[0], "recall@10": v[1], "mrr": v[2]}
-                          for k, v in overall.items()}, indent=2, sort_keys=True))
+        print(json.dumps({"depth": args.depth,
+                          "sets": {k: {"recall@1": v[0], "recall@10": v[1], "mrr": v[2]}
+                                   for k, v in overall.items()}}, indent=2, sort_keys=True))
     return 0
 
 
@@ -622,6 +650,13 @@ def main() -> int:
 
     score = sub.add_parser("score", help="score the active revision against a query file")
     score.add_argument("-q", "--queries", default="eval/queries.json")
+    score.add_argument(
+        "--depth",
+        type=int,
+        default=DEFAULT_DEPTH,
+        help=f"per-arm fetch limit and returned list length (default {DEFAULT_DEPTH}; "
+        f"`cementic search` ships {PRODUCTION_DEPTH})",
+    )
     score.add_argument("--json", action="store_true", help="also emit machine-readable totals")
     score.set_defaults(func=command_score)
 

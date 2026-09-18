@@ -870,11 +870,88 @@ a document ranked 11th by *both* arms is unreachable. Raise the per-arm limit to
 a multiple of `top_k`; keep `top_k` as the returned count. *Ends when:* Phase 0
 recall@10 moves or is shown flat, and the chosen multiple is recorded here.
 
+**KILLED 2026-09-19 — measured, and it makes retrieval worse.** Scoring the
+same query set at `--depth 10` (shipped) and `--depth 50` (this step's proposal,
+since `top_k` is the per-arm fetch limit) is a direct test of it, and the deeper
+fetch loses:
+
+| set | recall@10 @10 | recall@10 @50 | MRR @10 | MRR @50 |
+| --- | --- | --- | --- | --- |
+| rare-token | **0.950** | 0.817 | **0.717** | 0.689 |
+| title | 0.883 | 0.883 | 0.821 | 0.817 |
+| phrase | 1.000 | 1.000 | **0.503** | 0.348 |
+| phrase-reordered | **1.000** | 0.950 | **0.504** | 0.350 |
+| phrase-dropped | 0.967 | 0.967 | **0.466** | 0.290 |
+| phrase-typo | 0.217 | 0.233 | 0.143 | 0.147 |
+
+recall@1 is byte-identical at both depths in all six sets, so every bar in this
+document is depth-robust and none of them need restating. Eight rare-token
+queries lose gold from the top 10 going 10 -> 50 and none gain it; gold slides
+from ranks 3-9 to 11-16.
+
+**Do not re-propose over-fetching until the defect below is fixed** — it is the
+reason the deeper fetch loses, and over-fetching feeds it.
+
+**The defect: RRF scores documents by chunk count, not chunk quality.**
+`_merge_arms` passes *chunk-level* `source_path` lists to `combine`
+(`search.py:415-419`), and `reciprocal_rank_fusion` does
+`scores[path] += 1/(k+rank)` per occurrence (`hybrid.py:81`), so one document
+collects one addend per chunk it has in the pool. Traced on `VectorizedMap`,
+whose gold sits at lexical rank 1 with no vector chunks and scores 0.01639 at
+both depths — what changes is who passes it:
+
+| depth | documents outscoring gold | how |
+| --- | --- | --- |
+| 10 | 1 | 5 vector chunks (0.07847) |
+| 50 | 9 | 2-4 vector chunks each (0.0224-0.0429) |
+
+A one-chunk document cannot exceed `1/(60+1) = 0.0164` however good its match
+is; a two-chunk document at ranks 40 and 41 scores `1/100 + 1/101 = 0.0199` and
+beats it. Deeper fetching manufactures multi-chunk documents, which is the whole
+effect.
+
+*Candidate fix, not yet costed:* deduplicate each arm to document level, keeping
+each document's best rank, **before** fusing — so every document contributes
+exactly one term per arm and fusion ranks documents the way the metrics already
+score them. Cheap, no rebuild, no model, and testable against this same query
+set at both depths. It also plausibly moves numbers this project has been
+reading as ranker quality, so it should be measured before Phase 1 step 2 rather
+than after: a reranker evaluated on top of a miscounting fusion is evaluated
+against a moving baseline.
+
+*Two refuted hypotheses, recorded so they are not re-run:* displacing documents
+are **not** two-arm documents beating one-arm documents (the displacers were
+single-arm), and multiplicity is **not** visible in `Searcher.search`'s output
+(`_merge_arms` already deduplicates to one row per document there, so counting
+it post-hoc reads 1.00 for everyone and says nothing). Multiplicity only exists
+in the pre-fusion arm lists.
+
 **Step 2 — a rerank stage on the existing llama-server.** `--rerank` and
 `--pooling rank` are present on the installed build (10858, verified
 2026-09-18), so this adds no Python dependency, no new process class and no new
 supervision path: one more endpoint on a daemon already started, supervised and
 health-checked, plus a second GGUF.
+
+**Cost corrected 2026-09-19 — "no new supervision path" is wrong as configured,
+and this is the sentence that ranked the step.** The flags are real (re-checked
+against `llama-server --help` on build 10858). The topology is not.
+`DEFAULT_DAEMON_COMMAND` (`config.py:549`) runs classic single-model mode —
+`--model {model} --alias {alias} --embeddings`, one port — and startup fails
+unless the server serves `{alias}` at `/v1/models`. One `llama-server` process
+serves one model; a reranker is a different model. So today this step costs a
+second process, a second port, a second PID and log file, a second health check
+and `doctor` coverage for all of it. Also **no reranker GGUF exists** — `models/`
+holds only the two embedding models, and no candidate is named anywhere.
+
+*One possible rescue, unproven.* Build 10858 has a router-server mode
+(`--models-dir`, `--models-preset`, `--models-max`, default 4 loaded at once)
+that could plausibly serve embeddings and rerank from one process on one port,
+which would restore the original claim. Nobody has run it here — this is read
+off `--help` and nothing more. Settle it with a spike before designing step 2,
+because the answer decides whether the step is a config change or a second
+supervised daemon. The spike must also confirm that a router-mode server still
+satisfies the `{alias}` check the embedding path depends on; that path is the
+one thing that must not break, since it is what indexes the corpus.
 
 The design argument, which is why this outranks any fusion change: cementic
 asks one ranking to do recall and precision at once. Split them — the arms
