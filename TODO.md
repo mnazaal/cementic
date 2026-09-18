@@ -213,6 +213,8 @@ give it a condition someone could actually notice.
   moves the fingerprint by itself, so the fix costs exactly the rebuild it
   prevents. *Reopen when:* you want a non-PDF extractor, or anything else
   forces a rebuild — on that day the narrowing rides along for free.
+  **Trigger fired 2026-09-18:** a rebuild is authorised. Now item 2d of PLAN's
+  "Execution order — retrieval quality and the rebuild it rides".
 - **Publish the repo.** Nothing gates on it today; the install docs no longer
   describe a command that cannot work. Publishing only changes whether a
   `pipx install git+https://...` one-liner works for someone who is not the

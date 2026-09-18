@@ -742,7 +742,168 @@ below, and `TODO.md` holds the feature backlog as before.
 3-6. **Void.** `chunk_size` re-derivation, the punctuation filter and OCR
    removal go back to parked: each costs a full rebuild and there is no longer
    a rebuild to ride on. The five-day re-embed and its five days without search
-   are not being spent.
+   are not being spent. **Superseded 2026-09-18:** there is a rebuild again —
+   see "Execution order — retrieval quality and the rebuild it rides", where
+   all three are Phase 2 riders.
+
+## Execution order — retrieval quality and the rebuild it rides (2026-09-18)
+
+Opened after surveying txtai (`~/projects/txtai`, Apache-2.0, HEAD 2026-09-15,
+33k LOC) for transferable design. The survey's ranked list is not what makes
+this a plan; two facts about *this* repo are:
+
+- **A full rebuild is authorised.** That reverses the v1.5 section's closing
+  line — "there is no longer a rebuild to ride on" — and un-parks every item
+  that was waiting for one.
+- **Nothing measures retrieval quality on demand.** Five `notes/probe_*.py`
+  harnesses each answered one question and were kept as-is; the model
+  comparison that killed v1.5 lives in `~/.cache/`, outside the repo, on this
+  machine only.
+
+**Ordering is load-bearing.** Phase 1 completes before Phase 2: the reranker
+changes what the two arms are *for*, and if it lands after a model swap neither
+change can be attributed. Phase 0 precedes both, or nothing is scored.
+
+### Phase 0 — one evaluation harness, synthetic judgments
+
+Promote the two comparison methods that already exist into one repo-tracked
+harness; delete the probes it subsumes.
+
+**Judgments are mechanical — no human judging (decided 2026-09-18).** Set A:
+rare capitalised tokens, gold is the documents containing them. Set B: a
+document title as the query, gold is its own body chunks. Both are already
+built by `notes/probe_hybrid_retrieval.py`; the paired sign test and the
+stored-index control arm are in
+`~/.cache/cementic-igpu/calibration/compare-models.sh`, which is outside the
+repo and one `rm` from gone.
+
+Add a **phrase→body** set: sample a 3–6 word phrase from a body chunk, gold is
+its source document. This is the bucket nothing has ever measured and where
+`ts_rank` is most likely weak. (It is set E — `probe_hybrid_retrieval.py`
+already spends A on rare tokens, B on titles, C on common tokens and D on
+document-frequency bands.)
+
+*Ends when:* one command reports recall@1, recall@10 and MRR per set against
+the active revision; the numbers reproduce the v1.5 table's control arm
+(recall@1 0.7200, recall@10 0.8860, MRR 0.7812); the `~/.cache` script is gone.
+
+**DONE 2026-09-18** — `scripts/measure_retrieval_quality.py` (`build` draws the
+sets, `score` runs them; `eval/queries.json` is the checked-in instrument).
+Baseline on the active revision, 60 queries per set:
+
+| set | recall@1 | recall@10 | MRR |
+| --- | --- | --- | --- |
+| rare-token | 0.633 | 0.817 | 0.689 |
+| title | 0.783 | 0.883 | 0.817 |
+| phrase | 0.117 | 1.000 | 0.348 |
+
+**The phrase row is the finding, and it indicts `lead` directly.** The gold
+document is in the top 10 for all 60 phrase queries and first for 7. The
+lexical arm alone ranks it first for 58 (recall@1 0.967, MRR 0.983); fusion
+throws that away because `looks_like_identifier` is false for any multi-word
+query, so `lead = "vector"` and the vector arm is weak on verbatim phrases.
+`hybrid.py`'s stated reason — "'Kalman filter' is a topic, and the vector arm
+is better at topics" — is right for titles (vector 0.783 against lexical 0.050)
+and wrong for phrases.
+
+**The obvious repair was simulated and rejected.** Replacing the syntactic test
+with a pure rarity test — lexical owns rank 1 whenever the query has 1-5 exact
+matches, whatever its shape — moves phrase recall@1 to 0.967 and rare-token to
+0.650, but it fires on 20 of 60 titles, gets 12 of them wrong, and costs title
+recall@1 0.783 -> 0.583. That is this section's own trade restated: every
+rank-1 routing rule is a bet on an arm, and no rule wins both buckets.
+
+*Sets the bar for Phase 1 step 2.* A reranker does not have to choose, so it
+must beat the better of the two bets in every bucket: **recall@1 >= 0.650
+rare-token, >= 0.783 title, >= 0.967 phrase.** The recall@10 column is the
+ceiling it is reordering within (0.817 / 0.883 / 1.000).
+
+*Read the phrase numbers as an upper bound, not an estimate.* Its queries are
+verbatim substrings lifted from the documents and gated to <=5 exact matches,
+so exact matching must win on them; a user recalling a phrase imperfectly —
+reordered, paraphrased, one word off — is not represented. The direction is
+solid, the magnitude is inflated, and a perturbed-phrase variant is what would
+settle it.
+
+*Known artefact:* one accepted phrase is `augmentations by max- imizing the
+agreement` — PDF line-break hyphenation surviving into stored chunk text. It
+splits words across both arms' term space. A de-hyphenation pass at extract
+time re-versions the extractor profile, so it is nearly free as a Phase 2
+rider and expensive at any other time.
+
+### Phase 1 — no rebuild needed
+
+**Step 1 — over-fetch before fusing.** Both arms return exactly `top_k`
+(`search.py:330`, `:375`), so fusion only reorders the union of two top-10s and
+a document ranked 11th by *both* arms is unreachable. Raise the per-arm limit to
+a multiple of `top_k`; keep `top_k` as the returned count. *Ends when:* Phase 0
+recall@10 moves or is shown flat, and the chosen multiple is recorded here.
+
+**Step 2 — a rerank stage on the existing llama-server.** `--rerank` and
+`--pooling rank` are present on the installed build (10858, verified
+2026-09-18), so this adds no Python dependency, no new process class and no new
+supervision path: one more endpoint on a daemon already started, supervised and
+health-checked, plus a second GGUF.
+
+The design argument, which is why this outranks any fusion change: cementic
+asks one ranking to do recall and precision at once. Split them — the arms
+recall, the reranker orders — and the two arms' scores never need to be
+comparable. That comparability is the problem `hybrid.py` was written around.
+
+*Deletion test, to be run rather than assumed.* 30 references across
+`config.py`, `search.py`, `cli.py`, `hybrid.py` and three test files exist only
+to manage incomparable scores and hand-route rank 1: `lead`,
+`looks_like_identifier`, `_lexical_should_lead` and its extra per-search index
+probe, `lexical_lead_max_documents`, `scores_explain_order`, and `score_kind`
+plumbed through to the renderer. If the reranker beats `lead` on Phase 0 they
+all go and net surface shrinks. If it does not, the reranker goes.
+
+*Withdrawn by this step:* benchmarking `ts_rank` against BM25, which was the
+survey's top recommendation. With a reranker the lexical arm only has to recall
+a document into the pool, not order it; `ts_rank` is a weak ranker and an
+adequate filter. That avoids a Postgres search extension, a second index and a
+changed container image.
+
+### Phase 2 — the single rebuild, batched
+
+Everything here re-versions a profile. Decide all of it, then run once — the
+cost of missing one is another full rebuild.
+
+**2a. Reconsider the embedding model.** What the rebuild authorisation actually
+buys, and it dominates every ranking change. Current
+`nomic-embed-text-v2-moe` at `n_ctx = 512` forces `chunk_size = 320`
+(`cementic doctor`, 2026-09-18). The v1.5
+analysis above already costed the prize: a 2048-token window supports
+`chunk_size` near 1,300, cutting the corpus from ~2.3M chunks to ~575k and the
+vector table from 18 GB to ~4.5 GB. v1.5 lost on retrieval quality; the reason
+to want the window did not. Candidate GGUF models need a fresh check — no model
+is recommended here, and any name predating this line is stale. Method is Phase
+0's, on a 1,000-paper sample with the stored index as control, before
+committing ~108 h.
+
+**2b. The three riders the v1.5 section parked.** Unchanged and already
+specified above: drop punctuation-dominated chunks at chunk time, re-derive
+`chunk_size` against the chosen model's `/tokenize`, remove the `use_ocr` knob.
+Their *ends when* conditions stand as written.
+
+**2c. Structure-aware chunk boundaries.** From txtai, verified in source: the
+extractor writes a separator at page breaks and headings (`htmltomd.py:120`,
+`:224`) and the chunker splits on it when present, falling back to blank-line
+runs when absent (`segmentation.py:148-149`). One character is the entire
+protocol between the two stages — no import, no shared type, and the chunker
+stays a pure function. `pymupdf4llm` already emits Markdown headings to hang it
+on. Keep the token window as fallback and as the hard cap: this is a boundary
+*preference*, not a new chunker, and it adds no dependency.
+
+**2d. Narrow the extractor-registry fingerprint.** `TODO.md`'s parked item,
+whose stated trigger is "anything else forces a rebuild". This is that day; it
+rides along free.
+
+*Anti-scope, so nobody re-derives it:* no log-odds or convex score fusion —
+Phase 1 step 2 buys the same thing more cheaply, and txtai's implementation
+cites a paper absent from its own tree (`hybrid.py:232`); no chonkie or NLTK
+chunker (2c does it with a separator); no second embedding provider added
+merely to exercise a one-entry registry; no Postgres search extension.
 
 ## Design decisions and open items
 
