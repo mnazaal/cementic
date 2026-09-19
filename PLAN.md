@@ -870,54 +870,59 @@ a document ranked 11th by *both* arms is unreachable. Raise the per-arm limit to
 a multiple of `top_k`; keep `top_k` as the returned count. *Ends when:* Phase 0
 recall@10 moves or is shown flat, and the chosen multiple is recorded here.
 
-**KILLED 2026-09-19 — measured, and it makes retrieval worse.** Scoring the
-same query set at `--depth 10` (shipped) and `--depth 50` (this step's proposal,
-since `top_k` is the per-arm fetch limit) is a direct test of it, and the deeper
-fetch loses:
+**KILLED, THEN REVIVED 2026-09-19 — the step was right and the fusion under it
+was broken.** Scoring the same query set at `--depth 10` (shipped) and
+`--depth 50` (this step's proposal, since `top_k` is the per-arm fetch limit)
+first showed the deeper fetch *losing*: rare-token recall@10 0.950 -> 0.817,
+phrase MRR 0.503 -> 0.348, eight rare-token queries dropping gold out of the
+top 10 and none gaining it. That was not over-fetching failing. It was
+over-fetching exposing a defect in `combine`, now fixed.
 
-| set | recall@10 @10 | recall@10 @50 | MRR @10 | MRR @50 |
-| --- | --- | --- | --- | --- |
-| rare-token | **0.950** | 0.817 | **0.717** | 0.689 |
-| title | 0.883 | 0.883 | 0.821 | 0.817 |
-| phrase | 1.000 | 1.000 | **0.503** | 0.348 |
-| phrase-reordered | **1.000** | 0.950 | **0.504** | 0.350 |
-| phrase-dropped | 0.967 | 0.967 | **0.466** | 0.290 |
-| phrase-typo | 0.217 | 0.233 | 0.143 | 0.147 |
-
-recall@1 is byte-identical at both depths in all six sets, so every bar in this
-document is depth-robust and none of them need restating. Eight rare-token
-queries lose gold from the top 10 going 10 -> 50 and none gain it; gold slides
-from ranks 3-9 to 11-16.
-
-**Do not re-propose over-fetching until the defect below is fixed** — it is the
-reason the deeper fetch loses, and over-fetching feeds it.
-
-**The defect: RRF scores documents by chunk count, not chunk quality.**
+**The defect: RRF scored documents by chunk count, not chunk quality.**
 `_merge_arms` passes *chunk-level* `source_path` lists to `combine`
 (`search.py:415-419`), and `reciprocal_rank_fusion` does
 `scores[path] += 1/(k+rank)` per occurrence (`hybrid.py:81`), so one document
-collects one addend per chunk it has in the pool. Traced on `VectorizedMap`,
+collected one addend per chunk it had in the pool. Traced on `VectorizedMap`,
 whose gold sits at lexical rank 1 with no vector chunks and scores 0.01639 at
-both depths — what changes is who passes it:
+both depths -- what changed was who passed it: 1 document at depth 10, 9 at
+depth 50, every one of them by chunk accumulation. A one-chunk document cannot
+exceed `1/(60+1) = 0.0164` however good its match; a two-chunk document at ranks
+40 and 41 scores `1/100 + 1/101 = 0.0199` and beats it. Deeper fetching
+manufactures multi-chunk documents, which was the whole effect.
 
-| depth | documents outscoring gold | how |
-| --- | --- | --- |
-| 10 | 1 | 5 vector chunks (0.07847) |
-| 50 | 9 | 2-4 vector chunks each (0.0224-0.0429) |
+*Fixed* by collapsing each ranking to one entry per document before fusing, so
+every document enters at its best-ranked chunk and contributes exactly one term
+per arm. `deduplicate` already existed and already said in its own docstring
+that a document's best chunk "is what should represent it" -- it was applied to
+`combine`'s output but never its inputs. Three regression tests in
+`TestCombineScoresDocumentsNotChunks`; no pre-existing test changed, so this
+behaviour had no coverage at all.
 
-A one-chunk document cannot exceed `1/(60+1) = 0.0164` however good its match
-is; a two-chunk document at ranks 40 and 41 scores `1/100 + 1/101 = 0.0199` and
-beats it. Deeper fetching manufactures multi-chunk documents, which is the whole
-effect.
+**After the fix, at depth 50 (over-fetched):**
 
-*Candidate fix, not yet costed:* deduplicate each arm to document level, keeping
-each document's best rank, **before** fusing — so every document contributes
-exactly one term per arm and fusion ranks documents the way the metrics already
-score them. Cheap, no rebuild, no model, and testable against this same query
-set at both depths. It also plausibly moves numbers this project has been
-reading as ranker quality, so it should be measured before Phase 1 step 2 rather
-than after: a reranker evaluated on top of a miscounting fusion is evaluated
-against a moving baseline.
+| set | recall@10 before | after | MRR before | after |
+| --- | --- | --- | --- | --- |
+| rare-token | 0.817 | **0.983** | 0.689 | 0.719 |
+| title | 0.883 | 0.867 | 0.817 | 0.815 |
+| phrase | 1.000 | 1.000 | 0.348 | **0.544** |
+| phrase-reordered | 0.950 | **1.000** | 0.350 | **0.542** |
+| phrase-dropped | 0.967 | 0.950 | 0.290 | **0.470** |
+| phrase-typo | 0.233 | 0.233 | 0.147 | 0.147 |
+
+Over-fetching now *helps*: rare-token recall@10 0.983 at depth 50 against 0.950
+at shipped depth 10, the best figure recorded here. Phrase MRR gains at both
+depths (0.503 -> 0.547 at depth 10). **recall@1 is unchanged in all six sets at
+both depths**, because `lead` still owns position one -- so every bar in this
+document stands exactly as written and none need restating.
+
+*Two cells moved the wrong way, each one query of sixty:* title recall@10
+0.883 -> 0.867 at depth 50, and phrase-dropped 0.967 -> 0.950 at both depths.
+At n=60 a single query is 0.017, so treat these as noise unless a larger set
+reproduces them -- do not tune against them.
+
+*Ends when:* the per-arm multiple is chosen and recorded here. Depth 50 is
+measured and better; what is NOT yet measured is its latency cost, which is the
+remaining input to that choice.
 
 *Two refuted hypotheses, recorded so they are not re-run:* displacing documents
 are **not** two-arm documents beating one-arm documents (the displacers were

@@ -122,3 +122,48 @@ class TestScoresExplainOrder:
 
     def test_empty_is_trivially_consistent(self):
         assert scores_explain_order([]) is True
+
+
+class TestCombineScoresDocumentsNotChunks:
+    """A document's fused rank must not depend on how many chunks it owns.
+
+    Both arms return one row per chunk, so a ranking handed to `combine`
+    repeats a document once per matching chunk. `reciprocal_rank_fusion` adds
+    `1/(k+rank)` per occurrence, so before this was fixed a document collected
+    one addend per chunk and outranked better-matching documents purely by
+    owning more of them.
+
+    Measured on the live corpus 2026-09-19 (PLAN.md, Phase 1 step 1): the
+    effect cost rare-token recall@10 0.950 -> 0.817 when the per-arm fetch
+    depth rose from 10 to 50, because a deeper fetch manufactures more
+    multi-chunk documents.
+    """
+
+    def test_a_deep_two_chunk_document_loses_to_a_top_one_chunk_document(self):
+        # `deep` sits at vector ranks 10 and 11; `top` is the lexical arm's
+        # first hit. Summed, `deep` scores 1/70 + 1/71 = 0.0284 and wins; on
+        # its best chunk alone it scores 1/70 = 0.0143 and loses to 1/61.
+        vector = [f"filler{i}" for i in range(1, 10)] + ["deep", "deep"]
+        lexical = ["top"]
+
+        combined = combine(vector, lexical, lead="vector")
+
+        assert combined.index("top") < combined.index("deep")
+
+    def test_repeated_chunks_do_not_change_a_documents_rank(self):
+        """Duplicating a document's chunks must be a no-op for the ordering."""
+        vector = ["a", "b", "c"]
+        lexical = ["d"]
+
+        once = combine(vector, lexical, lead="vector")
+        repeated = combine(["a", "a", "a", "b", "b", "c"], lexical, lead="vector")
+
+        assert once == repeated
+
+    def test_a_document_is_represented_by_its_best_chunk(self):
+        """Dedup keeps first position, so rank 2 beats the same doc's rank 9."""
+        vector = ["x", "target"] + [f"filler{i}" for i in range(1, 7)] + ["target"]
+
+        combined = combine(vector, ["other"], lead="vector")
+
+        assert combined.index("target") < combined.index("filler1")

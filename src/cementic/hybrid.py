@@ -130,9 +130,26 @@ def combine(
 
     Degenerate cases fall out without special-casing: if the leading arm
     returned nothing, the fused list is returned unchanged.
+
+    **Each ranking is collapsed to one entry per document before fusing, and
+    that is load-bearing (2026-09-19).** Callers pass chunk-level rankings, so a
+    document repeats once per matching chunk, and `reciprocal_rank_fusion` adds
+    a term per occurrence. Fusing the raw lists therefore ranks a document by
+    how many chunks it owns rather than by how well its best chunk matches: a
+    one-chunk document cannot exceed ``1/(k+1)`` however good it is, while a
+    two-chunk document at ranks 40 and 41 scores ``1/100 + 1/101`` and passes
+    it. On the live corpus that cost rare-token recall@10 0.950 -> 0.817 when
+    the per-arm fetch depth rose 10 -> 50, because depth manufactures
+    multi-chunk documents (PLAN.md, Phase 1 step 1).
+
+    `deduplicate` keeps first position, so each document enters fusion at its
+    best-ranked chunk -- which is what its own docstring already said the
+    representative should be.
     """
     if lead not in ("vector", "lexical"):
         raise ValueError(f"lead must be 'vector' or 'lexical', got {lead!r}")
-    leading = vector_ranking if lead == "vector" else lexical_ranking
-    fused = reciprocal_rank_fusion(vector_ranking, lexical_ranking, k=k)
+    vector_documents = deduplicate(vector_ranking)
+    lexical_documents = deduplicate(lexical_ranking)
+    leading = vector_documents if lead == "vector" else lexical_documents
+    fused = reciprocal_rank_fusion(vector_documents, lexical_documents, k=k)
     return deduplicate(leading[:1] + fused)
