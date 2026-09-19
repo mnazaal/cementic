@@ -44,6 +44,14 @@ from cementic.vector_store import (
 MAX_SEARCH_RESULTS = 50
 MAX_QUERY_CHARS = 8_000
 
+#: How many results each arm fetches per returned result, under hybrid search.
+#: Chosen 2026-09-19 (PLAN.md, Phase 1 step 1) as the multiple actually
+#: measured: at the default `top_k` of 10 it fetches 50 per arm, which is the
+#: depth the recall and latency numbers in that section were taken at.
+#: The product is capped at `MAX_SEARCH_RESULTS`, so nothing fetches deeper
+#: than a configuration that has been scored.
+OVERFETCH_MULTIPLE = 5
+
 
 #: Fraction of the context window a query may occupy. The counting tokenizer
 #: (cl100k_base, shared with chunking) is not the embedding model's own, so the
@@ -75,6 +83,38 @@ def _reject_query_over_context(query: str, n_ctx: int) -> None:
             f"context window is {n_ctx} (usable {budget}). Shorten the query -- "
             "the model would silently ignore everything past the limit."
         )
+
+
+def arm_fetch_limit(top_k: int, *, hybrid: bool) -> int:
+    """How many results each arm fetches to return `top_k` of them (pure).
+
+    Fusion can only reorder what the arms handed it, so a document ranked just
+    outside both arms' lists is unreachable at any quality of ranking. Fetching
+    a multiple and returning `top_k` is Phase 1 step 1, chosen 2026-09-19:
+    raising the per-arm limit from 10 to 50 moved rare-token recall@10 from
+    0.950 to 0.983 and phrase MRR from 0.503 to 0.547, with recall@1 unchanged
+    in all six query sets.
+
+    Free in wall-clock terms rather than cheap: a search is 73% query embedding
+    (73.8 ms of a 100.9 ms median), and the extra rows cost less than the
+    +/-13 ms spread between repeats of one query, so the difference sits below
+    the noise floor.
+
+    Capped at `MAX_SEARCH_RESULTS` so nothing fetches deeper than a depth that
+    has actually been scored.
+
+    Without hybrid there is nothing to fuse: the deeper list would be sliced
+    back to `top_k` in score order, which is what fetching `top_k` returns.
+
+    **Sound only because `combine` fuses at document level.** Fusion scored per
+    *chunk* until 2026-09-19, and under that fusion this same over-fetch
+    LOWERED rare-token recall@10 to 0.817 by handing multi-chunk documents one
+    addend per chunk. Do not raise the multiple without re-reading
+    `hybrid.combine`'s contract.
+    """
+    if not hybrid:
+        return top_k
+    return min(top_k * OVERFETCH_MULTIPLE, MAX_SEARCH_RESULTS)
 
 
 class SearchResult(TypedDict):
@@ -284,6 +324,8 @@ class Searcher:
             distance_metric = embedding_profile.distance_metric
             distance_operator = _distance_operator(distance_metric)
 
+            arm_k = arm_fetch_limit(top_k, hybrid=self.config.search.hybrid)
+
             combined: list[SearchResult] = []
             for revision in revisions:
                 if not vector_table_exists(session.connection(), revision.embedding_profile_id):
@@ -301,7 +343,7 @@ class Searcher:
                     actual_method,
                     hnsw_ef_search=self.config.index.hnsw_ef_search,
                     diskann_query_rescore=self.config.index.diskann_query_rescore,
-                    top_k=top_k,
+                    top_k=arm_k,
                     hnsw_iterative_scan=self._iterative_scan_mode(session),
                 ):
                     session.execute(text(tuning))
@@ -327,7 +369,7 @@ class Searcher:
                         "collection": revision.collection,
                         "chunk_profile_id": revision.chunk_profile_id,
                         "extractor_profile_id": revision.extractor_profile_id,
-                        "k": top_k,
+                        "k": arm_k,
                     },
                 )
                 for row in rows:
@@ -346,7 +388,7 @@ class Searcher:
                     )
 
                 if self.config.search.hybrid:
-                    combined.extend(self._lexical_results(session, revision, query, top_k))
+                    combined.extend(self._lexical_results(session, revision, query, arm_k))
 
         combined.sort(key=lambda result: result["score"], reverse=True)
         if not self.config.search.hybrid:

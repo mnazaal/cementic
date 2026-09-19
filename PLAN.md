@@ -920,9 +920,25 @@ document stands exactly as written and none need restating.
 At n=60 a single query is 0.017, so treat these as noise unless a larger set
 reproduces them -- do not tune against them.
 
-*Ends when:* the per-arm multiple is chosen and recorded here. Depth 50 is
-measured and better; what is NOT yet measured is its latency cost, which is the
-remaining input to that choice.
+**CLOSED 2026-09-19. The multiple is 5, capped at `MAX_SEARCH_RESULTS`**
+(`search.arm_fetch_limit`, `OVERFETCH_MULTIPLE = 5`). At the shipped `top_k` of
+10 that fetches 50 per arm — the one depth the recall numbers above were taken
+at, so the cap means nothing ever fetches deeper than a scored configuration.
+Non-hybrid search is unchanged: with one arm the deeper list is sliced back to
+`top_k` in score order, which is what fetching `top_k` already returns.
+
+*Latency: free, and "free" is the measured claim rather than "cheap".* Timed
+interleaved, best-of-5 per query, n=20, warm-up discarded, every timed call
+asserted non-empty (a search that failed early is the fastest search). Median
+search 100.9 ms at depth 10 against 95.9 ms at depth 50 — **depth 50 reading
+*faster* is impossible**, so that −5.0 ms is this setup's noise floor, not a
+result. The paired per-query spread runs −13.1 to +3.5 ms, which is the honest
+error bar. The reason the effect hides: query embedding alone is 73.8 ms, 73%
+of the search, leaving ~27 ms for both arms' SQL and fusion together.
+
+*If the multiple is ever raised, re-measure rather than extrapolating.* Nothing
+here was measured above 50 per arm, and `MAX_SEARCH_RESULTS` is the cap that
+keeps that honest.
 
 *Two refuted hypotheses, recorded so they are not re-run:* displacing documents
 are **not** two-arm documents beating one-arm documents (the displacers were

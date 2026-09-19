@@ -10,6 +10,8 @@ from sqlalchemy.orm import sessionmaker
 from cementic.config import Config
 from cementic.db import Base, PipelineRevision
 from cementic.search import (
+    MAX_SEARCH_RESULTS,
+    OVERFETCH_MULTIPLE,
     Searcher,
     SearchResult,
     _create_embedding_provider,
@@ -17,6 +19,7 @@ from cementic.search import (
     _reject_query_over_context,
     _score_from_distance,
     _searchable_revisions,
+    arm_fetch_limit,
 )
 
 
@@ -628,3 +631,34 @@ class TestEmptyQueryIsRejected:
             searcher.search("  ")
 
         mock_session_factory.return_value.assert_not_called()
+
+
+class TestArmFetchLimit:
+    """Phase 1 step 1: each arm fetches a multiple, the caller still gets top_k.
+
+    Measured on the live corpus 2026-09-19 -- over-fetching moved rare-token
+    recall@10 0.950 -> 0.983 with recall@1 unchanged, and cost less than the
+    noise floor because a search is 73% query embedding.
+    """
+
+    def test_hybrid_fetches_the_multiple(self):
+        assert arm_fetch_limit(10, hybrid=True) == 10 * OVERFETCH_MULTIPLE
+
+    def test_the_shipped_default_fetches_the_depth_that_was_scored(self):
+        """`cementic search` defaults to 10, and depth 50 is what was measured."""
+        assert arm_fetch_limit(10, hybrid=True) == 50
+
+    def test_never_fetches_deeper_than_a_scored_depth(self):
+        assert arm_fetch_limit(MAX_SEARCH_RESULTS, hybrid=True) == MAX_SEARCH_RESULTS
+        assert arm_fetch_limit(30, hybrid=True) == MAX_SEARCH_RESULTS
+
+    def test_without_hybrid_there_is_nothing_to_fuse(self):
+        """One arm sliced to top_k in score order == fetching top_k."""
+        assert arm_fetch_limit(10, hybrid=False) == 10
+        assert arm_fetch_limit(MAX_SEARCH_RESULTS, hybrid=False) == MAX_SEARCH_RESULTS
+
+    @pytest.mark.parametrize("top_k", [1, 5, 10, 25, 50])
+    def test_always_fetches_at_least_what_it_returns(self, top_k):
+        """A limit below top_k would silently truncate the returned list."""
+        for hybrid in (True, False):
+            assert arm_fetch_limit(top_k, hybrid=hybrid) >= top_k
