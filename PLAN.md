@@ -1,121 +1,144 @@
 # cementic — architecture & design
 
-<!-- session-handoff:begin (2026-09-18) -->
+<!-- session-handoff:begin (2026-09-19) -->
 ## Where the work stands
 
-**The entry point is "Execution order — retrieval quality and the rebuild it
-rides" below, Phase 1 step 2** (a rerank stage on the existing llama-server).
-Phase 0 is DONE, and its baseline is what makes step 2 the entry point rather
-than step 1.
+**First action is a decision, not a task: continue in Phase 1, or start Phase
+2a (the embedding model).** Both are defensible and the session that just ended
+could not settle it. The case for 2a is that this plan says in its own words
+that it "dominates every ranking change", it is what the rebuild authorisation
+was granted for, and it is untouched after two sessions. The case for more
+Phase 1 is that `recall@1` has not moved at all across either session — it is
+still 0.633 / 0.783 / 0.117 for rare-token / title / phrase — and rank 1 is
+routed by `lead`, which nothing has yet tested. Read "Execution order —
+retrieval quality and the rebuild it rides" below before choosing.
 
-*(Corrected 2026-09-19: this line used to read "First action: merge the branch."
-That merge landed — `main` is at `4315697` and both session branches are gone —
-and the 2026-09-19 session confirmed Phase 0's bar holds. The rest of this block
-is from 2026-09-18 and was not rewritten; the query set it describes as 180
-queries is now 360, since `perturb` added three derived phrase sets.)*
+**If you want a task rather than a decision, take `lead`.** It is the cheapest
+unrun experiment in the plan, it owns the number that has never moved, and it
+is the surface Phase 1 step 2 proposes deleting — so measuring it tells you
+whether the reranker (now known to cost a second supervised daemon) is needed
+at all. It is not written up as a numbered step; it is the thread left hanging
+in Phase 1 step 2's deletion test.
 
-**Repo state.** ~~The session's work — `48a1148`, the harness, the baseline and
-the plan below — is already merged and pushed. Only this handoff is outstanding,
-as one commit on `claude/session-handoff`; merge and delete both branches.~~
-**Done — superseded 2026-09-19.** `main` = `origin/main` = `4315697` and both
-branches are deleted. The one durable line here: **a hook rejects agent commits
-to `main`**, so agent work lands on a branch and the merge is always yours.
+**Repo state.** Branch `claude/fuse-documents-not-chunks`, **two commits ahead
+of `main` and not merged**: `1e0bd7d` (fusion scores documents, not chunks —
+a shipped ranking bug) and `5485d9f` (over-fetch per arm, closing step 1).
+Fast-forward clean. `main` = `origin/main` = `65a68a3`. Working tree clean
+apart from the masked dotfiles that always show as untracked here.
 
-**Live system, unchanged this session.** `cementic@papers.service` up; 23,075
-documents; `doctor` fully green including the embedding canary (worst cosine
-0.999860521). Nothing was indexed, re-embedded or re-configured. No background
-jobs, nothing on a cluster.
+**These two commits must land together and in order.** Over-fetching is sound
+only because fusion now fuses at document level; under the old fusion the same
+over-fetch *lowered* rare-token recall@10 to 0.817. Merging `5485d9f` without
+`1e0bd7d` puts a known-bad configuration on `main`. A hook rejects agent
+commits to `main`, so the merge is yours:
+```bash
+git checkout main && git merge --ff-only claude/fuse-documents-not-chunks && git push
+```
+Delete the branch after the push succeeds, not before.
 
-**What this session did.** Surveyed txtai (`~/projects/txtai`, Apache-2.0, HEAD
-2026-09-15) for transferable design, turned the survey into the Phase 0/1/2 plan
-below, then built and ran Phase 0. The reasoning lives in that section, not here.
+**Live system.** `cementic@papers.service` up; `doctor` fully green (embedding
+canary worst cosine 0.999866174). Nothing indexed, re-embedded or
+re-configured this session — but `src/` ranking behaviour **did** change, so the
+corpus is untouched while search results are not. No background jobs, nothing
+on a cluster.
 
-**The one result a cold reader must not miss.** The baseline says the two arms
-already *retrieve* the right document and then fail to rank it first: recall@10
-is 0.817 / 0.883 / 1.000 across rare-token / title / phrase, while recall@1 on
-phrases is 0.117. The lexical arm alone ranks the phrase gold first for 58 of
-60. So over-fetching (Phase 1 step 1) addresses a problem this corpus does not
-have, and the live question is ordering. The table and the rejected routing-rule
-simulation are in Phase 0 below.
+**What shipped, in one line each.** `a59c41b` perturbed-phrase sets (merged);
+`65a68a3` `score --depth`, exposing that the eval measured depth 50 while the
+CLI ships 10 (merged); `1e0bd7d` the fusion fix; `5485d9f` over-fetch.
+
+**The one result a cold reader must not miss.** `recall@1` is unchanged by
+everything this session did — 0.633 / 0.783 / 0.117, identical to the committed
+Phase 0 baseline. Every gain landed in recall@10 and MRR (rare-token recall@10
+0.950 -> 0.983, phrase MRR 0.503 -> 0.544). The user-visible complaint that
+motivates the plan — the right paper is not first — is exactly as broken as it
+was. Do not read this session as having improved ranking; it improved the
+candidate pool and the ordering below rank one, and fixed a bug that would have
+corrupted any future comparison, including 2a's model comparison.
 
 **Corrections — distrust these sections' history, not their current text.**
-- **The v1.5 migration section's closing line is superseded.** It parked three
-  riders because "there is no longer a rebuild to ride on"; a rebuild is now
-  authorised and those three are Phase 2b. The line is annotated in place.
-- **The survey's top recommendation was withdrawn by measurement.** Benchmarking
-  `ts_rank` against BM25 ranked first before Phase 0 ran. With a reranker the
-  lexical arm only needs to *recall* into the pool, and the baseline shows it
-  already does. Recorded as withdrawn in Phase 1 step 2; do not re-propose it
-  without new evidence.
-- `chunk_size` is **320**, not 352. An earlier draft of Phase 2a said 352;
-  `cementic doctor` is the authority and the section now cites it.
+- **Phase 1 step 1 was KILLED and then REVIVED inside one session.** It reads
+  correctly now. The kill was real and measured; it was measuring a buggy
+  fusion. `65a68a3`'s commit subject ("killing the over-fetch step") is
+  therefore stale and was left alone because it is pushed.
+- **Phase 1 step 2's cost claim was wrong.** "No new supervision path" is false
+  as configured: `daemon_command` is single-model, so a reranker needs a second
+  supervised process today. Corrected in place; the original sentence is kept
+  above the correction because it is what ranked the step.
+- **The txtai survey's top recommendation is dead.** Benchmarking `ts_rank`
+  against BM25 was withdrawn, and this session falsified its stated reason. The
+  withdrawal still stands on its merits — BM25 inherits the same conjunction.
+- **Phase 0's published numbers were taken at depth 50**, not the shipped 10.
+  The section now says which depth each figure came from.
 
 **Deviations, attributed.**
-- *User-directed:* full plan scope including the ~108 h rebuild; synthetic-only
-  judgments with no human labelling; the plan landing in `PLAN.md`; filename
-  gold labels rather than absolute paths.
-- *Agent-decided:* rebuilding the query set (5.6 min) after inspection found two
-  defects in the first one — a known-item gate of 20 matching documents where
-  the original probe used 5, and a phrase extractor whose 3-character floor
-  deleted short words ("...to emerge..." became "...emerge..."). Both are now
-  recorded in the constants that carry them.
-- *Agent-decided:* discarding `arms.json` rather than promoting it (see below).
+- *User-directed:* settle the instrument before chasing the bar; implement the
+  fusion dedup; close step 1. Each was chosen by the user from lettered options.
+- *Agent-decided:* extracting `arm_fetch_limit` as a pure function rather than
+  leaving the arithmetic inline in a database-bound method; adding a `--depth`
+  flag rather than editing the constant, so one query set can be scored at
+  several depths; stacking over-fetch on the fusion branch instead of its own;
+  discarding all six scratchpad probes.
 
 **Environment quirks that cost time.**
-- A foreground command scoring all 180 queries exceeded the harness's 120 s cap
-  and was auto-backgrounded mid-run. Estimate and background from the outset: a
-  full `score` is ~113 s warm and ~187 s cold, and any per-arm diagnostic that
-  re-runs every query is ~5 min.
+- **Runtime scales with the returned-list size, not the fetch depth.** A
+  360-query `score --depth 10` with over-fetch live took **142 s** while
+  `--depth 50` took 452 s, fetching the same 50 rows per arm. An estimate
+  derived from fetch depth was wrong by 3x. Calibration: `--depth 10` without
+  over-fetch 307 s; full `check.sh` a few minutes; one search ~101 ms median,
+  73% of it query embedding.
+- **After a merge-and-delete you are standing on `main` again.** The pre-commit
+  hook rejected a commit this session for exactly that. Run
+  `git branch --show-current` *before* staging, not after the rejection.
 - The Bash sandbox blocks 127.0.0.1:5432 and reports it as "database not
-  reachable". Every command touching the database, `doctor` or `search` needs
-  the sandbox disabled. (Unchanged from last session; confirmed again.)
-- `scripts/` is **not** covered by `check.sh`'s gates, which run `ruff check
-  src/ tests/` and `mypy src/`. The new harness is clean only because ruff was
-  run on it by hand. Decide whether that stays true before the next script.
-- A heredoc containing a branch-deletion command trips the agent-checkpoint
-  hook even as documentation text. Write such blocks with the file tool.
-- **`$TMPDIR` is `/tmp/claude-3118271` — a shared per-user root, not
-  session-scoped — and a sibling agent session's file can already be sitting
-  there.** This session spliced *another project's* handoff block into this
-  file because a script preferred `$TMPDIR/handoff.md` over the scratchpad copy
-  it had just written. Caught by reading the result; recovered with `git restore
-  --source=HEAD -- PLAN.md`, since the damage never reached a commit. Use the
-  absolute session scratchpad path, never `$TMPDIR`, and assert on the content
-  before writing it into a standing document.
+  reachable". Every command touching the database, `doctor`, `search` or the
+  harness needs the sandbox disabled. (Unchanged; confirmed again.)
+- `$SCRATCH` is **not** set. Use the absolute scratchpad path.
+- Path-importing a script inside a test needs `sys.modules[spec.name] = module`
+  *before* `exec_module`, or `@dataclass` raises `AttributeError: 'NoneType'`
+  — it resolves the defining module through `sys.modules`. See
+  `tests/unit/test_retrieval_quality_harness.py`.
+- `scripts/` is still outside `check.sh`'s ruff/mypy gates. The harness's pure
+  functions are now gated anyway, because their tests live in `tests/`.
 
 **Artifacts.**
-- Promoted into the repo: `scripts/measure_retrieval_quality.py` and
-  `eval/queries.json` (180 queries, the fixed instrument — `score` never
-  rewrites it, and comparing two systems means scoring the same file twice).
-- **Discarded deliberately:** the scratchpad's `arms.json` (789 KB, cached
-  per-query lexical and fused rankings plus exact-match counts). It made the
-  routing-rule simulation free, but it predates the gold-label fix and still
-  carries absolute home paths, so promoting it would reintroduce the disclosure
-  that fix removed. Regenerate in ~5 min from `eval/queries.json` if another
-  ranking simulation is wanted.
-- Logs, outside the repo: `~/.cache/cementic-eval-build.log`,
-  `-eval-score.log`, `-eval-score2.log`, `-eval-arms.log`, `-unit.log`.
+- In the repo: `scripts/measure_retrieval_quality.py` (now `build` / `perturb`
+  / `score --depth`), `eval/queries.json` (360 queries — the 180 originals are
+  byte-identical, `perturb` only ever appends and regenerates its own kinds),
+  `tests/unit/test_retrieval_quality_harness.py`, and new tests in
+  `test_hybrid.py` and `test_search.py`.
+- **Discarded deliberately: all six scratchpad probes.** Two of them
+  (`why_depth_hurts.py`, `chunk_multiplicity.py`) were *invalid* and are
+  recorded as refuted in Phase 1 step 1 so nobody re-runs them. The valid four
+  regenerate in ~2 min, and their conclusions are in the plan. The latency
+  methodology is the only one non-trivial to rebuild; it is specified in
+  `search.arm_fetch_limit`'s docstring and in step 1 (interleaved, best-of-5,
+  warm-up discarded, every timed call asserted non-empty).
+- Logs, outside the repo: `~/.cache/cementic-eval-*.log` and
+  `~/.cache/cementic-check.log`.
 
 **Open, and deliberately not closed.**
-- **The phrase set's magnitude is inflated and nobody has fixed it.** Its
-  queries are verbatim substrings gated to <=5 exact matches, so exact matching
-  must win; a user recalling a phrase imperfectly is not represented. The
-  direction is solid, 0.967 is an upper bound. A perturbed-phrase variant is the
-  cheapest thing that would settle it.
-- `check.sh`'s six gates were **not** run this session. `src/` is untouched by
-  the commit, and unit (1137 passed), ruff and mypy were run instead. The PG
-  gate would have contended with the scoring runs for the single Postgres.
-- PDF line-break hyphenation survives into stored chunk text (`max- imizing`),
-  found incidentally in one of 60 phrase queries. Nobody has audited chunk text
-  quality; a de-hyphenation pass is a candidate Phase 2 rider.
+- **Typo robustness is the largest measured gap and nobody owns it.** One
+  transposed character makes the lexical arm return zero rows for 60 of 60
+  queries; end-to-end recall@10 is 0.217. Phase 1 step 3, unscheduled, and
+  explicitly blocked behind step 2.
+- **Two cells sit one query low and may be noise.** Title recall@10 0.867 and
+  phrase-dropped 0.950. At n=60 one query is 0.017. No seeds were run and the
+  set was not enlarged; the plan says do not tune against them.
+- **The router-server question is unproven.** Build 10858 has `--models-dir` /
+  `--models-max` (default 4) that *might* let one process serve embeddings and
+  rerank, which would restore step 2's original cost. Read off `--help` only;
+  nobody has run it.
+- **No reranker GGUF exists** and no candidate is named anywhere.
+- Phase 2 is entirely untouched, including 2a and the ~108 h rebuild.
 
 **Exit criteria — commands whose output confirms the above.**
 ```bash
-git status --short                       # empty apart from masked dotfiles
-git log --oneline -1                     # equal to origin/main after your merge
+git branch --show-current                # claude/fuse-documents-not-chunks
+git log --oneline main..HEAD             # 5485d9f then 1e0bd7d, until you merge
 ./.venv/bin/cementic doctor              # every line ok
-./.venv/bin/python scripts/measure_retrieval_quality.py score -q eval/queries.json
-# expect recall@1 0.633 / 0.783 / 0.117 for rare-token / title / phrase
+./scripts/check.sh                       # all six gates, including pg
+# ~2.5 min; recall@1 must read 0.633 / 0.783 / 0.117 and rare-token recall@10 0.983
+./.venv/bin/python scripts/measure_retrieval_quality.py score -q eval/queries.json --depth 10
 ```
 <!-- session-handoff:end -->
 
