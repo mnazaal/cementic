@@ -243,6 +243,19 @@ def _numbered(results: list[SearchResult]) -> list[SearchResult]:
     return results
 
 
+def split_arms(
+    results: list[SearchResult],
+) -> tuple[list[SearchResult], list[SearchResult]]:
+    """(vector arm, lexical arm) of a candidate list, each in its order (pure).
+
+    The arm is read off `score_kind`, the one field only the lexical arm sets to
+    ``"lexical_rank"``.
+    """
+    vector_arm = [r for r in results if r["score_kind"] != "lexical_rank"]
+    lexical_arm = [r for r in results if r["score_kind"] == "lexical_rank"]
+    return vector_arm, lexical_arm
+
+
 class Searcher:
     """Searcher for semantic search over active revisions."""
 
@@ -277,6 +290,27 @@ class Searcher:
         top_k: int = 10,
         collections: list[str] | None = None,
     ) -> list[SearchResult]:
+        combined = self.candidates(query, top_k=top_k, collections=collections)
+        if not self.config.search.hybrid:
+            return _numbered(combined[:top_k])
+        return _numbered(
+            self._merge_arms(session_free_results=combined, query=query, top_k=top_k)
+        )
+
+    def candidates(
+        self,
+        query: str,
+        top_k: int = 10,
+        collections: list[str] | None = None,
+    ) -> list[SearchResult]:
+        """Every row both arms fetched for a `top_k` search, before fusion.
+
+        The side-effecting half of `search`: embeds the query and runs both arms'
+        SQL, fetching `arm_fetch_limit(top_k)` rows per arm, sorted by score.
+        Rows are unnumbered and not yet cut to `top_k`. Public so the retrieval
+        harness can score fusion policies offline against the exact candidate
+        pool `search` would have fused (PLAN.md, Phase 1 step 2's deletion test).
+        """
         if top_k < 1 or top_k > MAX_SEARCH_RESULTS:
             raise ValueError(f"top_k must be between 1 and {MAX_SEARCH_RESULTS}")
         if not query.strip():
@@ -391,11 +425,7 @@ class Searcher:
                     combined.extend(self._lexical_results(session, revision, query, arm_k))
 
         combined.sort(key=lambda result: result["score"], reverse=True)
-        if not self.config.search.hybrid:
-            return _numbered(combined[:top_k])
-        return _numbered(
-            self._merge_arms(session_free_results=combined, query=query, top_k=top_k)
-        )
+        return combined
 
     def _lexical_results(
         self, session: Any, revision: PipelineRevision, query: str, top_k: int
@@ -442,8 +472,7 @@ class Searcher:
         first by one arm ties exactly with the other arm's first. Routing only
         position one recovers that without giving back the recall fusion earns.
         """
-        vector_arm = [r for r in session_free_results if r["score_kind"] != "lexical_rank"]
-        lexical_arm = [r for r in session_free_results if r["score_kind"] == "lexical_rank"]
+        vector_arm, lexical_arm = split_arms(session_free_results)
         if not lexical_arm or not vector_arm:
             return session_free_results[:top_k]
 
@@ -453,7 +482,7 @@ class Searcher:
         for result in lexical_arm + vector_arm:
             by_path[result["source_path"]] = result
 
-        lead = "lexical" if self._lexical_should_lead(query) else "vector"
+        lead = "lexical" if self.lexical_should_lead(query) else "vector"
         ordering = combine(
             [r["source_path"] for r in vector_arm],
             [r["source_path"] for r in lexical_arm],
@@ -461,7 +490,7 @@ class Searcher:
         )
         return [by_path[path] for path in ordering][:top_k]
 
-    def _lexical_should_lead(self, query: str) -> bool:
+    def lexical_should_lead(self, query: str) -> bool:
         """Whether this query is a single token rare enough to trust exactly.
 
         Two cheap tests rather than a classifier. The syntactic one is pure; the
