@@ -192,3 +192,77 @@ class TestPerturbedQueries:
         # themselves a source, so a second pass adds nothing.
         derived = harness.perturbed_queries(self.source())
         assert harness.perturbed_queries(derived) == []
+
+
+def record(vector, lexical, *, gold="g", shipped_lead="vector", kind="phrase"):
+    return harness.ArmRecord(
+        query="q", gold=gold, kind=kind, vector=vector, lexical=lexical,
+        shipped_lead=shipped_lead,
+    )
+
+
+class TestFusedRanking:
+    def test_the_lead_owns_rank_one(self) -> None:
+        vector, lexical = ["v", "x"], ["l", "x"]
+        assert harness.fused_ranking(vector, lexical, "vector", 10)[0] == "v"
+        assert harness.fused_ranking(vector, lexical, "lexical", 10)[0] == "l"
+
+    def test_no_lead_puts_the_document_both_arms_found_first(self) -> None:
+        # Plain RRF: "x" is second in both arms and outscores each arm's top.
+        assert harness.fused_ranking(["v", "x"], ["l", "x"], None, 10)[0] == "x"
+
+    def test_is_cut_to_depth(self) -> None:
+        vector = [f"d{i}" for i in range(30)]
+        assert len(harness.fused_ranking(vector, ["d0"], "vector", 10)) == 10
+
+    def test_one_empty_arm_cuts_chunks_before_collapsing_documents(self) -> None:
+        # `_merge_arms` returns chunk rows [:top_k] when an arm is empty, so a
+        # document repeated across those rows leaves fewer than top_k documents.
+        vector = ["a", "a", "b", "c"]
+        assert harness.fused_ranking(vector, [], "lexical", 2) == ["a"]
+        assert harness.fused_ranking([], vector, "vector", 3) == ["a", "b"]
+
+
+class TestPolicyRanking:
+    def test_shipped_follows_the_recorded_lead(self) -> None:
+        rec = record(["v"], ["l"], shipped_lead="lexical")
+        assert harness.policy_ranking(rec, "shipped", 10)[0] == "l"
+
+    def test_oracle_takes_the_lead_that_ranks_gold_higher(self) -> None:
+        rec = record(["v", "x"], ["g", "x"], gold="g")
+        assert harness.policy_ranking(rec, "oracle", 10)[0] == "g"
+
+    def test_oracle_keeps_vector_lead_on_a_tie(self) -> None:
+        rec = record(["v", "x"], ["l", "x"], gold="absent")
+        assert harness.policy_ranking(rec, "oracle", 10)[0] == "v"
+
+    def test_an_unknown_policy_is_refused(self) -> None:
+        with pytest.raises(ValueError, match="unknown policy"):
+            harness.policy_ranking(record(["v"], ["l"]), "coin", 10)
+
+
+class TestAblation:
+    def test_shipped_is_neither_better_nor_worse_than_itself(self) -> None:
+        rows = harness.ablation([record(["v", "g"], ["g", "v"])], 10)
+        assert rows["phrase"]["shipped"][3:] == (0, 0)
+
+    def test_counts_paired_wins_and_losses_against_shipped(self) -> None:
+        records = [
+            record(["v", "x"], ["g", "x"], gold="g"),  # lexical lead wins this one
+            record(["g", "x"], ["l", "x"], gold="g"),  # and loses this one
+        ]
+        rows = harness.ablation(records, 10)["phrase"]
+        assert rows["lexical"][3:] == (1, 1)
+        assert rows["oracle"][3:] == (1, 0)
+
+    def test_the_oracle_is_never_worse_than_shipped(self) -> None:
+        records = [
+            record(["v", "g"], ["l", "g"], shipped_lead="lexical"),
+            record(["g"], ["l"], shipped_lead="lexical"),
+            record(["v"], ["g"], shipped_lead="vector"),
+        ]
+        assert harness.ablation(records, 10)["phrase"]["oracle"][4] == 0
+
+    def test_recall_at_one_is_the_share_with_gold_first(self) -> None:
+        records = [record(["g"], ["l"]), record(["v"], ["g"])]
+        assert harness.ablation(records, 10)["phrase"]["vector"][0] == 0.5

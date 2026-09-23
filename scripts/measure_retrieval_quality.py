@@ -16,6 +16,12 @@ are allowed to move the query set:
     score     Read that file, run each query through the real search path, and
               print recall@1 / recall@10 / MRR per set. Needs the embedding
               server; seconds per query.
+    arms      Fetch both arms' pre-fusion candidates for every query, plus the
+              shipped rank-1 decision, and cache them outside the repo. Same
+              database cost as `score`; run once per revision.
+    ablate    Score rank-1 policies against that cache: shipped routing, plain
+              fusion, each arm always leading, and the per-query oracle.
+              Pure; no database, seconds.
 
 Splitting them is the point. A judgment re-derived on every run is not a
 judgment, it is a coin flip with a seed -- so `build`'s output is checked into
@@ -32,6 +38,8 @@ Usage:
     python scripts/measure_retrieval_quality.py build -o eval/queries.json
     python scripts/measure_retrieval_quality.py perturb -q eval/queries.json
     python scripts/measure_retrieval_quality.py score -q eval/queries.json
+    python scripts/measure_retrieval_quality.py arms -q eval/queries.json
+    python scripts/measure_retrieval_quality.py ablate
 
 The database is not reachable from an agent sandbox; run these unsandboxed.
 """
@@ -51,7 +59,8 @@ from sqlalchemy import text
 
 from cementic.config import get_config
 from cementic.db import LEXICAL_TEXT_CONFIG, get_engine
-from cementic.search import Searcher
+from cementic.hybrid import combine, reciprocal_rank_fusion
+from cementic.search import Searcher, arm_fetch_limit, split_arms
 
 #: Default ranking depth requested from search. Matches
 #: `search.MAX_SEARCH_RESULTS`, so recall@10 and MRR are measured over the
@@ -140,6 +149,25 @@ TYPO_MIN_WORD = 4
 PERTURBED_KINDS = ("phrase-reordered", "phrase-dropped", "phrase-typo")
 
 
+#: Where `arms` caches candidate lists. Outside the repo on purpose: it holds
+#: filenames from a private library, and it is regenerable from the query file
+#: in minutes.
+DEFAULT_ARMS_CACHE = "~/.cache/cementic-lead-arms.json"
+
+#: Rank-1 policies `ablate` scores, in the order printed. Every one fuses the
+#: same two arm lists; they differ only in who owns position one.
+#:
+#:   shipped  `Searcher.lexical_should_lead`, recorded per query by `arms`.
+#:   none     plain reciprocal rank fusion, nobody routed -- the configuration
+#:            Phase 1 step 2 proposes deleting `lead` down to.
+#:   vector   the vector arm always leads.
+#:   lexical  the lexical arm always leads.
+#:   oracle   whichever of vector-lead and lexical-lead ranks gold higher, per
+#:            query. Not a system: the ceiling any rank-1 routing rule over these
+#:            two arms can reach, and so the most that tuning `lead` could buy.
+POLICIES = ("shipped", "none", "vector", "lexical", "oracle")
+
+
 @dataclass(frozen=True)
 class Query:
     """One scored query and the filename of the document that answers it."""
@@ -152,6 +180,18 @@ class Query:
 # --------------------------------------------------------------------------
 # Pure functions
 # --------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class ArmRecord:
+    """One query's pre-fusion candidates, as document keys in arm order."""
+
+    query: str
+    gold: str
+    kind: str
+    vector: list[str]
+    lexical: list[str]
+    shipped_lead: str
 
 
 def document_key(source_path: str) -> str:
@@ -368,6 +408,109 @@ def format_table(
     ]
     for arm, (r1, r10, mrr) in rows.items():
         lines.append(f"  {arm:<10} {r1:>9.3f} {r10:>10.3f} {mrr:>7.3f}")
+    return "\n".join(lines)
+
+
+def fused_ranking(
+    vector: list[str], lexical: list[str], lead: str | None, depth: int
+) -> list[str]:
+    """The document ranking `search` returns for these arms and this lead (pure).
+
+    ``lead=None`` is plain reciprocal rank fusion with nobody routed. Mirrors
+    `Searcher._merge_arms` rather than calling it: with one arm empty that
+    method returns the other arm's chunk rows cut to `depth` *before* collapsing
+    to documents, so the fallback slices first here too. `ablate` checks this
+    mirror against the live system by requiring the ``shipped`` row to
+    reproduce `score` exactly.
+    """
+    if not vector or not lexical:
+        return deduplicate((vector or lexical)[:depth])
+    if lead is None:
+        ordering = reciprocal_rank_fusion(deduplicate(vector), deduplicate(lexical))
+    else:
+        ordering = combine(vector, lexical, lead=lead)
+    return ordering[:depth]
+
+
+def gold_rank(ranking: list[str], gold: str) -> float:
+    """1-based position of `gold`, or infinity when absent (pure)."""
+    try:
+        return float(ranking.index(gold) + 1)
+    except ValueError:
+        return float("inf")
+
+
+def policy_ranking(record: ArmRecord, policy: str, depth: int) -> list[str]:
+    """The ranking one rank-1 policy produces for one query (pure).
+
+    ``oracle`` reads the gold label, which is what makes it a ceiling and not a
+    system. On a tie it keeps vector-lead, the shipped default.
+    """
+    if policy == "oracle":
+        options = [
+            fused_ranking(record.vector, record.lexical, lead, depth)
+            for lead in ("vector", "lexical")
+        ]
+        return min(options, key=lambda ranking: gold_rank(ranking, record.gold))
+    leads: dict[str, str | None] = {
+        "shipped": record.shipped_lead,
+        "none": None,
+        "vector": "vector",
+        "lexical": "lexical",
+    }
+    if policy not in leads:
+        raise ValueError(f"unknown policy {policy!r}; expected one of {POLICIES}")
+    return fused_ranking(record.vector, record.lexical, leads[policy], depth)
+
+
+def ablation(
+    records: list[ArmRecord], depth: int
+) -> dict[str, dict[str, tuple[float, float, float, int, int]]]:
+    """Per set, per policy: (recall@1, recall@10, MRR, better, worse) (pure).
+
+    ``better`` and ``worse`` count queries whose gold rank beats or trails the
+    shipped policy's on the same query -- the paired comparison, which a
+    difference of means over n=60 hides. Both are zero for ``shipped`` itself.
+    """
+    by_kind: dict[str, list[ArmRecord]] = {}
+    for record in records:
+        by_kind.setdefault(record.kind, []).append(record)
+
+    out: dict[str, dict[str, tuple[float, float, float, int, int]]] = {}
+    for kind, group in by_kind.items():
+        shipped = [gold_rank(policy_ranking(r, "shipped", depth), r.gold) for r in group]
+        rows: dict[str, tuple[float, float, float, int, int]] = {}
+        for policy in POLICIES:
+            totals = [0, 0, 0.0]
+            better = worse = 0
+            for record, base in zip(group, shipped):
+                ranking = policy_ranking(record, policy, depth)
+                r1, r10, rr = metrics(ranking, record.gold)
+                totals[0] += r1
+                totals[1] += r10
+                totals[2] += rr
+                rank = gold_rank(ranking, record.gold)
+                better += rank < base
+                worse += rank > base
+            n = len(group)
+            rows[policy] = (totals[0] / n, totals[1] / n, totals[2] / n, better, worse)
+        out[kind] = rows
+    return out
+
+
+def format_ablation(
+    kind: str, rows: dict[str, tuple[float, float, float, int, int]], n: int, depth: int
+) -> str:
+    """Render one set's ablation (pure)."""
+    lines = [
+        f"\n{kind}  (n={n}, depth={depth})",
+        f"  {'policy':<8} {'recall@1':>9} {'recall@10':>10} {'MRR':>7} "
+        f"{'better':>7} {'worse':>6}",
+    ]
+    for policy, (r1, r10, mrr, better, worse) in rows.items():
+        lines.append(
+            f"  {policy:<8} {r1:>9.3f} {r10:>10.3f} {mrr:>7.3f} {better:>7} {worse:>6}"
+        )
     return "\n".join(lines)
 
 
@@ -634,6 +777,72 @@ def command_score(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_arms(args: argparse.Namespace) -> int:
+    payload = json.loads(Path(args.queries).read_text())
+    queries = [Query(**q) for q in payload["queries"]]
+    collection = payload["collection"]
+
+    config = get_config()
+    if not config.search.hybrid:
+        print("search.hybrid is off: there is no lexical arm to ablate", file=sys.stderr)
+        return 1
+    searcher = Searcher(config)
+    arm_limit = arm_fetch_limit(PRODUCTION_DEPTH, hybrid=True)
+    t0 = time.perf_counter()
+
+    records: list[dict] = []
+    for i, query in enumerate(queries, start=1):
+        candidates = searcher.candidates(
+            query.query, top_k=PRODUCTION_DEPTH, collections=[collection]
+        )
+        vector, lexical = split_arms(candidates)
+        records.append(
+            asdict(
+                ArmRecord(
+                    query=query.query,
+                    gold=query.gold,
+                    kind=query.kind,
+                    vector=[document_key(r["source_path"]) for r in vector],
+                    lexical=[document_key(r["source_path"]) for r in lexical],
+                    shipped_lead=(
+                        "lexical" if searcher.lexical_should_lead(query.query) else "vector"
+                    ),
+                )
+            )
+        )
+        if i % 30 == 0:
+            print(f"  {i}/{len(queries)} ({time.perf_counter() - t0:.0f}s)", flush=True)
+
+    out = Path(args.out).expanduser()
+    out.write_text(
+        json.dumps(
+            {"queries": args.queries, "arm_limit": arm_limit, "records": records}, indent=1
+        )
+    )
+    print(f"wrote {len(records)} records to {out} in {time.perf_counter() - t0:.0f}s")
+    return 0
+
+
+def command_ablate(args: argparse.Namespace) -> int:
+    payload = json.loads(Path(args.arms).expanduser().read_text())
+    # The cached lists are exactly what `search` fuses only at a depth whose
+    # per-arm fetch limit is the one they were fetched at.
+    if arm_fetch_limit(args.depth, hybrid=True) != payload["arm_limit"]:
+        print(
+            f"depth {args.depth} fetches {arm_fetch_limit(args.depth, hybrid=True)} per arm; "
+            f"the cache holds {payload['arm_limit']}. Re-run `arms` for this depth.",
+            file=sys.stderr,
+        )
+        return 1
+    records = [ArmRecord(**r) for r in payload["records"]]
+    for kind, rows in ablation(records, args.depth).items():
+        n = sum(1 for r in records if r.kind == kind)
+        print(format_ablation(kind, rows, n, args.depth))
+    leads = sum(1 for r in records if r.shipped_lead == "lexical")
+    print(f"\nshipped routing gave rank 1 to the lexical arm for {leads}/{len(records)} queries")
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     sub = parser.add_subparsers(dest="command", required=True)
@@ -659,6 +868,21 @@ def main() -> int:
     )
     score.add_argument("--json", action="store_true", help="also emit machine-readable totals")
     score.set_defaults(func=command_score)
+
+    arms = sub.add_parser("arms", help="cache both arms' pre-fusion candidates per query")
+    arms.add_argument("-q", "--queries", default="eval/queries.json")
+    arms.add_argument("-o", "--out", default=DEFAULT_ARMS_CACHE)
+    arms.set_defaults(func=command_arms)
+
+    ablate = sub.add_parser("ablate", help="score rank-1 policies against the arms cache")
+    ablate.add_argument("-a", "--arms", default=DEFAULT_ARMS_CACHE)
+    ablate.add_argument(
+        "--depth",
+        type=int,
+        default=PRODUCTION_DEPTH,
+        help=f"returned list length (default {PRODUCTION_DEPTH}, what `cementic search` ships)",
+    )
+    ablate.set_defaults(func=command_ablate)
 
     args = parser.parse_args()
     return int(args.func(args))
