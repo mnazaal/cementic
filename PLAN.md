@@ -13,28 +13,16 @@ still 0.633 / 0.783 / 0.117 for rare-token / title / phrase — and rank 1 is
 routed by `lead`, which nothing has yet tested. Read "Execution order —
 retrieval quality and the rebuild it rides" below before choosing.
 
-**If you want a task rather than a decision, take `lead`.** It is the cheapest
-unrun experiment in the plan, it owns the number that has never moved, and it
-is the surface Phase 1 step 2 proposes deleting — so measuring it tells you
-whether the reranker (now known to cost a second supervised daemon) is needed
-at all. It is not written up as a numbered step; it is the thread left hanging
-in Phase 1 step 2's deletion test.
+**`lead` was measured 2026-09-23 and the decision now leans to the
+router-server spike.** Deleting `lead` bare is refuted, and the best possible
+routing rule lands exactly on the reranker bar. Read the "RUN 2026-09-23"
+paragraph in Phase 1 step 2 before choosing. *(Corrected 2026-09-23; this
+paragraph originally recommended running that measurement.)*
 
-**Repo state.** Branch `claude/fuse-documents-not-chunks`, **two commits ahead
-of `main` and not merged**: `1e0bd7d` (fusion scores documents, not chunks —
-a shipped ranking bug) and `5485d9f` (over-fetch per arm, closing step 1).
-Fast-forward clean. `main` = `origin/main` = `65a68a3`. Working tree clean
-apart from the masked dotfiles that always show as untracked here.
-
-**These two commits must land together and in order.** Over-fetching is sound
-only because fusion now fuses at document level; under the old fusion the same
-over-fetch *lowered* rare-token recall@10 to 0.817. Merging `5485d9f` without
-`1e0bd7d` puts a known-bad configuration on `main`. A hook rejects agent
-commits to `main`, so the merge is yours:
-```bash
-git checkout main && git merge --ff-only claude/fuse-documents-not-chunks && git push
-```
-Delete the branch after the push succeeds, not before.
+**Repo state (corrected 2026-09-23).** The fusion branch was merged to `main`
+and deleted after this block was written. The `lead` ablation is on branch
+`claude/lead-ablation`, unmerged: a `Searcher.candidates` seam, the harness's
+`arms` / `ablate` subcommands with tests, and the PLAN.md result.
 
 **Live system.** `cementic@papers.service` up; `doctor` fully green (embedding
 canary worst cosine 0.999866174). Nothing indexed, re-embedded or
@@ -133,8 +121,8 @@ corrupted any future comparison, including 2a's model comparison.
 
 **Exit criteria — commands whose output confirms the above.**
 ```bash
-git branch --show-current                # claude/fuse-documents-not-chunks
-git log --oneline main..HEAD             # 5485d9f then 1e0bd7d, until you merge
+git branch --show-current                # claude/lead-ablation, until you merge
+git log --oneline main..HEAD             # the lead-ablation commits
 ./.venv/bin/cementic doctor              # every line ok
 ./scripts/check.sh                       # all six gates, including pg
 # ~2.5 min; recall@1 must read 0.633 / 0.783 / 0.117 and rare-token recall@10 0.983
@@ -1005,10 +993,61 @@ comparable. That comparability is the problem `hybrid.py` was written around.
 *Deletion test, to be run rather than assumed.* 30 references across
 `config.py`, `search.py`, `cli.py`, `hybrid.py` and three test files exist only
 to manage incomparable scores and hand-route rank 1: `lead`,
-`looks_like_identifier`, `_lexical_should_lead` and its extra per-search index
+`looks_like_identifier`, `lexical_should_lead` and its extra per-search index
 probe, `lexical_lead_max_documents`, `scores_explain_order`, and `score_kind`
 plumbed through to the renderer. If the reranker beats `lead` on Phase 0 they
 all go and net surface shrinks. If it does not, the reranker goes.
+
+**RUN 2026-09-23 — `lead` cannot be deleted bare, and routing's ceiling is
+exactly the reranker bar.** `measure_retrieval_quality.py arms` cached both
+arms' pre-fusion lists for all 360 queries (fetched at 50 per arm, the shipped
+limit); `ablate` then scored five rank-1 policies over those identical lists
+at depth 10, with no database. The `shipped` row reproduces all 18 cells of
+the last `score --depth 10` run, which is what validates the offline mirror of
+`_merge_arms`. `oracle` picks, per query, whichever of vector-lead and
+lexical-lead ranks gold higher: it reads the gold label, so it is the ceiling
+of any rank-1 routing rule over these arms, not a system. "Better / worse" is
+the paired count of queries whose gold rank beats or trails `shipped`.
+
+| set | shipped r@1 | none r@1 | lexical-lead r@1 | oracle r@1 | none: better / worse | oracle: better / worse |
+| --- | --- | --- | --- | --- | --- | --- |
+| rare-token | 0.633 | 0.067 | 0.650 | 0.650 | 3 / 36 | 2 / 0 |
+| title | 0.783 | 0.583 | 0.550 | 0.783 | 1 / 13 | 0 / 0 |
+| phrase | 0.117 | 0.250 | 0.967 | 0.967 | 9 / 0 | 51 / 0 |
+| phrase-reordered | 0.117 | 0.217 | 0.967 | 0.967 | 7 / 0 | 51 / 0 |
+| phrase-dropped | 0.083 | 0.217 | 0.833 | 0.833 | 8 / 0 | 45 / 0 |
+| phrase-typo | 0.100 | 0.100 | 0.100 | 0.100 | 0 / 0 | 0 / 0 |
+
+recall@10 is identical across every policy in every set, as it must be: only
+position one moves. Vector-lead equals `shipped` everywhere except rare-token,
+where it falls to 0.017. Full output: `~/.cache/cementic-eval-lead-ablate.log`.
+
+*Pre-registered predictions, all three held:* plain fusion loses rank 1 on
+rare-token and title; the oracle reads about 0.65 / 0.78 / 0.97; the gap
+between `shipped` and the oracle sits on phrase, about 50 of 60 queries (51).
+
+*Verdicts.*
+- **Deleting `lead` without a replacement is refuted.** Plain RRF loses 36
+  rare-token and 13 title queries against 13 phrase gains. The deletion half of
+  this step is conditional on a reranker, as written, and not a cleanup to do
+  now.
+- **The oracle is exactly Phase 0's bar, 0.650 / 0.783 / 0.967.** The best
+  routing rule possible reaches the bar and cannot exceed it, so a reranker
+  must match per-query perfect routing to earn its place. Any gain past the bar
+  has to come from reordering documents, not choosing an arm.
+- **The whole routing gap is phrase-versus-title.** The oracle is lexical-lead
+  for rare tokens and phrases and vector-lead for titles. A rule reaching it
+  must tell a verbatim body phrase from a title, and the rarity rule that tried
+  was already rejected in Phase 0 (12 of 60 titles wrong). No rule was searched
+  against these numbers, by design: n=60 per set.
+- **Which policy is best overall depends on the query mix, which is unknown.**
+  Always-lexical beats `shipped` on 52 queries and loses 14, but the sets are
+  60 each by construction, not by use. That makes the unmeasured-precondition
+  risk under "Decided — hybrid lexical + vector retrieval" the deciding input
+  for any routing change, not a footnote.
+
+*Next:* the router-server spike above, which decides whether this step is a
+config change or a second supervised daemon. Phase 2a waits on it.
 
 *The bar it must clear is in Phase 0 above, and it is not "beat today's
 numbers":* a reranker earns its place only by beating the better of the two
@@ -1263,7 +1302,7 @@ the slot a search tool is read from. Steps 1 and 2 established why: the tie is
 not a bug, because RRF is symmetric and both arms' rank-1 documents score
 `1/(k+1)`, so there is no neutral tie-break and choosing one *is* a bet on an
 arm. The rule that shipped bets per query rather than globally.
-`_lexical_should_lead` (`search.py:422`) gives rank 1 to the lexical arm only
+`lexical_should_lead` (`search.py:493`) gives rank 1 to the lexical arm only
 for a single token that is syntactically identifier-shaped and matches at most
 `search.lexical_lead_max_documents` documents; fusion owns the rest of the list.
 
