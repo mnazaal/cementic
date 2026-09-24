@@ -1168,11 +1168,22 @@ def embed_all(
 
 
 def run_model(config, spec: ModelSpec, sample: dict, out_dir: Path, port: int) -> None:
-    """Embed every text this model needs, unless its cache already exists."""
+    """Embed every text this model needs, resuming from whatever is cached.
+
+    Each finished step is written to a partial file at once, so a run killed
+    mid-model -- one was, by memory pressure from other work on the machine --
+    loses at most the step in flight. The final file appears only when every
+    step is done, and it is what scoring reads.
+    """
     cache = out_dir / f"{spec.name}.json"
     if cache.exists():
         print(f"  {spec.name}: cached", flush=True)
         return
+    partial = out_dir / f"{spec.name}.partial.json"
+    result: dict = (
+        json.loads(partial.read_text()) if partial.exists()
+        else {"model": spec.name, "gguf": spec.gguf}
+    )
     models_dir = Path(config.llama_cpp.model_path).expanduser().parent
     log = out_dir / f"server-{spec.name}.log"
     with log.open("w") as handle:
@@ -1195,14 +1206,19 @@ def run_model(config, spec: ModelSpec, sample: dict, out_dir: Path, port: int) -
             raise SystemExit(f"{spec.name}: server not ready in 180s; see {log}")
 
         papers = sample["papers"]
-        result: dict = {"model": spec.name, "gguf": spec.gguf}
         for kind in ("title", "phrase"):
+            if f"q_{kind}" in result:
+                continue
             texts = [format_for(spec, p[kind], query=True) for p in papers if p[kind]]
             result[f"q_{kind}"], _, _ = embed_all(url, texts, f"{spec.name} {kind} queries")
+            partial.write_text(json.dumps(result))
         # A 512-token window cannot hold the long chunks; the stored model only
         # ever runs at the stored granularity.
         granularities = ("short",) if spec.ctx < 1024 else ("short", "long")
         for granularity in granularities:
+            if granularity in result:
+                print(f"  {spec.name} {granularity}: cached", flush=True)
+                continue
             texts = [format_for(spec, c, query=False) for p in papers for c in p[granularity]]
             vectors, tokens, seconds = embed_all(url, texts, f"{spec.name} {granularity}")
             result[granularity] = vectors
@@ -1214,7 +1230,8 @@ def run_model(config, spec: ModelSpec, sample: dict, out_dir: Path, port: int) -
                 f"{seconds:.0f}s ({tokens / seconds:.0f} tok/s), {refused} refused",
                 flush=True,
             )
-        cache.write_text(json.dumps(result))
+            partial.write_text(json.dumps(result))
+        partial.rename(cache)
     finally:
         server.terminate()
         try:
