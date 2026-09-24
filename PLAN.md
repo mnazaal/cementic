@@ -13,16 +13,18 @@ still 0.633 / 0.783 / 0.117 for rare-token / title / phrase — and rank 1 is
 routed by `lead`, which nothing has yet tested. Read "Execution order —
 retrieval quality and the rebuild it rides" below before choosing.
 
-**`lead` was measured 2026-09-23 and the decision now leans to the
-router-server spike.** Deleting `lead` bare is refuted, and the best possible
-routing rule lands exactly on the reranker bar. Read the "RUN 2026-09-23"
-paragraph in Phase 1 step 2 before choosing. *(Corrected 2026-09-23; this
-paragraph originally recommended running that measurement.)*
+**Phase 1 is closed as of 2026-09-24; next is Phase 2a.** The `lead` ablation
+(2026-09-23) refuted deleting `lead` and put the best routing rule exactly on
+the reranker bar. The router-server spike (2026-09-24) then showed one
+process can serve both models with no code change, and that reranking 50
+chunks costs 17 s on this iGPU against a 0.5 s budget. Read the "RUN
+2026-09-23" and "SPIKE 2026-09-24" paragraphs in Phase 1 step 2. *(Corrected
+2026-09-23 and 2026-09-24; this paragraph originally recommended running the
+ablation.)*
 
-**Repo state (corrected 2026-09-23).** The fusion branch was merged to `main`
-and deleted after this block was written. The `lead` ablation is on branch
-`claude/lead-ablation`, unmerged: a `Searcher.candidates` seam, the harness's
-`arms` / `ablate` subcommands with tests, and the PLAN.md result.
+**Repo state (corrected 2026-09-24).** The fusion and lead-ablation branches
+are merged and deleted. The router spike changed no code; its PLAN.md record
+is on branch `claude/router-spike`, unmerged.
 
 **Live system.** `cementic@papers.service` up; `doctor` fully green (embedding
 canary worst cosine 0.999866174). Nothing indexed, re-embedded or
@@ -121,8 +123,8 @@ corrupted any future comparison, including 2a's model comparison.
 
 **Exit criteria — commands whose output confirms the above.**
 ```bash
-git branch --show-current                # claude/lead-ablation, until you merge
-git log --oneline main..HEAD             # the lead-ablation commits
+git branch --show-current                # claude/router-spike, until you merge
+git log --oneline main..HEAD             # the router-spike docs commit
 ./.venv/bin/cementic doctor              # every line ok
 ./scripts/check.sh                       # all six gates, including pg
 # ~2.5 min; recall@1 must read 0.633 / 0.783 / 0.117 and rare-token recall@10 0.983
@@ -975,15 +977,51 @@ second process, a second port, a second PID and log file, a second health check
 and `doctor` coverage for all of it. Also **no reranker GGUF exists** — `models/`
 holds only the two embedding models, and no candidate is named anywhere.
 
-*One possible rescue, unproven.* Build 10858 has a router-server mode
-(`--models-dir`, `--models-preset`, `--models-max`, default 4 loaded at once)
-that could plausibly serve embeddings and rerank from one process on one port,
-which would restore the original claim. Nobody has run it here — this is read
-off `--help` and nothing more. Settle it with a spike before designing step 2,
-because the answer decides whether the step is a config change or a second
-supervised daemon. The spike must also confirm that a router-mode server still
-satisfies the `{alias}` check the embedding path depends on; that path is the
-one thing that must not break, since it is what indexes the corpus.
+**SPIKE 2026-09-24 — the topology works and the latency kills the step.**
+The live daemon is build 10605 (the Vulkan build under
+`~/.cache/cementic-igpu/`, not the 10858 on PATH), and it has router mode
+too. Run unsandboxed on a spare port with a preset INI naming the embedding
+model's section by its fingerprint, the router spawned two children and
+reported the fingerprint as the model id, so cementic's alias check passed
+with no code change: `cementic doctor` against the router was green with the
+embedding canary reproducing the reference vectors exactly, and six eval
+queries returned the same top 10 as the live daemon on five, with one swap at
+ranks 7 and 9 on the sixth (embedding cosine 0.99983 between the two servers,
+scheduling noise under the canary's 0.99 floor). `bge-reranker-v2-m3` Q8_0
+served `/v1/rerank` with sane scores (6.1 for the relevant paragraph, -9.7 and
+-11.0 for the two decoys) and put a phrase query's gold document first over a
+53-chunk pool. Two router-mode costs found: `/tokenize` returns 400 without
+a `model` field, which `count_model_tokens` does not send, and the supervisor
+matches the daemon by an `--alias` substring on the command line, which a
+router launch does not carry. Both are small. Logs and the preset:
+`~/.cache/cementic-router/`.
+
+*The number that decides it.* Reranking is a full forward pass over
+query+chunk for every candidate, and the candidate pool is 50 chunks of about
+290 tokens: 14,493 prompt tokens per search.
+
+| documents | prompt tokens | best of 5 | median |
+| --- | --- | --- | --- |
+| 10 | 2,830 | 3.2 s | 3.7 s |
+| 50 | 14,493 | 16.9 s | 18.5 s |
+
+That is 856-886 tok/s through the server, against a `llama-bench` ceiling for
+this model on the iGPU of 994 tok/s (pp512, `-ngl 99`; 120 tok/s on CPU), so
+the server was on the GPU and within 12% of the hardware limit. The
+pre-registered go/no-go was about 500 ms for 50 chunks, five times the 101 ms
+search median. The measured floor is 30x over it, and 6x over it for the top
+10 alone. Batch size 4096 and 8 threads (second run) gained 27% on the first
+run's 23.3 s; nothing else in the server's configuration is left to tune.
+
+**CLOSED 2026-09-24 — dead on latency, not on topology or quality.** `lead`
+and its 30 references stay. The routing question stays where the ablation
+left it: perfect routing is the bar, no rule reaches it without knowing the
+query mix, and the mix is unmeasured. *The one variant not measured:* a
+reranker an order of magnitude smaller than 568M parameters over the top 10
+only, which recall@10 (0.983 / 0.867 / 1.000) says would be enough for rank
+1. No such GGUF was checked and quality would be lower; it is a separate
+decision, not a continuation of this step. The reranker GGUF is left in
+`models/` (gitignored, 636 MB, five minutes to re-download).
 
 The design argument, which is why this outranks any fusion change: cementic
 asks one ranking to do recall and precision at once. Split them — the arms
@@ -1092,9 +1130,9 @@ Phase 2a model moves 0.233.
 
 *Ends when:* one of the three is chosen with a measured recall@10 on
 `phrase-typo` to justify it, or the item is closed as "not worth it" with the
-0.233 recorded as the accepted floor. **Do not start this before Phase 1 step 2
-— a reranker changes what the lexical arm is for, and a fuzzy fallback tuned
-against today's fusion would be tuned against something about to be deleted.**
+0.233 recorded as the accepted floor. ~~**Do not start this before Phase 1 step 2**~~ — moot since 2026-09-24:
+step 2 is closed and nothing is about to be deleted, so this item is no
+longer blocked, only unscheduled.
 
 ### Phase 2 — the single rebuild, batched
 
