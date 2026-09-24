@@ -22,6 +22,10 @@ are allowed to move the query set:
     ablate    Score rank-1 policies against that cache: shipped routing, plain
               fusion, each arm always leading, and the per-query oracle.
               Pure; no database, seconds.
+    compare-models
+              Embedding models head to head on one body-text span per paper,
+              each at 320- and 1300-token chunks, with the stored index as the
+              control. Starts one llama-server per model; hours, resumable.
 
 Splitting them is the point. A judgment re-derived on every run is not a
 judgment, it is a coin flip with a seed -- so `build`'s output is checked into
@@ -40,6 +44,7 @@ Usage:
     python scripts/measure_retrieval_quality.py score -q eval/queries.json
     python scripts/measure_retrieval_quality.py arms -q eval/queries.json
     python scripts/measure_retrieval_quality.py ablate
+    python scripts/measure_retrieval_quality.py compare-models
 
 The database is not reachable from an agent sandbox; run these unsandboxed.
 """
@@ -47,20 +52,31 @@ The database is not reachable from an agent sandbox; run these unsandboxed.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import math
 import random
 import re
+import subprocess
 import sys
 import time
+import urllib.request
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+import tiktoken
 from sqlalchemy import text
 
+from cementic.chunk import TOKENIZER, chunk_text
 from cementic.config import get_config
 from cementic.db import LEXICAL_TEXT_CONFIG, get_engine
+from cementic.embedding_text import (
+    format_document_text_for_model,
+    format_query_text_for_model,
+)
 from cementic.hybrid import combine, reciprocal_rank_fusion
 from cementic.search import Searcher, arm_fetch_limit, split_arms
+from cementic.storage import read_extracted_text
 
 #: Default ranking depth requested from search. Matches
 #: `search.MAX_SEARCH_RESULTS`, so recall@10 and MRR are measured over the
@@ -166,6 +182,88 @@ DEFAULT_ARMS_CACHE = "~/.cache/cementic-lead-arms.json"
 #:            query. Not a system: the ceiling any rank-1 routing rule over these
 #:            two arms can reach, and so the most that tuning `lead` could buy.
 POLICIES = ("shipped", "none", "vector", "lexical", "oracle")
+
+#: Where `compare-models` keeps its sample, per-model vectors and server logs.
+#: Outside the repo for the same reason as the arms cache, and so a run that
+#: dies after three models resumes at the fourth.
+COMPARE_DIR = "~/.cache/cementic-model-compare"
+
+#: Papers in the comparison. 500 rather than the v1.5 run's 1,000 because each
+#: now contributes a whole span at two granularities, about 5M model tokens per
+#: candidate; a paired sign test over 500 still resolves the v1.5 run's effect
+#: size at p < 1e-4.
+COMPARE_DOCUMENTS = 500
+
+#: The stored chunking, which the span is laid out in. Must match the active
+#: revision's chunk profile, or the stored vectors describe different text;
+#: `compare_sample` checks the first span chunk of every paper against a
+#: re-chunk of its artifact and refuses the run if many disagree.
+STORED_CHUNK_SIZE = 320
+STORED_CHUNK_OVERLAP = 80
+
+#: Stored chunks skipped at the front of each paper, then taken as the span.
+#: The title is one of the queries and sits verbatim on the title page, which
+#: turned title-to-body into string matching in the v1.5 run (both models
+#: scored a perfect recall@1 with those chunks in, measured).
+SPAN_SKIP_CHUNKS = 2
+SPAN_CHUNKS = 8
+
+#: The long granularity: about what a 2,048-token window holds after the
+#: model-token / tiktoken ratio, per the v1.5 analysis in PLAN.md. Overlap
+#: keeps the stored ratio of one quarter.
+LONG_CHUNK_SIZE = 1300
+LONG_CHUNK_OVERLAP = 325
+
+#: Instruction for the instruction-tuned models' queries. One fixed string for
+#: every query kind, because production would ship one; tuning it per kind
+#: would score a configuration nobody runs. It is the models' own default.
+QWEN_INSTRUCTION = (
+    "Instruct: Given a web search query, retrieve relevant passages that answer the query\n"
+    "Query: "
+)
+
+
+@dataclass(frozen=True)
+class ModelSpec:
+    """How to serve and prompt one embedding model."""
+
+    name: str
+    gguf: str
+    ctx: int
+    pooling: str
+    query_prefix: str = ""
+    document_prefix: str = ""
+    #: Nomic models take their prefixes from cementic's own policy, so this
+    #: harness scores exactly the strings production embeds.
+    nomic: bool = False
+
+
+#: The candidates, keyed by the name results are reported under. The GGUFs
+#: append their own end-of-text token (checked 2026-09-24 via /tokenize), so
+#: no prefix here adds one.
+MODELS: dict[str, ModelSpec] = {
+    spec.name: spec
+    for spec in (
+        ModelSpec("v2-moe", "nomic-embed-text-v2-moe.Q8_0.gguf", 512, "mean", nomic=True),
+        ModelSpec(
+            "qwen3-0.6b", "Qwen3-Embedding-0.6B-Q8_0.gguf", 4096, "last",
+            query_prefix=QWEN_INSTRUCTION,
+        ),
+        ModelSpec(
+            "harrier-0.6b", "harrier-oss-v1-0.6b.Q8_0.gguf", 4096, "last",
+            query_prefix=QWEN_INSTRUCTION,
+        ),
+        ModelSpec(
+            "gemma-300m", "embeddinggemma-300M-Q8_0.gguf", 2048, "mean",
+            query_prefix="task: search result | query: ",
+            document_prefix="title: none | text: ",
+        ),
+    )
+}
+
+#: The model the stored index was built with. Its fresh 320 arm is the noise
+#: floor: same model, same text, only the batch composition differs.
+BASELINE_MODEL = "v2-moe"
 
 
 @dataclass(frozen=True)
@@ -514,6 +612,78 @@ def format_ablation(
     return "\n".join(lines)
 
 
+def span_token_range(chunk_size: int, overlap: int, skip: int, count: int) -> tuple[int, int]:
+    """Token interval covered by chunks ``skip .. skip+count-1`` (pure).
+
+    `chunk_text` slides a `chunk_size` window by ``chunk_size - overlap``, so
+    chunk ``i`` starts at ``i * step``.
+    """
+    step = chunk_size - overlap
+    return skip * step, (skip + count - 1) * step + chunk_size
+
+
+def format_for(spec: ModelSpec, text: str, *, query: bool) -> str:
+    """The exact string a model embeds for a query or a document (pure)."""
+    if spec.nomic:
+        formatter = format_query_text_for_model if query else format_document_text_for_model
+        return formatter(text, spec.gguf)
+    return (spec.query_prefix if query else spec.document_prefix) + text
+
+
+def gold_rank_and_margin(
+    similarities: list[float], pool_documents: list[int], gold: int
+) -> tuple[int, float]:
+    """Rank of the gold document by its best chunk, and its margin (pure).
+
+    A document is represented by its best chunk, as search collapses chunks to
+    documents. Rank 1 is best; a gold document with no chunk in the pool ranks
+    after every document that has one. The margin is gold's best similarity
+    minus the best other document's -- it separates two models that both rank
+    gold first, where recall cannot.
+    """
+    best: dict[int, float] = {}
+    for similarity, document in zip(similarities, pool_documents, strict=True):
+        if similarity > best.get(document, -math.inf):
+            best[document] = similarity
+    if gold not in best:
+        return len(best) + 1, -math.inf
+    mine = best.pop(gold)
+    rank = 1 + sum(1 for other in best.values() if other > mine)
+    margin = mine - max(best.values()) if best else 0.0
+    return rank, margin
+
+
+def sign_test(better: int, worse: int) -> float:
+    """Two-sided exact binomial p-value for a paired win/loss count (pure).
+
+    Ties are dropped, as in the v1.5 comparison this replaces.
+    """
+    n = better + worse
+    if n == 0:
+        return 1.0
+    tail = sum(math.comb(n, k) for k in range(0, min(better, worse) + 1)) / 2**n
+    return min(1.0, 2 * tail)
+
+
+def summarise(ranks: list[int], margins: list[float]) -> dict[str, float]:
+    """recall@1, recall@10, MRR and mean finite margin over one arm (pure)."""
+    n = len(ranks)
+    finite = [m for m in margins if math.isfinite(m)]
+    return {
+        "recall@1": sum(r == 1 for r in ranks) / n,
+        "recall@10": sum(r <= 10 for r in ranks) / n,
+        "MRR": sum(1 / r for r in ranks) / n,
+        "margin": sum(finite) / len(finite) if finite else float("nan"),
+    }
+
+
+def paired(ranks: list[int], baseline: list[int]) -> tuple[int, int, float]:
+    """(better, worse, sign-test p) of one arm against the baseline (pure)."""
+    better = sum(a < b for a, b in zip(ranks, baseline, strict=True))
+    worse = sum(a > b for a, b in zip(ranks, baseline, strict=True))
+    return better, worse, sign_test(better, worse)
+
+
 # --------------------------------------------------------------------------
 # Corpus probes (shell)
 # --------------------------------------------------------------------------
@@ -843,6 +1013,315 @@ def command_ablate(args: argparse.Namespace) -> int:
     return 0
 
 
+def compare_sample(conn, collection: str, n: int, rng: random.Random) -> dict:
+    """Draw papers, their stored span chunks and vectors, and the queries.
+
+    Returns plain JSON-able data so the sample is written once and every model,
+    including one run days later, embeds exactly the same text.
+    """
+    revision = conn.execute(
+        text(
+            "select extractor_profile_id, chunk_profile_id, embedding_profile_id "
+            "from pipeline_revisions where collection = :c and status = 'active'"
+        ),
+        {"c": collection},
+    ).one()
+    table = f"embedding_vectors_p{int(revision.embedding_profile_id)}"
+    candidates = conn.execute(
+        text(
+            "select sd.id, sd.source_path, ed.artifact_path from source_documents sd "
+            "join extracted_documents ed on ed.document_id = sd.id "
+            "and ed.extractor_profile_id = :ex and ed.status = 'done' "
+            "where sd.collection = :c and sd.status <> 'deleted' "
+            "and ed.artifact_path is not null"
+        ),
+        {"c": collection, "ex": revision.extractor_profile_id},
+    ).fetchall()
+    candidates = sorted(tuple(row) for row in candidates)
+    rng.shuffle(candidates)
+
+    first, last = SPAN_SKIP_CHUNKS, SPAN_SKIP_CHUNKS + SPAN_CHUNKS - 1
+    start, end = span_token_range(
+        STORED_CHUNK_SIZE, STORED_CHUNK_OVERLAP, SPAN_SKIP_CHUNKS, SPAN_CHUNKS
+    )
+    encoding = tiktoken.get_encoding(TOKENIZER)
+    papers: list[dict] = []
+    misaligned = 0
+    for document_id, source_path, artifact in candidates:
+        if len(papers) == n:
+            break
+        rows = conn.execute(
+            text(
+                "select c.chunk_index, c.content, ev.embedding::text as vector "
+                f"from {table} ev join chunks_v2 c on c.id = ev.chunk_id "
+                "where c.document_id = :d and ev.collection = :c "
+                "and ev.chunk_profile_id = :cp and ev.extractor_profile_id = :ex "
+                "and c.chunk_index between :first and :last order by c.chunk_index"
+            ),
+            {
+                "d": document_id, "c": collection, "cp": revision.chunk_profile_id,
+                "ex": revision.extractor_profile_id, "first": first, "last": last,
+            },
+        ).fetchall()
+        if [r.chunk_index for r in rows] != list(range(first, last + 1)):
+            continue
+        try:
+            body = read_extracted_text(Path(artifact))
+        except OSError:
+            continue
+        # Encoded exactly as `chunk_text` encodes, special-token spellings
+        # included as plain text, so the span's token offsets are its offsets.
+        tokens = encoding.encode(body, disallowed_special=())
+        if len(tokens) < end:
+            continue
+        # The stored chunks must be what chunking this artifact produces now,
+        # or the control arm scores vectors of different text.
+        rechunked = chunk_text(body, STORED_CHUNK_SIZE, STORED_CHUNK_OVERLAP)
+        if rechunked[first].content != rows[0].content:
+            misaligned += 1
+            continue
+        phrases = phrase_candidates(rows[SPAN_CHUNKS // 2].content)
+        # Byte-level decode; a character cut at either edge is dropped rather
+        # than rendered as U+FFFD.
+        span = encoding.decode_bytes(tokens[start:end]).decode("utf-8", "ignore")
+        papers.append(
+            {
+                "id": document_id,
+                "title": title_from_path(source_path),
+                "phrase": rng.choice(phrases) if phrases else None,
+                "short": [r.content for r in rows],
+                "stored": [[float(v) for v in r.vector.strip("[]").split(",")] for r in rows],
+                "long": [c.content for c in chunk_text(span, LONG_CHUNK_SIZE, LONG_CHUNK_OVERLAP)],
+            }
+        )
+    if misaligned > max(len(papers) // 20, 5):
+        raise SystemExit(
+            f"{misaligned} papers' stored chunks differ from a re-chunk of their artifact; "
+            "the chunk profile no longer matches STORED_CHUNK_SIZE/OVERLAP"
+        )
+    return {"collection": collection, "papers": papers, "misaligned": misaligned}
+
+
+def server_argv(config, spec: ModelSpec, port: int, models_dir: Path) -> list[str]:
+    """The live daemon's binary and environment, serving `spec` on `port`.
+
+    Taken from the configured `daemon_command` up to the executable, so every
+    model runs on the build the corpus was indexed with.
+    """
+    prefix: list[str] = []
+    for part in config.llama_cpp.daemon_command:
+        prefix.append(part)
+        if part.endswith("llama-server"):
+            break
+    else:
+        prefix = ["llama-server"]
+    return prefix + [
+        "--host", "127.0.0.1", "--port", str(port),
+        "--model", str(models_dir / spec.gguf), "--embeddings",
+        "--pooling", spec.pooling,
+        "--ctx-size", str(spec.ctx), "--batch-size", str(spec.ctx),
+        "--ubatch-size", str(spec.ctx), "--n-gpu-layers", "99",
+    ]
+
+
+def _post_embeddings(url: str, texts: list[str]) -> tuple[list[list[float]], int]:
+    request = urllib.request.Request(
+        f"{url}/v1/embeddings",
+        data=json.dumps({"input": texts}).encode(),
+        headers={"Content-Type": "application/json"},
+    )
+    with urllib.request.urlopen(request, timeout=900) as response:
+        payload = json.load(response)
+    rows = sorted(payload["data"], key=lambda r: r.get("index", 0))
+    used = int(payload.get("usage", {}).get("prompt_tokens", 0))
+    return [row["embedding"] for row in rows], used
+
+
+def embed_all(
+    url: str, texts: list[str], label: str
+) -> tuple[list[list[float] | None], int, float]:
+    """Vectors (None where refused), prompt tokens, and seconds spent."""
+    out: list[list[float] | None] = []
+    tokens, began = 0, time.perf_counter()
+    for i in range(0, len(texts), 16):
+        batch = texts[i : i + 16]
+        try:
+            vectors, used = _post_embeddings(url, batch)
+            out.extend(vectors)
+            tokens += used
+        except Exception:
+            for one in batch:
+                try:
+                    vectors, used = _post_embeddings(url, [one])
+                    out.extend(vectors)
+                    tokens += used
+                except Exception:
+                    out.append(None)
+        if (i // 16) % 25 == 24:
+            elapsed = time.perf_counter() - began
+            print(
+                f"    {label}: {len(out)}/{len(texts)} ({elapsed:.0f}s, "
+                f"{tokens / elapsed:.0f} tok/s)",
+                flush=True,
+            )
+    return out, tokens, time.perf_counter() - began
+
+
+def run_model(config, spec: ModelSpec, sample: dict, out_dir: Path, port: int) -> None:
+    """Embed every text this model needs, unless its cache already exists."""
+    cache = out_dir / f"{spec.name}.json"
+    if cache.exists():
+        print(f"  {spec.name}: cached", flush=True)
+        return
+    models_dir = Path(config.llama_cpp.model_path).expanduser().parent
+    log = out_dir / f"server-{spec.name}.log"
+    with log.open("w") as handle:
+        server = subprocess.Popen(
+            server_argv(config, spec, port, models_dir), stdout=handle, stderr=subprocess.STDOUT
+        )
+    url = f"http://127.0.0.1:{port}"
+    try:
+        for _ in range(180):
+            try:
+                with urllib.request.urlopen(f"{url}/health", timeout=2) as response:
+                    if response.status == 200:
+                        break
+            except Exception:
+                pass
+            if server.poll() is not None:
+                raise SystemExit(f"{spec.name}: server exited; see {log}")
+            time.sleep(1)
+        else:
+            raise SystemExit(f"{spec.name}: server not ready in 180s; see {log}")
+
+        papers = sample["papers"]
+        result: dict = {"model": spec.name, "gguf": spec.gguf}
+        for kind in ("title", "phrase"):
+            texts = [format_for(spec, p[kind], query=True) for p in papers if p[kind]]
+            result[f"q_{kind}"], _, _ = embed_all(url, texts, f"{spec.name} {kind} queries")
+        # A 512-token window cannot hold the long chunks; the stored model only
+        # ever runs at the stored granularity.
+        granularities = ("short",) if spec.ctx < 1024 else ("short", "long")
+        for granularity in granularities:
+            texts = [format_for(spec, c, query=False) for p in papers for c in p[granularity]]
+            vectors, tokens, seconds = embed_all(url, texts, f"{spec.name} {granularity}")
+            result[granularity] = vectors
+            result[f"{granularity}_tokens"] = tokens
+            result[f"{granularity}_seconds"] = seconds
+            refused = sum(v is None for v in vectors)
+            print(
+                f"  {spec.name} {granularity}: {len(texts)} chunks, {tokens} tokens in "
+                f"{seconds:.0f}s ({tokens / seconds:.0f} tok/s), {refused} refused",
+                flush=True,
+            )
+        cache.write_text(json.dumps(result))
+    finally:
+        server.terminate()
+        try:
+            server.wait(timeout=20)
+        except subprocess.TimeoutExpired:
+            server.kill()
+
+
+def score_arm(np, queries, query_docs, pool, pool_docs) -> tuple[list[int], list[float]]:
+    """Gold rank and margin per query for one (queries, pool) pair."""
+    keep = [i for i, v in enumerate(pool) if v is not None]
+    matrix = np.array([pool[i] for i in keep], dtype=np.float32)
+    matrix /= np.linalg.norm(matrix, axis=1, keepdims=True)
+    documents = [pool_docs[i] for i in keep]
+    ranks, margins = [], []
+    for vector, gold in zip(queries, query_docs, strict=True):
+        if vector is None:
+            ranks.append(len(set(documents)) + 1)
+            margins.append(-math.inf)
+            continue
+        q = np.asarray(vector, dtype=np.float32)
+        similarities = (matrix @ (q / np.linalg.norm(q))).tolist()
+        rank, margin = gold_rank_and_margin(similarities, documents, gold)
+        ranks.append(rank)
+        margins.append(margin)
+    return ranks, margins
+
+
+def command_compare_models(args: argparse.Namespace) -> int:
+    try:
+        import numpy as np
+    except ImportError:
+        print("compare-models needs numpy in the environment running it", file=sys.stderr)
+        return 1
+    names = args.models.split(",")
+    if BASELINE_MODEL not in names:
+        print(f"--models must include {BASELINE_MODEL}, the control's query side", file=sys.stderr)
+        return 1
+    out_dir = Path(args.out).expanduser()
+    out_dir.mkdir(parents=True, exist_ok=True)
+    config = get_config()
+    sample_path = out_dir / "sample.json"
+    if not sample_path.exists():
+        with get_engine(config.database.url).connect() as conn:
+            sample = compare_sample(conn, args.collection, args.documents, random.Random(SEED))
+        sample_path.write_text(json.dumps(sample))
+    sample = json.loads(sample_path.read_text())
+    papers = sample["papers"]
+    digest = hashlib.sha256(sample_path.read_bytes()).hexdigest()[:12]
+    print(
+        f"sample {digest}: {len(papers)} papers, {sample['misaligned']} misaligned skipped",
+        flush=True,
+    )
+
+    for name in names:
+        run_model(config, MODELS[name], sample, out_dir, args.port)
+
+    short_docs = [p["id"] for p in papers for _ in p["short"]]
+    long_docs = [p["id"] for p in papers for _ in p["long"]]
+    stored = [v for p in papers for v in p["stored"]]
+    loaded = {name: json.loads((out_dir / f"{name}.json").read_text()) for name in names}
+    lines = []
+    for kind in ("title", "phrase"):
+        query_docs = [p["id"] for p in papers if p[kind]]
+        # The control pairs fresh v2-moe queries with the stored index vectors,
+        # which is what production search does.
+        arms = {
+            "v2-moe stored@320": score_arm(
+                np, loaded[BASELINE_MODEL][f"q_{kind}"], query_docs, stored, short_docs
+            )
+        }
+        for name, result in loaded.items():
+            arms[f"{name}@320"] = score_arm(
+                np, result[f"q_{kind}"], query_docs, result["short"], short_docs
+            )
+            if "long" in result:
+                arms[f"{name}@1300"] = score_arm(
+                    np, result[f"q_{kind}"], query_docs, result["long"], long_docs
+                )
+        baseline = arms["v2-moe stored@320"][0]
+        lines.append(f"\n{kind} -> body  (n={len(query_docs)}, pool {len(papers)} papers)")
+        lines.append(
+            f"  {'arm':<22} {'recall@1':>9} {'recall@10':>10} {'MRR':>7} {'margin':>8}"
+            f" {'better':>7} {'worse':>6} {'sign p':>9}"
+        )
+        for arm, (ranks, margins) in arms.items():
+            m = summarise(ranks, margins)
+            better, worse, p = paired(ranks, baseline)
+            lines.append(
+                f"  {arm:<22} {m['recall@1']:>9.3f} {m['recall@10']:>10.3f} "
+                f"{m['MRR']:>7.3f} {m['margin']:>8.4f} {better:>7} {worse:>6} {p:>9.2g}"
+            )
+    lines.append("\nthroughput through llama-server (same machine, sequential runs)")
+    for name, result in loaded.items():
+        for granularity in ("short", "long"):
+            if f"{granularity}_tokens" in result:
+                tokens = result[f"{granularity}_tokens"]
+                seconds = result[f"{granularity}_seconds"]
+                refused = sum(v is None for v in result[granularity])
+                lines.append(
+                    f"  {name:<14} {granularity:<6} {tokens:>9} tokens {seconds:>7.0f}s "
+                    f"{tokens / seconds:>6.0f} tok/s  {refused} refused"
+                )
+    print("\n".join(lines))
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     sub = parser.add_subparsers(dest="command", required=True)
@@ -883,6 +1362,18 @@ def main() -> int:
         help=f"returned list length (default {PRODUCTION_DEPTH}, what `cementic search` ships)",
     )
     ablate.set_defaults(func=command_ablate)
+
+    compare = sub.add_parser("compare-models", help="embedding models head to head")
+    compare.add_argument("-c", "--collection", default="papers")
+    compare.add_argument("-n", "--documents", type=int, default=COMPARE_DOCUMENTS)
+    compare.add_argument("-o", "--out", default=COMPARE_DIR)
+    compare.add_argument(
+        "--models",
+        default=",".join(MODELS),
+        help=f"comma-separated, from {', '.join(MODELS)}; must include {BASELINE_MODEL}",
+    )
+    compare.add_argument("--port", type=int, default=11557)
+    compare.set_defaults(func=command_compare_models)
 
     args = parser.parse_args()
     return int(args.func(args))

@@ -266,3 +266,84 @@ class TestAblation:
     def test_recall_at_one_is_the_share_with_gold_first(self) -> None:
         records = [record(["g"], ["l"]), record(["v"], ["g"])]
         assert harness.ablation(records, 10)["phrase"]["vector"][0] == 0.5
+
+
+class TestSpanTokenRange:
+    def test_matches_the_windows_chunk_text_produces(self) -> None:
+        import tiktoken
+
+        from cementic.chunk import TOKENIZER, chunk_text
+
+        encoding = tiktoken.get_encoding(TOKENIZER)
+        body = " ".join(f"word{i}" for i in range(3000))
+        tokens = encoding.encode(body)
+        start, end = harness.span_token_range(320, 80, 2, 8)
+        chunks = chunk_text(body, 320, 80)
+        assert encoding.encode(chunks[2].content) == tokens[start : start + 320]
+        assert encoding.encode(chunks[9].content) == tokens[end - 320 : end]
+
+    def test_the_stored_span_is_2000_tokens(self) -> None:
+        assert harness.span_token_range(320, 80, 2, 8) == (480, 2480)
+
+
+class TestFormatFor:
+    def test_nomic_uses_cementics_own_prefixes(self) -> None:
+        spec = harness.MODELS["v2-moe"]
+        assert harness.format_for(spec, "x", query=True) == "search_query: x"
+        assert harness.format_for(spec, "x", query=False) == "search_document: x"
+
+    def test_instruction_models_prefix_queries_only(self) -> None:
+        spec = harness.MODELS["qwen3-0.6b"]
+        assert harness.format_for(spec, "x", query=True).endswith("\nQuery: x")
+        assert harness.format_for(spec, "x", query=False) == "x"
+
+    def test_gemma_prefixes_both_sides(self) -> None:
+        spec = harness.MODELS["gemma-300m"]
+        assert harness.format_for(spec, "x", query=True) == "task: search result | query: x"
+        assert harness.format_for(spec, "x", query=False) == "title: none | text: x"
+
+
+class TestGoldRankAndMargin:
+    def test_a_document_is_ranked_by_its_best_chunk(self) -> None:
+        # Doc 2 owns the single best chunk; doc 1 has more good chunks.
+        rank, margin = harness.gold_rank_and_margin([0.8, 0.7, 0.9], [1, 1, 2], gold=2)
+        assert rank == 1
+        assert margin == pytest.approx(0.1)
+
+    def test_rank_counts_documents_not_chunks(self) -> None:
+        rank, margin = harness.gold_rank_and_margin([0.9, 0.95, 0.5], [1, 1, 2], gold=2)
+        assert rank == 2
+        assert margin == pytest.approx(-0.45)
+
+    def test_a_gold_document_absent_from_the_pool_ranks_last(self) -> None:
+        rank, margin = harness.gold_rank_and_margin([0.9, 0.5], [1, 2], gold=3)
+        assert rank == 3
+        assert margin == float("-inf")
+
+
+class TestSignTest:
+    def test_reproduces_the_v1_5_runs_recorded_p_value(self) -> None:
+        # PLAN.md: 133 better, 245 worse, "exact sign test p = 8.9e-09".
+        assert harness.sign_test(133, 245) == pytest.approx(8.9e-09, rel=0.05)
+
+    def test_an_even_split_is_not_significant(self) -> None:
+        assert harness.sign_test(50, 50) == pytest.approx(1.0)
+
+    def test_no_decided_pairs_is_uninformative(self) -> None:
+        assert harness.sign_test(0, 0) == 1.0
+
+    def test_is_symmetric(self) -> None:
+        assert harness.sign_test(10, 30) == harness.sign_test(30, 10)
+
+
+class TestSummariseAndPaired:
+    def test_summarise(self) -> None:
+        m = harness.summarise([1, 2, 20], [0.1, -0.1, float("-inf")])
+        assert m["recall@1"] == pytest.approx(1 / 3)
+        assert m["recall@10"] == pytest.approx(2 / 3)
+        assert m["MRR"] == pytest.approx((1 + 0.5 + 0.05) / 3)
+        assert m["margin"] == pytest.approx(0.0)
+
+    def test_paired_counts_lower_rank_as_better(self) -> None:
+        better, worse, _ = harness.paired([1, 3, 2], [2, 3, 1])
+        assert (better, worse) == (1, 1)
