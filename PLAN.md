@@ -1,134 +1,85 @@
 # cementic — architecture & design
 
-<!-- session-handoff:begin (2026-09-19) -->
+<!-- session-handoff:begin (2026-09-24) -->
 ## Where the work stands
 
-**First action is a decision, not a task: continue in Phase 1, or start Phase
-2a (the embedding model).** Both are defensible and the session that just ended
-could not settle it. The case for 2a is that this plan says in its own words
-that it "dominates every ranking change", it is what the rebuild authorisation
-was granted for, and it is untouched after two sessions. The case for more
-Phase 1 is that `recall@1` has not moved at all across either session — it is
-still 0.633 / 0.783 / 0.117 for rare-token / title / phrase — and rank 1 is
-routed by `lead`, which nothing has yet tested. Read "Execution order —
-retrieval quality and the rebuild it rides" below before choosing.
+**Entry point: finish the Phase 2a model comparison, then read its verdict.**
+Read Phase 2 → "2a. Reconsider the embedding model" → "IN PROGRESS
+2026-09-24" first. The instrument is built and tested; the full 500-paper run
+was stopped by Claude Code's memory-pressure reaper, not by a fault. v2-moe is
+fully cached. EmbeddingGemma had finished its queries and 320-token arm and
+was 40% into its 1,300-token arm, but none of that was saved: the run used the
+old code, which cached only finished models. Per-step caching landed after.
+Harrier and Qwen3 have not run.
 
-**Phase 1 is closed as of 2026-09-24; next is Phase 2a.** The `lead` ablation
-(2026-09-23) refuted deleting `lead` and put the best routing rule exactly on
-the reranker bar. The router-server spike (2026-09-24) then showed one
-process can serve both models with no code change, and that reranking 50
-chunks costs 17 s on this iGPU against a 0.5 s budget. Read the "RUN
-2026-09-23" and "SPIKE 2026-09-24" paragraphs in Phase 1 step 2. *(Corrected
-2026-09-23 and 2026-09-24; this paragraph originally recommended running the
-ablation.)*
+**Next action, decided by the user at resume.** Three options were put and not
+yet answered: run EmbeddingGemma alone from Claude (~55 min at today's load,
+from scratch; the reaper can stop it again); run all four in the user's own terminal, where
+the reaper cannot reach (7-10 h); or wait for a quieter machine. The
+recommendation was Gemma now, the rest overnight in a terminal, because Gemma
+is the only candidate that clears the throughput gate. Both commands are in
+the exit criteria below; a finished run prints the verdict tables, which go
+into the "IN PROGRESS" paragraph as a RUN block with the verdict.
 
-**Repo state (corrected 2026-09-24).** The fusion and lead-ablation branches
-are merged and deleted. The router spike changed no code; its PLAN.md record
-is on branch `claude/router-spike`, unmerged.
+**Phase 1 is closed** (2026-09-23/24). The `lead` ablation refuted deleting
+`lead` and put the best possible routing rule exactly on the reranker bar
+(0.650 / 0.783 / 0.967 recall@1). The router-server spike showed one
+llama-server can serve both models with no code change, and that reranking
+50 chunks costs 17 s on this iGPU, so the reranker step died on latency.
+Records: Phase 1 step 2, "RUN 2026-09-23" and "SPIKE 2026-09-24". recall@1 is
+still 0.633 / 0.783 / 0.117, unchanged since Phase 0.
 
-**Live system.** `cementic@papers.service` up; `doctor` fully green (embedding
-canary worst cosine 0.999866174). Nothing indexed, re-embedded or
-re-configured this session — but `src/` ranking behaviour **did** change, so the
-corpus is untouched while search results are not. No background jobs, nothing
-on a cluster.
+**Repo state.** Branch `claude/model-compare`, three commits ahead of `main`
+after this handoff lands, fast-forwardable: `458a64f` the `compare-models`
+subcommand with tests, `b69c310` per-step resumable caching, and this docs
+commit. `main` = `3718668`, which carries the ablation and spike. Local
+branches `claude/lead-ablation` and `claude/router-spike` are merged and can
+be deleted. The masked `src/cementic/templates/postgres/.env` always shows as
+modified in agent shells; it is the sandbox, not a change.
 
-**What shipped, in one line each.** `a59c41b` perturbed-phrase sets (merged);
-`65a68a3` `score --depth`, exposing that the eval measured depth 50 while the
-CLI ships 10 (merged); `1e0bd7d` the fusion fix; `5485d9f` over-fetch.
+**Live system.** `cementic@papers.service` active, `doctor` green, corpus
+untouched (23,075 docs, all embedded). Nothing running in the background, no
+llama-server left on 11556 or 11557.
 
-**The one result a cold reader must not miss.** `recall@1` is unchanged by
-everything this session did — 0.633 / 0.783 / 0.117, identical to the committed
-Phase 0 baseline. Every gain landed in recall@10 and MRR (rare-token recall@10
-0.950 -> 0.983, phrase MRR 0.503 -> 0.544). The user-visible complaint that
-motivates the plan — the right paper is not first — is exactly as broken as it
-was. Do not read this session as having improved ranking; it improved the
-candidate pool and the ordering below rank one, and fixed a bug that would have
-corrupted any future comparison, including 2a's model comparison.
+**Deviations from the approved 2a plan, all agent-decided.** 500 papers, not
+1,000, because each paper now costs a whole span at two sizes (~5M tokens per
+candidate). The run was split, v2-moe and Gemma first, once the smoke showed
+Qwen3 and Harrier 2.6-4.6x slower than v2-moe. Harrier uses a community GGUF
+because no official one exists. Per-step caching was added after the reaper
+lost 40 minutes of Gemma.
 
-**Corrections — distrust these sections' history, not their current text.**
-- **Phase 1 step 1 was KILLED and then REVIVED inside one session.** It reads
-  correctly now. The kill was real and measured; it was measuring a buggy
-  fusion. `65a68a3`'s commit subject ("killing the over-fetch step") is
-  therefore stale and was left alone because it is pushed.
-- **Phase 1 step 2's cost claim was wrong.** "No new supervision path" is false
-  as configured: `daemon_command` is single-model, so a reranker needs a second
-  supervised process today. Corrected in place; the original sentence is kept
-  above the correction because it is what ranked the step.
-- **The txtai survey's top recommendation is dead.** Benchmarking `ts_rank`
-  against BM25 was withdrawn, and this session falsified its stated reason. The
-  withdrawal still stands on its merits — BM25 inherits the same conjunction.
-- **Phase 0's published numbers were taken at depth 50**, not the shipped 10.
-  The section now says which depth each figure came from.
+**Environment quirks found this session.**
+- Other agent sessions' jobs held load average at 16-30 and memory near 5 GB
+  free all afternoon. Throughput numbers taken then are load-bound: compare
+  ratios within one run, never against the 2,468 tok/s recorded idle.
+- Claude Code kills its own background jobs under memory pressure and says not
+  to restart them unasked. Long runs belong in the user's terminal.
+- `git diff`/`git status` with no pathspec fail in the sandbox on the masked
+  `.env` ("unsupported file type"). Pass a pathspec.
+- zsh does not word-split: `set -- $spec` inside a loop passes one argument.
+- `cementic.chunk.TOKENIZER` is the encoding's name, not an encoder; encode
+  with `tiktoken.get_encoding(TOKENIZER)` and `disallowed_special=()` to match
+  `chunk_text`.
+- `llama-bench -p 2048` aborts (exit 134) on the encoder models whose training
+  window is at or below 2048; bench them at 512 only.
 
-**Deviations, attributed.**
-- *User-directed:* settle the instrument before chasing the bar; implement the
-  fusion dedup; close step 1. Each was chosen by the user from lettered options.
-- *Agent-decided:* extracting `arm_fetch_limit` as a pure function rather than
-  leaving the arithmetic inline in a database-bound method; adding a `--depth`
-  flag rather than editing the constant, so one query set can be scored at
-  several depths; stacking over-fetch on the fusion branch instead of its own;
-  discarding all six scratchpad probes.
+**Artifacts, all outside the repo and regenerable.** `~/.cache/cementic-model-compare/`
+(sample, v2-moe cache, server logs), `~/.cache/cementic-model-compare-smoke/`
+(the 8-paper run), `~/.cache/cementic-router/` (spike preset and probes),
+`~/.cache/cementic-lead-arms.json` (ablation cache), logs
+`~/.cache/cementic-eval-lead-*.log`, `~/.cache/cementic-model-*.log`.
+`models/` gained four GGUFs, all gitignored: the bge reranker and the three
+candidates. Scratchpad: one applied edit script, discarded.
 
-**Environment quirks that cost time.**
-- **Runtime scales with the returned-list size, not the fetch depth.** A
-  360-query `score --depth 10` with over-fetch live took **142 s** while
-  `--depth 50` took 452 s, fetching the same 50 rows per arm. An estimate
-  derived from fetch depth was wrong by 3x. Calibration: `--depth 10` without
-  over-fetch 307 s; full `check.sh` a few minutes; one search ~101 ms median,
-  73% of it query embedding.
-- **After a merge-and-delete you are standing on `main` again.** The pre-commit
-  hook rejected a commit this session for exactly that. Run
-  `git branch --show-current` *before* staging, not after the rejection.
-- The Bash sandbox blocks 127.0.0.1:5432 and reports it as "database not
-  reachable". Every command touching the database, `doctor`, `search` or the
-  harness needs the sandbox disabled. (Unchanged; confirmed again.)
-- `$SCRATCH` is **not** set. Use the absolute scratchpad path.
-- Path-importing a script inside a test needs `sys.modules[spec.name] = module`
-  *before* `exec_module`, or `@dataclass` raises `AttributeError: 'NoneType'`
-  — it resolves the defining module through `sys.modules`. See
-  `tests/unit/test_retrieval_quality_harness.py`.
-- `scripts/` is still outside `check.sh`'s ruff/mypy gates. The harness's pure
-  functions are now gated anyway, because their tests live in `tests/`.
-
-**Artifacts.**
-- In the repo: `scripts/measure_retrieval_quality.py` (now `build` / `perturb`
-  / `score --depth`), `eval/queries.json` (360 queries — the 180 originals are
-  byte-identical, `perturb` only ever appends and regenerates its own kinds),
-  `tests/unit/test_retrieval_quality_harness.py`, and new tests in
-  `test_hybrid.py` and `test_search.py`.
-- **Discarded deliberately: all six scratchpad probes.** Two of them
-  (`why_depth_hurts.py`, `chunk_multiplicity.py`) were *invalid* and are
-  recorded as refuted in Phase 1 step 1 so nobody re-runs them. The valid four
-  regenerate in ~2 min, and their conclusions are in the plan. The latency
-  methodology is the only one non-trivial to rebuild; it is specified in
-  `search.arm_fetch_limit`'s docstring and in step 1 (interleaved, best-of-5,
-  warm-up discarded, every timed call asserted non-empty).
-- Logs, outside the repo: `~/.cache/cementic-eval-*.log` and
-  `~/.cache/cementic-check.log`.
-
-**Open, and deliberately not closed.**
-- **Typo robustness is the largest measured gap and nobody owns it.** One
-  transposed character makes the lexical arm return zero rows for 60 of 60
-  queries; end-to-end recall@10 is 0.217. Phase 1 step 3, unscheduled, and
-  explicitly blocked behind step 2.
-- **Two cells sit one query low and may be noise.** Title recall@10 0.867 and
-  phrase-dropped 0.950. At n=60 one query is 0.017. No seeds were run and the
-  set was not enlarged; the plan says do not tune against them.
-- **The router-server question is unproven.** Build 10858 has `--models-dir` /
-  `--models-max` (default 4) that *might* let one process serve embeddings and
-  rerank, which would restore step 2's original cost. Read off `--help` only;
-  nobody has run it.
-- **No reranker GGUF exists** and no candidate is named anywhere.
-- Phase 2 is entirely untouched, including 2a and the ~108 h rebuild.
-
-**Exit criteria — commands whose output confirms the above.**
+**Exit criteria.**
 ```bash
-git branch --show-current                # claude/router-spike, until you merge
-git log --oneline main..HEAD             # the router-spike docs commit
-./.venv/bin/cementic doctor              # every line ok
-./scripts/check.sh                       # all six gates, including pg
-# ~2.5 min; recall@1 must read 0.633 / 0.783 / 0.117 and rare-token recall@10 0.983
-./.venv/bin/python scripts/measure_retrieval_quality.py score -q eval/queries.json --depth 10
+git branch --show-current            # claude/model-compare, until merged
+git log --oneline main..HEAD         # three commits, handoff docs on top
+ls ~/.cache/cementic-model-compare/  # sample.json and v2-moe.json; no gemma file yet
+./.venv/bin/cementic doctor          # every line ok (needs the sandbox off)
+# Gemma only (~55 min), or all four (8-11 h) in a terminal; v2-moe is reused:
+./.venv/bin/python -u scripts/measure_retrieval_quality.py compare-models --models v2-moe,gemma-300m > ~/.cache/cementic-model-compare-gemma.log 2>&1
+./.venv/bin/python -u scripts/measure_retrieval_quality.py compare-models > ~/.cache/cementic-model-compare-all.log 2>&1
 ```
 <!-- session-handoff:end -->
 
@@ -1150,6 +1101,58 @@ to want the window did not. Candidate GGUF models need a fresh check — no mode
 is recommended here, and any name predating this line is stale. Method is Phase
 0's, on a 1,000-paper sample with the stored index as control, before
 committing ~108 h.
+
+**IN PROGRESS 2026-09-24 — instrument built, one of four models embedded.**
+`measure_retrieval_quality.py compare-models` replaces the v1.5 script in
+`~/.cache/cementic-igpu/calibration/` (not yet deleted; delete it once a full
+run has completed). Each of 500 seeded papers contributes one 2,000-token body
+span (stored chunks 2-9, skipping the title page), embedded at the stored
+320-token chunking and at 1,300 with overlap 325. That fixes the v1.5 run's
+stated flaw, which compared a long-window model only at 320. Queries are the
+paper's title and one verbatim phrase from the span; a document ranks by its
+best chunk. Arms: stored v2-moe vectors (the control, paired with fresh v2-moe
+queries, as production search does), fresh v2-moe at 320 (the noise floor),
+and each candidate at both sizes. Each model is served by the live daemon's
+own build (10605) on port 11557, and the harness caches after every finished
+step under `~/.cache/cementic-model-compare/`.
+
+*Candidates, checked 2026-09-24:* Qwen3-Embedding-0.6B (official Q8_0,
+Apache-2.0, 32k window, 1024 dims, last-token pooling), EmbeddingGemma-300M
+(ggml-org Q8_0, Gemma licence, 2k window, 768 dims), Harrier-oss-v1-0.6b
+(MIT, April 2026, Qwen3 architecture; only community GGUFs, mradermacher's
+used). All three GGUFs append their own end-of-text token (`/tokenize`), so
+nothing adds one. All three are in `models/`, gitignored.
+
+*Throughput through llama-server, under load average 16-30 from other work:*
+
+| model | chunks | tokens/s, 8-paper smoke | tokens/s, 500-paper run |
+| --- | --- | --- | --- |
+| v2-moe | 320 | 568 | 838 |
+| EmbeddingGemma | 320 | 1,036 | 902 |
+| EmbeddingGemma | 1,300 | 1,164 | 609 (stopped at 40%, not saved) |
+| Qwen3-0.6B | 320 / 1,300 | 124 / 138 | not run |
+| Harrier-0.6B | 320 / 1,300 | 217 / 209 | not run |
+
+The absolute numbers are load-bound (v2-moe benched 754 under load against
+2,468 recorded idle), so read ratios. Qwen3 and Harrier run 2.6-4.6x slower
+than v2-moe, which puts their projected rebuild above the pre-registered
+threshold of about twice today's ~108 h. They still get scored, but a win
+comes back as a speed-versus-quality decision, not a go. EmbeddingGemma is the
+only candidate at or above v2-moe's speed.
+
+*Quality so far:* none at n=500. The 8-paper smoke saturated recall and
+decides nothing; it verified the pipeline (fresh v2-moe margin 0.1286 against
+stored 0.1285, zero misaligned chunks, zero refusals).
+
+*Pre-registered rules (2026-09-24):* a candidate at 1,300 must beat stored
+v2-moe on title queries by a paired sign test at p < 0.01, not lose on
+phrases, and gain more margin than fresh-versus-stored v2-moe does. No winner
+closes 2a as "stay on v2-moe", and 2b-2d are then judged alone. A winner whose
+projected rebuild exceeds ~2x today's goes to the user with the number.
+
+*Expected ceiling of the payoff:* a better embedding can move title recall@1,
+where the vector arm leads, and recall@10 / MRR everywhere. It cannot move
+phrase recall@1, which routing owns (Phase 1 step 2).
 
 **2b. The three riders the v1.5 section parked.** Unchanged and already
 specified above: drop punctuation-dominated chunks at chunk time, re-derive
