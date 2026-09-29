@@ -1,85 +1,79 @@
 # cementic — architecture & design
 
-<!-- session-handoff:begin (2026-09-24) -->
+<!-- session-handoff:begin (2026-09-29) -->
 ## Where the work stands
 
-**Entry point: finish the Phase 2a model comparison, then read its verdict.**
-Read Phase 2 → "2a. Reconsider the embedding model" → "IN PROGRESS
-2026-09-24" first. The instrument is built and tested; the full 500-paper run
-was stopped by Claude Code's memory-pressure reaper, not by a fault. v2-moe is
-fully cached. EmbeddingGemma had finished its queries and 320-token arm and
-was 40% into its 1,300-token arm, but none of that was saved: the run used the
-old code, which cached only finished models. Per-step caching landed after.
-Harrier and Qwen3 have not run.
+**Entry point: finish the Phase 2a model comparison by running Harrier and
+Qwen3, then close 2a.** Read Phase 2 → "2a. Reconsider the embedding model" →
+"RUN 2026-09-29" first. v2-moe and EmbeddingGemma are fully cached at n=500
+(sample `8d3c95f989f5`). Gemma failed the pre-registered rules: its title gain
+at 1,300 misses p < 0.01 (p = 0.066), and it loses on phrases (recall@1 0.216
+against 0.301).
 
-**Next action, decided by the user at resume.** Three options were put and not
-yet answered: run EmbeddingGemma alone from Claude (~55 min at today's load,
-from scratch; the reaper can stop it again); run all four in the user's own terminal, where
-the reaper cannot reach (7-10 h); or wait for a quieter machine. The
-recommendation was Gemma now, the rest overnight in a terminal, because Gemma
-is the only candidate that clears the throughput gate. Both commands are in
-the exit criteria below; a finished run prints the verdict tables, which go
-into the "IN PROGRESS" paragraph as a RUN block with the verdict.
+**Next action: the overnight run, in the user's terminal.** It embeds only
+Harrier and Qwen3 and reuses the other two caches (7-10 h at 09-24's load).
+The command is in the exit criteria. When it finishes, add a RUN block for
+the two models under 2a and apply the same three rules. Both models are
+2.6-4.6x slower than v2-moe, so a win returns to the user as a
+speed-versus-quality decision with the projected rebuild hours. If neither
+wins, 2a closes as "stay on v2-moe", and 2b-2d are judged alone. Once a
+full run has completed, delete `~/.cache/cementic-igpu/calibration/`, the old
+v1.5 script, as the 2a section says.
 
-**Phase 1 is closed** (2026-09-23/24). The `lead` ablation refuted deleting
-`lead` and put the best possible routing rule exactly on the reranker bar
-(0.650 / 0.783 / 0.967 recall@1). The router-server spike showed one
-llama-server can serve both models with no code change, and that reranking
-50 chunks costs 17 s on this iGPU, so the reranker step died on latency.
-Records: Phase 1 step 2, "RUN 2026-09-23" and "SPIKE 2026-09-24". recall@1 is
-still 0.633 / 0.783 / 0.117, unchanged since Phase 0.
+**Open anomaly, not blocking.** Fresh v2-moe beats its own stored vectors on
+99 phrase queries and trails on 9 (p = 2.6e-20), yet its recall@1 and MRR are
+slightly lower. The suspected cause is the 21 chunks fresh v2-moe refused:
+`score_arm` in `scripts/measure_retrieval_quality.py` drops refused chunks
+from the pool. It is unverified. Until it is checked, the margin rule ("gain
+more than fresh-versus-stored") has no clean floor. It is a scoring-side fix
+and needs no re-embedding. Details are in the RUN block.
 
-**Repo state.** Branch `claude/model-compare`, three commits ahead of `main`
-after this handoff lands, fast-forwardable: `458a64f` the `compare-models`
-subcommand with tests, `b69c310` per-step resumable caching, and this docs
-commit. `main` = `3718668`, which carries the ablation and spike. Local
-branches `claude/lead-ablation` and `claude/router-spike` are merged and can
-be deleted. The masked `src/cementic/templates/postgres/.env` always shows as
-modified in agent shells; it is the sandbox, not a change.
+**Phase 1 is closed** (2026-09-23/24). recall@1 is still 0.633 / 0.783 /
+0.117, unchanged since Phase 0. Records: Phase 1 step 2, "RUN 2026-09-23" and
+"SPIKE 2026-09-24".
 
-**Live system.** `cementic@papers.service` active, `doctor` green, corpus
-untouched (23,075 docs, all embedded). Nothing running in the background, no
-llama-server left on 11556 or 11557.
+**Repo state.** Branch `claude/gemma-verdict` is one docs commit ahead of
+`main` (this handoff plus the Gemma RUN block) and fast-forwardable. The user
+merges it with the command below. `main` carries the whole `compare-models`
+instrument; the earlier agent branches are merged and deleted. In agent
+shells, two things show as changes and are not: the masked
+`src/cementic/templates/postgres/.env`, and the untracked dotfiles in the
+repo root (`.bashrc`, `.gitconfig`, `.mcp.json`, `.claude/*`, …), which are
+`/dev/null` placeholders the sandbox mounts.
+
+**Live system.** Nothing running. `cementic@papers.service` and `doctor` were
+last checked on 2026-09-24: active and green, corpus untouched (23,075 docs,
+all embedded). This session did not re-check them.
 
 **Deviations from the approved 2a plan, all agent-decided.** 500 papers, not
-1,000, because each paper now costs a whole span at two sizes (~5M tokens per
-candidate). The run was split, v2-moe and Gemma first, once the smoke showed
-Qwen3 and Harrier 2.6-4.6x slower than v2-moe. Harrier uses a community GGUF
-because no official one exists. Per-step caching was added after the reaper
-lost 40 minutes of Gemma.
+1,000 (~5M tokens per candidate at two chunk sizes). The run was split, v2-moe
+and Gemma first. Harrier uses a community GGUF because no official one exists.
+Throughput is only comparable within one run: v2-moe was measured on 09-24 at
+load 16-30, Gemma on 09-29 at load 6-9.
 
-**Environment quirks found this session.**
-- Other agent sessions' jobs held load average at 16-30 and memory near 5 GB
-  free all afternoon. Throughput numbers taken then are load-bound: compare
-  ratios within one run, never against the 2,468 tok/s recorded idle.
-- Claude Code kills its own background jobs under memory pressure and says not
-  to restart them unasked. Long runs belong in the user's terminal.
+**Environment quirks.**
+- Claude Code kills its own background jobs under memory pressure. Long runs
+  belong in the user's terminal, which is how Gemma finished (~40 min).
 - `git diff`/`git status` with no pathspec fail in the sandbox on the masked
-  `.env` ("unsupported file type"). Pass a pathspec.
-- zsh does not word-split: `set -- $spec` inside a loop passes one argument.
-- `cementic.chunk.TOKENIZER` is the encoding's name, not an encoder; encode
-  with `tiktoken.get_encoding(TOKENIZER)` and `disallowed_special=()` to match
-  `chunk_text`.
-- `llama-bench -p 2048` aborts (exit 134) on the encoder models whose training
-  window is at or below 2048; bench them at 512 only.
+  `.env`. Pass a pathspec.
+- Bash hooks here block `git config` and `ls` of the session scratchpad as
+  "sensitive path"; read commit identity from `git log` instead.
+- `llama-bench -p 2048` aborts (exit 134) on encoder models whose training
+  window is at or below 2048; bench them at 512.
 
 **Artifacts, all outside the repo and regenerable.** `~/.cache/cementic-model-compare/`
-(sample, v2-moe cache, server logs), `~/.cache/cementic-model-compare-smoke/`
-(the 8-paper run), `~/.cache/cementic-router/` (spike preset and probes),
-`~/.cache/cementic-lead-arms.json` (ablation cache), logs
-`~/.cache/cementic-eval-lead-*.log`, `~/.cache/cementic-model-*.log`.
-`models/` gained four GGUFs, all gitignored: the bge reranker and the three
-candidates. Scratchpad: one applied edit script, discarded.
+(sample, `v2-moe.json`, `gemma-300m.json`, server logs), run logs
+`~/.cache/cementic-model-compare-*.log`, `~/.cache/cementic-router/`,
+`~/.cache/cementic-lead-arms.json`. `models/` holds the bge reranker and the
+three candidate GGUFs, gitignored. Scratchpad: nothing written this session.
 
 **Exit criteria.**
 ```bash
-git branch --show-current            # claude/model-compare, until merged
-git log --oneline main..HEAD         # three commits, handoff docs on top
-ls ~/.cache/cementic-model-compare/  # sample.json and v2-moe.json; no gemma file yet
-./.venv/bin/cementic doctor          # every line ok (needs the sandbox off)
-# Gemma only (~55 min), or all four (8-11 h) in a terminal; v2-moe is reused:
-./.venv/bin/python -u scripts/measure_retrieval_quality.py compare-models --models v2-moe,gemma-300m > ~/.cache/cementic-model-compare-gemma.log 2>&1
-./.venv/bin/python -u scripts/measure_retrieval_quality.py compare-models > ~/.cache/cementic-model-compare-all.log 2>&1
+git log --oneline main..claude/gemma-verdict   # one docs commit
+ls ~/.cache/cementic-model-compare/            # sample.json, v2-moe.json, gemma-300m.json
+# user: land the docs commit, then start the overnight run (7-10 h):
+cd ~/projects/cementic && git merge --ff-only claude/gemma-verdict && git branch -d claude/gemma-verdict
+cd ~/projects/cementic && ./.venv/bin/python -u scripts/measure_retrieval_quality.py compare-models > ~/.cache/cementic-model-compare-all.log 2>&1
 ```
 <!-- session-handoff:end -->
 
@@ -1102,7 +1096,7 @@ is recommended here, and any name predating this line is stale. Method is Phase
 0's, on a 1,000-paper sample with the stored index as control, before
 committing ~108 h.
 
-**IN PROGRESS 2026-09-24 — instrument built, one of four models embedded.**
+**IN PROGRESS 2026-09-24 — instrument built; v2-moe and EmbeddingGemma embedded (2026-09-29).**
 `measure_retrieval_quality.py compare-models` replaces the v1.5 script in
 `~/.cache/cementic-igpu/calibration/` (not yet deleted; delete it once a full
 run has completed). Each of 500 seeded papers contributes one 2,000-token body
@@ -1140,9 +1134,37 @@ threshold of about twice today's ~108 h. They still get scored, but a win
 comes back as a speed-versus-quality decision, not a go. EmbeddingGemma is the
 only candidate at or above v2-moe's speed.
 
-*Quality so far:* none at n=500. The 8-paper smoke saturated recall and
-decides nothing; it verified the pipeline (fresh v2-moe margin 0.1286 against
-stored 0.1285, zero misaligned chunks, zero refusals).
+*Quality so far:* the 8-paper smoke saturated recall and decides nothing; it
+verified the pipeline (fresh v2-moe margin 0.1286 against stored 0.1285, zero
+misaligned chunks, zero refusals).
+
+**RUN 2026-09-29 — EmbeddingGemma fails; Harrier and Qwen3 pending.** 500
+papers (sample `8d3c95f989f5`), run in the user's terminal, log
+`~/.cache/cementic-model-compare-gemma.log`. Recall@1, with the paired sign
+test against stored v2-moe:
+
+| arm | title r@1 | title better/worse, p | phrase r@1 | phrase better/worse, p |
+| --- | --- | --- | --- | --- |
+| v2-moe stored@320 | 0.850 | control | 0.301 | control |
+| v2-moe fresh@320 | 0.848 | 2/2, 1 | 0.299 | 99/9, 2.6e-20 |
+| Gemma@320 | 0.890 | 54/31, 0.017 | 0.234 | 171/224, 0.0088 |
+| Gemma@1300 | 0.874 | 52/34, 0.066 | 0.216 | 170/238, 0.00089 |
+
+Verdict: Gemma@1300 fails two of the three rules. Its title gain misses
+p < 0.01, and it loses on phrases (recall@1 0.216 against 0.301, MRR 0.302
+against 0.381). Gemma@320 fails the same two. The query and document prefixes
+are the model card's (`task: search result | query: `, `title: none | text: `),
+so a prompt mismatch does not explain the phrase loss. Throughput is not
+comparable across the two runs: Gemma ran at 1,246 / 1,025 tok/s under load
+6-9, and v2-moe ran at 838 under load 16-30.
+
+Open anomaly in the noise floor: fresh v2-moe beats its own stored vectors on
+99 phrase queries and trails on 9, yet its recall@1 and MRR are slightly
+lower. Fresh v2-moe refused 21 chunks, and `score_arm` drops refused chunks
+from the pool, which likely explains it: a refused distractor raises the gold
+by one rank, and a refused gold chunk sinks it. Until that is checked, the
+"gain more margin than fresh-versus-stored" rule has no clean floor. The
+Gemma verdict does not depend on it.
 
 *Pre-registered rules (2026-09-24):* a candidate at 1,300 must beat stored
 v2-moe on title queries by a paired sign test at p < 0.01, not lose on
