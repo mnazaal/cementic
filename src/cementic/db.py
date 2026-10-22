@@ -671,8 +671,19 @@ def _add_missing_columns(engine: Engine) -> None:
     """
     if engine.dialect.name != "postgresql":
         return
+    missing = [
+        (table, column, definition)
+        for table, column, definition in _RETROFIT_COLUMNS
+        if column not in {c["name"] for c in inspect(engine).get_columns(table)}
+    ]
+    # Checked through the catalog first: ADD COLUMN IF NOT EXISTS takes an
+    # ACCESS EXCLUSIVE lock even when the column is there, so running it on
+    # every worker start queued behind any open `status` read and stalled
+    # searches behind it in turn.
+    if not missing:
+        return
     with engine.begin() as conn:
-        for table, column, definition in _RETROFIT_COLUMNS:
+        for table, column, definition in missing:
             conn.execute(
                 text(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} {definition}")
             )

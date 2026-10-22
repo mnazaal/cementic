@@ -380,10 +380,48 @@ def interrupted_claims_message(attempts: int) -> str:
     """The error a requeue stamps on a document the worker kept dying on."""
     return (
         f"the worker stopped mid-document on {attempts} consecutive attempts "
-        "(a crash or out-of-memory kill, not an error cementic could catch); "
-        "skipped so the rest of the collection can finish. Changing the file "
-        "retries it."
+        "(a crash, an out-of-memory kill, or a forced stop while this document "
+        "was in progress); skipped so the rest of the collection can finish. "
+        "Changing the file retries it."
     )
+
+
+def _purge_all_chunks(session: Session, extracted_document_id: int) -> None:
+    """Drop every chunk of a document whose current content is unknown.
+
+    Used when re-extraction *failed*: the file on disk changed (its hash is what
+    selected it), so the chunks in hand describe a version that is gone, and
+    there is no new text to replace them with. Keeping them meant search went on
+    serving the old contents of a file that no longer extracts -- indefinitely,
+    since search applies no freshness filter and ``_step_chunk`` only revisits a
+    document once extraction succeeds.
+
+    Removing them makes the document return nothing until it extracts again,
+    which is the honest answer, and the failure is already visible as
+    ``failures extract=N`` in ``cementic status``.
+
+    The emptied chunkings must also be invalidated, or "until it extracts
+    again" never arrives. ``_step_chunk`` re-claims a *done* chunking only when
+    its ``source_content_hash`` differs from the extraction's, so a file that
+    later extracts to the **same** text it had before matches its own stale
+    hash, is never revisited, and keeps zero chunks for good -- while
+    ``chunked_scope`` still counts it as done, so ``cementic status`` reads
+    100%. Found on the live corpus 2026-09-07: two of 23,064 papers sat in
+    exactly that state, unsearchable and unreported, since 2026-08-24.
+
+    Clearing the hash is what re-opens the work: ``_step_chunk``'s claim treats
+    NULL as distinct, and ``chunked_scope``'s equality then excludes the row
+    from ``chunked_done`` until it is genuinely re-chunked.
+    """
+    chunked_ids = select(ChunkedDocument.id).where(
+        ChunkedDocument.extracted_document_id == extracted_document_id
+    )
+    session.query(Chunk).filter(Chunk.chunked_document_id.in_(chunked_ids)).delete(
+        synchronize_session=False
+    )
+    session.query(ChunkedDocument).filter(
+        ChunkedDocument.extracted_document_id == extracted_document_id
+    ).update({ChunkedDocument.source_content_hash: None}, synchronize_session=False)
 
 
 def requeue_interrupted_artifacts(
@@ -429,6 +467,11 @@ def requeue_interrupted_artifacts(
         ):
             row.status = "failed"
             row.error_message = interrupted_claims_message(row.attempts)
+            if isinstance(row, ExtractedDocument) and row.content_hash is not None:
+                # The claim stamped the new file's hash, but the chunks still
+                # hold the previous version's text: the same stale-content
+                # case a failed re-extraction purges at write-back.
+                _purge_all_chunks(session, row.id)
         session.flush()
         session.query(model).filter(
             *scope,

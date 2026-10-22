@@ -1493,6 +1493,7 @@ class TestTokenizerOutageIsNotADocumentFailure:
 
         with (
             patch("cementic.pipeline_worker.read_extracted_text", return_value="some text"),
+            patch("cementic.pipeline_worker.tokenizer"),
             patch(
                 "cementic.pipeline_worker.chunk_text",
                 side_effect=TokenizerUnavailableError("offline"),
@@ -1506,9 +1507,51 @@ class TestTokenizerOutageIsNotADocumentFailure:
             chunked = (
                 session.query(ChunkedDocument)
                 .filter_by(extracted_document_id=pending_extracted_id)
-                .first()
+                .one()
             )
-            assert chunked is None or chunked.status not in ("done", "failed")
+            # Handed back uncounted: a restart during the outage must not cap
+            # a healthy document as a crash (review finding).
+            assert (chunked.status, chunked.attempts) == ("pending", 0)
+
+    def test_an_uncached_tokenizer_raises_before_any_claim(self, temp_dir: Path) -> None:
+        from cementic.chunk import TokenizerUnavailableError
+
+        engine = create_engine("sqlite:///:memory:")
+        Base.metadata.create_all(engine)
+        session_factory = sessionmaker(bind=engine, expire_on_commit=False)
+        with session_factory() as session:
+            revision_id, pending_extracted_id = _seed_chunk_selection_data(
+                session, "offline-early", n_already_done=0
+            )
+        config = Config()
+        config.pipeline_worker.log_file = temp_dir / "worker.log"
+        worker = PipelineWorker(config)
+        worker.Session = session_factory
+        worker.collection = "offline-early"
+
+        with (
+            patch(
+                "cementic.pipeline_worker.tokenizer",
+                side_effect=TokenizerUnavailableError("offline"),
+            ),
+            pytest.raises(TokenizerUnavailableError),
+        ):
+            worker._step_chunk(revision_id)
+
+        with session_factory() as session:
+            assert (
+                session.query(ChunkedDocument)
+                .filter_by(extracted_document_id=pending_extracted_id)
+                .count()
+                == 0
+            )
+
+    def test_an_uncached_tokenizer_is_a_retryable_embed_error(self) -> None:
+        """Review finding: stamping it failed every pending embedding offline."""
+        from cementic.chunk import TokenizerUnavailableError
+        from cementic.pipeline_worker import is_retryable_embed_error
+
+        assert is_retryable_embed_error(TokenizerUnavailableError("offline")) is True
 
 
 class TestProviderFailuresAreVisible:

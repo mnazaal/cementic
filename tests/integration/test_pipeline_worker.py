@@ -967,6 +967,58 @@ class TestCrashingDocumentIsCapped:
         with session_factory() as session:
             assert session.query(ExtractedDocument).one().attempts == 1
 
+    def test_a_capped_re_extraction_drops_the_previous_versions_chunks(
+        self, sqlite_setup, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Review finding: the capped row kept serving the old file's text."""
+        from cementic.db import Chunk, ChunkedDocument
+
+        config, session_factory, pdf_fixtures_dir = sqlite_setup
+        collection = "test_crash_cap_stale"
+        pipeline, source_watcher = _setup_worker(config, session_factory, collection, monkeypatch)
+        source_watcher._register_document(str(pdf_fixtures_dir / "test_doc_a.pdf"))
+        revision_id = pipeline._ensure_target_revision()
+        with session_factory() as session:
+            revision = session.get(PipelineRevision, revision_id)
+            document = session.query(SourceDocument).one()
+            extracted = ExtractedDocument(
+                document_id=document.id,
+                extractor_profile_id=revision.extractor_profile_id,
+                source_file_hash=document.file_hash,
+                content_hash="old-text",
+                status="done",
+            )
+            session.add(extracted)
+            session.flush()
+            chunked = ChunkedDocument(
+                extracted_document_id=extracted.id,
+                chunk_profile_id=revision.chunk_profile_id,
+                source_content_hash="old-text",
+                status="done",
+                total_chunks=1,
+            )
+            session.add(chunked)
+            session.flush()
+            session.add(
+                Chunk(
+                    document_id=document.id,
+                    chunked_document_id=chunked.id,
+                    chunk_index=0,
+                    content="the old version",
+                )
+            )
+            # The file changes on disk into one that kills the extractor.
+            document.file_hash = "e" * 64
+            session.commit()
+
+        for _ in range(3):
+            _crash_once(pipeline, revision_id, monkeypatch)
+            _restart(session_factory, collection, revision_id)
+
+        with session_factory() as session:
+            assert session.query(ExtractedDocument).one().status == "failed"
+            assert session.query(Chunk).count() == 0
+
     @pytest.mark.pg
     def test_create_tables_adds_the_column_to_an_older_schema(self, pg_engine) -> None:
         """A database from before the cap gets `attempts` added in place."""

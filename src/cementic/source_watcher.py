@@ -1056,7 +1056,16 @@ class SourceWatcher:
                 # source_path) would otherwise refuse it.
                 session.flush()
             document.source_path = dest
-            session.commit()
+            try:
+                session.commit()
+            except IntegrityError:
+                # A concurrent registration (a debounce timer or the scan)
+                # took the destination first. Fall back to the delete the move
+                # used to be, rather than leave this row live at a path that
+                # no longer exists.
+                session.rollback()
+                self._mark_document_deleted(src_path)
+                return
         self._logger.info(
             "Document renamed: %s -> %s (collection=%s)", source, dest, self.collection
         )

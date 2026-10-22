@@ -16,7 +16,7 @@ import requests
 from sqlalchemy import and_, or_, select, text
 from sqlalchemy.orm import Session
 
-from cementic.chunk import TextChunk, TokenizerUnavailableError, chunk_text
+from cementic.chunk import TextChunk, TokenizerUnavailableError, chunk_text, tokenizer
 from cementic.config import Config, get_config
 from cementic.db import (
     Chunk,
@@ -36,6 +36,7 @@ from cementic.embedding_runtime import create_provider, runtime_spec_from_config
 from cementic.extract import extract_document
 from cementic.index_strategies import index_dimension_error
 from cementic.revisions import (
+    _purge_all_chunks,
     chunk_scope,
     chunked_scope,
     claimed_attempts,
@@ -249,6 +250,11 @@ def is_retryable_embed_error(error: BaseException) -> bool:
     HTTP status that is not in the retryable set -- a real 400/404 stays
     terminal, everything else about the provider is retried.
     """
+    if isinstance(error, TokenizerUnavailableError):
+        # The token-budget check could not load its tokenizer: offline with
+        # nothing cached. As much a provider outage as a refused connection,
+        # and stamping it would fail every pending embedding within minutes.
+        return True
     if not isinstance(error, requests.exceptions.RequestException):
         return False
     if isinstance(error, requests.exceptions.HTTPError):
@@ -281,44 +287,6 @@ def revision_is_complete(counts: PipelineCounts) -> bool:
 def revision_failure_total(counts: PipelineCounts) -> int:
     """Total failed artifacts across all stages (pure)."""
     return counts.extracted_failed + counts.chunked_failed + counts.failed_embeddings
-
-
-def _purge_all_chunks(session: Session, extracted_document_id: int) -> None:
-    """Drop every chunk of a document whose current content is unknown.
-
-    Used when re-extraction *failed*: the file on disk changed (its hash is what
-    selected it), so the chunks in hand describe a version that is gone, and
-    there is no new text to replace them with. Keeping them meant search went on
-    serving the old contents of a file that no longer extracts -- indefinitely,
-    since search applies no freshness filter and ``_step_chunk`` only revisits a
-    document once extraction succeeds.
-
-    Removing them makes the document return nothing until it extracts again,
-    which is the honest answer, and the failure is already visible as
-    ``failures extract=N`` in ``cementic status``.
-
-    The emptied chunkings must also be invalidated, or "until it extracts
-    again" never arrives. ``_step_chunk`` re-claims a *done* chunking only when
-    its ``source_content_hash`` differs from the extraction's, so a file that
-    later extracts to the **same** text it had before matches its own stale
-    hash, is never revisited, and keeps zero chunks for good -- while
-    ``chunked_scope`` still counts it as done, so ``cementic status`` reads
-    100%. Found on the live corpus 2026-09-07: two of 23,064 papers sat in
-    exactly that state, unsearchable and unreported, since 2026-08-24.
-
-    Clearing the hash is what re-opens the work: ``_step_chunk``'s claim treats
-    NULL as distinct, and ``chunked_scope``'s equality then excludes the row
-    from ``chunked_done`` until it is genuinely re-chunked.
-    """
-    chunked_ids = select(ChunkedDocument.id).where(
-        ChunkedDocument.extracted_document_id == extracted_document_id
-    )
-    session.query(Chunk).filter(Chunk.chunked_document_id.in_(chunked_ids)).delete(
-        synchronize_session=False
-    )
-    session.query(ChunkedDocument).filter(
-        ChunkedDocument.extracted_document_id == extracted_document_id
-    ).update({ChunkedDocument.source_content_hash: None}, synchronize_session=False)
 
 
 def _purge_superseded_chunks(
@@ -854,6 +822,9 @@ class PipelineWorker:
             )
             if candidate_row is None:
                 return False
+            # Before claiming, so an offline machine with no cached tokenizer
+            # raises to the loop's back-off without touching any row.
+            tokenizer()
             extracted, chunked = candidate_row
 
             if chunked is None:
@@ -919,8 +890,10 @@ class PipelineWorker:
             error_message = None
         except TokenizerUnavailableError:
             # Not this document's fault: failing it would fail every document
-            # the same way. Raise to the loop, which publishes the error and
-            # backs off; the row stays claimable and is retried next pass.
+            # the same way. Hand the claim back uncounted, so a restart during
+            # the outage cannot cap a healthy document as a crash, then raise
+            # to the loop, which publishes the error and backs off.
+            self._release_chunk_claim(chunked_id)
             raise
         except Exception as error:
             chunk_items = []
@@ -949,6 +922,16 @@ class PipelineWorker:
 
         self.state_manager.update(current_file=None)
         return True
+
+    def _release_chunk_claim(self, chunked_id: int) -> None:
+        """Return a chunk claim to ``pending`` without counting the attempt."""
+        with self.Session() as session:
+            chunked = session.get(ChunkedDocument, chunked_id)
+            if chunked is not None:
+                chunked.status = "pending"
+                chunked.attempts = max((chunked.attempts or 1) - 1, 0)
+                session.commit()
+        self.state_manager.update(current_file=None)
 
     def _write_back_chunks(
         self,
