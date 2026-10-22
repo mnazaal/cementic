@@ -1,78 +1,57 @@
 # cementic — architecture & design
 
-<!-- session-handoff:begin (2026-09-29) -->
+<!-- session-handoff:begin (2026-10-22) -->
 ## Where the work stands
 
-**Entry point: finish the Phase 2a model comparison by running Harrier and
-Qwen3, then close 2a.** Read Phase 2 → "2a. Reconsider the embedding model" →
-"RUN 2026-09-29" first. v2-moe and EmbeddingGemma are fully cached at n=500
-(sample `8d3c95f989f5`). Gemma failed the pre-registered rules: its title gain
-at 1,300 misses p < 0.01 (p = 0.066), and it loses on phrases (recall@1 0.216
-against 0.301).
+**Entry point: "Execution order (2026-10-22)" below, the only live plan.** It
+folds three threads into one order: the 2026-10-22 audit
+(`notes/review-codebase.html`, local only), the unstarted steps 2-6 of the
+2026-09-10 CLI-surface audit, and retrieval-quality Phase 2. Start at
+"Correctness", first step, the search projection fix.
 
-**Next action: the overnight run, in the user's terminal.** It embeds only
-Harrier and Qwen3 and reuses the other two caches (7-10 h at 09-24's load).
-The command is in the exit criteria. When it finishes, add a RUN block for
-the two models under 2a and apply the same three rules. Both models are
-2.6-4.6x slower than v2-moe, so a win returns to the user as a
-speed-versus-quality decision with the projected rebuild hours. If neither
-wins, 2a closes as "stay on v2-moe", and 2b-2d are judged alone. Once a
-full run has completed, delete `~/.cache/cementic-igpu/calibration/`, the old
-v1.5 script, as the 2a section says.
+**Still pending outside the repo: the Phase 2a overnight run.** Harrier and
+Qwen3 have not been embedded: `~/.cache/cementic-model-compare/` holds only
+`sample.json`, `v2-moe.json` and `gemma-300m.json` (checked 2026-10-22). The
+command is in the exit criteria. It is independent of every code step before
+"Lexical arm", so the audit fixes do not wait for it. The open noise-floor
+anomaly (21 refused chunks dropped by `score_arm`) is unchanged; details sit
+under "Retrieval Phase 2" → 2a → "RUN 2026-09-29".
 
-**Open anomaly, not blocking.** Fresh v2-moe beats its own stored vectors on
-99 phrase queries and trails on 9 (p = 2.6e-20), yet its recall@1 and MRR are
-slightly lower. The suspected cause is the 21 chunks fresh v2-moe refused:
-`score_arm` in `scripts/measure_retrieval_quality.py` drops refused chunks
-from the pool. It is unverified. Until it is checked, the margin rule ("gain
-more than fresh-versus-stored") has no clean floor. It is a scoring-side fix
-and needs no re-embedding. Details are in the RUN block.
+**Gate evidence, 2026-10-22.** `./scripts/check.sh` passed every gate,
+including integration-pg, run by the user outside the sandbox. In an agent
+sandbox the same script fails 57 tests because tiktoken cannot download its
+BPE file. That is the "Tokenizer offline" step below, not a regression.
 
-**Phase 1 is closed** (2026-09-23/24). recall@1 is still 0.633 / 0.783 /
-0.117, unchanged since Phase 0. Records: Phase 1 step 2, "RUN 2026-09-23" and
-"SPIKE 2026-09-24".
+**Repo state.** `main` at `73b5d4c`. This PLAN.md rewrite is uncommitted in the
+working tree. The full pre-rewrite text, including every closed record cut to a
+verdict below, is `git show 73b5d4c:PLAN.md`. In agent shells, two things show
+as changes and are not: the masked `src/cementic/templates/postgres/.env`, and
+the untracked `/dev/null` dotfile placeholders in the repo root.
 
-**Repo state.** Branch `claude/gemma-verdict` is one docs commit ahead of
-`main` (this handoff plus the Gemma RUN block) and fast-forwardable. The user
-merges it with the command below. `main` carries the whole `compare-models`
-instrument; the earlier agent branches are merged and deleted. In agent
-shells, two things show as changes and are not: the masked
-`src/cementic/templates/postgres/.env`, and the untracked dotfiles in the
-repo root (`.bashrc`, `.gitconfig`, `.mcp.json`, `.claude/*`, …), which are
-`/dev/null` placeholders the sandbox mounts.
-
-**Live system.** Nothing running. `cementic@papers.service` and `doctor` were
-last checked on 2026-09-24: active and green, corpus untouched (23,075 docs,
-all embedded). This session did not re-check them.
-
-**Deviations from the approved 2a plan, all agent-decided.** 500 papers, not
-1,000 (~5M tokens per candidate at two chunk sizes). The run was split, v2-moe
-and Gemma first. Harrier uses a community GGUF because no official one exists.
-Throughput is only comparable within one run: v2-moe was measured on 09-24 at
-load 16-30, Gemma on 09-29 at load 6-9.
+**Live system.** Not checked this session. Last checked 2026-09-24:
+`cementic@papers.service` active, 23,075 documents, all embedded.
 
 **Environment quirks.**
 - Claude Code kills its own background jobs under memory pressure. Long runs
-  belong in the user's terminal, which is how Gemma finished (~40 min).
+  belong in the user's terminal.
 - `git diff`/`git status` with no pathspec fail in the sandbox on the masked
   `.env`. Pass a pathspec.
-- Bash hooks here block `git config` and `ls` of the session scratchpad as
+- The sandbox blocks port 5432 and the tiktoken download, so `check.sh` there is
+  never a full gate. The user runs it.
+- Bash hooks block `git config` and `ls` of the session scratchpad as
   "sensitive path"; read commit identity from `git log` instead.
 - `llama-bench -p 2048` aborts (exit 134) on encoder models whose training
   window is at or below 2048; bench them at 512.
 
-**Artifacts, all outside the repo and regenerable.** `~/.cache/cementic-model-compare/`
-(sample, `v2-moe.json`, `gemma-300m.json`, server logs), run logs
-`~/.cache/cementic-model-compare-*.log`, `~/.cache/cementic-router/`,
-`~/.cache/cementic-lead-arms.json`. `models/` holds the bge reranker and the
-three candidate GGUFs, gitignored. Scratchpad: nothing written this session.
+**Artifacts outside the repo.** Audit: `notes/review-codebase.html` (gitignored),
+its predecessor `~/.cache/cementic-audit/review-codebase-2026-08-26.html`, gate
+logs `~/.cache/cementic-audit/`. Model comparison: `~/.cache/cementic-model-compare/`.
 
 **Exit criteria.**
 ```bash
-git log --oneline main..claude/gemma-verdict   # one docs commit
-ls ~/.cache/cementic-model-compare/            # sample.json, v2-moe.json, gemma-300m.json
-# user: land the docs commit, then start the overnight run (7-10 h):
-cd ~/projects/cementic && git merge --ff-only claude/gemma-verdict && git branch -d claude/gemma-verdict
+git -C ~/projects/cementic diff --stat -- PLAN.md   # this rewrite, uncommitted
+ls ~/.cache/cementic-model-compare/                # harrier/qwen3 json appear after the run
+# user, any time (7-10 h, own terminal):
 cd ~/projects/cementic && ./.venv/bin/python -u scripts/measure_retrieval_quality.py compare-models > ~/.cache/cementic-model-compare-all.log 2>&1
 ```
 <!-- session-handoff:end -->
@@ -89,13 +68,63 @@ that duplicated the code:
   comment beside the thing it explains cannot drift from it; a separate register
   can, and these had already become copies.
 - **Project policy** — `notes/` gitignored, no backwards-compatibility
-  obligation, the 3.12 floor — moved to README's "Decisions worth knowing".
+  obligation, the 3.12 floor — moved to README's "Decisions worth knowing", which `6df8ab9` later removed
+  (`git show 6df8ab9^:README.md`, line 907).
 - **Scheduling** — why Batch C ran before Batch A, why a characterization test
   preceded the refactor — deliberately dropped. They were about sequencing one
   piece of work and answer nothing six months out.
 
 The two parked items that had revisit conditions moved to `TODO.md`'s "Parked,
 with a trigger", because nothing here was watching for them.
+
+### 2026-10-22 — decisions from the audit interview
+
+Each entry is a question a later reader would ask. All are **live**. Each names
+the execution-order step that carries it out.
+
+- **Why does one execution order hold the audit, the CLI audit and retrieval?**
+  Three live orders gave no single answer to "what next", and they interact.
+  The worker fixes should land before the Phase 2 rebuild re-extracts the
+  corpus. The lexical-arm change has to wait for 2a so it doesn't confound the
+  model comparison. And the systemd copy wants the `cementic run` group from the
+  CLI audit. *Rejected:* two cross-linked tracks, which is two live plans; and
+  parking CLI steps 2-6, which drops `cementic run` and the search document id.
+- **Why both an attempt cap and out-of-process extraction for poison PDFs?** A
+  cap stops the crash loop cheaply but cannot see a hang, since a hang never
+  crashes. Only a child process with a timeout and an rlimit catches hangs, and
+  it also closes the hostile-PDF exposure. *Rejected:* cap only, which leaves
+  hangs and the security item; isolation only, which still loops on a crash
+  outside extraction.
+- **Why does the repo ship a copy of the live systemd unit instead of owning
+  it?** User's call: dotfiles stay untouched. *Accepted cost:* two copies that
+  can drift. *Rejected:* the repo owns the unit and dotfiles symlink to it
+  (couples dotfiles to the checkout); deleting `packaging/systemd` (users write
+  their own). *Revisit when:* the two copies differ in anything other than
+  paths.
+- **Why only a docs warning about the default Postgres password?** It is a
+  single-user tool, and generating a password per install couples
+  `init postgres` to the user config and needs a migration note. *Revisit
+  when:* cementic is documented for shared machines.
+- **Why pin tiktoken's cache directory rather than vendor the encoding or count
+  with the server?** Pinning is small and survives reboots. Vendoring adds about
+  1.7 MB of an OpenAI-hosted file with unclear redistribution terms. Counting
+  with the server would make `chunk` need a running server and would move every
+  chunk boundary, forcing a full re-chunk. *Accepted cost:* the first run after
+  install still needs the network once.
+- **Why do `status` and `collection list` stay separate after the audit flagged
+  the overlap?** The 2026-09-10 measurement still holds: `collection list` is
+  about 2x cheaper because it skips the worker and daemon probes. Reaffirmed,
+  not reopened.
+- **Why does `llama_cpp.verbose` leave the runtime fingerprint?** This reverses
+  the 2026-08-23 line under "Deliberately not done" that said it "correctly
+  stays in the runtime fingerprint". The audit found the cost that line missed.
+  Two processes whose configs differ only in verbosity compute different aliases
+  and kill each other's daemon on every search. Verbosity stays a launch
+  argument, so a reused daemon just keeps the log level it started with.
+  Agent-decided during the plan write-up, not asked in the interview.
+- **Why tag 0.3.0?** HEAD is 144 commits past `v0.2.0` and `uv tool` installs
+  from HEAD, so the version string currently means nothing. CHANGELOG keeps its
+  tag-time policy.
 
 ## Design principles
 
@@ -116,15 +145,16 @@ with a trigger", because nothing here was watching for them.
   exit — nothing ingests embedded JSONL and `search` always derives its own
   vector — and it cannot get one, because a cementic vector is only meaningful
   inside a revision that pins three profiles and their fingerprints. These are
-  debugging and export tools, not a composable loop. See "Execution order — CLI
-  surface audit".
+  debugging and export tools, not a composable loop. See "Decided — the CLI surface after the `llm`
+  audit".
 
 ## Scale context
 
 The target is no longer an estimate: the corpus was surveyed on 2026-08-24 at
 22,246 PDFs / 592,248 pages, which at 3.65 chunks/page is **~2.16M vectors**.
 The numbers behind that (query latency, embedding and extraction throughput,
-GPU rates, HNSW memory) are in README's "Measurements behind the defaults";
+GPU rates, HNSW memory) were in README's "Measurements behind the defaults" until `6df8ab9`
+removed it (`git show 6df8ab9^:README.md`);
 the design consequence is everything under Key seams below:
 per-embedding-profile vector tables, a `diskann` seam for when memory binds
 before latency does, versioned revisions so a model or chunking change builds in
@@ -200,8 +230,8 @@ database, test stages in isolation, or pipe a stage to an external tool.
 Their JSONL is not the stored shape, so do not read it as a picture of the
 database: the filter emits `index` where `chunks_v2` stores `chunk_index`, it
 carries no document identity, and it keeps the whitespace chunks the worker
-drops and renumbers. Step 5 of "Execution order — CLI surface audit" closes the
-key-name half of that.
+drops and renumbers. The CLI step "Rename the filter's chunk index key" closes
+the key-name half of that.
 
 ### Markdown as the text intermediate representation
 
@@ -221,251 +251,130 @@ is the contract for the *text* extraction family, not a universal law; per-type
 backend choice is what raises text-extraction quality (e.g. docling/marker) where
 it matters.
 
-## Execution order — hybrid retrieval (2026-09-07)
+## Execution order (2026-10-22)
 
-**CLOSED 2026-09-10.** Steps 1–5b are done: the mechanism is measured, the
-shape is settled (*the leading arm owns rank 1, fusion owns the rest*), the
-pure core ships in `hybrid.py` verified against both query sets, and the shell
-shipped a session later than this section claimed — `search.py` branches on
-`config.search.hybrid`, `ensure_lexical_index` runs inside `create_tables`, and
-`ix_chunks_v2_fts` is present on the live database. Evidence and predictions
-are in **Decided — hybrid lexical + vector retrieval** below and
-`notes/design-hybrid-retrieval.html`. Kept for the measurements; nothing here
-is outstanding except the one risk that section still carries, which is that
-the precondition for the whole feature was never measured.
+The one live plan. It merges the 2026-10-22 audit (`notes/review-codebase.html`,
+local only), steps 2-6 of the 2026-09-10 CLI-surface audit, and
+retrieval-quality Phase 2. Why one order is in the decision log. Each step names
+what ends it. Line numbers are as of `73b5d4c`.
 
-1. ~~**Confirm the rank-1 collapse is a tie-break artifact.**~~ **DONE
-   2026-09-07.** Set A, n=150: 68.0% lost an *exact* score tie (winner was a
-   vector-only document in 101 of 102), 28.7% genuinely outscored, 3.3% already
-   rank 1. The pre-registered bar was ≥90%, so the diagnosis is **not**
-   confirmed as stated — but the decomposition is exact: 68.0 + 3.3 = 71.3,
-   which is lexical-only's recall@1 to the digit, and the 28.7% complement is
-   precisely the queries where gold is not lexical rank 1.
+**Ordering is load-bearing:**
+- **Correctness comes first, and the search projection fix comes first within it.**
+  It is a one-line fix for a defect every multi-hit search shows.
+- **Worker changes land before the Phase 2 rebuild.** These are the attempt cap,
+  the `last_error` clear, rename as re-path, the schema retrofits, set-based
+  embed write-back, and extraction isolation. The rebuild re-extracts all 23k
+  PDFs, which is when a poison PDF is likeliest to surface, and set-based
+  write-back shortens it.
+- **Worker changes need a quiet moment.** The unit runs the working tree, so
+  each one takes effect at `systemctl --user restart cementic@papers`. Restart
+  only while nothing is mid-batch.
+- **The import diet precedes `cementic run`**, and `cementic run` precedes the
+  systemd copy. This is the CLI audit's own constraint, plus the packaging step
+  that now depends on it.
+- **The lexical-arm change waits until 2a closes**, so the model comparison is
+  never scored across two search behaviours.
+- **The schema retrofits go in one step**, because `create_all` never alters an
+  existing table. The attempt cap adds the first retrofit, and the efficiency
+  step adds the rest through the same helper.
+- **The functional-core refactors are behaviour-preserving, one commit each.**
+  The embed planner lands before the rebuild. The rest can land any time after
+  correctness.
+- **The release comes last.**
 
-2. ~~**Fix the tie-break and re-measure.**~~ **DONE 2026-09-07 — the rule
-   failed, so step 3 stands.** Step 1 reframed this: the tie is not a bug.
-   Both arms' rank-1 documents score `1/(k+1)` because RRF is symmetric, so
-   there is no neutral tie-break — choosing one *is* a bet on an arm. Measured
-   with the bet placed on lexical:
+### Correctness
 
-   | set | vector | lexical | hybrid RRF | hybrid + lexical ties |
-   | --- | --- | --- | --- | --- |
-   | A recall@1 | 0.027 | 0.713 | 0.047 | **0.713** PASS |
-   | B recall@1 | 0.713 | 0.173 | 0.540 | **0.567** FAIL (−0.147) |
-   | A recall@10 | 0.047 | 1.000 | 1.000 | 1.000 |
-   | B recall@10 | 0.787 | 0.207 | 0.840 | 0.840 |
+**1. Search shows each document's best chunk.** `_merge_arms` (`search.py:479-491`)
+fills `by_path` last-write-wins over score-ordered rows, so a multi-chunk paper
+carries its *worst* vector chunk while ranked by its best, and
+`scores_explain_order` then hides the score column. Use first-write-wins, key on
+`(collection, source_path)`, and lift the merge into a module function taking
+`lead` as a parameter so it is testable without a session.
+*Ends when:* a unit test with rows A 0.9, B 0.8, A 0.3 returns A's 0.9 chunk; it
+fails on `73b5d4c`; harness `score` numbers are unchanged, since ranking does
+not move.
+*Anti-scope:* no ranking change, no `document_id` yet (the CLI step "A document
+id in search results" re-keys on it later).
 
-   The rule required both sets within 0.05 of the best single arm. A lands on
-   it exactly; B misses by 0.147. **The finding worth keeping is the split:**
-   fusion is unambiguously right for the result *list* (recall@10 improves on
-   both sets, 0.047→1.000 and 0.787→0.840) and cannot work for the *top slot*,
-   because the tie-break that maximises A is the one that costs B. So the
-   design is *fuse the list, route the ordering* — narrower than a routing
-   subsystem.
+**2. Attempt cap for work that kills the worker.** Today a document whose
+extraction segfaults MuPDF or OOM-kills the worker is re-claimed first on every
+restart, because the claim orders by lowest id and `requeue_interrupted_artifacts`
+(`revisions.py:364-420`) resets every `processing` row. Add `attempts` to
+`extracted_documents` and `chunked_documents`, bump it in the claim commit, and
+have requeue stamp rows at the cap `failed` with a reason naming the count. The
+schema change is an `ADD COLUMN IF NOT EXISTS ... DEFAULT 0` retrofit in
+`create_tables`, beside the existing ones.
+*Ends when:* a pg test drives claim → simulated death → requeue to the cap and
+the next document is claimed; `status --verbose` shows the reason.
+*Anti-scope:* no timeout here, since hangs are the isolation step's job; leave
+embeddings alone, because an embed crash is the server's, not the worker's.
 
-3. ~~**Find where lexical stops beating vector, as a function of document
-   frequency.**~~ **DONE 2026-09-07 — shape found, exact threshold not
-   identified.** Set D, single tokens on a fresh sampling stream, 40 per band,
-   gold = the document the token was drawn from:
+**3. Tokenizer offline.** tiktoken caches `cl100k_base` in
+`$TMPDIR/data-gym-cache`, which is wiped at reboot, and re-downloads it on
+first use. Offline, `cementic chunk` prints a 26 KB traceback, the worker
+stamps chunks failed, and 57 tests fail. Route the three `get_encoding` sites
+(`chunk.py:87`, `search.py:79`, `embedding_runtime.py:425`) through one helper
+that defaults `TIKTOKEN_CACHE_DIR` to the cementic data dir unless the user set
+it. Add a `doctor` check for the cached encoding, and make `chunk` print one line
+on a fetch failure. The decision log says why this beats vendoring or
+server-side counting.
+*Ends when:* with the cache warm and the network blocked, `chunk` works; cold
+and blocked, `chunk` exits 1 in one line and `doctor` names the fix.
 
-   | document frequency | lexical | vector | lexical − vector |
-   | --- | --- | --- | --- |
-   | 1–5 | 0.500 | 0.050 | **+0.450** |
-   | 6–20 | 0.200 | 0.050 | **+0.150** |
-   | 21–100 | 0.050 | 0.000 | +0.050 |
-   | 101–500 | 0.000 | 0.025 | −0.025 |
-   | 501–2000 | 0.000 | 0.000 | 0.000 |
+**4. A rename re-paths instead of re-embedding.** `on_moved`
+(`source_watcher.py:439-449`) runs delete-then-create, and the delete purges
+vectors at once. When the destination is unregistered and the source row is
+live, update `source_path` in place: the same outcome
+`_document_reached_by_another_path` already gives a moved tree found at scan.
+*Ends when:* an integration test moves a file and a directory under a live
+watcher and the chunk ids survive with no re-embed.
+*Anti-scope:* do not defer deletes in general. The sync-client
+delete-then-create trade at `source_watcher.py:285-298` is documented and
+separate.
 
-   The pre-registered rule put \(T\) at the top of the last band winning by
-   ≥ 0.05, which reads as \(T = 100\) — but that band's margin is **2 queries
-   out of 40** and the design was never powered to resolve it. Honest reading:
-   the *shape* is unambiguous and the exact threshold is not. Lexical's edge
-   decays monotonically and is gone by 100, so any \(T\) in 20–100 captures
-   almost all of the benefit. **Use \(T = 20\)** — the conservative end, routing
-   only where lexical wins decisively.
+**5. Clear `last_error` after any productive pass.** The clear at
+`pipeline_worker.py:598-600` runs only on an idle pass, so a 10-second server
+blip stays red in `status` for a whole import.
+*Ends when:* a unit test of error, then productive pass, sees it cleared.
 
-   Two things this also settled. Set A was **optimistically constructed**: it
-   required the gold document to appear in the lexical top 50, which is why its
-   lexical recall@1 is 0.713 where set D's unfiltered 1–5 band gives 0.500. The
-   vector arm reads 0.050 against set A's 0.027 — so the core finding (vector
-   fails on rare tokens, lexical does not) survives both constructions, but
-   set A's absolute numbers are the flattering ones. And the falsifier did not
-   fire: vector stays at or below 0.050 in every band, including on freshly
-   sampled tokens.
+**6. Drop `verbose` from the runtime fingerprint.** It reverses a 2026-08-23
+line, and the reason is in the decision log. It stays in the launch command.
+*Ends when:* two configs differing only in `verbose` fingerprint equally. Expect
+one daemon restart on deploy, because the alias changes once.
 
-4. ~~**Repair the null control.**~~ **CLOSED 2026-09-07 — set D already is
-   one, and a better one.** Set C was confounded (its gold document came from
-   the same unordered sample the lexical arm ranks within, so both favoured the
-   same physically-early rows). It does not need repairing, because set D
-   supplies the null condition properly: the 501–2000 band *is* "common tokens,
-   where exact matching cannot identify a document", and lexical's advantage
-   there is **+0.000**. Better still, set D gives a dose-response — the
-   advantage runs +0.450, +0.150, +0.050, −0.025, 0.000 as frequency rises,
-   while the vector arm stays flat at 0.000–0.050 throughout. A mechanism that
-   scales with the quantity it is supposed to depend on, and vanishes where it
-   should, is stronger evidence than a single null cell. No set C claim is
-   made and none is needed.
+**7. Two CLI lies.** The `search` synopsis shows `[TRAILING_COLLECTIONS]...`,
+which only works after `-c` (`cli.py:387-402`). Make usage and help show the
+working form, `search "q" -c a b`, which the `tool-cementic` skill uses.
+`config init` always writes the user-dir path (`cli.py:166`). Write the path
+`config path` resolves to, or refuse and name the file that shadows it.
+*Ends when:* `--help` shows only accepted forms, and `config init` with
+`./cementic.toml` present does not write a file nothing reads.
 
-5a. ~~**The pure core.**~~ **DONE 2026-09-07 — `hybrid.py`, verified against
-   both sets.** `combine(vector, lexical, lead=...)`: the leading arm owns rank
-   1, reciprocal rank fusion owns everything below. One position is routed, not
-   the whole ordering — taking more of the leading arm's list gives back the
-   recall@10 that fusion earns. Measured end to end through the production
-   functions, n=150 per set:
+**8. The small ones, one commit.**
+- The extractor profile display name exceeds `String(100)` with about eight
+  backends (`profiles.py:250-255`), so truncate it, since the fingerprint
+  carries identity.
+- Plaintext extraction rejects non-UTF-8 files (`extract.py:239`), so decode with
+  replacement. Only files that fail today change output.
+- cementic's own argument errors exit 1 where Click's exit 2 (`cli_shared.py:431-441`),
+  so raise `BadParameter`.
+- `doctor` prints an empty `extensions:` heading and raw driver text when the
+  database is down, so reuse the one-line unreachable message the other
+  commands print.
+*Ends when:* each has a test, and `check.sh` is green.
 
-   | set | arm | recall@1 | recall@10 | routing |
-   | --- | --- | --- | --- | --- |
-   | A rare tokens | best single (lexical) | 0.713 | 1.000 | |
-   | | **routed** | **0.713** (+0.000) | **1.000** (+0.000) | 150/150 lexical |
-   | B semantic | best single (vector) | 0.713 | 0.787 | |
-   | | fused only | 0.540 | 0.840 | |
-   | | **routed** | **0.713** (+0.000) | **0.853** (+0.013) | 150/150 vector |
+### User-facing CLI
 
-   Both optima at once, which is what the split was designed for: rank 1 and
-   recall@10 are decided in different places, so they stop trading against each
-   other. Set B's routed recall@10 beats even pure fusion, because leading with
-   the vector arm's first result costs nothing there and the fused tail still
-   contributes the documents only the lexical arm found.
+The CLI-surface audit's remaining steps, carried over verbatim from 2026-09-10
+except for renamed headings. Its rationale, and the directions it closed, are
+under "Decided — the CLI surface after the `llm` audit". **Ordering:** the
+import diet precedes `cementic run`, because `cli.py` does not import
+`source_watcher` and `cementic run` adds a path to it. Done naively, `cementic run`
+undoes the import diet. Machine-readable output precedes the document id,
+because both change output contracts and the convention is fixed in the first.
+The key rename is independent. Then four audit additions.
 
-5b. **The shell — still to do.** *Correction 2026-09-07:* this step previously
-   said the lexical index becomes per-revision, reconciled by `collection
-   reindex` like the ANN index. That was wrong and made the step look three
-   times its real size. Vectors live in per-profile tables
-   (`embedding_vectors_p6`) because different models produce incomparable
-   vectors; `chunks_v2` is a single global table and text is
-   model-independent, so **one GIN index serves every collection and every
-   revision**. It belongs beside `ix_chunks_v2_document` as a table-level
-   index, and touches the revision machinery not at all. It stays out of every
-   profile payload for the reason already established — a text-derived index
-   cannot change a vector.
-
-   i. ~~**Measure the insert cost before making it default-on.**~~ **DONE
-      2026-09-07 — and the pre-registered rule asked the wrong question.**
-      Interleaved arms, real chunk text, first batch discarded
-      (`notes/probe_gin_insert_cost.py`):
-
-      | arm | median per 2,000 rows | rows/s |
-      | --- | --- | --- |
-      | with GIN index | 0.480 s | 4,166 |
-      | without | 0.104 s | 19,184 |
-
-      **+360% write overhead**, far past the 10% bar, and the no-index arm's
-      own spread is 0.041 s so the difference is not noise. By the rule as
-      written: build after import.
-
-      The rule is wrong, because relative insert throughput is not the
-      decision-relevant quantity — total import wall clock is, and inserts are
-      not remotely the bottleneck. Over the whole corpus: 2,298,558 chunks at
-      4,166 rows/s is **9.2 minutes** of insert time against **2.0 minutes**
-      without, a difference of ~7 minutes. Embedding the same corpus runs at
-      the measured 5.56 chunk/s — about **115 hours**. The index costs **0.1%
-      of import wall clock**, and the arithmetic that makes it look expensive
-      is a ratio between two quantities that are both ~750× faster than the
-      step that actually gates the pipeline.
-
-      **Decision: build up front**, which is also the `ensure_revision_ann_index_up_front`
-      precedent — no post-import build step to forget, no window where the
-      index is silently absent, and the index is correct at every moment. This
-      is a deliberate departure from a rule fixed in advance, recorded as one
-      because the alternative is pretending the rule was never written.
-
-   ii. ~~**Creation path.**~~ **DONE 2026-09-07 (`36c73ff`), with a defect
-      found and fixed in `45ed214`.** The first version ran the CONCURRENTLY
-      build inside `create_tables`, which runs at worker startup — so on an
-      existing corpus `cementic start` would have blocked for minutes, or
-      indefinitely, because CONCURRENTLY waits for every open transaction on
-      the table before it begins. A hanging test found it. Startup now builds
-      only on an empty table, where it is instant; an existing corpus upgrades
-      via `build_lexical_index`, which a person runs and watches.
-      `ensure_lexical_index(engine)`, PostgreSQL-only and a
-      no-op elsewhere — the pattern `ensure_vector_extensions` already uses, and
-      the reason the sqlite unit suite keeps working. An empty table indexes
-      instantly; an existing corpus needs `CREATE INDEX CONCURRENTLY`, which
-      cannot run inside a transaction and so needs its own connection.
-      *Exit:* met 2026-09-12, and the exit criterion had to be built before it
-      could be met. `doctor` had no lexical-index check, so a missing GIN index
-      was reported by nothing — the same silence the document-identity section
-      calls out as costing more than the bugs. It now has one; see "Decided —
-      the full-text index reports its own absence" below. The sqlite-backed
-      unit tests are untouched.
-
-   iii. ~~**The lexical query, scoped to the active revision.**~~ **DONE
-      2026-09-07 (`45ed214`).** `lexical_sql` joins the *same* per-profile
-      vector table `knn_sql` joins and filters on the *same* three denormalised
-      columns, so scope parity is structural rather than remembered. The test
-      was mutation-checked: with the chunk-profile filter neutralised it fails,
-      so it tests the filter and not the join. The correctness
-      risk of the whole step: the vector arm is implicitly scoped because each
-      profile owns its own vector table, but `chunks_v2` holds chunks from
-      *every* revision including superseded ones. The lexical query must filter
-      to the active revision's chunk scope or search will return documents the
-      vector arm structurally cannot.
-      *Exit:* a test that seeds a superseded revision's chunks and proves they
-      are never returned.
-
-   iv. ~~**Wire in `hybrid.combine`.**~~ **DONE 2026-09-07 (`03f443d`).**
-      Verified on the live corpus: a semantic query stays vector-led and
-      unchanged, a rare token is lexical-led, `--json` parses.
-      `SearchResult.distance` became `float | None` — a lexical hit has no
-      distance from the query vector, and NaN would have serialised to invalid
-      JSON, breaking the documented `search --json | jq`. Routing decided by
-      `looks_like_identifier`
-      plus one document-frequency probe at threshold 20; config to set the
-      threshold and to turn hybrid off.
-      *Exit:* `cementic search` returns routed results on `papers`, and
-      `./scripts/check.sh` is green.
-
-   v. ~~**Stop the score column contradicting the order.**~~ **DONE — shipped
-      in `64b24d4`**, which is where the four-survey prior-art review landed
-      (`notes/design-hybrid-retrieval.html`): human-facing tools withhold a
-      numeric score by default, machine-facing ones publish the fused value.
-      `rank` on `SearchResult`, the terminal column shown only when
-      `scores_explain_order` says it still explains the order, `--scores` to
-      force it (Recoll's off-by-default `%R`), and `score_kind` naming each
-      arm's own score in `--json`. README documents the behaviour.
-      *Anti-scope, still live:* do not write the RRF sum into `score`. It is
-      the Elasticsearch/LlamaIndex convention and it is monotonic, but it
-      replaces a meaningful cosine 0.675 with a meaningless 0.0164 *including
-      for pure-vector queries where nothing was fused* — a regression in the
-      common case to fix a problem that exists only in the fused one.
-
-   vi. ~~**README.**~~ **DONE 2026-09-07.** The search section gains what hybrid does, when the lexical
-      arm leads, and that a single common word is not an identifier query —
-      "Hochreiter" appears in 1,697 of 23,064 documents, so it routes to the
-      vector arm and searching famous names will not behave like searching rare
-      ones.
-
-   *Anti-scope for all of 5b:* one index, one fusion rule, one threshold. No
-   per-collection tuning surface, no query classifier beyond the two-line
-   predicate, and no re-opening of RRF `k`.
-
-## Execution order — CLI surface audit (2026-09-10)
-
-Ran the audit `TODO.md` had gated on the hybrid thread closing. Full evidence,
-including the `llm` comparison and the per-command usage matrix, is in
-`notes/design-cli-surface.html` (gitignored). Surface as audited: **21 leaf
-commands** against `llm`'s 9.
-
-The rationale — why the audit cut nothing, what the boundary was, and which
-directions are closed — is in "Decided — the CLI surface after the `llm` audit"
-under Design decisions. This section is the order of work only.
-
-**Ordering is not arbitrary.** Step 2 must precede step 4: `source_watcher` is
-the *one* cementic module `cli.py` does not import today, and step 4 adds a path
-to it. Done naively, step 4 undoes step 2. Step 3 must precede step 6, because
-both change output contracts and step 3 is where the convention gets fixed.
-Steps 5 and 6 are independent of everything else.
-
-### Step 1 — fix the two documentation defects — DONE 2026-09-10
-
-Shipped in the same commit as this section. README claimed `search --json` emits
-six fields; it emits seven — `rank` was added by `64b24d4` (`search.py:202`) and
-never reached the docs. And `scripts/verify_postgres_container.sh` called
-`cementic status --doctor`, a flag removed when `doctor` was split out
-(README:880 records the removal with no alias kept), so the script could not
-have run.
-
-### Step 2 — stop the CLI importing the database and HTTP layers
+#### Import diet — stop the CLI importing the database and HTTP layers
 
 The measured defect. Import time for `cementic.cli`, and for the set a light
 command actually needs, six runs each (import only, excluding interpreter
@@ -533,7 +442,7 @@ creation. If `HNSW_ITERATIVE_SCAN_MODES` is relocated rather than
 function-imported, it must land somewhere with no cementic imports, or it just
 reshuffles the knot.
 
-### Step 3 — machine-readable output for the three query commands
+#### Machine-readable output for the three query commands
 
 `collection list`, `collection revisions`, `embedding status`. Skip `stop`: it
 is an action, not a query.
@@ -593,21 +502,21 @@ one object emits `json.dumps(doc, indent=2, default=str)`, as `status` does
 (`render.py:393`). `doctor` uses `sort_keys=True` instead; leave it alone rather
 than churn a third command to match.
 
-### Step 4 — promote the runner subcommands
+#### `cementic run` — promote the runner subcommands
 
 `cementic.runner` already has both commands with foreground semantics and a
 deliberate non-zero exit on fatal startup (`runner.py:93, 141`), specifically so
 a service manager can see it. This is surfacing existing code.
 
 *What changes.* Expose them as a `cementic run watcher` / `cementic run worker`
-group, then repoint `packaging/systemd/cementic-worker@.service:19` and
-`cementic-watcher@.service:26`. A group rather than two top-level commands,
+group, then point the packaged unit at it (2026-10-22: the five old units are
+replaced by a copy of the live one, under "Packaging, docs and deletions"). A group rather than two top-level commands,
 because the surface is already the audit's weakest point and this adds one entry
 rather than two.
 
 *Risk, and the reason for the ordering.* `cli.py` does not import
 `source_watcher` today. Mounting the runner eagerly would pull it in and undo
-step 2, so the group must load its implementation inside the command body.
+the import diet, so the group must load its implementation inside the command body.
 
 *Anti-scope:* do not change what the workers do, do not add a `--foreground`
 flag to `start`, and do not make `start` spawn the new commands — the supervisor
@@ -619,9 +528,9 @@ fingerprint, and switching to the installed snapshot re-versions the corpus.
 
 *Exit condition:* `cementic run worker --collection papers` starts and stops
 cleanly in the foreground, the packaged units start under `systemctl --user`,
-and the step-2 guard test still passes.
+and the import-diet guard test still passes.
 
-### Step 5 — rename the filter's chunk index key
+#### Rename the filter's chunk index key
 
 One line at `cli.py:1155`, from `{"index": …}` to `{"chunk_index": …}`, plus the
 six test sites asserting or feeding the key (`tests/unit/test_cli.py:481, 2687,
@@ -638,7 +547,7 @@ description of a debugging tool.
 *Exit condition:* `cementic extract X | cementic chunk | cementic embed` still
 runs end to end, and no test or doc still says `index`.
 
-### Step 6 — a document id in search results
+#### A document id in search results
 
 *What changes, and it is a query change rather than a dict change.* Neither
 `vector_store.knn_sql` (`vector_store.py:147`) nor `lexical_sql`
@@ -651,435 +560,158 @@ lists, two constructor edits in `search.py` (:337 and :380), one key on the
 `source_path` and lets the vector arm win the projection (`search.py:407–412`),
 so a chunk id would be whichever chunk the winning arm happened to match —
 arbitrary, and unstable across a query the other arm leads. A document id is
-stable because path and document are one-to-one.
+stable because path and document are one-to-one. *Added 2026-10-22:* once the
+id exists, re-key the search projection (Correctness step 1) on it instead of
+`(collection, source_path)`.
 
 *Exit condition:* `cementic search Q -c papers --json | jq -r .document_id`
 returns ids, and the README field count matches the emitted keys — the defect
-step 1 fixed was exactly that count drifting.
+the 2026-09-10 docs fix corrected was exactly that count drifting.
 
 *Anti-scope:* one id field. Not the artifact path, not the chunk index, not the
 revision label; each is a separate argument about what a result is for.
 
-*Anti-scope for the whole thread, so nobody re-derives it:* no ingest command
+*Anti-scope for the CLI steps, so nobody re-derives it:* no ingest command
 for embedded JSONL and no search-by-vector (the composability decision above
 says why — and note it does not reach `cementic add`); no deletion of
 `start`/`stop` or the supervisor; no dropping of PostgreSQL or the daemon to
 match `llm`'s zero-dependency shape, which is the engine and not the interface;
 and no unifying of the `--force` short forms.
 
-## Execution order — v1.5 migration: CLOSED, the gate failed (2026-09-05)
+#### Audit additions
 
-The migration this sequenced is **not happening**: v1.5 retrieves measurably
-worse than v2-moe on this corpus. Steps 1 and 2 ran; 3 to 6 are void. Kept
-short as the record of how it closed; the reasoning is in the migration section
-below, and `TODO.md` holds the feature backlog as before.
+- **Drop `search --limit`.** It is a third spelling of `-n` and clashes with
+  `status --limit` (`cli.py:966`). *Ends when:* `search --limit` is a usage
+  error, and no doc or test names it.
+- **README lists the filters.** `extract`, `chunk` and `embed` are the only way
+  to test an extractor without a database. *Ends when:* README's command block
+  names them.
+- **Document the JSON shapes.** Cover `status --json` and `doctor --json` in
+  `docs/operations.md`, including the `error` key and which keys vanish when the
+  database is down (`render.py:355-386`). Do it alongside the JSONL convention
+  above. *Ends when:* the documented keys match a test that asserts them.
+- **Delete `collection_callback`** (`cli_collection.py:33-38`). It never runs,
+  because `no_args_is_help` fires first, and its unit test calls it directly.
+  *Ends when:* the function and that test are gone and `cementic collection`
+  still prints help.
 
-1. **Merge the canary.** DONE -- `06f7d62` on `main`.
-2. **Compare v1.5 against v2-moe.** DONE, and it is the reason this list is
-   closed. 1,000 papers, 2,000 body chunks, title-to-body retrieval, both
-   models embedded fresh in one session with the stored index vectors as a
-   control arm (`~/.cache/cementic-igpu/calibration/compare-models.sh`):
+`collection list` stays a separate command. The decision log has the
+reaffirmation.
 
-   | arm | recall@1 | recall@10 | MRR | mean margin |
-   | --- | --- | --- | --- | --- |
-   | v2-moe (current) | 0.7170 | 0.8870 | 0.7797 | 0.0546 |
-   | v1.5 (candidate) | 0.6590 | 0.8450 | 0.7267 | 0.0279 |
-   | v2-moe from the stored index (control) | 0.7200 | 0.8860 | 0.7812 | 0.0545 |
+### Schema retrofits and efficiency
 
-   v1.5 is worse on every measure: -8.1% recall@1, -6.8% MRR, and it separates
-   the right paper from the best wrong one **half** as well (-48.9%). Paired
-   over 1,000 queries it ranks the paper higher on 133 and lower on 245 (exact
-   sign test p = 8.9e-09), and wins the margin on 299 against the control arm's
-   own 523 -- ten standard deviations below the null the control measures. The
-   control arm also lands on top of fresh v2-moe, which is what says the
-   comparison itself is sound.
+**1. One retrofit pass.** Use the helper the attempt cap introduced, in
+`create_tables`:
+- add `size_bytes` and `mtime_ns` to `source_documents`;
+- drop the two redundant prefix indexes, `ix_source_documents_collection`
+  (`db.py:71`) and `ix_chunk_embeddings_profile_status` (`db.py:307`). Both have
+  been deferred since 2026-08-26;
+- set `NOT NULL` on the three `chunk_embeddings` scope columns, which stayed
+  nullable from a deleted migration. Refuse with a count if any NULL row exists.
+Fix the stale index credit at `revisions.py:303`.
+*Ends when:* a pg test builds the old shape, runs `create_tables`, and matches a
+fresh database. `EXPLAIN` of the embed claim and of
+`_document_reached_by_another_path` still uses the wider indexes.
 
-3-6. **Void.** `chunk_size` re-derivation, the punctuation filter and OCR
-   removal go back to parked: each costs a full rebuild and there is no longer
-   a rebuild to ride on. The five-day re-embed and its five days without search
-   are not being spent. **Superseded 2026-09-18:** there is a rebuild again —
-   see "Execution order — retrieval quality and the rebuild it rides", where
-   all three are Phase 2 riders.
+**2. Watcher restart without re-hashing.** Every start SHA-256s the whole
+corpus (`source_watcher.py:897-901`). Compare `(size_bytes, mtime_ns)` first,
+and hash only on change.
+*Ends when:* a test counts zero hashes on an unchanged second start, and the
+`papers` watcher restart time is recorded here, before and after.
 
-## Execution order — retrieval quality and the rebuild it rides (2026-09-18)
+**3. Measure the extract and chunk claims.** They order by id over outer-joined
+`IS DISTINCT FROM` predicates (`pipeline_worker.py:641-669, 807-835`), which
+likely walks the done prefix. The embed claim had this exact pattern, measured
+and fixed. Run `EXPLAIN (ANALYZE, BUFFERS)` at a mostly-done revision. The
+Phase 2 rebuild at about 90% is the natural moment.
+*Ends when:* the plan is recorded here with a fix, or a verdict of "flat in the
+done count".
 
-Opened after surveying txtai (`~/projects/txtai`, Apache-2.0, HEAD 2026-09-15,
-33k LOC) for transferable design. The survey's ranked list is not what makes
-this a plan; two facts about *this* repo are:
+**4. `collection remove` by subselect.** `collections.py:143-175` loads every
+document as an ORM object and ships three literal `IN` lists.
+*Ends when:* a pg test passes and the statements carry no id literals.
 
-- **A full rebuild is authorised.** That reverses the v1.5 section's closing
-  line — "there is no longer a rebuild to ride on" — and un-parks every item
-  that was waiting for one.
-- **Nothing measures retrieval quality on demand.** Five `notes/probe_*.py`
-  harnesses each answered one question and were kept as-is; the model
-  comparison that killed v1.5 lives in `~/.cache/`, outside the repo, on this
-  machine only.
+*Anti-scope:* no TOML parse cache, for the reason under "Deliberately not
+done", and no throttling of the worker's state-file writes.
 
-**Ordering is load-bearing.** Phase 1 completes before Phase 2: the reranker
-changes what the two arms are *for*, and if it lands after a model swap neither
-change can be attributed. Phase 0 precedes both, or nothing is scored.
+### Functional core
 
-### Phase 0 — one evaluation harness, synthetic judgments
+Behaviour-preserving, one commit each. A commit that has to change an existing
+test has changed behaviour and is out of scope. *Anti-scope for the phase:* no
+new layers (no state-machine framework, no command bus), and no module-graph
+change beyond the one split named below.
 
-Promote the two comparison methods that already exist into one repo-tracked
-harness; delete the probes it subsumes.
+1. **Embed planner and set-based write-back, before the rebuild.**
+   `_step_embed` (`pipeline_worker.py:963-1170`, about 210 lines) mixes the
+   claim, publishing, retry policy, provider calls and write-back. Extract a
+   pure `plan_embed_outcome(claimed, results, errors)` that returns done,
+   failed-with-reason and release sets. Write back with two set UPDATEs in place
+   of about 96 statements per 32-chunk batch, and drop chunk ids that vanished
+   mid-request before the vector upsert, which closes the foreign-key race at
+   `:1134-1168`.
+   *Ends when:* the outcome policy is tested as data, the statement count per
+   batch is measured, and the pg suite is green.
+2. **`stop` decides as data.** `stop_background` (`cli.py:751-897`) picks one of
+   nine messages inline with `os.kill`. Make the decision a pure function of
+   processes, liveness and kill results, returning messages, the next state and
+   the exit code.
+   *Ends when:* each of the nine branches is a table-driven test.
+3. **Watcher identity choice.** Inside `_register_document`
+   (`source_watcher.py:865-966`), "which existing row is this file" becomes a
+   pure function over the three lookups. *Ends when:* tested without a session.
+4. **Target-revision rule.** The resurrect, supersede or create decision in
+   `get_target_revision` (`revisions.py:222-279`) becomes a pure function over
+   existing revisions and profile ids. *Ends when:* tested without a session.
+5. **Status document split.** `render.build_status_document` becomes a query
+   function and a pure document builder, dropping the two smuggled callables
+   and the hint parameter. *Ends when:* the builder is tested from plain data.
+6. **`Config` as a value.** Move the path defaulting out of `Config.__init__`
+   (`config.py:1160-1191`) into an after-validator. Split the diagnostics half
+   (`config.py:129-412`) into `config_diagnostics.py`, the one module-graph
+   change this phase allows. *Ends when:* two `Config()` built from different
+   working directories differ only in the fields that name a path.
+7. **Public names for cross-module use.** Drop the underscore from the five
+   `render._print_*` helpers, the 17 `cli_shared` names `cli.py` imports, and
+   `_TASK_PREFIX_TOKEN_ALLOWANCE`. Fix the "pure bookkeeping" label on
+   `_over_budget_reasons`, which may make an HTTP call. Capture
+   `extracted.content_hash` into a local in `_step_chunk`, not off a detached
+   instance. *Ends when:* no `_`-prefixed name is imported across modules.
+8. **One table printer.** Replace the three hand-rolled column-width printers
+   (`cli.py:674-691`, `cli_collection.py:114-123`, `:329-339`) with a single
+   pure rows-to-lines helper. *Ends when:* the CLI tests are unchanged and the
+   helper has its own tests.
 
-**Judgments are mechanical — no human judging (decided 2026-09-18).** Set A:
-rare capitalised tokens, gold is the documents containing them. Set B: a
-document title as the query, gold is its own body chunks. Both are already
-built by `notes/probe_hybrid_retrieval.py`; the paired sign test and the
-stored-index control arm are in
-`~/.cache/cementic-igpu/calibration/compare-models.sh`, which is outside the
-repo and one `rm` from gone.
+### Extraction isolation, before the rebuild
 
-Add a **phrase→body** set: sample a 3–6 word phrase from a body chunk, gold is
-its source document. This is the bucket nothing has ever measured and where
-`ts_rank` is most likely weak. (It is set E — `probe_hybrid_retrieval.py`
-already spends A on rare tokens, B on titles, C on common tokens and D on
-document-frequency bands.)
+Extract PDFs in a child process with a wall-clock timeout and `RLIMIT_AS`. A
+crash or timeout stamps the document failed with the reason. Today MuPDF parses
+in the worker, which holds the database credentials, with no limit, and the
+900 s timeout covers only command extractors.
+*Pre-registered:* on a 200-PDF sample, the extracted text must be byte-identical
+to in-process extraction, so the extractor fingerprint must not move.
+Extraction wall clock may rise at most 5%. Past that, use one long-lived child
+restarted on death instead of one process per document.
+*Ends when:* both numbers are recorded here, and a test PDF that kills its
+child is stamped failed while the next document proceeds.
+*Anti-scope:* no seccomp or namespace sandbox; command extractors are
+unchanged.
 
-*Ends when:* one command reports recall@1, recall@10 and MRR per set against
-the active revision; the numbers reproduce the v1.5 table's control arm
-(recall@1 0.7200, recall@10 0.8860, MRR 0.7812); the `~/.cache` script is gone.
+### Retrieval
 
-**DONE 2026-09-18** — `scripts/measure_retrieval_quality.py` (`build` draws the
-sets, `score` runs them; `eval/queries.json` is the checked-in instrument).
-Baseline on the active revision, 60 queries per set:
+**Lexical arm, after 2a closes.** The inner `LIMIT :pool` in `lexical_sql`
+(`vector_store.py:197-205`) has no ORDER BY, so for a common term the 2000-row
+pool is roughly the oldest rows. Ordering it is not the fix, because ranking
+every match is the recorded hang under "Two performance traps". Measure whether
+the sample bias moves the harness at all by scoring pools of 2000 and 10000, and
+either raise the pool or document it as an unranked sample. Separately, scope
+`lexical_should_lead`'s rarity probe (`search.py:503-515`) to the searched
+revisions, the way `lexical_sql` scopes its arm. Make the non-hybrid and
+one-arm-empty paths (`search.py:295, 476-477`) return one row per document,
+like the fused path.
+*Ends when:* harness `score` before and after shows no set losing more than one
+query, 0.017, on recall@1 or recall@10, and the verdict is recorded here.
 
-| set | recall@1 | recall@10 | MRR |
-| --- | --- | --- | --- |
-| rare-token | 0.633 | 0.817 | 0.689 |
-| title | 0.783 | 0.883 | 0.817 |
-| phrase | 0.117 | 1.000 | 0.348 |
-
-**The phrase row is the finding, and it indicts `lead` directly.** The gold
-document is in the top 10 for all 60 phrase queries and first for 7. The
-lexical arm alone ranks it first for 58 (recall@1 0.967, MRR 0.983); fusion
-throws that away because `looks_like_identifier` is false for any multi-word
-query, so `lead = "vector"` and the vector arm is weak on verbatim phrases.
-`hybrid.py`'s stated reason — "'Kalman filter' is a topic, and the vector arm
-is better at topics" — is right for titles (vector 0.783 against lexical 0.050)
-and wrong for phrases.
-
-**The obvious repair was simulated and rejected.** Replacing the syntactic test
-with a pure rarity test — lexical owns rank 1 whenever the query has 1-5 exact
-matches, whatever its shape — moves phrase recall@1 to 0.967 and rare-token to
-0.650, but it fires on 20 of 60 titles, gets 12 of them wrong, and costs title
-recall@1 0.783 -> 0.583. That is this section's own trade restated: every
-rank-1 routing rule is a bet on an arm, and no rule wins both buckets.
-
-*Sets the bar for Phase 1 step 2.* A reranker does not have to choose, so it
-must beat the better of the two bets in every bucket: **recall@1 >= 0.650
-rare-token, >= 0.783 title, >= 0.967 phrase.** The recall@10 column is the
-ceiling it is reordering within (0.817 / 0.883 / 1.000).
-
-*Read the phrase numbers as an upper bound, not an estimate.* Its queries are
-verbatim substrings lifted from the documents and gated to <=5 exact matches,
-so exact matching must win on them; a user recalling a phrase imperfectly —
-reordered, paraphrased, one word off — is not represented. The direction is
-solid, the magnitude is inflated, and a perturbed-phrase variant is what would
-settle it.
-
-**SETTLED 2026-09-19 — the bar is not inflated, and the worry was aimed at the
-wrong perturbation.** `perturb` derives three sets from the same 60 phrases,
-each keeping its source's gold label, so the comparison is paired and a move is
-attributable to the perturbation rather than to a different draw. Both control
-arms reproduced their baselines exactly in the same run (rare-token 0.633 /
-0.817 / 0.689, title 0.783 / 0.883 / 0.817, phrase 0.117 / 1.000 / 0.348).
-
-| set | fused r@1 | fused r@10 | fused MRR | lexical-only r@1 | lexical returned nothing |
-| --- | --- | --- | --- | --- | --- |
-| phrase (verbatim) | 0.117 | 1.000 | 0.348 | 0.967 | 0/60 |
-| phrase-reordered | 0.117 | 0.950 | 0.350 | 0.967 | 0/60 |
-| phrase-dropped | 0.083 | 0.967 | 0.290 | 0.833 | 0/60 |
-| phrase-typo | 0.100 | 0.233 | 0.147 | **0.000** | **60/60** |
-
-*The 0.967 bar survives, so Phase 1 step 2's target stands unchanged.* Word
-order costs it nothing at all — `lexical_sql` scores with `ts_rank`, not
-`ts_rank_cd` (`vector_store.py:203`), so the lexical arm cannot see word order
-and reordering is a no-op by construction rather than by luck. Dropping an
-interior word costs 0.967 -> 0.833.
-
-*What the exercise actually found is a hole nobody owned: nothing in the system
-does fuzzy matching.* `plainto_tsquery` builds a hard conjunction, so one
-transposed character leaves one lexeme matching no chunk and the whole AND
-returns zero rows — measured directly, not inferred: `'prior' & 'densiti' &
-'ssm' & 'depend'` matches 6 chunks and `'prior' & 'denstii' & 'ssm' & 'depend'`
-matches 0. Stemming does not rescue a transposition. Fused typo recall@10 is
-0.233 and the lexical arm contributes 0.000 of it, so the vector arm carries
-imperfect recall alone and gets 23% of gold documents into the top 10.
-
-*The perturbed sets are diagnostics, not gates.* A reranker cannot reorder an
-empty candidate pool, so gating Phase 1 step 2 on the typo set would fail it for
-a defect it has no power over. Report them beside the bar; do not add them to
-it.
-
-*Known artefact:* one accepted phrase is `augmentations by max- imizing the
-agreement` — PDF line-break hyphenation surviving into stored chunk text. It
-splits words across both arms' term space. A de-hyphenation pass at extract
-time re-versions the extractor profile, so it is nearly free as a Phase 2
-rider and expensive at any other time.
-
-### Phase 1 — no rebuild needed
-
-**Step 1 — over-fetch before fusing.** Both arms return exactly `top_k`
-(`search.py:330`, `:375`), so fusion only reorders the union of two top-10s and
-a document ranked 11th by *both* arms is unreachable. Raise the per-arm limit to
-a multiple of `top_k`; keep `top_k` as the returned count. *Ends when:* Phase 0
-recall@10 moves or is shown flat, and the chosen multiple is recorded here.
-
-**KILLED, THEN REVIVED 2026-09-19 — the step was right and the fusion under it
-was broken.** Scoring the same query set at `--depth 10` (shipped) and
-`--depth 50` (this step's proposal, since `top_k` is the per-arm fetch limit)
-first showed the deeper fetch *losing*: rare-token recall@10 0.950 -> 0.817,
-phrase MRR 0.503 -> 0.348, eight rare-token queries dropping gold out of the
-top 10 and none gaining it. That was not over-fetching failing. It was
-over-fetching exposing a defect in `combine`, now fixed.
-
-**The defect: RRF scored documents by chunk count, not chunk quality.**
-`_merge_arms` passes *chunk-level* `source_path` lists to `combine`
-(`search.py:415-419`), and `reciprocal_rank_fusion` does
-`scores[path] += 1/(k+rank)` per occurrence (`hybrid.py:81`), so one document
-collected one addend per chunk it had in the pool. Traced on `VectorizedMap`,
-whose gold sits at lexical rank 1 with no vector chunks and scores 0.01639 at
-both depths -- what changed was who passed it: 1 document at depth 10, 9 at
-depth 50, every one of them by chunk accumulation. A one-chunk document cannot
-exceed `1/(60+1) = 0.0164` however good its match; a two-chunk document at ranks
-40 and 41 scores `1/100 + 1/101 = 0.0199` and beats it. Deeper fetching
-manufactures multi-chunk documents, which was the whole effect.
-
-*Fixed* by collapsing each ranking to one entry per document before fusing, so
-every document enters at its best-ranked chunk and contributes exactly one term
-per arm. `deduplicate` already existed and already said in its own docstring
-that a document's best chunk "is what should represent it" -- it was applied to
-`combine`'s output but never its inputs. Three regression tests in
-`TestCombineScoresDocumentsNotChunks`; no pre-existing test changed, so this
-behaviour had no coverage at all.
-
-**After the fix, at depth 50 (over-fetched):**
-
-| set | recall@10 before | after | MRR before | after |
-| --- | --- | --- | --- | --- |
-| rare-token | 0.817 | **0.983** | 0.689 | 0.719 |
-| title | 0.883 | 0.867 | 0.817 | 0.815 |
-| phrase | 1.000 | 1.000 | 0.348 | **0.544** |
-| phrase-reordered | 0.950 | **1.000** | 0.350 | **0.542** |
-| phrase-dropped | 0.967 | 0.950 | 0.290 | **0.470** |
-| phrase-typo | 0.233 | 0.233 | 0.147 | 0.147 |
-
-Over-fetching now *helps*: rare-token recall@10 0.983 at depth 50 against 0.950
-at shipped depth 10, the best figure recorded here. Phrase MRR gains at both
-depths (0.503 -> 0.547 at depth 10). **recall@1 is unchanged in all six sets at
-both depths**, because `lead` still owns position one -- so every bar in this
-document stands exactly as written and none need restating.
-
-*Two cells moved the wrong way, each one query of sixty:* title recall@10
-0.883 -> 0.867 at depth 50, and phrase-dropped 0.967 -> 0.950 at both depths.
-At n=60 a single query is 0.017, so treat these as noise unless a larger set
-reproduces them -- do not tune against them.
-
-**CLOSED 2026-09-19. The multiple is 5, capped at `MAX_SEARCH_RESULTS`**
-(`search.arm_fetch_limit`, `OVERFETCH_MULTIPLE = 5`). At the shipped `top_k` of
-10 that fetches 50 per arm — the one depth the recall numbers above were taken
-at, so the cap means nothing ever fetches deeper than a scored configuration.
-Non-hybrid search is unchanged: with one arm the deeper list is sliced back to
-`top_k` in score order, which is what fetching `top_k` already returns.
-
-*Latency: free, and "free" is the measured claim rather than "cheap".* Timed
-interleaved, best-of-5 per query, n=20, warm-up discarded, every timed call
-asserted non-empty (a search that failed early is the fastest search). Median
-search 100.9 ms at depth 10 against 95.9 ms at depth 50 — **depth 50 reading
-*faster* is impossible**, so that −5.0 ms is this setup's noise floor, not a
-result. The paired per-query spread runs −13.1 to +3.5 ms, which is the honest
-error bar. The reason the effect hides: query embedding alone is 73.8 ms, 73%
-of the search, leaving ~27 ms for both arms' SQL and fusion together.
-
-*If the multiple is ever raised, re-measure rather than extrapolating.* Nothing
-here was measured above 50 per arm, and `MAX_SEARCH_RESULTS` is the cap that
-keeps that honest.
-
-*Two refuted hypotheses, recorded so they are not re-run:* displacing documents
-are **not** two-arm documents beating one-arm documents (the displacers were
-single-arm), and multiplicity is **not** visible in `Searcher.search`'s output
-(`_merge_arms` already deduplicates to one row per document there, so counting
-it post-hoc reads 1.00 for everyone and says nothing). Multiplicity only exists
-in the pre-fusion arm lists.
-
-**Step 2 — a rerank stage on the existing llama-server.** `--rerank` and
-`--pooling rank` are present on the installed build (10858, verified
-2026-09-18), so this adds no Python dependency, no new process class and no new
-supervision path: one more endpoint on a daemon already started, supervised and
-health-checked, plus a second GGUF.
-
-**Cost corrected 2026-09-19 — "no new supervision path" is wrong as configured,
-and this is the sentence that ranked the step.** The flags are real (re-checked
-against `llama-server --help` on build 10858). The topology is not.
-`DEFAULT_DAEMON_COMMAND` (`config.py:549`) runs classic single-model mode —
-`--model {model} --alias {alias} --embeddings`, one port — and startup fails
-unless the server serves `{alias}` at `/v1/models`. One `llama-server` process
-serves one model; a reranker is a different model. So today this step costs a
-second process, a second port, a second PID and log file, a second health check
-and `doctor` coverage for all of it. Also **no reranker GGUF exists** — `models/`
-holds only the two embedding models, and no candidate is named anywhere.
-
-**SPIKE 2026-09-24 — the topology works and the latency kills the step.**
-The live daemon is build 10605 (the Vulkan build under
-`~/.cache/cementic-igpu/`, not the 10858 on PATH), and it has router mode
-too. Run unsandboxed on a spare port with a preset INI naming the embedding
-model's section by its fingerprint, the router spawned two children and
-reported the fingerprint as the model id, so cementic's alias check passed
-with no code change: `cementic doctor` against the router was green with the
-embedding canary reproducing the reference vectors exactly, and six eval
-queries returned the same top 10 as the live daemon on five, with one swap at
-ranks 7 and 9 on the sixth (embedding cosine 0.99983 between the two servers,
-scheduling noise under the canary's 0.99 floor). `bge-reranker-v2-m3` Q8_0
-served `/v1/rerank` with sane scores (6.1 for the relevant paragraph, -9.7 and
--11.0 for the two decoys) and put a phrase query's gold document first over a
-53-chunk pool. Two router-mode costs found: `/tokenize` returns 400 without
-a `model` field, which `count_model_tokens` does not send, and the supervisor
-matches the daemon by an `--alias` substring on the command line, which a
-router launch does not carry. Both are small. Logs and the preset:
-`~/.cache/cementic-router/`.
-
-*The number that decides it.* Reranking is a full forward pass over
-query+chunk for every candidate, and the candidate pool is 50 chunks of about
-290 tokens: 14,493 prompt tokens per search.
-
-| documents | prompt tokens | best of 5 | median |
-| --- | --- | --- | --- |
-| 10 | 2,830 | 3.2 s | 3.7 s |
-| 50 | 14,493 | 16.9 s | 18.5 s |
-
-That is 856-886 tok/s through the server, against a `llama-bench` ceiling for
-this model on the iGPU of 994 tok/s (pp512, `-ngl 99`; 120 tok/s on CPU), so
-the server was on the GPU and within 12% of the hardware limit. The
-pre-registered go/no-go was about 500 ms for 50 chunks, five times the 101 ms
-search median. The measured floor is 30x over it, and 6x over it for the top
-10 alone. Batch size 4096 and 8 threads (second run) gained 27% on the first
-run's 23.3 s; nothing else in the server's configuration is left to tune.
-
-**CLOSED 2026-09-24 — dead on latency, not on topology or quality.** `lead`
-and its 30 references stay. The routing question stays where the ablation
-left it: perfect routing is the bar, no rule reaches it without knowing the
-query mix, and the mix is unmeasured. *The one variant not measured:* a
-reranker an order of magnitude smaller than 568M parameters over the top 10
-only, which recall@10 (0.983 / 0.867 / 1.000) says would be enough for rank
-1. No such GGUF was checked and quality would be lower; it is a separate
-decision, not a continuation of this step. The reranker GGUF is left in
-`models/` (gitignored, 636 MB, five minutes to re-download).
-
-The design argument, which is why this outranks any fusion change: cementic
-asks one ranking to do recall and precision at once. Split them — the arms
-recall, the reranker orders — and the two arms' scores never need to be
-comparable. That comparability is the problem `hybrid.py` was written around.
-
-*Deletion test, to be run rather than assumed.* 30 references across
-`config.py`, `search.py`, `cli.py`, `hybrid.py` and three test files exist only
-to manage incomparable scores and hand-route rank 1: `lead`,
-`looks_like_identifier`, `lexical_should_lead` and its extra per-search index
-probe, `lexical_lead_max_documents`, `scores_explain_order`, and `score_kind`
-plumbed through to the renderer. If the reranker beats `lead` on Phase 0 they
-all go and net surface shrinks. If it does not, the reranker goes.
-
-**RUN 2026-09-23 — `lead` cannot be deleted bare, and routing's ceiling is
-exactly the reranker bar.** `measure_retrieval_quality.py arms` cached both
-arms' pre-fusion lists for all 360 queries (fetched at 50 per arm, the shipped
-limit); `ablate` then scored five rank-1 policies over those identical lists
-at depth 10, with no database. The `shipped` row reproduces all 18 cells of
-the last `score --depth 10` run, which is what validates the offline mirror of
-`_merge_arms`. `oracle` picks, per query, whichever of vector-lead and
-lexical-lead ranks gold higher: it reads the gold label, so it is the ceiling
-of any rank-1 routing rule over these arms, not a system. "Better / worse" is
-the paired count of queries whose gold rank beats or trails `shipped`.
-
-| set | shipped r@1 | none r@1 | lexical-lead r@1 | oracle r@1 | none: better / worse | oracle: better / worse |
-| --- | --- | --- | --- | --- | --- | --- |
-| rare-token | 0.633 | 0.067 | 0.650 | 0.650 | 3 / 36 | 2 / 0 |
-| title | 0.783 | 0.583 | 0.550 | 0.783 | 1 / 13 | 0 / 0 |
-| phrase | 0.117 | 0.250 | 0.967 | 0.967 | 9 / 0 | 51 / 0 |
-| phrase-reordered | 0.117 | 0.217 | 0.967 | 0.967 | 7 / 0 | 51 / 0 |
-| phrase-dropped | 0.083 | 0.217 | 0.833 | 0.833 | 8 / 0 | 45 / 0 |
-| phrase-typo | 0.100 | 0.100 | 0.100 | 0.100 | 0 / 0 | 0 / 0 |
-
-recall@10 is identical across every policy in every set, as it must be: only
-position one moves. Vector-lead equals `shipped` everywhere except rare-token,
-where it falls to 0.017. Full output: `~/.cache/cementic-eval-lead-ablate.log`.
-
-*Pre-registered predictions, all three held:* plain fusion loses rank 1 on
-rare-token and title; the oracle reads about 0.65 / 0.78 / 0.97; the gap
-between `shipped` and the oracle sits on phrase, about 50 of 60 queries (51).
-
-*Verdicts.*
-- **Deleting `lead` without a replacement is refuted.** Plain RRF loses 36
-  rare-token and 13 title queries against 13 phrase gains. The deletion half of
-  this step is conditional on a reranker, as written, and not a cleanup to do
-  now.
-- **The oracle is exactly Phase 0's bar, 0.650 / 0.783 / 0.967.** The best
-  routing rule possible reaches the bar and cannot exceed it, so a reranker
-  must match per-query perfect routing to earn its place. Any gain past the bar
-  has to come from reordering documents, not choosing an arm.
-- **The whole routing gap is phrase-versus-title.** The oracle is lexical-lead
-  for rare tokens and phrases and vector-lead for titles. A rule reaching it
-  must tell a verbatim body phrase from a title, and the rarity rule that tried
-  was already rejected in Phase 0 (12 of 60 titles wrong). No rule was searched
-  against these numbers, by design: n=60 per set.
-- **Which policy is best overall depends on the query mix, which is unknown.**
-  Always-lexical beats `shipped` on 52 queries and loses 14, but the sets are
-  60 each by construction, not by use. That makes the unmeasured-precondition
-  risk under "Decided — hybrid lexical + vector retrieval" the deciding input
-  for any routing change, not a footnote.
-
-*Next:* the router-server spike above, which decides whether this step is a
-config change or a second supervised daemon. Phase 2a waits on it.
-
-*The bar it must clear is in Phase 0 above, and it is not "beat today's
-numbers":* a reranker earns its place only by beating the better of the two
-routing bets in every bucket — recall@1 >= 0.650 rare-token, >= 0.783 title,
->= 0.967 phrase. If it cannot, the rarity-routing rule is the cheaper honest
-answer and this step is dropped.
-
-*Withdrawn by this step:* benchmarking `ts_rank` against BM25, which was the
-survey's top recommendation. With a reranker the lexical arm only has to recall
-a document into the pool, not order it; `ts_rank` is a weak ranker and an
-adequate filter. That avoids a Postgres search extension, a second index and a
-changed container image.
-
-**The withdrawal stands; its stated reason does not (corrected 2026-09-19.)**
-"An adequate filter" is false wherever the query is not spelled exactly as the
-document spells it: the perturbed sets above measured the lexical arm returning
-*zero rows* for 60 of 60 typo'd phrases, which is not a weak filter but an
-absent one. BM25 would fail identically — it scores the terms a query already
-matched and would inherit the same conjunction — so swapping the ranker was
-never the fix and the withdrawal survives on its merits. The correct statement
-is that `ts_rank`'s *ranking* is adequate under a reranker, and its *recall* is
-adequate only for exactly-spelled queries. See "Open — fuzzy matching" below,
-which is where the real gap went.
-
-**Step 3 (opened 2026-09-19) — Open — fuzzy matching, unowned and unscheduled.**
-No rebuild, no re-versioning, independent of everything above; ordered last
-within Phase 1 because it is the only item here with no measured target yet.
-
-The gap, measured: a query one character off its document retrieves nothing
-lexically (60/60 typo'd phrases returned zero rows) and lands at fused recall@10
-0.233 on the vector arm alone. Every number this project has ever reported is on
-queries spelled exactly as the corpus spells them, so the whole eval is blind to
-the case — which is the one a person searching their own library from memory is
-most likely to produce.
-
-*Not yet a decision.* Three candidates, none costed: `pg_trgm` similarity as a
-fallback only when the lexical arm returns zero rows (narrow, adds an extension
-and an index); relaxing `plainto_tsquery`'s conjunction to an OR-with-threshold
-(no extension, but it changes recall on every query, not just typo'd ones); or
-accepting the vector arm as the only typo path and measuring how far a better
-Phase 2a model moves 0.233.
-
-*Ends when:* one of the three is chosen with a measured recall@10 on
-`phrase-typo` to justify it, or the item is closed as "not worth it" with the
-0.233 recorded as the accepted floor. ~~**Do not start this before Phase 1 step 2**~~ — moot since 2026-09-24:
-step 2 is closed and nothing is about to be deleted, so this item is no
-longer blocked, only unscheduled.
-
-### Phase 2 — the single rebuild, batched
+#### Retrieval Phase 2 — the single rebuild, batched
 
 Everything here re-versions a profile. Decide all of it, then run once — the
 cost of missing one is another full rebuild.
@@ -1088,18 +720,21 @@ cost of missing one is another full rebuild.
 buys, and it dominates every ranking change. Current
 `nomic-embed-text-v2-moe` at `n_ctx = 512` forces `chunk_size = 320`
 (`cementic doctor`, 2026-09-18). The v1.5
-analysis above already costed the prize: a 2048-token window supports
+analysis (below, under "Rejected by measurement") already costed the prize: a 2048-token window supports
 `chunk_size` near 1,300, cutting the corpus from ~2.3M chunks to ~575k and the
 vector table from 18 GB to ~4.5 GB. v1.5 lost on retrieval quality; the reason
 to want the window did not. Candidate GGUF models need a fresh check — no model
 is recommended here, and any name predating this line is stale. Method is Phase
-0's, on a 1,000-paper sample with the stored index as control, before
+0's, on a 1,000-paper sample *(run at 500, an agent-decided deviation: about
+5M tokens per candidate at two chunk sizes)* with the stored index as control, before
 committing ~108 h.
 
 **IN PROGRESS 2026-09-24 — instrument built; v2-moe and EmbeddingGemma embedded (2026-09-29).**
 `measure_retrieval_quality.py compare-models` replaces the v1.5 script in
 `~/.cache/cementic-igpu/calibration/` (not yet deleted; delete it once a full
-run has completed). Each of 500 seeded papers contributes one 2,000-token body
+run has completed). **Before deleting, move out `calibrate.sh` and its `*-cpu`
+artifacts:** that directory also holds the only canary recalibration script
+(see "Live residuals of closed records" → canary). Each of 500 seeded papers contributes one 2,000-token body
 span (stored chunks 2-9, skipping the title page), embedded at the stored
 320-token chunking and at 1,300 with overlap 325. That fixes the v1.5 run's
 stated flaw, which compared a long-window model only at 320. Queries are the
@@ -1176,8 +811,8 @@ projected rebuild exceeds ~2x today's goes to the user with the number.
 where the vector arm leads, and recall@10 / MRR everywhere. It cannot move
 phrase recall@1, which routing owns (Phase 1 step 2).
 
-**2b. The three riders the v1.5 section parked.** Unchanged and already
-specified above: drop punctuation-dominated chunks at chunk time, re-derive
+**2b. The three riders the v1.5 section parked.** Unchanged and specified
+under "Rejected by measurement — v1.5" below: drop punctuation-dominated chunks at chunk time, re-derive
 `chunk_size` against the chosen model's `/tokenize`, remove the `use_ocr` knob.
 Their *ends when* conditions stand as written.
 
@@ -1194,19 +829,176 @@ on. Keep the token window as fallback and as the hard cap: this is a boundary
 whose stated trigger is "anything else forces a rebuild". This is that day; it
 rides along free.
 
+**2e. De-hyphenate at extract time.** Restored from Phase 0's known artefact:
+*Known artefact:* one accepted phrase is `augmentations by max- imizing the
+agreement` — PDF line-break hyphenation surviving into stored chunk text. It
+splits words across both arms' term space. A de-hyphenation pass at extract
+time re-versions the extractor profile, so it is nearly free as a Phase 2
+rider and expensive at any other time.
+
 *Anti-scope, so nobody re-derives it:* no log-odds or convex score fusion —
-Phase 1 step 2 buys the same thing more cheaply, and txtai's implementation
+Phase 1 step 2 buys the same thing more cheaply *(stale reason: that step was
+closed on latency 2026-09-24; the anti-scope stands because the routing ceiling
+equals the Phase 0 bar, so no fusion rule can beat it)*, and txtai's implementation
 cites a paper absent from its own tree (`hybrid.py:232`); no chonkie or NLTK
 chunker (2c does it with a separator); no second embedding provider added
 merely to exercise a one-entry registry; no Postgres search extension.
+
+**The rebuild runs only after** correctness steps 2 and 4, the schema
+retrofits, the embed planner, and extraction isolation are in.
+
+**Fuzzy matching (opened 2026-09-19 as Phase 1 step 3) — open, unscheduled.**
+No rebuild, no re-versioning, independent of everything above; ordered last
+within Phase 1 because it is the only item here with no measured target yet.
+
+The gap, measured: a query one character off its document retrieves nothing
+lexically (60/60 typo'd phrases returned zero rows) and lands at fused recall@10
+0.233 on the vector arm alone. Every number this project has ever reported is on
+queries spelled exactly as the corpus spells them, so the whole eval is blind to
+the case — which is the one a person searching their own library from memory is
+most likely to produce.
+
+*Not yet a decision.* Three candidates, none costed: `pg_trgm` similarity as a
+fallback only when the lexical arm returns zero rows (narrow, adds an extension
+and an index); relaxing `plainto_tsquery`'s conjunction to an OR-with-threshold
+(no extension, but it changes recall on every query, not just typo'd ones); or
+accepting the vector arm as the only typo path and measuring how far a better
+Phase 2a model moves 0.233.
+
+*Ends when:* one of the three is chosen with a measured recall@10 on
+`phrase-typo` to justify it, or the item is closed as "not worth it" with the
+0.233 recorded as the accepted floor. ~~**Do not start this before Phase 1 step 2**~~ — moot since 2026-09-24:
+step 2 is closed and nothing is about to be deleted, so this item is no
+longer blocked, only unscheduled.
+
+### Packaging, docs and deletions
+
+Independent of the code phases, except where noted.
+
+- **systemd: ship a copy of the live unit.** Replace the five units in
+  `packaging/systemd/` with a templated copy of
+  `~/dotfiles/.config/systemd/user/cementic@.service`. Template the paths and
+  state that it needs `daemon_autostart = true`. Use `cementic run` once that
+  step has landed. Point `docs/setup.md:77` and `docs/operations.md:35` at it.
+  Dotfiles stay untouched. The decision log records the accepted drift.
+  *Ends when:* the copy starts under `systemctl --user` from a checkout at a
+  path other than `~/projects/cementic`.
+- **Shared-machine warning.** Add it to `docs/setup.md` and the template README:
+  the default Postgres role is superuser `cementic`/`cementic`. Give the
+  `ALTER ROLE` command. *Ends when:* both docs carry it.
+- **Delete dead and duplicate code.**
+  - `vector_store.backfill_filter_columns_sql` and `enforce_filter_columns_sql`,
+    which have zero callers.
+  - `tests/integration/test_runner.py`, after folding its two unique cases into
+    the unit file.
+  - `scripts/measure_embedding_claim_scale.py` and
+    `scripts/measure_index_build_order.py`. No doc names either, and the second
+    imports a private test helper.
+
+  *Ends when:* every check passes.
+- **Structural debounce tests.** Replace the four wall-clock tests
+  (`tests/integration/test_source_watcher.py:336-389`) with an injected timer.
+  *Ends when:* no `time.sleep` remains in them.
+- **Doc anchors.** Fix TODO.md's three dead anchors: `tests/unit/conftest.py`
+  and two README headings removed in `6df8ab9`. State one gate count everywhere.
+  *Ends when:* every path TODO.md cites exists.
+- **`tool-cementic` skill.** It lives outside the repo and is not writable by
+  agents. If a surface it names changes, hand the user the edit. Today it uses
+  only `-n` and `-c`, so likely nothing.
+
+### Release 0.3.0
+
+Bump `pyproject.toml`, `uv lock`, write the CHANGELOG entry per its tag-time
+policy, tag, push, then `uv tool upgrade cementic`. The push is outward-facing,
+so it needs the user's go at the time.
+*Ends when:* `cementic --version` from PATH prints `0.3.0`.
+
+### Not doing (so nobody re-derives it)
+
+- **Merging `status` into `collection list`:** reaffirmed 2026-10-22.
+- **A per-install Postgres password:** see the decision log.
+- **`llama-server --api-key`:** a local-user port squat is out of scope for a
+  single-user tool.
+- **The `RUNNING`-before-startup ordering:** the 2026-08 verdict under
+  "Deliberately not done" stands. It is a two-line fix only if
+  `PipelineWorker.start` is open anyway.
+- **A TOML parse cache:** same section.
+- **Pinning CI actions to SHAs:** major tags are acceptable for a personal repo.
+
+## Closed records
+
+One line each: verdict, the numbers later steps cite, and a pointer. The full
+text of every record is `git show 73b5d4c:PLAN.md`.
+
+- **Hybrid retrieval execution order (2026-09-07), CLOSED 2026-09-10.** The
+  leading arm owns rank 1 and fusion owns the rest (`hybrid.py`). Lexical-lead
+  routing fires on a single identifier-shaped token in at most 20 documents,
+  the threshold set D's document-frequency bands gave. The GIN index is built
+  up front, because it costs 0.1% of import wall clock. Commits `36c73ff`,
+  `45ed214`, `03f443d`, `64b24d4`. Risks that remain are under "Decided — hybrid
+  lexical + vector retrieval".
+- **CLI-surface audit step 1 (2026-09-10), DONE.** README's `search --json`
+  field count is fixed, and `verify_postgres_container.sh` no longer calls the
+  removed `status --doctor`. Steps 2-6 moved into the execution order.
+- **v1.5 migration (2026-09-05), CLOSED, the gate failed.** On 1,000 papers,
+  v1.5 had recall@1 0.6590 against v2-moe's 0.7170, with sign test
+  p = 8.9e-09. The stored-index control arm scored 0.7200 / 0.8860 / 0.7812
+  (recall@1 / recall@10 / MRR). The canary shipped in `06f7d62`.
+- **Retrieval Phase 0 (2026-09-18), DONE.** The harness is
+  `scripts/measure_retrieval_quality.py`, with instrument `eval/queries.json`,
+  60 queries per set. Baseline recall@1 / recall@10 / MRR: rare-token
+  0.633 / 0.817 / 0.689, title 0.783 / 0.883 / 0.817, phrase 0.117 / 1.000 / 0.348.
+  **The bar any rank-1 change must clear is recall@1 ≥ 0.650 rare-token,
+  ≥ 0.783 title, ≥ 0.967 phrase.** The perturbed phrase sets are diagnostics,
+  not gates. The typo set's lexical arm returns 0/60 rows, and fused recall@10
+  is 0.233.
+- **Retrieval Phase 1 step 1, over-fetch (2026-09-19), CLOSED.** The per-arm
+  fetch multiple is 5, capped at `MAX_SEARCH_RESULTS`, and costs no measurable
+  latency. Nothing was measured above 50 per arm, so if the multiple is ever
+  raised, re-measure rather than extrapolate. The step exposed chunk-count RRF scoring, fixed in `1e0bd7d` by
+  fusing documents, not chunks. Rare-token recall@10 rose to 0.983, and
+  recall@1 was unchanged everywhere.
+- **Retrieval Phase 1 step 2, reranker (2026-09-24), CLOSED on latency.**
+  Router mode passes cementic's alias check but needs two fixes: `/tokenize`
+  must send a `model` field, and the supervisor's `--alias` command-line match
+  does not see a router launch. 50 chunks take 16.9 s best-of-5 against a
+  500 ms bar. Benchmarking `ts_rank` against BM25 stays withdrawn, because
+  BM25 inherits the same `plainto_tsquery` conjunction and cannot fix typo
+  recall. The `lead` ablation showed per-query oracle routing
+  equals the Phase 0 bar exactly, and that deleting `lead` bare loses 36
+  rare-token and 13 title queries. A reranker an order of magnitude smaller
+  over the top 10 only was never measured. Logs: `~/.cache/cementic-router/`,
+  `~/.cache/cementic-eval-lead-ablate.log`.
+- **Full-text index reports its own absence (2026-09-12), DONE.**
+  `collection reindex` builds it, `doctor`'s `lexical_index` check names its
+  state, and an invalid leftover is dropped before the rebuild.
+- **Document identity (2026-09-09), DONE.** The invariant to keep: **any code
+  path that removes chunks clears the chunking's `source_content_hash` in the
+  same statement.** A file is the same document when its stored path still
+  resolves to it. Fixed by `38b0bdd`, `e755474`, `cae580c`, `7645182`.
+- **External command extractor (2026-09-03), DONE** in `935bf45`. The residual
+  risk is that a version command printing a constant cannot be detected, so
+  `doctor` shows what was recorded for a human to check. The contract and the
+  fallback rule are under "Live residuals of closed records".
+- **Query-first embed scheduling (2026-09-01), DONE.** It shipped as
+  `embed_submit_batch_size` and `db.SearchActivity`. Still open: HNSW insert
+  cost growing with the graph, host contention, and pgvector index maintenance
+  as explanations for the embed-rate decay from 5.5 to 4.0.
+- **Build the ANN index up front (2026-08-13), TAKEN.**
+  `ensure_revision_ann_index_up_front`, HNSW only. DiskANN keeps build-at-ready
+  because it is unmeasured.
+- **Server drift detected by a canary (2026-09-05), IMPLEMENTED** in
+  `canary.py` and `doctor`'s `embedding_canary`. Left undone deliberately: a
+  `doctor --restamp` front door, and canaries for collections that never index
+  again.
 
 ## Design decisions and open items
 
 ### Decided — the CLI surface after the `llm` audit (2026-09-10)
 
 Evidence, the full command inventory and the `llm` comparison are in
-`notes/design-cli-surface.html` (gitignored). The steps are in "Execution order
-— CLI surface audit". This block holds only what a later reader would otherwise
+`notes/design-cli-surface.html` (gitignored). The remaining steps are under "Execution
+order (2026-10-22)" → "User-facing CLI". This block holds only what a later reader would otherwise
 re-derive: why the audit cut nothing, and which directions are closed.
 
 **The comparison is the front door, not the engine.** `llm` needs no daemon, no
@@ -1260,92 +1052,18 @@ promote` and `reindex`, bare `--force` on `collection remove`, `stop`, `config
 init` and `init postgres`. A breaking change to muscle memory for a consistency
 nobody has tripped over. *Reopen when:* someone reports it.
 
-### Decided — the full-text index reports its own absence (2026-09-12) — DONE
-
-Found by sweeping this document against the code: step 5b.ii above claimed
-`cementic doctor` reported the lexical index, and nothing did. Three gaps, one
-per layer, and they compounded — the index could be absent, unreported, and
-unbuildable at the same time.
-
-**Nothing could build it.** `build_lexical_index` had zero callers.
-`ensure_lexical_index` deliberately skips a populated `chunks_v2` (building
-there blocks worker startup for minutes), so a corpus indexed before hybrid
-landed could not get the index from any command, only from hand-written Python.
-It is now reached by `cementic collection reindex`, which is where a user
-already goes when an index is wrong. *Rejected:* a new leaf command. The CLI
-audit named the surface the weakest point in the design, and this is a
-once-per-corpus repair. *Also rejected:* making the index per-revision and
-reconciled like the ANN index — 5b already settled that a text-derived index
-cannot depend on a model, so it stays a table-level index that this command
-merely ensures.
-
-**Nothing reported it.** `doctor`'s `lexical_index` check names the state
-rather than a boolean, because the three cases need different actions: missing
-on a corpus that holds chunks is a warning with the repair command; missing on
-an empty table is fine, since the next startup builds it for free; and
-`search.hybrid = false` makes it moot, so warning would be noise. A warning
-rather than a failure, like `stranded_chunkings`: the installation is fit to
-run and a corpus inside it needs one command.
-
-**Presence was the wrong question, which is the part worth keeping.** An
-interrupted `CREATE INDEX CONCURRENTLY` leaves an index that `pg_indexes`
-lists and the planner refuses to read, so every exact-word query silently
-falls back to scanning 2.3M rows — a check that asked only "is it there"
-would have passed on it. Worse, `CREATE INDEX CONCURRENTLY IF NOT EXISTS`
-matches on the *name*, so the retry no-opped against the leftover and the old
-code needed two runs to recover: one to drop, one to build. It now drops an
-invalid index before rebuilding. Pinned by a PostgreSQL test that marks a real
-index invalid in the catalog, mutation-checked by removing the drop — without
-it the test fails with the two-run `RuntimeError`.
-
 ### Decided — hybrid lexical + vector retrieval (2026-09-07) — DONE
 
-**The mechanism is confirmed and large, and the fusion rule that settles it
-shipped 2026-09-09.** A dense
-embedding compresses a chunk into one vector, and a rare exact token — an
-author surname, an acronym, an equation label — is not recoverable from it.
-Measured on `papers`, n=150 per set, predictions registered before the run
-(`notes/design-hybrid-retrieval.html`):
-
-| set | arm | recall@1 | recall@10 |
-| --- | --- | --- | --- |
-| A rare exact tokens | vector | 0.020 | 0.047 |
-| | lexical (ceiling) | 0.713 | 1.000 |
-| | hybrid RRF | 0.047 | 1.000 |
-| B semantic title→body | vector | 0.713 | 0.787 |
-| | lexical | 0.173 | 0.207 |
-| | hybrid RRF | 0.540 | 0.840 |
-
-Vector-only found the right paper 7 times in 150. Hybrid found it every time:
-+0.953 recall@10 against a pre-registered build threshold of +0.15, with the
-falsifier (vector ≥ 0.85, which would have killed the feature outright) never
-in sight.
-
-**Cost is not a constraint.** A GIN index on `to_tsvector('english', content)`
-builds concurrently in 6.0–6.3 min and occupies **617 MB fresh**; lexical
-queries run in 1–173 ms. The 0.98 GB projected from a 100k-chunk sample was 60%
-high — GIN posting lists compress better at corpus scale.
+Shipped 2026-09-09. A dense embedding cannot recover a rare exact token, so
+vector-only search found the right paper for 7 of 150 rare-token queries, and
+hybrid found it every time (recall@10 0.047 to 1.000). Plain RRF loses rank 1
+on both query kinds, so the leading arm owns rank 1 and fusion owns the rest.
+Full measurements: `git show 73b5d4c:PLAN.md`. What stays live:
 
 **Resolved 2026-09-12 — maintaining this index per insert costs 82% of its
-size, which the build-up-front decision never measured.** The live index read
-1,121 MB where a rebuild of the same rows reads 617 MB, and the 504 MB
-difference is recoverable: `REINDEX INDEX CONCURRENTLY` returned it to 617 MB in
-6.0 min with search up throughout. Three candidate causes were tested rather
-than argued, because the first two were wrong:
-
-| | measured |
-| --- | --- |
-| fresh build, `maintenance_work_mem = 64MB` (the server default) | 617 MB, 6.3 min |
-| fresh build, `maintenance_work_mem = 1GB` | 617 MB, 6.0 min |
-| the live index, built up front and maintained across 2.3M inserts | 1,121 MB |
-
-So build memory is irrelevant (both arms identical), corpus growth cannot
-explain it (2,299,762 chunks against ~2,298,558 when the 617 MB was taken), and
-neither can dead tuples (1,194, table vacuumed 2026-09-10). What remains is the
-index absorbing 2.3M incremental inserts plus the 2026-09-09 repair's deletes,
-which is step 5b.i's decision working as designed and carrying a size cost
-nobody had put a number on. Both shadow builds ran beside the live index and
-were dropped, so nothing was taken out of service to learn this.
+size.** The live index read 1,121 MB against 617 MB for a fresh rebuild of the
+same rows, and `REINDEX INDEX CONCURRENTLY` recovered it in 6.0 min with search
+up throughout. Build memory, corpus growth and dead tuples were each ruled out.
 
 **What this changes.** The up-front decision stands — its argument was wall
 clock and correctness-at-every-moment, and those hold — but it now reads: +82%
@@ -1358,22 +1076,11 @@ maintained index costs latency as well as space. It did not here — 291 ms
 against 342 ms for the non-embedding half of a search, inside one arm's own
 80 ms spread, so no speedup is claimed.
 
-**Rank 1 was the hard part, and it is settled.** Plain RRF at k=60 drops set B
-from 0.713 to 0.540 and reaches only 0.047 on set A where the lexical arm alone
-gets 0.713 — each arm alone beats their combination at the top slot, which is
-the slot a search tool is read from. Steps 1 and 2 established why: the tie is
-not a bug, because RRF is symmetric and both arms' rank-1 documents score
-`1/(k+1)`, so there is no neutral tie-break and choosing one *is* a bet on an
-arm. The rule that shipped bets per query rather than globally.
-`lexical_should_lead` (`search.py:493`) gives rank 1 to the lexical arm only
-for a single token that is syntactically identifier-shaped and matches at most
-`search.lexical_lead_max_documents` documents; fusion owns the rest of the list.
-
 **Risk — the precondition is unmeasured.** All of this assumes real queries are
 identifier-shaped. Nobody has looked at one; sets A and C are synthetic by
 construction. If such queries are a small fraction of real use then this is a
 well-measured solution to a problem the corpus does not have, and set A's 0.047
-does not change that. **This gated step 5, which shipped anyway**, so the gate
+does not change that. **This gated step 5 of the closed hybrid execution order, which shipped anyway**, so the gate
 was passed by decision rather than by measurement — the strongest reason to
 distrust this section is that its own precondition was never checked. Cheap
 counter: log query strings and timestamps locally and read the mix.
@@ -1390,7 +1097,9 @@ carries `ix_chunks_v2_fts` and no probe index.
 came from `notes/probe_hybrid_retrieval.py`, and `notes/` is gitignored by the
 project's own decision. The results survive here; the code that produced them
 would not survive a `git clean`. Either exempt that one file or accept that the
-measurements are reproducible only from their description.
+measurements are reproducible only from their description. *Narrowed
+2026-09-18:* Phase 0 moved on-demand measurement into the tracked
+`scripts/measure_retrieval_quality.py`. Only the original probe stays untracked.
 
 **Two performance traps, both measured rather than reasoned**, kept because
 each cost an hour: `select distinct document_id … limit n` makes the planner
@@ -1401,128 +1110,10 @@ index scan too. And `ts_rank` over every match of a common term recomputes a
 tsvector per row and hangs for minutes; ranking must happen over a capped
 candidate pool.
 
-### Decided — what makes two rows the same document (2026-09-09) — DONE
+### Rejected by measurement — v1.5, and what would reopen a model swap
 
-**Implemented on `claude/watcher-document-identity` (four commits).** Written
-after the live corpus held 46,139 documents where 23,077 belong, and 18,103 of
-them matched nothing in search. Both halves of that came from the same place:
-identity and the work attached to it are keyed on the path, and nothing checked
-that the key still meant what it meant when it was written.
-
-**Chunks may not be deleted without invalidating the chunking.** `_step_chunk`
-re-claims a `done` chunking only when its `source_content_hash` differs from
-the extraction's, so a chunking left with a current hash and no chunks is never
-revisited. `0deeb88` fixed that for the failed-re-extraction purge; the
-watcher's delete purge had the same hole, and a delete-then-create of an
-unchanged file — a sync client, an editor renaming a temp file over the
-original — is an ordinary event, so it fired 18,101 times. The rule is now: any
-code path that removes chunks clears the hash in the same statement.
-
-**A document is the same document when it is the same file, not the same
-path.** A watched root given as a symlink is stored resolved, so moving a tree
-and leaving a link behind re-registers every file under a path cementic has
-never seen, and the pre-move rows keep resolving through the link so nothing
-retires them. Registration now repaths instead of inserting a twin.
-
-*Matching the moved row by content hash was tried first and is not enough.*
-It assumes the corpus only moved. On this corpus 3,338 papers had also been
-rewritten between the two scans, so their recorded hash no longer identified
-the file their row still pointed at, and a rescan created 7,512 duplicates
-before it was stopped. The watcher resolved the root itself, so it can name the
-pre-move path outright — an exact lookup on the unique index, indifferent to
-how much the file has changed. The hash probe stays as the fallback for a move
-no root alias explains.
-
-**Retiring a stale row may not delete chunks at all.** The reconcile retires a
-row whose path is no longer its own real path — previously invisible to it,
-since `_is_under_watched_roots` compares literally and a pre-move path is under
-no watched root. The first guard written for it retired a row whose twin *held
-chunks*, on the reasoning that the twin covered the text. An independent review
-killed that: holding chunks is a membership test, so a twin one chunk into a
-five-hundred-chunk document satisfies it while covering almost none of it. The
-rule now is that the row must hold no chunks and a live document must already
-hold its real path — retiring deletes nothing, and nothing unreplaced is
-retired. Ungated, a restart on the damaged corpus would have deleted 2.3M
-chunks and bought hours of re-embedding to reach the state it was already in.
-
-**Which then required folding the twin back in.** With retirement that strict,
-a duplicate pair would be permanent: the repath only fires when nothing is
-registered at the scanned path, so a twin already sitting there short-circuits
-every later scan. So an empty twin gives way to the row that holds the work —
-the same resolution the manual repair applied to the live corpus — and a pair
-that both hold chunks is left for a human, because choosing between them means
-discarding one. Both halves came out of the review; the branch shipped the
-first guard and the permanent duplicate it implied.
-
-**The silence cost more than the bugs.** Both instances of the lost-chunk class
-were invisible for weeks because `cementic status` read 100% chunked
-throughout. `cementic doctor` now counts chunkings that are done and own no
-chunks (0.17s against 46k documents), so a third path lands in a report rather
-than nowhere.
-
-### Decided — external command extractor (2026-09-03) — DONE
-
-**Shipped in `935bf45`** (registry entry, `[extraction.commands]` with its
-paired `command_versions`, the `extraction_commands` doctor check, tests).
-Retained for the rationale; nothing below is outstanding. Extraction was the
-last subsystem that hardcoded
-Python libraries and grows a boolean per library feature. Embeddings already
-work the other way: `daemon_command` names a binary, cementic spawns it and
-consumes its output. A `command` extractor makes extraction symmetric — text
-comes from an operator-named argv, so OCR, `pdftotext`, `docling` and anything
-else are config, not dependencies. Built ahead of demand deliberately: the
-user's call, on the grounds that the seam is cheaper to add now than to retrofit.
-
-**Contract, kept narrow on purpose:** argv in, text on stdout, nothing else. A
-tool that writes files instead (`ocrmypdf`) gets a two-line wrapper — that is
-the composition boundary, not cementic's problem. A wide contract is what turns
-an early abstraction into debt.
-
-```toml
-[extraction.backends]
-pdf = "command"
-[extraction.commands]
-pdf = ["pdftotext", "-layout", "{path}", "-"]
-[extraction.command_versions]
-pdf = ["pdftotext", "-v"]
-```
-
-**`version_command` is required, because version flags cannot be guessed.**
-Probed on this host: `pdftotext --version` treats the flag as a filename,
-prints an I/O error and **exits 0**, while `pdftotext -v` works; `gs --version`
-and `mutool -v` disagree again. So neither the flag nor the exit code is a
-reliable signal, and a guessed flag would record a constant error string as
-"the version" — never changing on upgrade, silently disabling the guarantee.
-Its output enters the extraction payload so a tool upgrade re-versions
-revisions, the same property `extraction_libraries` gives pymupdf. Residual
-risk: a wrong flag that prints a constant cannot be detected automatically, so
-`doctor` prints what was recorded for a human to check.
-
-**Probe cost is a non-issue.** `build_extractor_profile_payload` is reached only
-via `get_or_create_extractor_profile` ← `revisions.py:229` ← revision creation.
-Once per revision, not per document; no cache needed.
-
-**Fingerprint-neutral by gating.** Both new payload keys appear only when a
-command backend is configured, so existing fingerprints do not move and no
-corpus rebuilds. Same trick as the conditional rapidocr entry in `profiles.py`.
-
-**`supported_extensions()` gains a `Config`.** The command extractor's
-extensions come from the `[extraction.commands]` keys, otherwise it could never
-add a file type cementic does not already know — its best use. Ripples to
-`source_watcher.py:350`, `:596` and `:700`; `DocumentEventHandler`
-(`source_watcher.py:328`) takes the resolved
-set as plain data, matching how `ignore_directories` is already passed. The
-command extractor is never a fallback: it must be named in `backends`.
-
-### Rejected by measurement — migrating `papers` to v1.5 (2026-09-05)
-
-**Decided, then reversed the same day by the gate that was built to test it.**
-The candidate was `nomic-embed-text-v1.5`; it retrieves worse than the v2-moe
-already in place (numbers in the closed execution order above), so `papers`
-stays on v2-moe and the three rebuild-blocked changes stay parked. Everything
-below is kept because it is what a *future* model swap costs, and because the
-reasoning that pointed at v1.5 was sound right up to the measurement -- which
-is the argument for keeping the gate cheap and running it first.
+Verdict in "Closed records". Kept for the reopen condition, which Phase 2a is
+now exercising:
 
 **What would reopen this.** A candidate that beats v2-moe on
 `compare-models.sh`, run the same way. Two facts worth carrying into that
@@ -1624,15 +1215,6 @@ against the chosen model's `/tokenize`, recorded here.
 *Remove OCR from the codebase.* See the section below; it is blocked on this
 same rebuild and on the command extractor landing first.
 
-Already done, and it needed no rebuild: **splitting over-budget chunks at embed
-time** (`c99d84b`, 2026-09-04). Chunking and both profiles were untouched, so
-requeueing the failed rows was enough — chunks that had no vector gained one,
-which is additive. The splitter halves on whitespace, then on characters,
-because dot-leader pages are frequently one whitespace-free run. Roughly 1,200
-of the affected chunks are genuinely dense content (code, maths, long structured
-titles); the rest are contents pages that the punctuation filter above should
-stop creating at all.
-
 ### Parked again — remove OCR from the codebase
 
 **Not blocked on design; it now has a rebuild to ride on.** `use_ocr` reaches
@@ -1652,51 +1234,68 @@ Pre-processing with `ocrmypdf` into `pymupdf-raw` works with no cementic code at
 all and is the documented fallback — untested here, no OCR engine is installed
 on this host.
 
-### Decided — detect server drift with a canary, not a fingerprint (2026-09-05)
+### Fourth review (2026-08-14) — the lesson worth keeping
 
-**Implemented 2026-09-05 (`canary.py`, `doctor.py`'s `embedding_canary` check,
-`embedding_profile_canaries`). Supersedes the open item that asked whether to
-record the llama.cpp build in the embedding profile, and corrects its central
-claim.** That note said a server upgrade is "usually numerically a no-op".
-Nothing had measured it, and as stated it is false: new kernels and different
-reduction orders move the last bits by construction.
+What it found and what closed each is in the note. One lesson has no other home,
+because it is about how the fix itself went wrong:
 
-Measured 2026-09-05 against the live server (`b10605-a130532ae`,
-nomic-embed-text-v2-moe Q8_0, Vulkan iGPU), embedding one text three ways over
-`/v1/embeddings`:
+**A guard is only as good as the thing its test measures.** The headline finding
+was that `chunk_size` (tiktoken tokens) was pitted against `n_ctx` (the model's
+own tokens), silently truncating ~30% of every full chunk. The fix lowered
+`chunk_size` and added a runtime guard with a cheap pre-filter, pinned by a new
+invariant test. Both the chosen constant and the test were wrong in the same way:
+they measured the bare chunk, while the guard measures the *formatted* text, and
+the `search_document: ` prefix adds 3 tokens. That pushed every chunk 3 tokens
+past the skip threshold, so the "rare" exact-count path ran on every single
+chunk — which, against a daemon that serialises requests, stalled a live
+re-index for hours. The test now builds a real chunk and formats it exactly as
+the client does; set back to the old value, it fails.
 
-| Same text, same model, same build | Bitwise identical | max abs diff | cosine |
-| --- | --- | --- | --- |
-| the same request, twice | yes | 0 | 1.000000000000 |
-| alone vs. first of a 2-text request | no | 7.5e-9 | 1.000000000000 |
-| alone vs. last of a 32-text request | no | 2.3e-3 | 0.999796 |
+The same trap produced the original bug: `measure_chunk_context_fit.py` embedded
+`chunk[:len*0.75]` while printing the *full* chunk's token count beside an "ok"
+verdict, so the config comment citing it as proof of safety was citing a
+measurement that never tested the case it claimed.
 
-**The corpus is already not bitwise reproducible, and no fingerprint can make it
-so.** The worker submits `pipeline_worker.batch_size = 32` texts per request, so
-a chunk's exact vector depends on which 31 others rode with it — on arrival
-order, and on where a restart landed. What the fingerprint guarantees is
-therefore not "the same bits" but "the same vector space, comparable distances",
-and 2.3e-3 of wobble does not threaten that.
+### Live residuals of closed records
 
-That reframes the question. It is not *does an upgrade change the numbers*
-(everything does, including doing nothing) but *does it change them by more than
-the noise the corpus already carries*. Two classes of llama.cpp change, which a
-build string cannot tell apart:
+Verbatim from `73b5d4c`, because each still constrains work in the execution
+order or carries a revisit trigger.
 
-- **arithmetic** — new kernels, different reduction order, quantization
-  rewrites. The same magnitude as the batching wobble above. A rebuild buys
-  nothing.
-- **semantic** — a tokenizer fix, a pooling-type or normalization default, an
-  attention-mask fix for embedding models. These change the function rather than
-  its rounding, and would move cosine far below 0.999. A rebuild is mandatory.
+**Document identity: the retirement rules.** Both "A rename re-paths" and
+"Watcher identity choice" edit this code.
 
-**Decision: `cementic doctor` grows a behavioral canary, and the server build is
-recorded beside it as evidence rather than as identity.** A revision stores a
-handful of fixed reference texts with their vectors; doctor re-embeds them **as
-one fixed request — same texts, same order, same count** — and reports the
-cosine against the stored ones. The first row of the table is what makes this
-work: a fixed request is bitwise reproducible within a build, so any difference
-at all is the server's doing, and the size of it says which class the change is.
+**Retiring a stale row may not delete chunks at all.** The reconcile retires a
+row whose path is no longer its own real path — previously invisible to it,
+since `_is_under_watched_roots` compares literally and a pre-move path is under
+no watched root. The first guard written for it retired a row whose twin *held
+chunks*, on the reasoning that the twin covered the text. An independent review
+killed that: holding chunks is a membership test, so a twin one chunk into a
+five-hundred-chunk document satisfies it while covering almost none of it. The
+rule now is that the row must hold no chunks and a live document must already
+hold its real path — retiring deletes nothing, and nothing unreplaced is
+retired. Ungated, a restart on the damaged corpus would have deleted 2.3M
+chunks and bought hours of re-embedding to reach the state it was already in.
+
+**Which then required folding the twin back in.** With retirement that strict,
+a duplicate pair would be permanent: the repath only fires when nothing is
+registered at the scanned path, so a twin already sitting there short-circuits
+every later scan. So an empty twin gives way to the row that holds the work —
+the same resolution the manual repair applied to the live corpus — and a pair
+that both hold chunks is left for a human, because choosing between them means
+discarding one. Both halves came out of the review; the branch shipped the
+first guard and the permanent duplicate it implied.
+
+**External command extractor: the contract.**
+
+**Contract, kept narrow on purpose:** argv in, text on stdout, nothing else. A
+tool that writes files instead (`ocrmypdf`) gets a two-line wrapper — that is
+the composition boundary, not cementic's problem. A wide contract is what turns
+an early abstraction into debt.
+The command extractor is never a fallback: it must be named in `backends`.
+
+**Canary: the invariants.** The 0.99 cosine threshold sits about 100x above the
+worst observed cross-build noise. The calibration table is in `73b5d4c`.
+
 **The comparison is strict** — doctor flags any difference from the stored
 vectors, and reports the cosine only to say how bad it is (~1e-9 is arithmetic
 noise, below 0.999 is a changed function). Accepting a drifted build must be an
@@ -1724,36 +1323,6 @@ Rejected:
 - **Compare build strings in doctor.** The same false-alarm rate without the
   rebuild. A check that fires on every upgrade is a check that gets ignored.
 
-**Threshold: cosine 0.99 — and the "no threshold at all" plan above was
-wrong.** Cross-build calibration ran b10605 against b10818 (213 builds and ~12
-days later), same model, same flags, the same 200 real `papers` chunks in the
-production 32-per-request shape, on both backends:
-
-| Backend | Result |
-| --- | --- |
-| CPU (agent sandbox, no `/dev/dri`) | 200/200 bitwise identical, max abs diff 0 |
-| Vulkan iGPU (`Intel(R) Graphics (MTL)`) | 200/200 bitwise identical, max abs diff 0 |
-
-That reads as "zero drift, so compare exactly", and it is the wrong conclusion.
-Both runs replayed the *same traffic sequence* against a fresh server, holding
-fixed the one variable that actually moves vectors. Running the implemented
-canary against the live server exposed it on first contact: replaying the
-canary after an unrelated 3-text request gives cosine 0.999908 instead of 1.0,
-and after an 18-text request 0.999887, while back-to-back replays with nothing
-in between are exact. llama-server packs concurrent slot work into unified
-batches (`kv_unified = true` in its own startup log), so reproducibility is a
-property of the request *and its predecessors* — which no client can fix, and
-which `doctor` cannot avoid, since its own daemon probe embeds first.
-
-The floor is therefore measured rather than absent: scheduling noise reaches
-2.0e-4 in (1 - cosine) and request composition 2.3e-3, while a tokenizer,
-pooling or normalization change lands two orders of magnitude below. `0.99`
-sits in that gap, ~100x above the worst observed noise, deliberately
-conservative because both bounds come from a handful of sampled shapes rather
-than a derivation. What the cross-build table still establishes is that no
-*semantic* change happened across those 213 builds; that conclusion never
-depended on the traffic sequence.
-
 Reproduce with `~/.cache/cementic-igpu/calibration/calibrate.sh` (it reuses
 `sample.json`, so inputs stay identical); the CPU-run artifacts are preserved
 alongside as `*-cpu`. Note for whoever repeats this: absence of Vulkan lines in
@@ -1769,29 +1338,8 @@ also indexing-only: a collection that never indexes again keeps no canary, so
 the check reports honestly that it has nothing to replay rather than inventing
 a reference from today's server.
 
-### Decided — query-first embed scheduling (2026-09-01) — DONE
+**Query-first scheduling: what is parked, and the ceiling.**
 
-**Both layers shipped**: sub-batching as `pipeline_worker.embed_submit_batch_size`
-and the search lease as `db.SearchActivity` / `search.record_search_activity`,
-consumed by `pipeline_worker`'s `_wait_while_search_is_active`. Retained for the
-measurements and the parked triggers. A search query landing mid-import waits on the
-shared llama-server: the worker POSTs 32 texts per request, b10605 schedules
-per-input FIFO with no HTTP priority hook, so a query's one task queues behind
-up to 32 — measured 0.4–9.6 s of queue delay (17.2 s worst-case wall) against
-~0.1 s of actual ANN+SQL. Design, prior-art survey (storage engines, vector
-DBs, inference servers, desktop indexers), and verified b10605 scheduler facts:
-`notes/design-embed-scheduling.html`.
-
-Three layers, first two to build:
-
-1. **Sub-batch submission** — keep the DB claim at 32, submit to llama-server
-   in sub-batches of ~slot count (4). Bounds query wait ~10 s → ~1 s with no
-   coordination code (queue delay is proportional to per-request input count).
-2. **Search lease** — `search` upserts a timestamp (`utc_now()`, house style) before embedding;
-   the worker checks between sub-batches and yields while fresh (TTL ~10 s,
-   refreshed per search), with a starvation cap so continuous searching cannot
-   stall a build. Precedent: Windows `IRowsetPrioritization`, Postgres
-   autovacuum cancellation, OpenAI flex tier.
 3. **Abort in-flight on lease activity** — possible (b10605 cancels queued
    tasks ≤ ~1 s on client disconnect) but not built: Layer 1 shrinks the
    quantum until aborting saves ≤ ~1 s. Seam left open.
@@ -1801,44 +1349,6 @@ practice; the strong fix if Layers 1–2 measure insufficient — costs runtime-
 fingerprint work and resident memory) and an upstream llama.cpp patch exposing
 the internal front-of-queue path as a `priority` field on embeddings.
 
-**Amended 2026-09-02 — Layer 1 was not free, and is now conditional.** The
-design claimed sub-batching left indexing throughput untouched when nobody
-searches. It did not: measured on the papers import, a constant request size of
-4 cost **~2× throughput** (≈4.0 → ≈1.7–2.9 emb/s), a step visible at the exact
-worker restart that put it into service. Two causes, both measured against the
-live llama-server: a fixed ~0.36 s per request (0.72 s for one input against
-12.2 s for 32, so ~0.36 s of that is size-independent), and ~25% of wall clock
-with no slot busy, because a request sized to the slot count empties all four
-slots across every client round trip.
-
-The request size now follows the lease instead of being constant
-(`embed_submit_size`): the whole claim when no search is recent,
-`embed_submit_batch_size` while one is. Layer 2's yield is unchanged and still
-does the work during an interactive session. The residual is the honest cost of
-not building Layer 3 — the *first* query after a quiet stretch can land
-mid-request and wait out one full claim. It is bounded, and it exists only
-while a build runs: once a collection is promoted the worker embeds nothing and
-queries are uncontended.
-
-This also promotes Layer 3 from "value evaporated" to the thing that would
-remove the residual, since the premise that retired it — that Layer 1 had
-already shrunk the quantum for free — is what the measurement falsified.
-
-**Correction, same day, after the fix shipped: the ~2× attribution above does
-not hold.** With the adaptive sizing running, requests are confirmed
-claim-sized (40 groups of exactly 32 launches between client round trips) and
-the search lease is hours stale, yet throughput is 2.24 chunk/s — inside the
-1.7–2.9 band the constant-4 build ran at, not the ~4.0 that preceded it.
-Restoring big requests did not restore the old rate, so the 4.0 → 2.0 step at
-the 2026-09-01 17:23 restart is **unexplained**; it correlated with the
-sub-batch change and was attributed to it on that correlation alone.
-
-Ruled out since: chunk length (flat at 317–323 model tokens across the whole
-run) and GPU availability (the iGPU is visible and the server never restarted).
-Still open: HNSW insert cost growing with the graph — which fits the slow
-5.5 → 4.0 decay better than it fits a step — host contention, and pgvector
-index maintenance.
-
 What survives: the fixed ~0.36 s per request is measured and real, so
 sub-batching does cost *something*; and a hard ceiling was found that bounds
 any work here — `--ubatch-size` is 512 while chunks average ~318 model tokens,
@@ -1847,241 +1357,50 @@ with 32 tasks queued. Request size cannot buy concurrency the physical batch
 has no room for. Raising `n_ctx`/ubatch is the untested lever and changes the
 runtime fingerprint, so the server must restart for it.
 
-### Decided — build the ANN index up front (2026-08-13)
-
-**Taken.** `ensure_revision_ann_index_up_front` (`revisions.py`) creates the
-HNSW index beside the vector table in `_ensure_target_revision`, guarded to the
-empty-table case (rows without an index mean a resumed build — its bulk build
-stays at the ready transition) and to HNSW (DiskANN is unmeasured and keeps
-build-at-ready). The ready-transition and `collection reindex` calls stay for
-resumes and method changes. The measurements that justified it:
-
-**Should the ANN index be created up front, on the empty table?** HNSW has no
-training step, so it can be. Every insert then maintains the graph and the
-build stall disappears entirely. Measured at 100k × 768, `maintenance_work_mem`
-2GB for both, clustered vectors (uniform random ones sit at near-identical
-distances, which makes recall meaningless):
-
-| | insert then build (today) | build then insert |
-|---|---|---|
-| insert | 61.8 s | 413.1 s |
-| build | 81.5 s — worker blocked | 0.0 s |
-| **total** | **143.3 s** | **413.1 s** |
-| longest unresumable step | 81.5 s | none |
-| recall@10 mean / worst | 0.996 / 0.900 | 1.000 / 1.000 |
-| query latency | ~0.74 ms | ~0.74 ms |
-| index size (30k) | 117 MB | 117 MB |
-
-So it costs ~2.9× total indexing time and buys: no stall, full resumability
-(inserts commit per batch, so a kill loses one batch instead of the whole
-build), a searchable index *during* ingestion rather than after, and recall and
-latency that are equal or better. pgvector's guidance that building after
-loading is faster holds; that it yields a better graph did not, here.
-
-The 2.9× is on the insert step, and cementic's pipeline is embedding-bound:
-+351 s per 100k vectors is ~3.5 ms of index maintenance per chunk, against tens
-of milliseconds to embed one. Proportionally small, and spread out instead of
-concentrated.
-
-**Two earlier numbers here were wrong and are corrected above.** A first A/B run
-reported a 100× query-latency gap and a recall difference between the two build
-orders. Both were artifacts: the run never checked which plan each query got,
-and the `enable_indexscan = off` used to force an exact baseline leaked onto
-pooled connections, so some "ANN" queries were sequential scans. Re-measured
-with both plans asserted via `EXPLAIN` and a separate pool for the baseline, the
-two indexes are the same size and the same speed.
-
-### Fourth review (2026-08-14) — the lesson worth keeping
-
-What it found and what closed each is in the note. One lesson has no other home,
-because it is about how the fix itself went wrong:
-
-**A guard is only as good as the thing its test measures.** The headline finding
-was that `chunk_size` (tiktoken tokens) was pitted against `n_ctx` (the model's
-own tokens), silently truncating ~30% of every full chunk. The fix lowered
-`chunk_size` and added a runtime guard with a cheap pre-filter, pinned by a new
-invariant test. Both the chosen constant and the test were wrong in the same way:
-they measured the bare chunk, while the guard measures the *formatted* text, and
-the `search_document: ` prefix adds 3 tokens. That pushed every chunk 3 tokens
-past the skip threshold, so the "rare" exact-count path ran on every single
-chunk — which, against a daemon that serialises requests, stalled a live
-re-index for hours. The test now builds a real chunk and formats it exactly as
-the client does; set back to the old value, it fails.
-
-The same trap produced the original bug: `measure_chunk_context_fit.py` embedded
-`chunk[:len*0.75]` while printing the *full* chunk's token count beside an "ok"
-verdict, so the config comment citing it as proof of safety was citing a
-measurement that never tested the case it claimed.
-
 ### Deliberately not done
 
-Findings from the **first** review (2026-08-06) judged not worth fixing — not
-oversights, and distinct from the feature roadmap in `TODO.md`. Reasoning is in
-the relevant commit messages: ANN pre-filter recall on shared vector tables
-(inherent to ANN + post-filter; the actionable slice is purging vectors for
-deleted documents), `check_health` treating a live-but-broken daemon as healthy
-(documented tradeoff), DiskANN + inner-product `storage_layout` (unreachable
-while only cosine exists), and reading model identity from GGUF metadata instead
-of the filename.
+Judged not worth fixing, with the reason. Full history:
+`git show 73b5d4c:PLAN.md`.
 
-That last item bundled two concerns the code has since separated, so read it as
-half-closed. *Which model produced these vectors* no longer comes from a
-filename: Batch C (`77e0e3f`) made it a content digest (`profiles.py:170`).
-*Which text policy applies* is still a filename match (`embedding_text.py:33`),
-deliberately so — that half is the fifth-review residual below, and it is the
-only live part of this item.
-
-Of those, the `status` half of the `check_health` tradeoff **was** reopened and
-fixed — `status` no longer blocks 120 s to return an answer the pid file already
-had. Two more were reopened and are now also closed; both entries below were
-still written as open when the sixth review (2026-08-23) checked them against
-the code, which is why they carry their resolution inline:
-
-**Correction 2026-09-06:** the claim above that `status` no longer blocks is
-not true of the code today. Seven timed runs of `cementic status -c papers`
-took 12–128 s at 0–2% CPU, on this build and on an install predating it. What
-was fixed was one path; something else in the command still waits. Queued in
-`TODO.md` as a root-cause item.
-
-**Root-caused and fixed 2026-09-07.** The remaining wait was never a timeout:
-it was one query. The embedding counts reached the collection and the two
-profiles by joining `chunk_embeddings` -> `chunks_v2` -> `chunked_documents` ->
-`extracted_documents` -> `source_documents`, so counting them scanned all of
-`chunks_v2` — 2.6 GB of chunk text read to fetch three integers a row, with the
-hash join spilling to 32 disk batches. Per-statement timing of one run: 7.96 s
-of a 9.08 s total in that single statement, the rest under 0.1 s each; the CPU
-sat at 0–2% because the work was in the Postgres backend, not the CLI. The
-count now reads the denormalised columns `chunk_embeddings` already carries for
-`_step_embed`'s claim (`embedding_scope_denormalised`, `revisions.py`).
-Interleaved on the live corpus, same connection, both forms returning the same
-row: 1.15 s joined against 0.20 s flat warm, 7.96 s against 0.21 s cold.
-`cementic status -c papers` end to end: 1.97-2.27 s across five warm runs,
-against 12-128 s before. A cold cache still costs -- one run just after the pg
-suite took 10.1 s -- so the tail is smaller, not gone.
-
-- ~~**`check_health` still calls a live-but-broken daemon healthy.**~~
-  **RESOLVED 2026-08-18** by the release plan's batch 1a (`04e974a`):
-  `DaemonHealth.WEDGED` (`embedding_runtime.py:758-772`) plus the two-stage
-  probe, with the busy/wedged disambiguation observed working live during the
-  batch-3 build. The motivating incident stands as the record: on 2026-08-15 a
-  wedged daemon held the port for 21 hours while `cementic status` reported
-  `embedding healthy`.
-- ~~**The filename heuristic silently disables Nomic task prefixes.**~~
-  **RESOLVED 2026-08-18** by batch 1b (`9f1d148`): `_NOMIC_V2_MARKER` no longer
-  exists; `embedding_text.py:33` is `_NOMIC_FAMILY_MARKER = "nomic-embed-text"`,
-  matching v1/v1.5/v2, and the pinning test was retired. The *residual* is
-  unchanged and still deferred: matching on filename at all still mis-selects
-  for a renamed GGUF, and reading GGUF metadata remains the real fix.
-
-From the **fifth** review (2026-08-18), deferred or kept with reasons:
-
-- ~~**The watcher is blind to directory moves until restart** (fifth review
-  §2.9).~~ **RESOLVED 2026-08-18** (`b1999da`) — the repro was run and the
-  measured event table is in README's "Measurements behind the defaults":
-  move-out (case C) was real and is fixed; root-move (case D) is unfixable from
-  inside the watch and is documented in README's Known limitations.
-- **TOML parsed once per pydantic-settings section source** (~9× per `Config`
-  construction). Caching keyed on path+mtime risks stale reads on
-  coarse-mtime filesystems — test flakiness — for a millisecond-scale win.
-  Revisit only if config load ever shows up in a profile.
-- Three §5 trim candidates stay: `_llama_daemon_runtime_status` (a seam its
-  tests pin), `_state` (turned out multi-use), and the `state_path is None`
-  guards (they defend the field's declared type).
-
-Closed again by the round-two review, with reasons — each of these looks like a
-bug and is one, but the fix costs more than the defect:
-
-- ~~**`verbose` in the embedding profile fingerprint.**~~ **RESOLVED 2026-08-23**
-  by Batch C (`77e0e3f`). The entry's own condition is what closed it: removal
-  was only worth doing batched with a model-identity change so the corpus is
-  re-embedded once, and Batch C was that change. `profiles.py:230` now records
-  the deliberate absence. It correctly stays in the *runtime* fingerprint, where
-  it is a launch argument.
-- **Naive `TIMESTAMP` columns.** Zero readers today (one write, no comparison,
-  no display). The fix is a column-type change in a project whose only schema
-  mechanism is `create_all`, so old and new databases would diverge with nothing
-  to reconcile them. Revisit if anything ever reads these columns.
-- ~~**`connect_args` / `gssencmode` on non-psycopg URLs.**~~ **RESOLVED, and
-  this entry was doubly stale when checked on 2026-09-12.** The
-  `startswith("postgresql://")` prefix match it described is gone: `db.py`
-  parses the URL instead, and says so in the comment beside it, so
-  driver-qualified URLs like `postgresql+psycopg2://` are handled. The entry
-  also claimed it had been "queued in `TODO.md`", and no such item was ever
-  there.
-- **`ignore_directories` replacing the defaults.** Working as documented,
-  including the "empty list indexes everything" escape hatch a union would
-  break. If discoverability is the concern, add a separate
-  `additional_ignore_directories` — a feature decision, not a defect fix.
-- **The advisory-lock leak and the `RUNNING` state-write ordering.** Every path
-  that leaks the lock is immediately followed by process exit, which releases
-  it; the stale state file is corrected by `start`'s liveness check and cleared
-  by `stop`. Two-line fixes if those functions are open anyway, not worth a slot.
-- **`index.method` being unreachable on a built system.** Closed by
-  `cementic collection reindex`, which reconciles the active revision's index
-  with the current `[index]` config. *(The instruction that used to sit here —
-  "correct the sentence in `TODO.md` claiming the build path already reconciles
-  a changed method" — was itself stale: no such sentence exists in `TODO.md`.)*
-
-**Closed 2026-08-23 — the four fourth-review carry-overs.** All four are done
-and were verified live; the commits cited below carry the reasoning.
-
-- `cementic start` reporting success after 2 s → Batch B (`ba3ac8a`): the fatal
-  reason now reaches `cementic status`, and the message no longer claims a
-  success two seconds of watching cannot establish.
-- The unreclaimable orphaned daemon → Batch A (`e5ba0b9`): recovery from `/proc`
-  by the spawned command line, which closes the general case rather than the one
-  cause Batch 1 fixed.
-- Model identity being the path string → Batch C (`77e0e3f`): identity is a
-  content digest.
-- `EXTRACTION_VERSION` hand-maintained → Batch C (`77e0e3f`): derived from the
-  installed extraction libraries.
+- **ANN pre-filter recall on shared vector tables:** inherent to ANN plus
+  post-filter. The actionable slice was purging vectors of deleted documents,
+  and that is done.
+- **DiskANN with inner-product `storage_layout`:** unreachable while only cosine
+  exists.
+- **Text policy by filename** (`embedding_text.py:33`): a renamed GGUF gets the
+  wrong prefixes. Reading GGUF metadata is the real fix, and it is deferred.
+  Model *identity* is already a content digest.
+- **TOML parsed once per settings source,** about 9x per `Config`. A cache keyed
+  on path and mtime risks stale reads on coarse-mtime filesystems for a
+  millisecond win. *Revisit when:* config load shows up in a profile.
+- **Three trim candidates stay:** `_llama_daemon_runtime_status`, `_state`, and
+  the `state_path is None` guards.
+- **Naive `TIMESTAMP` columns:** nothing reads them, and `create_all` cannot
+  migrate a column type. *Revisit when:* anything reads them.
+- **`ignore_directories` replacing the defaults:** works as documented. A
+  separate `additional_ignore_directories` would be a feature, not a fix.
+- **The advisory-lock leak and the `RUNNING` state-write ordering:** every path
+  that leaks is followed by process exit, and `start`'s liveness check corrects
+  the state file. A two-line fix if those functions are open anyway.
+- **The `verbose` line from 2026-08-23 is superseded.** It said `verbose`
+  "correctly stays in the runtime fingerprint", and the 2026-10-22 decision log
+  reverses that.
 
 ### Audit findings not fixed (2026-08-24)
 
-Three read-only audits ran before the bulk import — hostile document content,
-failure handling, scale. Four findings were fixed (`<|endoftext|>` chunking, the
-unescaped LIKE prefix, both write-back stalls, and separately the NUL bytes and
-the retryable-500). These are the rest, kept because they are real and because a
-finding that lives only in a chat log is a finding nobody will act on. None
-blocks the import.
-
 Checked against the real 22,246-file corpus and **not present**, so reachable in
 principle but not here: filenames containing `[` (would break
-`status --verbose`, `render.py:260`), non-UTF-8 filenames (the four bare
-`.decode()` calls at `source_watcher.py:411`, `:420`, `:442`, `:444`, then
-`render.py:157`), and paths over ~2,600 bytes (btree limit on
-`ix_source_documents_collection_source`, `db.py:72`).
-
-Live, in rough order of how likely they are to bite:
-
-**Closed 2026-09-06.** Six of the eight are closed. Five went in one pass: the unlimited
-`status --verbose` (now `--limit`, default 20, failures first), the
-rounding that reported 100.0% with work outstanding, the unbounded
-whole-corpus delete (batched at 500 documents), `chunk_text`'s unkillable
-quadratic (refused above a 100,000-character unbroken run), and
-`extract_pdf_markdown`'s `use_ocr` default. `_step_embed` needed nothing:
-it had already been fixed, and this entry had gone on describing a defect
-the code closed -- which is why the two that remain say what is still true
-of the code rather than what was once observed.
-
-`extractor_registry_payload` moved to `TODO.md`'s parked list. It is real,
-but narrowing the payload moves the fingerprint exactly as adding an
-extractor does, so the fix costs the 2.3M-vector rebuild it exists to
-avoid; it is only free on a day something else is already rebuilding.
+`status --verbose`), non-UTF-8 filenames (the bare `.decode()` calls in
+`source_watcher.py`), and paths over about 2,600 bytes (btree limit on
+`ix_source_documents_collection_source`).
 
 Still live:
 
-- **A revision can reach `ready` mid-initial-scan** (`revision_is_complete`,
-  `pipeline_worker.py:263`): the watcher registers documents one at a time with
-  no scan-complete marker, so a drain of the first N looks complete. Promotion
-  re-checks and refuses, so this misleads rather than corrupts. **Narrowed
-  since it was written:** the all-zero case — the fresh-`cementic start` race
-  where the worker's first pass beats the watcher's first document — is now
-  refused outright and documented in the function. What remains is the first-N
-  drain of a scan already under way.
-
-Resolved by the systemd units rather than by code: the worker had no respawn
-after an OOM or reboot, so a multi-day run ended silently.
+- **A revision can reach `ready` mid-initial-scan** (`revision_is_complete`):
+  the watcher registers documents one at a time with no scan-complete marker,
+  so a drain of the first N looks complete. Promotion re-checks and refuses, so
+  this misleads rather than corrupts. The all-zero case is refused outright;
+  what remains is the first-N drain of a scan already under way.
 
 ## Road to v1
 
@@ -2098,4 +1417,3 @@ All four must hold before a 1.0 tag; none is scheduled work yet:
 4. **Multi-platform verification** — macOS (and possibly Windows) actually
    tested rather than "best-effort", since the README ships install
    instructions for them.
-
