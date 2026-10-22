@@ -771,6 +771,45 @@ class TestWorkerProcessingLoop:
         assert state.last_error is None
         assert state.last_error_at is None
 
+    def test_loop_clears_a_recorded_failure_after_a_productive_pass(
+        self, temp_dir: Path
+    ) -> None:
+        """A recovered worker that is busy must not keep reporting the old error.
+
+        Regression (2026-10-22 audit): the clear ran only on an idle pass, and a
+        productive step `continue`d past it, so one transient failure early in a
+        multi-day import stayed in `cementic status` until the import ended.
+        """
+        config = Config()
+        config.pipeline_worker.log_file = temp_dir / "worker.log"
+        config.pipeline_worker.state_path = temp_dir / "worker-state.json"
+        worker = PipelineWorker(config)
+        worker.Session = MagicMock()
+
+        calls = {"n": 0}
+        observed: dict[str, object] = {}
+
+        def extract(_revision_id: int) -> bool:
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("transient")
+            if calls["n"] == 3:
+                # The pass after the first productive one, with no idle pass yet.
+                observed["last_error"] = worker.state_manager.load().last_error
+                worker._shutdown_event.set()
+            return True
+
+        with (
+            patch.object(worker, "_step_extract", side_effect=extract),
+            patch.object(worker, "_step_chunk", return_value=False),
+            patch.object(worker, "_step_embed", return_value=False),
+            patch.object(worker, "_mark_revision_ready_if_complete"),
+            patch.object(worker._shutdown_event, "wait"),
+        ):
+            worker._run_processing_loop(1)
+
+        assert observed["last_error"] is None
+
     def test_loop_skips_when_extract_does_work(self, temp_dir: Path) -> None:
         """When _step_extract returns True the loop continues immediately."""
         config = Config()

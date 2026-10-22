@@ -576,13 +576,13 @@ class PipelineWorker:
                             revision_id,
                         )
                         return
-                if self._step_extract(revision_id):
-                    continue
-                if self._step_chunk(revision_id):
-                    continue
-                if self._step_embed(revision_id):
-                    continue
-                self._mark_revision_ready_if_complete(revision_id)
+                progressed = (
+                    self._step_extract(revision_id)
+                    or self._step_chunk(revision_id)
+                    or self._step_embed(revision_id)
+                )
+                if not progressed:
+                    self._mark_revision_ready_if_complete(revision_id)
             except Exception as error:
                 # A transient failure (Postgres restart, network blip) must not
                 # kill the worker: log, back off, retry. Interrupted rows are
@@ -595,9 +595,15 @@ class PipelineWorker:
                 reported_error = True
                 self._shutdown_event.wait(5 * self.config.pipeline_worker.poll_interval)
                 continue
+            # Any pass that did not raise clears the published error, including
+            # a productive one. Clearing only on an idle pass meant a 10-second
+            # server blip on day one of an import stayed red in `cementic
+            # status` until the import ended (2026-10-22 audit).
             if reported_error:
                 self.state_manager.update(last_error=None, last_error_at=None)
                 reported_error = False
+            if progressed:
+                continue
             self._shutdown_event.wait(self.config.pipeline_worker.poll_interval)
 
     def _record_loop_error(self, error: Exception) -> None:
