@@ -179,13 +179,18 @@ def collect_doctor_report(config: Config) -> dict[str, Any]:
             stranded_chunkings = _stranded_chunkings(conn)
             lexical_facts = lexical_index_facts(conn)
     except Exception as error:
+        # The driver's text runs to several lines plus a "Background on this
+        # error" link. The human report gets its first line, like every other
+        # command's one-line "database not reachable"; the JSON keeps it whole.
+        first_line = str(error).strip().splitlines()[0] if str(error).strip() else ""
         checks["database"] = {
             "status": "fail",
             "reachable": database_ok,
+            "error": str(error),
             "message": (
-                f"{error}. Run `cementic init postgres ./cementic-postgres` once and "
-                "follow its README, or set CEMENTIC_DB_URL to a Postgres with pgvector "
-                "and pgvectorscale."
+                f"not reachable ({first_line}). Run `cementic init postgres "
+                "./cementic-postgres` once and follow its README, or set "
+                "CEMENTIC_DB_URL to a Postgres with pgvector and pgvectorscale."
             ),
         }
         checks["extensions"] = {}

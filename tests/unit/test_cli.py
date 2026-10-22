@@ -108,6 +108,26 @@ class TestConfigCommands:
         forced = runner.invoke(app, ["config", "init", "--force"])
         assert forced.exit_code == 0
 
+    @pytest.mark.parametrize(
+        "argv",
+        [
+            ["search", "q", "-c", "bad name!"],
+            ["search", "   "],
+            ["status", "-c", "Bad Name"],
+            ["extract", ""],
+        ],
+    )
+    def test_a_malformed_argument_is_a_usage_error(self, argv) -> None:
+        """cementic's own argument checks exit 2, like Click's (2026-10-22 audit).
+
+        They exited 1, the "could not" code, so a wrapper retrying on 1 retried
+        a typo forever.
+        """
+        result = runner.invoke(app, argv)
+
+        assert result.exit_code == 2, result.stderr
+        assert result.stdout == ""
+
     def test_search_usage_shows_only_forms_that_parse(self) -> None:
         """Regression (2026-10-22 audit): usage advertised [TRAILING_COLLECTIONS]...
 

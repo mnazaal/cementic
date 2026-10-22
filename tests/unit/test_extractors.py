@@ -485,3 +485,24 @@ class TestCommandVersionProbe:
     def test_a_missing_tool_is_refused(self) -> None:
         with pytest.raises(RuntimeError, match="could not run"):
             command_version(["definitely-not-a-tool"])
+
+
+def test_plaintext_with_a_stray_latin1_byte_still_extracts(tmp_path: Path) -> None:
+    """One non-UTF-8 byte used to fail the whole document (2026-10-22 audit)."""
+    from cementic.extract import _plaintext_extractor
+
+    note = tmp_path / "note.txt"
+    note.write_bytes("caf\xe9 au lait".encode("latin-1"))
+
+    text = _plaintext_extractor(str(note), Config())
+
+    assert text == "caf\ufffd au lait"
+
+
+def test_valid_utf8_plaintext_is_unchanged(tmp_path: Path) -> None:
+    from cementic.extract import _plaintext_extractor
+
+    note = tmp_path / "note.md"
+    note.write_text("café — naïve", encoding="utf-8")
+
+    assert _plaintext_extractor(str(note), Config()) == "café — naïve"

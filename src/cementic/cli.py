@@ -1007,6 +1007,11 @@ def search(
 
     A new collection can return partial results while it builds.
     """
+    if not query.strip():
+        # Checked here, not only in Searcher: an empty query is a usage error
+        # (exit 2), and the library's ValueError reached the generic exit 1.
+        err_console.print("search failed: query cannot be empty")
+        raise typer.Exit(2)
     filters = _build_collection_filters(collections, trailing_collections)
     if filters is not None:
         filters = [_validated_collection_name(c) for c in filters]
@@ -1116,7 +1121,7 @@ def extract(path: str = typer.Argument(..., help="Path to a document file")) -> 
         # Path("") is Path("."), so the directory guard below reported an empty
         # subject: "extract failed:  is a directory, not a document file".
         err_console.print("extract failed: no path given")
-        raise typer.Exit(1)
+        raise typer.Exit(2)
     if Path(path).is_dir():
         # Falling through said "no extractor for '(none)'" -- technically the
         # registry's answer for a suffixless path, but nonsense as a message.

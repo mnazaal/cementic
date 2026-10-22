@@ -503,3 +503,17 @@ class TestStoredProfileCanRelaunchItsModel:
             digests.append(_fingerprint(build_embedding_profile_payload(config, _llama_provider())))
 
         assert digests[0] == digests[1]
+
+
+def test_an_extractor_profile_name_fits_its_column() -> None:
+    """About eight backends overflowed String(100) and killed the worker (2026-10-22)."""
+    from cementic.db import EXTRACTOR_PROFILE_NAME_LENGTH
+    from cementic.profiles import _extractor_profile_name
+
+    extensions = ("docx", "epub", "html", "md", "pdf", "pptx", "txt", "xlsx")
+    backends = {ext: "command" for ext in extensions}
+
+    name = _extractor_profile_name({"backends": backends})
+
+    assert len(name) <= EXTRACTOR_PROFILE_NAME_LENGTH
+    assert name.startswith("docx=command,epub=command")

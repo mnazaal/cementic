@@ -13,7 +13,12 @@ from sqlalchemy.orm import Session
 
 from cementic.chunk import TOKENIZER
 from cementic.config import Config, resolve_llama_model_path
-from cementic.db import ChunkProfile, EmbeddingProfile, ExtractorProfile
+from cementic.db import (
+    EXTRACTOR_PROFILE_NAME_LENGTH,
+    ChunkProfile,
+    EmbeddingProfile,
+    ExtractorProfile,
+)
 from cementic.embedding_provider import EmbeddingFacts, EmbeddingProvider
 from cementic.embedding_runtime import EmbeddingRuntimeSpec, runtime_spec_from_config
 from cementic.embedding_text import describe_text_policy
@@ -248,11 +253,19 @@ def build_embedding_profile_payload(
 
 
 def _extractor_profile_name(payload: dict[str, object]) -> str:
-    """A short display name; the fingerprint carries the real identity."""
+    """A short display name; the fingerprint carries the real identity.
+
+    Capped at the column's length: about eight configured backends overflowed
+    it, and the INSERT then failed with a DataError the get-or-create's
+    IntegrityError handler does not catch, killing the worker at startup
+    (2026-10-22 audit). A truncated name is fine because nothing looks it up.
+    """
     backends = payload.get("backends") or {}
     if not isinstance(backends, dict) or not backends:
         return "default"
-    return ",".join(f"{key}={value}" for key, value in sorted(backends.items()))
+    name = ",".join(f"{key}={value}" for key, value in sorted(backends.items()))
+    limit = EXTRACTOR_PROFILE_NAME_LENGTH
+    return name if len(name) <= limit else name[: limit - 1] + "…"
 
 
 def get_or_create_extractor_profile(session: Session, config: Config) -> ExtractorProfile:

@@ -99,7 +99,10 @@ def _validated_collection_name(collection: str) -> str:
         return validate_collection_name(collection)
     except ValueError as e:
         err_console.print(f"[red]Error: {e}[/red]")
-        raise typer.Exit(1)
+        # 2, not 1: a malformed name is a usage error, the same class Click
+        # exits 2 for. A wrapper that retries on 1 ("could not") would
+        # otherwise retry a typo forever.
+        raise typer.Exit(2)
 
 
 def _get_data_dir() -> Path:

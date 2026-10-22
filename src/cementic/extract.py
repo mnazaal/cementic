@@ -237,7 +237,11 @@ def _raw_pdf_extractor(path: str, config: Config) -> str:
 
 
 def _plaintext_extractor(path: str, config: Config) -> str:
-    return Path(path).read_text(encoding="utf-8")
+    # Replacement rather than strict decoding: one Latin-1 byte in a .txt or a
+    # stray 0xA0 in a .md failed the whole document with a decode traceback
+    # (2026-10-22 audit). Valid UTF-8 extracts exactly as before, so no
+    # document that succeeded before changes.
+    return Path(path).read_text(encoding="utf-8", errors="replace")
 
 
 #: How long an extraction command may run before it is killed. Generous: OCR

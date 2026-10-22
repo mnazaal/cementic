@@ -928,3 +928,32 @@ class TestTokenizerCheck:
         tokenizer_cache_file().write_bytes(b"ranks")
 
         assert _tokenizer_check()["status"] == "ok"
+
+
+class TestUnreachableDatabaseReadsAsOneLine:
+    """`doctor` reports a down database the way every other command does."""
+
+    @patch("cementic.doctor._daemon_state", return_value=(True, True, "reachable"))
+    @patch("cementic.doctor.get_engine")
+    def test_the_message_keeps_only_the_first_line(self, mock_get_engine, _daemon) -> None:
+        mock_get_engine.side_effect = Exception(
+            'connection to server at "127.0.0.1", port 5432 failed: Connection refused\n'
+            "\tIs the server running on that host?\n"
+            "(Background on this error at: https://sqlalche.me/e/20/e3q8)"
+        )
+
+        database = collect_doctor_report(Config())["checks"]["database"]
+
+        assert "\n" not in database["message"]
+        assert "sqlalche.me" not in database["message"]
+        assert database["message"].startswith("not reachable (connection to server")
+        assert "sqlalche.me" in database["error"]
+
+    def test_skipped_extensions_say_why(self, capsys) -> None:
+        from cementic.render import _print_doctor_report
+
+        _print_doctor_report(
+            {"ok": False, "checks": {"database": {"status": "fail"}, "extensions": {}}}
+        )
+
+        assert "extensions: skipped (database not reachable)" in capsys.readouterr().out

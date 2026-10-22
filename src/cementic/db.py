@@ -83,6 +83,10 @@ class SourceDocument(Base):
     )
 
 
+#: Length of `ExtractorProfile.name`; `profiles` truncates display names to it.
+EXTRACTOR_PROFILE_NAME_LENGTH = 100
+
+
 class ExtractorProfile(Base):
     """Immutable extractor configuration definition."""
 
@@ -90,7 +94,7 @@ class ExtractorProfile(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     fingerprint: Mapped[str] = mapped_column(String(128), nullable=False, unique=True)
-    name: Mapped[str] = mapped_column(String(100), nullable=False)
+    name: Mapped[str] = mapped_column(String(EXTRACTOR_PROFILE_NAME_LENGTH), nullable=False)
     config_json: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[datetime] = mapped_column(default=utc_now)
 

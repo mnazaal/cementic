@@ -56,6 +56,11 @@ def _print_doctor_report(report: dict[str, Any]) -> None:
     checks = report["checks"]
     for name, payload in checks.items():
         if name == "extensions":
+            if not payload:
+                # Nothing was inspected because the database was unreachable;
+                # a bare heading read as truncated output.
+                console.print("extensions: skipped (database not reachable)")
+                continue
             console.print("extensions:")
             for extension, extension_payload in payload.items():
                 console.print(
