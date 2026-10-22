@@ -799,8 +799,11 @@ class TestSearchCommand:
         runner.invoke(app, ["search", "test query", "--top-k", "5"])
         mock_searcher.search.assert_called_with("test query", top_k=5, collections=None)
 
-        runner.invoke(app, ["search", "test query", "--limit", "7"])
-        mock_searcher.search.assert_called_with("test query", top_k=7, collections=None)
+        # `--limit` was a third spelling of -n, and `status --limit` means
+        # something else (a file count, where 0 is "all"). Removed 2026-10-22.
+        removed = runner.invoke(app, ["search", "test query", "--limit", "7"])
+        assert removed.exit_code == 2
+        assert "No such option" in removed.stderr
 
 
 class TestBackgroundCommands:

@@ -76,6 +76,9 @@ cementic start DIRECTORY... -c COLLECTION   # watch and index
 cementic search QUERY -c COLLECTION         # search active revision
 cementic status                              # progress and health
 cementic doctor                              # diagnose local setup
+cementic extract FILE                        # one document to Markdown, no database
+cementic chunk [FILE]                        # text to chunk JSONL
+cementic embed                               # chunk JSONL to embedding JSONL
 cementic collection --help                   # revisions, promote, reindex, remove
 cementic embedding --help                    # local embedding runtime
 cementic config --help                       # config location and effective values

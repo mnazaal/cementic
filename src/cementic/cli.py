@@ -974,7 +974,7 @@ def embedding_runtime_status() -> None:
 def search(
     query: str = typer.Argument(..., help="Search query"),
     top_k: int = typer.Option(
-        10, "-n", "--top-k", "--limit", min=1, max=MAX_SEARCH_RESULTS, help="Number of results"
+        10, "-n", "--top-k", min=1, max=MAX_SEARCH_RESULTS, help="Number of results"
     ),
     collections: list[str] | None = typer.Option(
         None,

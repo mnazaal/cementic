@@ -43,6 +43,78 @@ watcher, and pipeline-worker processes.
 Use either those service units or `cementic start`, not both for the same
 collection.
 
+## Machine-readable output
+
+`cementic status --json` and `cementic doctor --json` print one JSON document
+each. `search --json` and `chunk` print JSONL, one object per line. A test
+compares the two shapes below against what the commands build, so a key added
+or renamed without updating this page fails the suite.
+
+`status --json`, with no `-c`:
+
+<!-- json-shape: status -->
+```json
+{
+  "supervisor": {"state": "str", "collection": "str|null", "directories": ["str"]},
+  "source_watcher": {
+    "process": "str", "state": "str", "pid": "str", "processed": "int",
+    "failed": "int", "skipped_files": "list", "current_file": "str|null",
+    "last_error": "str|null", "last_error_at": "str|null"
+  },
+  "pipeline_worker": {
+    "process": "str", "state": "str", "pid": "str", "current_file": "str|null",
+    "last_error": "str|null", "last_error_at": "str|null",
+    "current_activity": "str|null"
+  },
+  "health": {
+    "db_reachable": "bool", "embedding_provider": "str",
+    "embedding_healthy": "bool", "llama_daemon": "str"
+  },
+  "collections": {
+    "NAME": {
+      "documents": "int", "extracted_done": "int", "extracted_failed": "int",
+      "chunked_done": "int", "chunked_failed": "int", "total_chunks": "int",
+      "pending_embeddings": "int", "processing_embeddings": "int",
+      "done_embeddings": "int", "failed_embeddings": "int",
+      "extraction_pct": "float", "chunking_pct": "float", "embedding_pct": "float",
+      "active_revision_label": "str|null", "ready_revision_label": "str|null",
+      "building_revision_label": "str|null"
+    }
+  }
+}
+```
+
+Keys that change with the situation:
+
+- With `-c NAME`, `pipeline` replaces `collections`. It holds one collection's
+  counts plus a `collection` key. With `--verbose` as well, `files` lists
+  per-file progress and `files_truncated` says whether `--limit` cut it.
+- When the health probe fails, `health` keeps its four keys set to `null` and
+  adds `error`.
+- When the database cannot be read, the top level gains `error`, and
+  `collections` or `pipeline` is absent. The command then exits 1.
+
+`doctor --json`:
+
+<!-- json-shape: doctor -->
+```json
+{
+  "ok": "bool",
+  "checks": {
+    "config": {}, "database": {}, "extensions": {}, "model": {}, "daemon": {},
+    "stranded_chunkings": {}, "lexical_index": {}, "chunk_budget": {},
+    "tokenizer": {}, "embedding_server": {}, "ocr": {},
+    "extraction_commands": {}, "extractor_profile": {}, "embedding_canary": {}
+  }
+}
+```
+
+Each check has `status` (`ok`, `warning` or `fail`) and usually `message`. The
+other keys are specific to the check. `extensions` maps each Postgres extension
+to its own `status` and `message`, and is empty when the database is down. Then
+`database` carries the full driver text in `error`. `ok` is false, and the
+command exits 1, when any check fails.
+
 ## Limits
 
 - One CLI-managed indexing session runs at a time. Pass multiple directories to
