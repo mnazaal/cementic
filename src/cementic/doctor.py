@@ -243,6 +243,7 @@ def collect_doctor_report(config: Config) -> dict[str, Any]:
         lexical_facts, hybrid=config.search.hybrid
     )
     checks["chunk_budget"] = _chunk_budget_check(config)
+    checks["tokenizer"] = _tokenizer_check()
     checks["embedding_server"] = _embedding_server_check(config)
     server_ok = checks["embedding_server"]["status"] != "fail"
     checks["ocr"] = _ocr_check(config)
@@ -810,6 +811,32 @@ def _lexical_index_check(facts: LexicalIndexFacts | None, *, hybrid: bool) -> di
             f"{LEXICAL_INDEX_NAME} is missing on a corpus that already holds chunks, "
             "so the exact-word half of every hybrid search matches nothing and only "
             f"the vector arm answers; {repair} (about 6 minutes for 2.3M chunks)"
+        ),
+    }
+
+
+def _tokenizer_check() -> dict[str, Any]:
+    """Report whether the chunking tokenizer is cached locally.
+
+    tiktoken downloads it on first use. A warning rather than a failure when
+    absent: a machine with network fetches it once and is fine, and `doctor`
+    must not download anything itself. Offline, every chunk and every search
+    fails until it is cached, which is what the message says.
+    """
+    from cementic.chunk import TOKENIZER, tokenizer_cache_file
+
+    path = tokenizer_cache_file()
+    cached = path.is_file()
+    return {
+        "status": "ok" if cached else "warning",
+        "path": str(path),
+        "cached": cached,
+        "message": (
+            f"{TOKENIZER} cached"
+            if cached
+            else f"{TOKENIZER} is not cached; the first chunk or search downloads it "
+            "(about 1.7 MB) and fails without network. To fetch it now: "
+            "printf x | cementic chunk"
         ),
     }
 

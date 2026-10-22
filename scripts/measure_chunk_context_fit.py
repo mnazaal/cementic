@@ -35,9 +35,8 @@ from __future__ import annotations
 import sys
 
 import requests
-import tiktoken
 
-from cementic.chunk import TOKENIZER, chunk_text
+from cementic.chunk import TOKENIZER, chunk_text, tokenizer
 from cementic.config import Config
 from cementic.embedding_text import describe_text_policy, format_document_text_for_model
 
@@ -66,7 +65,7 @@ def main() -> int:
         print("start it with `cementic embedding start`", file=sys.stderr)
         return 1
     alias = served[0]["id"]
-    encoding = tiktoken.get_encoding(TOKENIZER)
+    encoding = tokenizer()
     budget = config.llama_cpp.n_ctx
 
     print(f"model      : {config.llama_cpp.model_path}")

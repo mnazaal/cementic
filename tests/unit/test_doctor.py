@@ -904,3 +904,27 @@ def _insert_chunking(
             ),
             {"i": index},
         )
+
+
+class TestTokenizerCheck:
+    """`doctor` says whether the chunking tokenizer is cached (2026-10-22 audit)."""
+
+    def test_missing_is_a_warning_that_says_how_to_fetch_it(self, monkeypatch, tmp_path):
+        from cementic.doctor import _tokenizer_check
+
+        monkeypatch.setenv("TIKTOKEN_CACHE_DIR", str(tmp_path))
+
+        check = _tokenizer_check()
+
+        assert check["status"] == "warning"
+        assert check["cached"] is False
+        assert "cementic chunk" in check["message"]
+
+    def test_present_is_ok(self, monkeypatch, tmp_path):
+        from cementic.chunk import tokenizer_cache_file
+        from cementic.doctor import _tokenizer_check
+
+        monkeypatch.setenv("TIKTOKEN_CACHE_DIR", str(tmp_path))
+        tokenizer_cache_file().write_bytes(b"ranks")
+
+        assert _tokenizer_check()["status"] == "ok"

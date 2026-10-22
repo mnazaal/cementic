@@ -8,11 +8,10 @@ import logging
 # mypy: disable-error-code="import-untyped"
 from typing import Any, TypedDict
 
-import tiktoken
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 
-from cementic.chunk import TOKENIZER
+from cementic.chunk import tokenizer
 from cementic.config import Config, get_config
 from cementic.db import (
     LEXICAL_TEXT_CONFIG,
@@ -76,7 +75,7 @@ def _reject_query_over_context(query: str, n_ctx: int) -> None:
     budget = max(1, int(n_ctx * _QUERY_CONTEXT_MARGIN))
     # disallowed_special=() as in chunk.py: a pasted `<|endoftext|>` is prose
     # to count, not a control token to refuse with an unrelated ValueError.
-    tokens = len(tiktoken.get_encoding(TOKENIZER).encode(query, disallowed_special=()))
+    tokens = len(tokenizer().encode(query, disallowed_special=()))
     if tokens > budget:
         raise ValueError(
             f"query too long: about {tokens} tokens, but the embedding model's "

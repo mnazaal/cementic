@@ -15,7 +15,7 @@ from rich.markup import escape
 
 from cementic import render
 from cementic.bootstrap import Bootstrapper
-from cementic.chunk import chunk_text
+from cementic.chunk import TokenizerUnavailableError, chunk_text
 from cementic.cli_collection import collection_app
 from cementic.cli_format import CementicTyper
 from cementic.cli_shared import (
@@ -1155,6 +1155,10 @@ def chunk(
     overlap = chunk_overlap if chunk_overlap is not None else cfg.pipeline.chunk_overlap
     try:
         pieces = chunk_text(text, chunk_size=size, chunk_overlap=overlap)
+    except TokenizerUnavailableError as error:
+        # A fresh or offline machine: one line, not a 26 KB requests traceback.
+        err_console.print(f"chunk failed: {error}")
+        raise typer.Exit(1)
     except ValueError as error:
         # Reachable from a plausible invocation: passing only --chunk-size leaves
         # the overlap at its (larger) configured default, so say where each value

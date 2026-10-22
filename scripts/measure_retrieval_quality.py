@@ -64,10 +64,9 @@ import urllib.request
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-import tiktoken
 from sqlalchemy import text
 
-from cementic.chunk import TOKENIZER, chunk_text
+from cementic.chunk import TOKENIZER, chunk_text, tokenizer
 from cementic.config import get_config
 from cementic.db import LEXICAL_TEXT_CONFIG, get_engine
 from cementic.embedding_text import (
@@ -1044,7 +1043,7 @@ def compare_sample(conn, collection: str, n: int, rng: random.Random) -> dict:
     start, end = span_token_range(
         STORED_CHUNK_SIZE, STORED_CHUNK_OVERLAP, SPAN_SKIP_CHUNKS, SPAN_CHUNKS
     )
-    encoding = tiktoken.get_encoding(TOKENIZER)
+    encoding = tokenizer()
     papers: list[dict] = []
     misaligned = 0
     for document_id, source_path, artifact in candidates:

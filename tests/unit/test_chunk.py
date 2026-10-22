@@ -215,3 +215,53 @@ class TestUnbrokenRunGuard:
 
         with pytest.raises(ValueError, match="1,001 characters"):
             chunk_text("x" * 1_001, chunk_size=512, chunk_overlap=0)
+
+
+class TestTokenizerCache:
+    """The tokenizer is cached under cementic's data dir (2026-10-22 audit).
+
+    tiktoken's default cache is ``$TMPDIR/data-gym-cache``, wiped at reboot, so
+    an offline machine failed every chunk and search after each boot.
+    """
+
+    def test_the_url_matches_tiktokens_own(self):
+        """`doctor` names the cache file from this URL; drift would make it lie."""
+        import inspect
+
+        import tiktoken_ext.openai_public as openai_public
+
+        from cementic.chunk import TOKENIZER_URL
+
+        assert TOKENIZER_URL in inspect.getsource(openai_public.cl100k_base)
+
+    def test_defaults_to_the_cementic_data_dir(self, monkeypatch):
+        from cementic.chunk import tokenizer_cache_dir
+        from cementic.config import cementic_data_dir
+
+        monkeypatch.delenv("TIKTOKEN_CACHE_DIR", raising=False)
+        monkeypatch.delenv("DATA_GYM_CACHE_DIR", raising=False)
+
+        assert tokenizer_cache_dir() == cementic_data_dir() / "tiktoken"
+
+    def test_a_users_own_location_wins(self, monkeypatch, tmp_path):
+        from cementic.chunk import tokenizer_cache_dir
+
+        monkeypatch.setenv("TIKTOKEN_CACHE_DIR", str(tmp_path))
+
+        assert tokenizer_cache_dir() == tmp_path
+
+    def test_an_unfetchable_tokenizer_is_one_named_error(self, monkeypatch):
+        import requests
+
+        from cementic.chunk import TokenizerUnavailableError, tokenizer
+
+        def offline(_name):
+            raise requests.ConnectionError("Remote end closed connection without response")
+
+        tokenizer.cache_clear()
+        monkeypatch.setattr(tiktoken, "get_encoding", offline)
+        try:
+            with pytest.raises(TokenizerUnavailableError, match="downloaded once on first use"):
+                tokenizer()
+        finally:
+            tokenizer.cache_clear()

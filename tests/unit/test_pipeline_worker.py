@@ -1472,6 +1472,45 @@ class TestStepChunkSelectionIsBounded:
         assert small == large
 
 
+class TestTokenizerOutageIsNotADocumentFailure:
+    """An unfetchable tokenizer must not stamp every document failed (2026-10-22)."""
+
+    def test_the_chunk_step_raises_and_leaves_the_row_claimable(self, temp_dir: Path) -> None:
+        from cementic.chunk import TokenizerUnavailableError
+
+        engine = create_engine("sqlite:///:memory:")
+        Base.metadata.create_all(engine)
+        session_factory = sessionmaker(bind=engine, expire_on_commit=False)
+        with session_factory() as session:
+            revision_id, pending_extracted_id = _seed_chunk_selection_data(
+                session, "offline", n_already_done=0
+            )
+        config = Config()
+        config.pipeline_worker.log_file = temp_dir / "worker.log"
+        worker = PipelineWorker(config)
+        worker.Session = session_factory
+        worker.collection = "offline"
+
+        with (
+            patch("cementic.pipeline_worker.read_extracted_text", return_value="some text"),
+            patch(
+                "cementic.pipeline_worker.chunk_text",
+                side_effect=TokenizerUnavailableError("offline"),
+            ),
+            patch.object(worker.state_manager, "update"),
+            pytest.raises(TokenizerUnavailableError),
+        ):
+            worker._step_chunk(revision_id)
+
+        with session_factory() as session:
+            chunked = (
+                session.query(ChunkedDocument)
+                .filter_by(extracted_document_id=pending_extracted_id)
+                .first()
+            )
+            assert chunked is None or chunked.status not in ("done", "failed")
+
+
 class TestProviderFailuresAreVisible:
     """A provider that is down must not look like an idle worker.
 

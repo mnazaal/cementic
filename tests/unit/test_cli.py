@@ -2754,6 +2754,23 @@ class TestFilterCommands:
         assert first["index"] == 0
         assert "hello world" in first["content"]
 
+    def test_chunk_without_a_tokenizer_is_one_line(self):
+        """Offline on a fresh machine: one stderr line, not a requests traceback.
+
+        Regression (2026-10-22 audit): 26 KB of urllib3 traceback on stderr.
+        """
+        from cementic.chunk import TokenizerUnavailableError
+
+        with patch(
+            "cementic.cli.chunk_text",
+            side_effect=TokenizerUnavailableError("could not load the cl100k_base tokenizer"),
+        ):
+            result = runner.invoke(app, ["chunk"], input="hello world")
+
+        assert result.exit_code == 1
+        assert result.stdout == ""
+        assert result.stderr.strip() == "chunk failed: could not load the cl100k_base tokenizer"
+
     def test_chunk_reads_a_file(self, tmp_path):
         f = tmp_path / "doc.txt"
         f.write_text("some text to chunk", encoding="utf-8")

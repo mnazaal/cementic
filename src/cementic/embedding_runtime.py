@@ -15,9 +15,8 @@ from pathlib import Path
 from typing import Any, Callable
 
 import requests
-import tiktoken
 
-from cementic.chunk import TOKENIZER
+from cementic.chunk import tokenizer
 from cementic.config import Config, resolve_llama_model_path
 from cementic.embedding_provider import EmbeddingFacts, EmbeddingProvider
 from cementic.embedding_text import (
@@ -427,7 +426,7 @@ class RemoteEmbeddingClient(EmbeddingProvider):
         # ordinary prose in NLP papers, and tiktoken's default raise stamped
         # such chunks terminally failed here after chunking had passed them.
         approx = (
-            len(tiktoken.get_encoding(TOKENIZER).encode(text, disallowed_special=()))
+            len(tokenizer().encode(text, disallowed_special=()))
             * _TOKEN_RATIO_UPPER_BOUND
         )
         if not exact and approx <= budget:

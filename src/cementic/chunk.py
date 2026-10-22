@@ -2,14 +2,74 @@
 
 from __future__ import annotations
 
+import functools
+import hashlib
+import os
 import re
 from dataclasses import dataclass
+from pathlib import Path
 
 import tiktoken
+
+from cementic.config import cementic_data_dir
 
 #: Tokenizer used for chunking. Also recorded in chunk profiles (see profiles.py),
 #: so changing it re-versions every chunk profile.
 TOKENIZER = "cl100k_base"
+
+#: Where tiktoken fetches ``TOKENIZER``'s BPE ranks on first use. Mirrors
+#: ``tiktoken_ext.openai_public.cl100k_base``, and a test pins the two together,
+#: because `doctor` derives the cache file's name from it.
+TOKENIZER_URL = "https://openaipublic.blob.core.windows.net/encodings/cl100k_base.tiktoken"
+
+
+class TokenizerUnavailableError(RuntimeError):
+    """The tokenizer file is not cached and could not be downloaded.
+
+    Not a property of any document, so the worker must not stamp a chunk failed
+    for it: every document in the corpus would fail the same way.
+    """
+
+
+def tokenizer_cache_dir() -> Path:
+    """Where the tokenizer file is cached (pure apart from reading the environment).
+
+    tiktoken's own overrides win when set. Otherwise cementic's data dir, not
+    tiktoken's default of ``$TMPDIR/data-gym-cache``: that is wiped at reboot,
+    so every boot silently needed the network again, and an offline machine
+    failed every chunk and every search (2026-10-22 audit).
+    """
+    for variable in ("TIKTOKEN_CACHE_DIR", "DATA_GYM_CACHE_DIR"):
+        if variable in os.environ:
+            return Path(os.environ[variable])
+    return cementic_data_dir() / "tiktoken"
+
+
+def tokenizer_cache_file() -> Path:
+    """The file tiktoken caches ``TOKENIZER`` in: its cache key is the URL's SHA-1."""
+    return tokenizer_cache_dir() / hashlib.sha1(TOKENIZER_URL.encode()).hexdigest()
+
+
+@functools.cache
+def tokenizer() -> tiktoken.Encoding:
+    """The ``TOKENIZER`` encoding, cached under cementic's data dir.
+
+    The one place that loads it, so the cache location is set before tiktoken
+    first looks. Setting the variable is the only side effect, and only when
+    the user has not chosen a location themselves.
+    """
+    if not any(v in os.environ for v in ("TIKTOKEN_CACHE_DIR", "DATA_GYM_CACHE_DIR")):
+        os.environ["TIKTOKEN_CACHE_DIR"] = str(tokenizer_cache_dir())
+    try:
+        return tiktoken.get_encoding(TOKENIZER)
+    except Exception as error:
+        # tiktoken fetches with `requests` and verifies a hash; any failure
+        # here means the ranks are neither cached nor fetchable.
+        raise TokenizerUnavailableError(
+            f"could not load the {TOKENIZER} tokenizer: it is downloaded once on "
+            f"first use and cached in {tokenizer_cache_dir()}, and the download "
+            f"failed ({type(error).__name__}: {error})"
+        ) from error
 
 #: Longest run of non-whitespace characters `chunk_text` will hand the
 #: tokenizer. tiktoken's pre-tokenizer splits on whitespace and then runs BPE
@@ -84,7 +144,7 @@ def chunk_text(
             "(try a different [extraction.backends] pdf backend)"
         )
 
-    encoding = tiktoken.get_encoding(TOKENIZER)
+    encoding = tokenizer()
     # `disallowed_special=()` because tiktoken otherwise refuses any text
     # containing a literal control-token spelling -- `<|endoftext|>` and its
     # siblings -- and raises instead of encoding. That string is ordinary prose

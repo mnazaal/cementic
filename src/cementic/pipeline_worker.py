@@ -16,7 +16,7 @@ import requests
 from sqlalchemy import and_, or_, select, text
 from sqlalchemy.orm import Session
 
-from cementic.chunk import TextChunk, chunk_text
+from cementic.chunk import TextChunk, TokenizerUnavailableError, chunk_text
 from cementic.config import Config, get_config
 from cementic.db import (
     Chunk,
@@ -896,6 +896,11 @@ class PipelineWorker:
             ]
             status = "done"
             error_message = None
+        except TokenizerUnavailableError:
+            # Not this document's fault: failing it would fail every document
+            # the same way. Raise to the loop, which publishes the error and
+            # backs off; the row stays claimable and is retried next pass.
+            raise
         except Exception as error:
             chunk_items = []
             status = "failed"

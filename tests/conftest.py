@@ -18,6 +18,12 @@ from tests.fixtures.generate_pdfs import ensure_fixture_pdfs
 # Ensure DB password env var is set for all tests; matches compose.yml's default.
 os.environ.setdefault("CEMENTIC_DB_PASSWORD", "cementic")
 
+# The tokenizer cache must outlive the data-dir isolation below. cementic caches
+# the tokenizer under its data dir, which is a fresh temp dir per test, so the
+# suite would download it every session. Keep tiktoken's own default location.
+if not {"TIKTOKEN_CACHE_DIR", "DATA_GYM_CACHE_DIR"} & os.environ.keys():
+    os.environ["TIKTOKEN_CACHE_DIR"] = os.path.join(tempfile.gettempdir(), "data-gym-cache")
+
 
 @pytest.fixture(scope="session", autouse=True)
 def _ensure_pdf_fixtures() -> None:
