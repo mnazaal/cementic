@@ -722,6 +722,38 @@ class TestARenameKeepsTheDocument:
             assert document.status != "deleted"
             assert session.query(Chunk).filter_by(document_id=document_id).count() == 3
 
+    def test_a_renamed_directory_keeps_every_document(
+        self, watcher_config: Config, watcher_db, temp_dir: Path
+    ) -> None:
+        """Fed the per-file events watchdog's inotify emitter synthesises for a
+        directory rename (`generate_sub_moved_events`, observers/inotify.py)."""
+        from watchdog.events import generate_sub_moved_events
+
+        _engine, session_factory, _db_path = watcher_db
+        root = temp_dir / "Papers"
+        (root / "2024").mkdir(parents=True)
+        for name in ("a.md", "b.md"):
+            (root / "2024" / name).write_text(name, encoding="utf-8")
+        sw = self._watcher(watcher_config, session_factory, root)
+        for name in ("a.md", "b.md"):
+            sw._register_document(str(root / "2024" / name))
+            with session_factory() as session:
+                _give_document_a_chunk(session, str((root / "2024" / name).resolve()), "papers")
+        with session_factory() as session:
+            ids = sorted(d.id for d in session.query(SourceDocument))
+
+        (root / "2024").rename(root / "archive-2024")
+        for event in generate_sub_moved_events(str(root / "2024"), str(root / "archive-2024")):
+            self._move(sw, Path(event.src_path), Path(event.dest_path))
+
+        with session_factory() as session:
+            documents = session.query(SourceDocument).order_by(SourceDocument.id).all()
+            assert [d.id for d in documents] == ids
+            assert [d.source_path for d in documents] == [
+                str((root / "archive-2024" / name).resolve()) for name in ("a.md", "b.md")
+            ]
+            assert session.query(Chunk).count() == 2
+
     def test_a_destination_holding_its_own_chunks_falls_back_to_delete(
         self, watcher_config: Config, watcher_db, temp_dir: Path
     ) -> None:
