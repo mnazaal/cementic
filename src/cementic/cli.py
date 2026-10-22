@@ -38,7 +38,12 @@ from cementic.cli_shared import (
     err_console,
 )
 from cementic.collections import collection_exists, list_collections
-from cementic.config import config_path_error, default_config_path, resolve_config_path
+from cementic.config import (
+    config_init_target,
+    config_path_error,
+    default_config_path,
+    resolve_config_path,
+)
 from cementic.doctor import collect_doctor_report
 from cementic.embedding_runtime import (
     create_provider,
@@ -164,7 +169,13 @@ def config_init(
     force: bool = typer.Option(False, "--force", help="Overwrite an existing config file"),
 ) -> None:
     """Write the complete annotated reference for settings and defaults."""
-    path = default_config_path()
+    path, shadowed_by = config_init_target()
+    if shadowed_by is not None:
+        err_console.print(
+            f"{shadowed_by} takes precedence over {path}, so a file written there "
+            f"would be ignored; edit {shadowed_by} instead"
+        )
+        raise typer.Exit(1)
     if path.exists() and not force:
         err_console.print(f"config already exists at {path} (use --force to overwrite)")
         raise typer.Exit(1)
@@ -969,11 +980,17 @@ def search(
         None,
         "-c",
         "--collection",
-        help="Filter collections; supports '-c work personal' or repeated '-c'.",
+        help=(
+            "Collections to search. Names follow the query: "
+            "'QUERY -c work personal', or repeat '-c work -c personal'."
+        ),
     ),
+    # Hidden from the argument list, and shown in usage as the -c form it
+    # really is: it only carries the extra names in 'QUERY -c a b',
+    # and advertising it as a positional made 'search QUERY a' and
+    # 'search -c a b QUERY' look valid when neither is (2026-10-22 audit).
     trailing_collections: list[str] | None = typer.Argument(
-        None,
-        help="Additional collections after --collection/-c",
+        None, hidden=True, metavar="[-c COLLECTION...]"
     ),
     scores: bool = typer.Option(
         False,

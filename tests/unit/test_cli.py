@@ -108,6 +108,44 @@ class TestConfigCommands:
         forced = runner.invoke(app, ["config", "init", "--force"])
         assert forced.exit_code == 0
 
+    def test_search_usage_shows_only_forms_that_parse(self) -> None:
+        """Regression (2026-10-22 audit): usage advertised [TRAILING_COLLECTIONS]...
+
+        That positional is accepted only after -c, so `search q research` and
+        `search -c a b q` both looked valid from the help and both failed.
+        """
+        result = runner.invoke(app, ["search", "--help"])
+
+        assert result.exit_code == 0
+        assert "TRAILING_COLLECTIONS" not in result.stdout
+        assert "QUERY [-c COLLECTION...]" in result.stdout
+
+    def test_init_refuses_to_write_a_file_a_local_config_shadows(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """Regression (2026-10-22 audit): init wrote a user-dir file nothing read."""
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "cementic.toml").write_text("[pipeline]\n", encoding="utf-8")
+
+        result = runner.invoke(app, ["config", "init"])
+
+        assert result.exit_code == 1
+        assert "cementic.toml" in result.stderr
+        assert "edit" in result.stderr
+        assert not default_config_path().exists()
+
+    def test_init_writes_the_file_cementic_config_names(self, tmp_path, monkeypatch) -> None:
+        target = tmp_path / "mine.toml"
+        monkeypatch.setenv("CEMENTIC_CONFIG", str(target))
+
+        result = runner.invoke(app, ["config", "init"])
+
+        assert result.exit_code == 0
+        assert target.is_file()
+        assert not default_config_path().exists()
+        path = runner.invoke(app, ["config", "path"])
+        assert path.stdout.strip() == str(target)
+
     def test_show_outputs_effective_json(self, tmp_path, monkeypatch) -> None:
         monkeypatch.setattr("cementic.cli_shared._config", None)  # reset cached singleton
         cfg = tmp_path / "cementic.toml"

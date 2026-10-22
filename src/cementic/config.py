@@ -97,6 +97,23 @@ def default_config_path() -> Path:
     return Path(user_config_dir("cementic")) / "config.toml"
 
 
+def config_init_target() -> tuple[Path, Path | None]:
+    """Where `cementic config init` writes, and the file that would shadow it.
+
+    ``CEMENTIC_CONFIG`` when set, since it outranks every other location;
+    otherwise the user config dir, which a project-local ``./cementic.toml``
+    outranks. Init used to write the user dir unconditionally, so with either
+    of the others in play it wrote a file no command reads (2026-10-22 audit).
+    """
+    explicit = os.environ.get("CEMENTIC_CONFIG")
+    if explicit:
+        expanded = _expand_user_path(explicit)
+        if expanded is not None:
+            return expanded, None
+    local = Path.cwd() / "cementic.toml"
+    return default_config_path(), (local if local.is_file() else None)
+
+
 def cementic_data_dir(*, ensure_exists: bool = False) -> Path:
     """Return the cementic user-data directory (where artifacts/models live)."""
     return Path(user_data_dir("cementic", ensure_exists=ensure_exists))
