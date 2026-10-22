@@ -336,10 +336,12 @@ class DocumentEventHandler(FileSystemEventHandler):
         watched_roots: Iterable[Path] = (),
         delete_directory_callback: Callable[[str], None] | None = None,
         extensions: Iterable[str] | None = None,
+        move_callback: Callable[[str, str], None] | None = None,
     ) -> None:
         self.callback = callback
         self.delete_callback = delete_callback
         self.delete_directory_callback = delete_directory_callback
+        self.move_callback = move_callback
         self._ignored_directories = set(ignore_directories)
         # Plain data, like ignore_directories above, rather than a Config: the
         # set is config-dependent now (the `command` extractor's file types come
@@ -443,9 +445,23 @@ class DocumentEventHandler(FileSystemEventHandler):
         dest_path = (
             event.dest_path.decode() if isinstance(event.dest_path, bytes) else event.dest_path
         )
-        if self.delete_callback and self._should_process(src_path):
+        timer = self._timers.pop(src_path, None)
+        if timer:
+            timer.cancel()
+        source_tracked = self._should_process(src_path)
+        dest_tracked = self._should_process(dest_path)
+        if source_tracked and dest_tracked and self.move_callback:
+            # A rename keeps the document: repath its row, so its extraction,
+            # chunks and vectors survive. Handled as delete-then-create it
+            # purged them all, and `mv papers/2024 papers/archive` re-embedded
+            # every file under it, one FileMovedEvent each (2026-10-22 audit).
+            self.move_callback(src_path, dest_path)
+        elif source_tracked and self.delete_callback:
             self.delete_callback(src_path)
-        if self._should_process(dest_path):
+        if dest_tracked:
+            # Still registered, as before: this re-hashes the file, so an edit
+            # made on the way still re-indexes it, and a repath that could not
+            # apply falls back to an ordinary registration.
             self._debounced_process(dest_path)
 
 
@@ -594,6 +610,7 @@ class SourceWatcher:
             watched_roots=self._watched_roots,
             delete_directory_callback=self._on_directory_deleted,
             extensions=supported_extensions(self.config),
+            move_callback=self._on_file_moved,
         )
         self._event_handler = event_handler
         for path in self._watched_roots:
@@ -762,6 +779,14 @@ class SourceWatcher:
             # the deleted file kept "existing" in search with nothing visible
             # in `status` beyond a log line the user has to know to look for.
             self.state_manager.record_skipped(file_path, f"deletion failed: {error}")
+            self._record_error(error)
+
+    def _on_file_moved(self, src_path: str, dest_path: str) -> None:
+        try:
+            self._mark_document_moved(src_path, dest_path)
+        except Exception as error:
+            self._logger.error("Failed to repath %s -> %s: %s", src_path, dest_path, error)
+            self.state_manager.record_skipped(src_path, f"rename failed: {error}")
             self._record_error(error)
 
     def _on_directory_deleted(self, dir_path: str) -> None:
@@ -983,6 +1008,51 @@ class SourceWatcher:
             session.commit()
         self._logger.info(
             "Marked document deleted: %s (collection=%s)", normalized_path, self.collection
+        )
+
+    def _mark_document_moved(self, src_path: str, dest_path: str) -> None:
+        """Repath the document at ``src_path`` to ``dest_path``, keeping its work.
+
+        Falls back to the delete the move used to be whenever a plain repath
+        would lose something: when the destination is outside the watched
+        roots, or already belongs to another document that holds chunks.
+        An occupant without chunks is a twin the scan registered first, which
+        `_merge_prior_root_document` already resolves the same way.
+        """
+        source = self._normalize_watched_path(src_path, must_exist=False)
+        dest = self._normalize_watched_path(dest_path, must_exist=True)
+        if source is None:
+            return
+        if dest is None:
+            self._mark_document_deleted(src_path)
+            return
+        with self.Session() as session:
+            document = (
+                session.query(SourceDocument)
+                .filter_by(source_path=source, collection=self.collection)
+                .filter(SourceDocument.status != "deleted")
+                .first()
+            )
+            if document is None:
+                return
+            occupant = (
+                session.query(SourceDocument)
+                .filter_by(source_path=dest, collection=self.collection)
+                .first()
+            )
+            if occupant is not None:
+                if _documents_holding_chunks(session, [occupant.id]):
+                    session.rollback()
+                    self._mark_document_deleted(src_path)
+                    return
+                session.delete(occupant)
+                # Before the repath: the unique index on (collection,
+                # source_path) would otherwise refuse it.
+                session.flush()
+            document.source_path = dest
+            session.commit()
+        self._logger.info(
+            "Document renamed: %s -> %s (collection=%s)", source, dest, self.collection
         )
 
     def _mark_documents_deleted_under(self, dir_path: str) -> None:

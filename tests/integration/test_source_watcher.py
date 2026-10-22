@@ -9,6 +9,7 @@ from unittest.mock import patch
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
+from watchdog.events import FileMovedEvent
 
 from cementic.config import Config
 from cementic.db import (
@@ -636,6 +637,84 @@ def _give_document_a_chunk(
             )
         )
     session.commit()
+
+
+class TestARenameKeepsTheDocument:
+    """A rename inside the watched tree repaths the row (2026-10-22 audit).
+
+    It was handled as delete-then-create: the delete purged the document's
+    chunks and vectors, and the create registered a fresh row, so renaming a
+    directory re-extracted and re-embedded everything under it.
+    """
+
+    def _watcher(self, watcher_config, session_factory, root: Path) -> SourceWatcher:
+        sw = SourceWatcher(watcher_config)
+        sw.Session = session_factory
+        sw.collection = "papers"
+        sw._watched_roots = [root.resolve()]
+        return sw
+
+    def _move(self, sw: SourceWatcher, old: Path, new: Path) -> None:
+        handler = DocumentEventHandler(
+            sw._on_file_detected,
+            sw._on_file_deleted,
+            watched_roots=sw._watched_roots,
+            move_callback=sw._on_file_moved,
+        )
+        handler._debounced_process = sw._on_file_detected  # type: ignore[method-assign]
+        handler.on_moved(FileMovedEvent(str(old), str(new)))
+
+    def test_a_renamed_file_keeps_its_row_and_chunks(
+        self, watcher_config: Config, watcher_db, temp_dir: Path
+    ) -> None:
+        _engine, session_factory, _db_path = watcher_db
+        root = temp_dir / "Papers"
+        root.mkdir()
+        old = root / "draft.md"
+        old.write_text("content", encoding="utf-8")
+        sw = self._watcher(watcher_config, session_factory, root)
+        sw._register_document(str(old))
+        with session_factory() as session:
+            _give_document_a_chunk(session, str(old.resolve()), "papers", chunks=3)
+            document_id = session.query(SourceDocument).one().id
+
+        new = root / "archive" / "final.md"
+        new.parent.mkdir()
+        old.rename(new)
+        self._move(sw, old, new)
+
+        with session_factory() as session:
+            document = session.query(SourceDocument).one()
+            assert document.id == document_id
+            assert document.source_path == str(new.resolve())
+            assert document.status != "deleted"
+            assert session.query(Chunk).filter_by(document_id=document_id).count() == 3
+
+    def test_a_destination_holding_its_own_chunks_falls_back_to_delete(
+        self, watcher_config: Config, watcher_db, temp_dir: Path
+    ) -> None:
+        """Two documents with work: the repath cannot keep both, so the move
+        is the delete-then-create it always was, and nothing is merged."""
+        _engine, session_factory, _db_path = watcher_db
+        root = temp_dir / "Papers"
+        root.mkdir()
+        old, new = root / "a.md", root / "b.md"
+        old.write_text("a", encoding="utf-8")
+        new.write_text("b", encoding="utf-8")
+        sw = self._watcher(watcher_config, session_factory, root)
+        sw._register_document(str(old))
+        sw._register_document(str(new))
+        with session_factory() as session:
+            _give_document_a_chunk(session, str(old.resolve()), "papers")
+            _give_document_a_chunk(session, str(new.resolve()), "papers")
+
+        old.replace(new)
+        self._move(sw, old, new)
+
+        with session_factory() as session:
+            by_path = {d.source_path: d.status for d in session.query(SourceDocument)}
+            assert by_path[str(old.resolve())] == "deleted"
+            assert by_path[str(new.resolve())] != "deleted"
 
 
 class TestRetiringAStaleIdentityNeverLosesTheWork:

@@ -100,6 +100,35 @@ class TestDocumentEventHandler:
         assert detected == ["/notes/new.md"]
 
 
+    def test_a_rename_between_tracked_paths_is_a_move_not_a_delete(self):
+        detected, deleted, moved = [], [], []
+        handler = DocumentEventHandler(
+            detected.append, deleted.append, move_callback=lambda s, d: moved.append((s, d))
+        )
+        handler._debounced_process = detected.append  # type: ignore[method-assign]
+
+        handler.on_moved(
+            MagicMock(is_directory=False, src_path="/notes/old.md", dest_path="/notes/new.md")
+        )
+
+        assert moved == [("/notes/old.md", "/notes/new.md")]
+        assert deleted == []
+        assert detected == ["/notes/new.md"]
+
+    def test_a_rename_to_an_untracked_name_is_still_a_delete(self):
+        deleted, moved = [], []
+        handler = DocumentEventHandler(
+            lambda _p: None, deleted.append, move_callback=lambda s, d: moved.append((s, d))
+        )
+
+        handler.on_moved(
+            MagicMock(is_directory=False, src_path="/notes/old.md", dest_path="/notes/old.md.bak")
+        )
+
+        assert deleted == ["/notes/old.md"]
+        assert moved == []
+
+
 class TestSourceWatcher:
     """Test document watcher behavior."""
 
