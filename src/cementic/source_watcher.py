@@ -337,6 +337,7 @@ class DocumentEventHandler(FileSystemEventHandler):
         delete_directory_callback: Callable[[str], None] | None = None,
         extensions: Iterable[str] | None = None,
         move_callback: Callable[[str, str], None] | None = None,
+        timer_factory: Callable[..., Any] = threading.Timer,
     ) -> None:
         self.callback = callback
         self.delete_callback = delete_callback
@@ -354,6 +355,9 @@ class DocumentEventHandler(FileSystemEventHandler):
         self._watched_roots = [Path(root) for root in watched_roots]
         self._timers: dict[str, Any] = {}
         self._debounce_seconds = 2.0
+        # Injectable so the debounce can be tested by firing timers directly
+        # rather than sleeping past real ones.
+        self._timer_factory = timer_factory
 
     def _is_ignored(self, file_path: str) -> bool:
         """Whether a directory *below the watched root* is one the watcher skips.
@@ -392,7 +396,9 @@ class DocumentEventHandler(FileSystemEventHandler):
         if existing_timer:
             existing_timer.cancel()
 
-        timer = threading.Timer(self._debounce_seconds, self._run_callback, args=(file_path,))
+        timer = self._timer_factory(
+            self._debounce_seconds, self._run_callback, args=(file_path,)
+        )
         timer.daemon = True
         self._timers[file_path] = timer
         timer.start()

@@ -2,7 +2,6 @@
 
 import os
 import signal
-import time
 from pathlib import Path
 from unittest.mock import patch
 
@@ -41,6 +40,37 @@ def watcher_db(temp_dir: Path):
     Base.metadata.create_all(engine)
     session_factory = sessionmaker(bind=engine)
     return engine, session_factory, db_path
+
+
+class _FakeTimer:
+    """A `threading.Timer` stand-in that fires only when told to."""
+
+    def __init__(self, delay, function, args=()) -> None:
+        self.delay, self.function, self.args = delay, function, args
+        self.started = self.cancelled = False
+
+    def start(self) -> None:
+        self.started = True
+
+    def cancel(self) -> None:
+        self.cancelled = True
+
+
+class _FakeTimers:
+    """Timer factory recording every timer, so a test can fire them in order."""
+
+    def __init__(self) -> None:
+        self.created: list[_FakeTimer] = []
+
+    def __call__(self, delay, function, args=()) -> _FakeTimer:
+        timer = _FakeTimer(delay, function, args)
+        self.created.append(timer)
+        return timer
+
+    def fire_all(self) -> None:
+        for timer in self.created:
+            if timer.started and not timer.cancelled:
+                timer.function(*timer.args)
 
 
 class TestIgnoredDirectories:
@@ -335,41 +365,41 @@ class TestDocumentEventHandler:
         assert handler._should_process("noext") is False
 
     def test_debounced_process_fires(self) -> None:
-        callback_called = []
-        handler = DocumentEventHandler(lambda p: callback_called.append(p))
-        handler._debounce_seconds = 0.01
+        callback_called: list[str] = []
+        timers = _FakeTimers()
+        handler = DocumentEventHandler(callback_called.append, timer_factory=timers)
 
         handler._debounced_process("/tmp/test.pdf")
+        assert callback_called == []
+        timers.fire_all()
 
-        # Wait briefly for timer to fire
-        time.sleep(0.1)
-        assert len(callback_called) == 1
-        assert callback_called[0] == "/tmp/test.pdf"
+        assert callback_called == ["/tmp/test.pdf"]
+        assert timers.created[0].delay == handler._debounce_seconds
 
     def test_debounced_cancel_replaced(self) -> None:
         """Second trigger on same path cancels first timer."""
-        callback_called = []
-        handler = DocumentEventHandler(lambda p: callback_called.append(p))
-        handler._debounce_seconds = 0.03
+        callback_called: list[str] = []
+        timers = _FakeTimers()
+        handler = DocumentEventHandler(callback_called.append, timer_factory=timers)
 
         handler._debounced_process("/tmp/test.pdf")
         handler._debounced_process("/tmp/test.pdf")  # Same path → cancels first
+        timers.fire_all()
 
-        time.sleep(0.2)
-        # Only one callback should have fired (first was cancelled)
-        assert len(callback_called) == 1
+        assert [timer.cancelled for timer in timers.created] == [True, False]
+        assert callback_called == ["/tmp/test.pdf"]
 
     def test_cancel_all_clears_timers(self) -> None:
-        callback_called = []
-        handler = DocumentEventHandler(lambda p: callback_called.append(p))
-        handler._debounce_seconds = 0.05
+        callback_called: list[str] = []
+        timers = _FakeTimers()
+        handler = DocumentEventHandler(callback_called.append, timer_factory=timers)
 
         handler._debounced_process("/tmp/test.pdf")
         handler.cancel_all()
+        timers.fire_all()
 
-        time.sleep(0.1)
-        assert len(callback_called) == 0
-        assert len(handler._timers) == 0
+        assert callback_called == []
+        assert handler._timers == {}
 
     def test_on_created_non_pdf_ignored(self) -> None:
         callback_called = []
@@ -381,15 +411,17 @@ class TestDocumentEventHandler:
         assert len(callback_called) == 0
 
     def test_on_modified_debounces(self) -> None:
-        callback_called = []
-        handler = DocumentEventHandler(lambda p: callback_called.append(p))
-        handler._debounce_seconds = 0.01
         from watchdog.events import FileModifiedEvent
-        event = FileModifiedEvent("/tmp/test.pdf")
-        handler.on_modified(event)
-        time.sleep(0.1)
-        assert len(callback_called) == 1
 
+        callback_called: list[str] = []
+        timers = _FakeTimers()
+        handler = DocumentEventHandler(callback_called.append, timer_factory=timers)
+
+        handler.on_modified(FileModifiedEvent("/tmp/test.pdf"))
+        handler.on_modified(FileModifiedEvent("/tmp/test.pdf"))
+        timers.fire_all()
+
+        assert callback_called == ["/tmp/test.pdf"]
 
 class TestDirectoryMoveDeletion:
     """A directory moved out of the watched tree must drop out of search live.

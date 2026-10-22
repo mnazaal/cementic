@@ -30,14 +30,6 @@ from cementic.db import get_engine, get_session_factory
 collection_app = CementicTyper(help="Inspect and manage collections")
 
 
-@collection_app.callback(invoke_without_command=True)
-def collection_callback(ctx: typer.Context) -> None:
-    """Show collection subcommand help when no subcommand is provided."""
-    if ctx.invoked_subcommand is None:
-        typer.echo(ctx.get_help())
-        raise typer.Exit()
-
-
 @collection_app.command(
     "remove",
     short_help="Delete a collection and its artifacts",

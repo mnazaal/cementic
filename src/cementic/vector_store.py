@@ -65,43 +65,6 @@ def create_table_sql(profile_id: int, dim: int) -> str:
     )
 
 
-def backfill_filter_columns_sql(profile_id: int) -> str:
-    """Populate the filter columns from the joins they replace.
-
-    Derived from the existing rows, so an upgrade costs one UPDATE rather than
-    re-embedding the corpus -- which at a few hundred thousand chunks is the
-    difference between a minute and a day.
-    """
-    table = vector_table_name(profile_id)
-    return (
-        f"UPDATE {table} ev SET collection = sd.collection, "
-        "extractor_profile_id = ed.extractor_profile_id, "
-        "chunk_profile_id = cd.chunk_profile_id "
-        "FROM chunks_v2 c "
-        "JOIN chunked_documents cd ON c.chunked_document_id = cd.id "
-        "JOIN extracted_documents ed ON cd.extracted_document_id = ed.id "
-        "JOIN source_documents sd ON c.document_id = sd.id "
-        "WHERE ev.chunk_id = c.id AND ev.collection IS NULL"
-    )
-
-
-def enforce_filter_columns_sql(profile_id: int) -> list[str]:
-    """Drop any row the backfill could not resolve, then require the columns.
-
-    A leftover NULL row is unreachable by search anyway; leaving it nullable
-    would let it sit there looking indexed. There should be none -- the vector
-    table's foreign key cascades from ``chunks_v2`` -- so this is a guard, not a
-    routine step.
-    """
-    table = vector_table_name(profile_id)
-    return [
-        f"DELETE FROM {table} WHERE collection IS NULL",
-        f"ALTER TABLE {table} ALTER COLUMN collection SET NOT NULL",
-        f"ALTER TABLE {table} ALTER COLUMN extractor_profile_id SET NOT NULL",
-        f"ALTER TABLE {table} ALTER COLUMN chunk_profile_id SET NOT NULL",
-    ]
-
-
 def drop_table_sql(profile_id: int) -> str:
     """DDL to drop one profile's vector table."""
     return f"DROP TABLE IF EXISTS {vector_table_name(profile_id)}"

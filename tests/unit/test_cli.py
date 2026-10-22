@@ -8,7 +8,6 @@ from unittest.mock import MagicMock, patch
 import pytest
 import typer
 from sqlalchemy.exc import OperationalError
-from typer import Context
 from typer.testing import CliRunner
 
 from cementic import cli as cementic_cli
@@ -19,7 +18,6 @@ from cementic.cli import (
     _supervisor_processes,
     app,
 )
-from cementic.cli_collection import collection_callback
 from cementic.collections import PromotionOutcome, ReindexOutcome
 from cementic.config import Config, default_config_path
 from cementic.embedding_runtime import DaemonHealth
@@ -1986,21 +1984,6 @@ class TestCliHelpers:
                 pass
             else:
                 raise AssertionError("Expected RuntimeError")
-
-
-class TestCollectionCallback:
-    """Tests for collection_callback."""
-
-    def test_callback_without_subcommand(self, monkeypatch):
-        """collection_callback prints help and exits when no subcommand."""
-        mock_ctx = MagicMock(spec=Context)
-        mock_ctx.invoked_subcommand = None
-        mock_ctx.get_help.return_value = "help text here"
-        try:
-            collection_callback(mock_ctx)
-        except typer.Exit:
-            pass  # expected
-        mock_ctx.get_help.assert_called_once()
 
 
 class TestRemovePrompt:

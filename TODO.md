@@ -155,7 +155,7 @@ the `pg_engine` fixture brings up `compose.yml`'s pgvector+vectorscale
 container itself. Keep it green with `./scripts/check.sh` before pushing.
 
 Both gaps the 2026-08-14 review recorded here are closed: the 3.14 sqlite
-engine leak (autouse dispose fixture, `tests/unit/conftest.py`) and the
+engine leak (autouse dispose fixture, `tests/conftest.py`) and the
 missing pipeline-failure-to-status connection
 (`test_status_verbose_reports_a_real_extraction_and_embedding_failure`).
 
@@ -176,8 +176,9 @@ missing pipeline-failure-to-status connection
   small machines.
 - **Build llama-cpp-python with Vulkan** so the iGPU works under
   `daemon_autostart` instead of an externally-run `llama-server`. Less pressing
-  than it looked: the external server needs no code change, is documented in
-  README ("Running embeddings on a GPU"), and is now supervised by the systemd
+  than it looked: the external server needs no code change, was documented in
+  README's "Running embeddings on a GPU" until `6df8ab9` removed it (read it
+  with `git show 6df8ab9^:README.md`), and is now supervised by the systemd
   units, so the practical gap this would close is small. Blocked on `glslc`,
   which is neither packaged here nor on PyPI — it needs shaderc from source.
 - ~~**Cut indexing wall clock at corpus scale.**~~ **Done 2026-08-24.** 26 days
@@ -185,7 +186,7 @@ missing pipeline-failure-to-status connection
   iGPU via an external llama-server (~490 h → ~108 h measured end to end), and
   denormalising the embedding claim so it stays flat instead of degrading with
   the completed fraction. Numbers in README's "Measurements behind the
-  defaults". Three levers that did **not** pay, so nobody re-tries them: thread
+  defaults" as of `6df8ab9^` (`git show 6df8ab9^:README.md`). Three levers that did **not** pay, so nobody re-tries them: thread
   pinning (this machine's run-to-run spread reached 53%, which swamps any
   thread-count effect), `batch_size = 128` (3.12 chunk/s against 32's 4.27,
   though one sample each cannot separate that from noise — the point is there

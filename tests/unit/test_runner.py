@@ -2,6 +2,7 @@
 
 from unittest.mock import patch
 
+import pytest
 from typer.testing import CliRunner
 
 from cementic.runner import app
@@ -31,15 +32,6 @@ class TestRunnerCommands:
     def test_source_watcher_missing_directories(self) -> None:
         result = runner.invoke(app, ["source-watcher"])
         assert result.exit_code != 0
-
-    @patch("cementic.runner.get_config")
-    @patch("cementic.runner.SourceWatcher")
-    @patch("cementic.runner.Bootstrapper")
-    def test_source_watcher_calls_start(self, mock_boot, mock_watcher, mock_cfg) -> None:
-        runner.invoke(app, ["source-watcher", "/tmp/test", "-c", "mycoll"])
-        # Errors may occur due to mocks not being fully set up
-        # We just verify the command runs and calls our mock
-        assert mock_watcher.called or mock_cfg.called or mock_boot.called
 
     def test_source_watcher_reports_a_broken_config_on_stderr(self, tmp_path, monkeypatch) -> None:
         """`_load_config` was entirely untested before it shared `render_config_error`
@@ -108,3 +100,57 @@ class TestRunnerErrorExits:
         result = runner.invoke(app, ["source-watcher", "/tmp/x"])
         assert result.exit_code == 1
         assert "Bootstrap failed: db unreachable" in result.stderr
+
+
+class TestRunnerLifecycle:
+    """Folded from the former tests/integration/test_runner.py (2026-10-22)."""
+
+    @pytest.mark.parametrize(
+        ("argv", "worker_class", "expected_start"),
+        [
+            (
+                ["source-watcher", "/tmp/a", "-c", "mycoll"],
+                "cementic.runner.SourceWatcher",
+                ((["/tmp/a"],), {"collection": "mycoll"}),
+            ),
+            (
+                ["pipeline-worker", "-c", "mycoll"],
+                "cementic.runner.PipelineWorker",
+                ((), {"collection": "mycoll"}),
+            ),
+        ],
+    )
+    def test_ctrl_c_during_start_stops_cleanly_with_exit_0(
+        self, argv, worker_class, expected_start
+    ) -> None:
+        with (
+            patch("cementic.runner.get_config"),
+            patch("cementic.runner.Bootstrapper"),
+            patch(worker_class) as worker_cls,
+        ):
+            worker = worker_cls.return_value
+            worker.start.side_effect = KeyboardInterrupt
+            worker.fatal_reason = None
+
+            result = runner.invoke(app, argv)
+
+        assert result.exit_code == 0
+        args, kwargs = expected_start
+        worker.start.assert_called_once_with(*args, **kwargs)
+        worker.stop.assert_called_once()
+
+    @patch("cementic.runner.get_config")
+    @patch("cementic.runner.Bootstrapper")
+    @patch("cementic.runner.PipelineWorker")
+    def test_a_fatal_reason_after_start_returns_exits_1(
+        self, mock_worker, mock_boot, mock_cfg
+    ) -> None:
+        """A startup failure that returns instead of raising (already running,
+        lock held) used to be indistinguishable from success by exit code."""
+        mock_worker.return_value.start.return_value = None
+        mock_worker.return_value.fatal_reason = "already running"
+
+        result = runner.invoke(app, ["pipeline-worker"])
+
+        assert result.exit_code == 1
+        mock_worker.return_value.stop.assert_not_called()
