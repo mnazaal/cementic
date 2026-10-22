@@ -5,17 +5,15 @@
 
 **Entry point: "Execution order (2026-10-22)" below, the only live plan.**
 Correctness steps 1-8, the four "Audit additions" and four "Packaging, docs and
-deletions" items are DONE on branch `claude/audit-fixes`, pending the user's
-gate. Each step carries its commit. Next unstarted work: "User-facing CLI"
+deletions" items are DONE on branch `claude/audit-fixes`. The user's gate
+passed on `92fce41`, all checks including integration-pg (2026-10-22). Each step carries its commit. Next unstarted work: "User-facing CLI"
 (the import diet first), then "Schema retrofits and efficiency".
 
-**Branch `claude/audit-fixes`**, 14 commits on `73b5d4c`, not merged. Last
-commit `f667e21` repairs a cold review's findings. Those repairs have not been
-re-reviewed. Not provable in the agent sandbox: the pg tests (port 5432 is
-blocked), including the new `attempts` retrofit test, and any test that
-loads the tokenizer. In the sandbox the non-pg suite shows the 60 baseline
-tiktoken failures plus two chunk-step tests that now reach the tokenizer
-before claiming. Both should pass with network.
+**Branch `claude/audit-fixes`**, 15 commits on `73b5d4c`, not merged. Last
+commit `f667e21` repairs a cold review's findings, and a second cold review of
+it ran before merge. After the gate, `check.sh` gained `--extra dev` on every
+`uv run`: a fresh checkout's first run failed mypy, unit and integration
+because the plain sync left out the dev tools.
 
 **Open from the review, accepted for now.** A file renamed while its
 extraction is in flight fails with FileNotFoundError and stays failed until
@@ -49,7 +47,6 @@ comparison: `~/.cache/cementic-model-compare/`.
 **Exit criteria.**
 ```bash
 git -C ~/projects/cementic merge-base --is-ancestor main claude/audit-fixes && echo fast-forwardable
-cd ~/projects/cementic-audit-fixes && ./scripts/check.sh   # every gate ok, integration-pg included
 ls ~/.cache/cementic-model-compare/                         # harrier/qwen3 json appear after the run
 ```
 <!-- session-handoff:end -->

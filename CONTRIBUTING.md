@@ -15,8 +15,8 @@ PostgreSQL-backed integration tests.
 ./scripts/check.sh
 ```
 
-The script runs project tools through `uv`, so it works after `uv sync` without
-activating `.venv`. It checks the lockfile, Ruff, mypy, unit tests, and
+The script runs project tools through `uv run --extra dev`, so it works in a
+fresh checkout without activating `.venv` or syncing first. It checks the lockfile, Ruff, mypy, unit tests, and
 non-PostgreSQL integration tests. It also runs PostgreSQL integration tests when a suitable database is
 reachable. A missing PostgreSQL gate is reported as skipped, not passed.
 
