@@ -852,6 +852,141 @@ class TestTerminalFailuresAndDeletedDocs:
             assert session.query(ExtractedDocument).filter_by(status="pending").count() == 1
 
 
+class _WorkerDied(BaseException):
+    """Stands in for a segfault or OOM kill: no `except Exception` catches it."""
+
+
+def _crash_once(pipeline: PipelineWorker, revision_id: int, monkeypatch) -> None:
+    """Claim the next document and die inside extraction, before write-back."""
+    def die(*_args, **_kwargs):
+        raise _WorkerDied
+
+    with monkeypatch.context() as patched:
+        patched.setattr("cementic.pipeline_worker.extract_document", die)
+        with pytest.raises(_WorkerDied):
+            pipeline._step_extract(revision_id)
+
+
+def _restart(session_factory, collection: str, revision_id: int) -> None:
+    with session_factory() as session:
+        revision = session.get(PipelineRevision, revision_id)
+        requeue_interrupted_artifacts(session, collection, revision)
+        session.commit()
+
+
+class TestCrashingDocumentIsCapped:
+    """A document that kills the worker must not pin the collection (2026-10-22 audit).
+
+    The claim committed `processing`, the restart's requeue reset it to
+    `pending`, and the claim ordered by id took it first again: one PDF that
+    segfaults PyMuPDF stopped every document after it, with no error recorded.
+    """
+
+    def test_the_third_crash_fails_it_and_the_next_document_is_extracted(
+        self, sqlite_setup, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cementic.revisions import MAX_INTERRUPTED_CLAIMS
+
+        config, session_factory, pdf_fixtures_dir = sqlite_setup
+        collection = "test_crash_cap"
+        pipeline, source_watcher = _setup_worker(config, session_factory, collection, monkeypatch)
+        source_watcher._register_document(str(pdf_fixtures_dir / "test_doc_a.pdf"))
+        source_watcher._register_document(str(pdf_fixtures_dir / "test_doc_b.pdf"))
+        revision_id = pipeline._ensure_target_revision()
+        with session_factory() as session:
+            first_id, second_id = (
+                doc.id
+                for doc in session.query(SourceDocument)
+                .filter_by(collection=collection)
+                .order_by(SourceDocument.id)
+            )
+
+        for crash in range(1, MAX_INTERRUPTED_CLAIMS + 1):
+            _crash_once(pipeline, revision_id, monkeypatch)
+            with session_factory() as session:
+                row = session.query(ExtractedDocument).filter_by(document_id=first_id).one()
+                assert (row.status, row.attempts) == ("processing", crash)
+            _restart(session_factory, collection, revision_id)
+
+        with session_factory() as session:
+            row = session.query(ExtractedDocument).filter_by(document_id=first_id).one()
+            assert row.status == "failed"
+            assert "consecutive attempts" in row.error_message
+
+        # Stays failed across further restarts, and the claim moves on.
+        _restart(session_factory, collection, revision_id)
+        assert pipeline._step_extract(revision_id) is True
+        with session_factory() as session:
+            assert (
+                session.query(ExtractedDocument).filter_by(document_id=first_id).one().status
+                == "failed"
+            )
+            second = session.query(ExtractedDocument).filter_by(document_id=second_id).one()
+            assert (second.status, second.attempts) == ("done", 0)
+
+    def test_an_ordinary_failure_is_still_retried_on_restart(
+        self, sqlite_setup, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The cap counts crashes only: a caught error resets the count."""
+        config, session_factory, pdf_fixtures_dir = sqlite_setup
+        collection = "test_crash_cap_ordinary"
+        pipeline, source_watcher = _setup_worker(config, session_factory, collection, monkeypatch)
+        source_watcher._register_document(str(pdf_fixtures_dir / "test_doc_a.pdf"))
+        revision_id = pipeline._ensure_target_revision()
+        monkeypatch.setattr(
+            "cementic.pipeline_worker.extract_document",
+            lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("bad file")),
+        )
+
+        for _ in range(5):
+            assert pipeline._step_extract(revision_id) is True
+            _restart(session_factory, collection, revision_id)
+
+        with session_factory() as session:
+            row = session.query(ExtractedDocument).one()
+            assert (row.status, row.attempts) == ("pending", 0)
+
+    def test_a_changed_file_gets_a_fresh_allowance(
+        self, sqlite_setup, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        config, session_factory, pdf_fixtures_dir = sqlite_setup
+        collection = "test_crash_cap_changed"
+        pipeline, source_watcher = _setup_worker(config, session_factory, collection, monkeypatch)
+        source_watcher._register_document(str(pdf_fixtures_dir / "test_doc_a.pdf"))
+        revision_id = pipeline._ensure_target_revision()
+        _crash_once(pipeline, revision_id, monkeypatch)
+        _restart(session_factory, collection, revision_id)
+        _crash_once(pipeline, revision_id, monkeypatch)
+        with session_factory() as session:
+            session.query(SourceDocument).one().file_hash = "f" * 64
+            session.commit()
+        _restart(session_factory, collection, revision_id)
+
+        _crash_once(pipeline, revision_id, monkeypatch)
+
+        with session_factory() as session:
+            assert session.query(ExtractedDocument).one().attempts == 1
+
+    @pytest.mark.pg
+    def test_create_tables_adds_the_column_to_an_older_schema(self, pg_engine) -> None:
+        """A database from before the cap gets `attempts` added in place."""
+        from sqlalchemy import inspect as sa_inspect
+
+        from cementic.db import create_tables
+
+        with pg_engine.begin() as conn:
+            conn.execute(text("ALTER TABLE extracted_documents DROP COLUMN attempts"))
+            conn.execute(text("ALTER TABLE chunked_documents DROP COLUMN attempts"))
+
+        create_tables(pg_engine)
+
+        inspector = sa_inspect(pg_engine)
+        for table in ("extracted_documents", "chunked_documents"):
+            columns = {c["name"]: c for c in inspector.get_columns(table)}
+            assert "attempts" in columns
+            assert columns["attempts"]["nullable"] is False
+
+
 class TestRevisionCompletionScoping:
     """A revision must settle even when it shares profiles with an older one.
 

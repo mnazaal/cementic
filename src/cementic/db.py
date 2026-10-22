@@ -119,6 +119,9 @@ class ExtractedDocument(Base):
     content_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     status: Mapped[str] = mapped_column(String(20), default="pending", nullable=False)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Claims since the last write-back. Only a worker that died mid-document
+    # leaves it above 1; `requeue_interrupted_artifacts` fails the row at the cap.
+    attempts: Mapped[int] = mapped_column(Integer, default=0, server_default="0", nullable=False)
     created_at: Mapped[datetime] = mapped_column(default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(default=utc_now, onupdate=utc_now)
 
@@ -169,6 +172,9 @@ class ChunkedDocument(Base):
     status: Mapped[str] = mapped_column(String(20), default="pending", nullable=False)
     total_chunks: Mapped[int | None] = mapped_column(Integer, nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Claims since the last write-back. Only a worker that died mid-document
+    # leaves it above 1; `requeue_interrupted_artifacts` fails the row at the cap.
+    attempts: Mapped[int] = mapped_column(Integer, default=0, server_default="0", nullable=False)
     created_at: Mapped[datetime] = mapped_column(default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(default=utc_now, onupdate=utc_now)
 
@@ -624,6 +630,7 @@ def create_tables(engine: Engine) -> None:
     """Create all tables required by the versioned pipeline schema."""
     ensure_vector_extensions(engine)
     Base.metadata.create_all(engine)
+    _add_missing_columns(engine)
     ensure_lexical_index(engine)
     try:
         with engine.begin() as conn:
@@ -642,6 +649,33 @@ def create_tables(engine: Engine) -> None:
             engine
         ):
             raise
+
+
+#: Columns added after their table first shipped. `create_all` creates missing
+#: tables only, so a database from before the column needs it added in place.
+_RETROFIT_COLUMNS = (
+    ("extracted_documents", "attempts", "INTEGER NOT NULL DEFAULT 0"),
+    ("chunked_documents", "attempts", "INTEGER NOT NULL DEFAULT 0"),
+)
+
+
+def _add_missing_columns(engine: Engine) -> None:
+    """Add `_RETROFIT_COLUMNS` to an existing PostgreSQL schema.
+
+    A constant default makes each ADD COLUMN a catalog-only change on
+    PostgreSQL 11+, so it does not rewrite the table. ALTER TABLE takes its
+    lock before checking IF NOT EXISTS, so the two workers starting together
+    serialise here rather than racing the way the indexes below can.
+    SQLite is only the test backend, where `create_all` always builds the
+    current schema.
+    """
+    if engine.dialect.name != "postgresql":
+        return
+    with engine.begin() as conn:
+        for table, column, definition in _RETROFIT_COLUMNS:
+            conn.execute(
+                text(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} {definition}")
+            )
 
 
 def _source_file_hash_index_exists(engine: Engine) -> bool:

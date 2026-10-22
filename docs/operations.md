@@ -26,8 +26,11 @@ partial results while it builds.
 | `cementic stop` | Stop the watcher and pipeline worker; Postgres remains running. |
 
 A failed document does not stop the rest of a build. The next `cementic start`
-retries it. If the embedding service becomes unreachable, affected chunks remain
-pending instead of becoming permanent failures.
+retries it. One exception is a document the worker died on three times in a row,
+from a crash or an out-of-memory kill. It stays failed across restarts, so it
+cannot stop the rest of the collection, until the file changes. If the embedding
+service becomes unreachable, affected chunks remain pending instead of becoming
+permanent failures.
 
 ## Long-running indexing
 

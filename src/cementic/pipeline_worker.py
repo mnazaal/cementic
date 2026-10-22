@@ -38,6 +38,7 @@ from cementic.index_strategies import index_dimension_error
 from cementic.revisions import (
     chunk_scope,
     chunked_scope,
+    claimed_attempts,
     embedding_scope_denormalised,
     ensure_revision_ann_index,
     ensure_revision_ann_index_up_front,
@@ -682,12 +683,22 @@ class PipelineWorker:
                     document_id=document.id,
                     extractor_profile_id=profile_id,
                     status="processing",
+                    attempts=0,
                 )
                 session.add(extracted)
                 session.flush()
             else:
                 extracted.status = "processing"
                 extracted.error_message = None
+            # Counted and hash-stamped at claim time, so a worker that dies
+            # inside extract_document still leaves a record of the attempt for
+            # the restart's requeue to cap, and a capped row stays hash-matched
+            # (else the claim's IS DISTINCT FROM re-selects it forever).
+            extracted.attempts = claimed_attempts(
+                extracted.attempts or 0,
+                same_input=extracted.source_file_hash == document.file_hash,
+            )
+            extracted.source_file_hash = document.file_hash
 
             session.commit()
 
@@ -755,6 +766,7 @@ class PipelineWorker:
                 extracted.content_hash = content_hash
                 extracted.status = status
                 extracted.error_message = error_message
+                extracted.attempts = 0
                 if content_hash is not None:
                     if previous_content_hash != content_hash:
                         _purge_superseded_chunks(session, extracted.id, content_hash)
@@ -800,6 +812,7 @@ class PipelineWorker:
             setattr(artifact, scope_hash_field, scope_hash)
             artifact.status = "failed"
             artifact.error_message = str(error)
+            artifact.attempts = 0
             session.commit()
 
     def _step_chunk(self, revision_id: int) -> bool:
@@ -848,12 +861,19 @@ class PipelineWorker:
                     extracted_document_id=extracted.id,
                     chunk_profile_id=chunk_profile_id,
                     status="processing",
+                    attempts=0,
                 )
                 session.add(chunked)
                 session.flush()
             else:
                 chunked.status = "processing"
                 chunked.error_message = None
+            # Same claim-time bookkeeping as the extract step.
+            chunked.attempts = claimed_attempts(
+                chunked.attempts or 0,
+                same_input=chunked.source_content_hash == extracted.content_hash,
+            )
+            chunked.source_content_hash = extracted.content_hash
 
             session.commit()
 
@@ -870,6 +890,7 @@ class PipelineWorker:
                     chunked.source_content_hash = extracted.content_hash
                     chunked.status = "failed"
                     chunked.error_message = "Missing extracted artifact path"
+                    chunked.attempts = 0
                     session.commit()
             return True
 
@@ -969,6 +990,7 @@ class PipelineWorker:
                 chunked.total_chunks = len(chunk_items)
             chunked.status = status
             chunked.error_message = error_message
+            chunked.attempts = 0
             session.commit()
 
     def _step_embed(self, revision_id: int) -> bool:

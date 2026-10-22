@@ -1919,3 +1919,15 @@ class TestOverBudgetReasonsAreCollectedOutsideTheTransaction:
     def test_a_provider_without_the_method_yields_no_reasons(self):
         reasons = _over_budget_reasons(object(), ["a"], [None])
         assert reasons == [None]
+
+
+class TestClaimedAttempts:
+    def test_a_repeat_claim_counts_up(self) -> None:
+        from cementic.revisions import claimed_attempts
+
+        assert claimed_attempts(2, same_input=True) == 3
+
+    def test_new_input_starts_again(self) -> None:
+        from cementic.revisions import claimed_attempts
+
+        assert claimed_attempts(7, same_input=False) == 1

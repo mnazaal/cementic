@@ -361,6 +361,31 @@ def materialize_pending_embeddings(
     return cast(int, getattr(result, "rowcount", 0)) or 0
 
 
+#: Claims a document may take without one finishing before it is failed. A
+#: claim that never reaches write-back means the worker died inside the stage:
+#: a PyMuPDF segfault or an out-of-memory kill, which no ``except`` can stamp.
+MAX_INTERRUPTED_CLAIMS = 3
+
+
+def claimed_attempts(previous: int, *, same_input: bool) -> int:
+    """The attempt count a claim records: one more, or 1 for new input.
+
+    A changed file (or re-extracted text) is a new document as far as a
+    crash is concerned, so it starts again with the full allowance.
+    """
+    return previous + 1 if same_input else 1
+
+
+def interrupted_claims_message(attempts: int) -> str:
+    """The error a requeue stamps on a document the worker kept dying on."""
+    return (
+        f"the worker stopped mid-document on {attempts} consecutive attempts "
+        "(a crash or out-of-memory kill, not an error cementic could catch); "
+        "skipped so the rest of the collection can finish. Changing the file "
+        "retries it."
+    )
+
+
 def requeue_interrupted_artifacts(
     session: Session, collection: str, revision: PipelineRevision
 ) -> None:
@@ -370,28 +395,46 @@ def requeue_interrupted_artifacts(
     finish), but a fresh ``cementic start`` re-queues them — along with any rows a
     crashed worker left in ``processing`` — for another attempt. Deleted source
     documents are skipped so they leave no dangling ``pending`` rows.
+
+    Except a document the worker died on ``MAX_INTERRUPTED_CLAIMS`` times in a
+    row: it is stamped ``failed`` and stays so across restarts. Requeueing it
+    re-claimed it first on every start (the claims order by id), so one
+    document that crashes the extractor stopped the whole collection, with
+    no error recorded anywhere (2026-10-22 audit).
     """
     interrupted = ("failed", "processing")
     doc_ids = select(SourceDocument.id).where(
         SourceDocument.collection == collection,
         SourceDocument.status != "deleted",
     )
-
-    session.query(ExtractedDocument).filter(
-        ExtractedDocument.document_id.in_(doc_ids),
-        ExtractedDocument.extractor_profile_id == revision.extractor_profile_id,
-        ExtractedDocument.status.in_(interrupted),
-    ).update({"status": "pending"}, synchronize_session=False)
-
-    extracted_ids = select(ExtractedDocument.id).where(
+    extracted_rows = (
         ExtractedDocument.document_id.in_(doc_ids),
         ExtractedDocument.extractor_profile_id == revision.extractor_profile_id,
     )
-    session.query(ChunkedDocument).filter(
+    extracted_ids = select(ExtractedDocument.id).where(*extracted_rows)
+    chunked_rows = (
         ChunkedDocument.extracted_document_id.in_(extracted_ids),
         ChunkedDocument.chunk_profile_id == revision.chunk_profile_id,
-        ChunkedDocument.status.in_(interrupted),
-    ).update({"status": "pending"}, synchronize_session=False)
+    )
+
+    artifact_scopes: tuple[tuple[Any, tuple[Any, ...]], ...] = (
+        (ExtractedDocument, extracted_rows),
+        (ChunkedDocument, chunked_rows),
+    )
+    for model, scope in artifact_scopes:
+        for row in session.query(model).filter(
+            *scope,
+            model.status == "processing",
+            model.attempts >= MAX_INTERRUPTED_CLAIMS,
+        ):
+            row.status = "failed"
+            row.error_message = interrupted_claims_message(row.attempts)
+        session.flush()
+        session.query(model).filter(
+            *scope,
+            model.status.in_(interrupted),
+            model.attempts < MAX_INTERRUPTED_CLAIMS,
+        ).update({"status": "pending"}, synchronize_session=False)
 
     # Scope to the revision's chunk chain: embeddings of chunks under another
     # chunk profile are never embed candidates for this revision, so resetting
