@@ -136,12 +136,18 @@ def llama_cpp_runtime_fingerprint(
     n_ctx: int,
     n_batch: int,
     n_gpu_layers: int,
-    verbose: bool,
 ) -> str:
     """Return a stable fingerprint for one llama.cpp runtime config.
 
     Only fields that change what the server loads belong here -- they become the
     served model's alias, so a difference forces a daemon restart.
+
+    ``verbose`` is deliberately excluded (2026-10-22). It only sets the log
+    level, and two processes whose configs differ only in it -- a shell with
+    ``CEMENTIC_LLAMA_VERBOSE=true`` beside a systemd worker without it --
+    computed different aliases and killed each other's daemon on every search.
+    It stays a launch argument: a reused daemon keeps the log level it started
+    with.
 
     ``embedding_dim`` is deliberately excluded. It is not a llama.cpp launch
     argument (the model file determines it), and it reaches callers from two
@@ -163,7 +169,6 @@ def llama_cpp_runtime_fingerprint(
             # gets reused, keeping its 512-token cap until a manual restart.
             "n_batch": n_batch,
             "n_gpu_layers": n_gpu_layers,
-            "verbose": verbose,
         },
         sort_keys=True,
     )
@@ -666,7 +671,6 @@ def build_llama_cpp_client(
             n_ctx=n_ctx,
             n_batch=n_ctx,
             n_gpu_layers=n_gpu_layers,
-            verbose=runtime_spec.verbose,
         ),
         model_identifier=runtime_spec.model_identifier,
         timeout=float(config.llama_cpp.llama_embed_timeout_seconds),
@@ -1207,9 +1211,8 @@ def render_daemon_command(
     unknown placeholders, so this cannot raise on a loaded config.
 
     ``verbose`` renders as llama-server's integer log threshold rather than a
-    bare flag: a conditional flag cannot be expressed by substitution, and it
-    has to be expressible, because `verbose` is part of the runtime
-    fingerprint and so must reach the command it claims to describe.
+    bare flag: a conditional flag cannot be expressed by substitution, and an
+    operator's own `daemon_command` must still be able to honour the setting.
     """
     values = {
         "model": model,
@@ -1248,7 +1251,6 @@ def _start_llama_cpp_daemon(
         n_ctx=n_ctx,
         n_batch=n_ctx,
         n_gpu_layers=n_gpu_layers,
-        verbose=runtime_spec.verbose,
     )
     # One spawn path, whether the command is the default `llama-server`
     # invocation or the operator's own: pid file with start token, the daemon

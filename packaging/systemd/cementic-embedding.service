@@ -20,7 +20,7 @@
 #   #     llama_cpp_runtime_fingerprint as f; c=get_config(); s=runtime_spec_from_config(c); \
 #   #     n=s.n_ctx or c.llama_cpp.n_ctx; \
 #   #     g=s.n_gpu_layers if s.n_gpu_layers is not None else c.llama_cpp.n_gpu_layers; \
-#   #     print(f(model_path=s.model_identifier,n_ctx=n,n_batch=n,n_gpu_layers=g,verbose=s.verbose))"
+#   #     print(f(model_path=s.model_identifier,n_ctx=n,n_batch=n,n_gpu_layers=g))"
 #   systemctl --user daemon-reload
 #   systemctl --user enable --now cementic-embedding.service
 #

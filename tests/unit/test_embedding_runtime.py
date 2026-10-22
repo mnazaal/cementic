@@ -545,10 +545,8 @@ class TestDaemonLifecycle:
     def test_render_daemon_command_maps_verbose_to_a_log_threshold(self) -> None:
         """llama-server takes a verbosity number, not a boolean flag.
 
-        A conditional flag cannot be produced by substitution, and `verbose` is
-        part of the runtime fingerprint -- so it has to reach the command that
-        fingerprint claims to describe, or toggling it would restart the daemon
-        into an identical one.
+        A conditional flag cannot be produced by substitution, and an operator's
+        own `daemon_command` must still be able to honour `verbose`.
         """
 
         def rendered(verbose: bool) -> list[str]:
@@ -736,21 +734,18 @@ class TestEmbeddingRuntime:
             n_ctx=512,
             n_batch=512,
             n_gpu_layers=0,
-            verbose=False,
         )
         second = llama_cpp_runtime_fingerprint(
             model_path="model.gguf",
             n_ctx=512,
             n_batch=512,
             n_gpu_layers=0,
-            verbose=False,
         )
         third = llama_cpp_runtime_fingerprint(
             model_path="other.gguf",
             n_ctx=512,
             n_batch=512,
             n_gpu_layers=0,
-            verbose=False,
         )
 
         assert first == second
@@ -934,7 +929,6 @@ class TestEmbeddingRuntime:
             n_ctx=1024,
             n_batch=1024,
             n_gpu_layers=2,
-            verbose=True,
         )
 
     def test_get_runtime_client_uses_embed_timeout_not_start_timeout(self) -> None:
@@ -1329,16 +1323,36 @@ class TestDaemonRecoveryFromProc:
         assert not config.llama_cpp.daemon_pid_file.exists()
 
 
+def test_runtime_fingerprint_ignores_verbosity() -> None:
+    """Two configs differing only in log level must share one daemon.
+
+    Regression (2026-10-22 audit): `verbose` was in the alias, so a shell with
+    CEMENTIC_LLAMA_VERBOSE=true and a systemd worker without it computed
+    different aliases and restarted the daemon from under each other.
+    """
+    config = Config()
+    config.llama_cpp.model_path = "/models/test.gguf"
+    config.llama_cpp.verbose = False
+    quiet = runtime_spec_from_config(config)
+    config.llama_cpp.verbose = True
+    loud = runtime_spec_from_config(config)
+
+    assert quiet.verbose != loud.verbose
+    # build_llama_cpp_client does no I/O; it computes the alias a client expects.
+    aliases = {build_llama_cpp_client(config, spec).expected_fingerprint for spec in (quiet, loud)}
+    assert len(aliases) == 1
+
+
 def test_runtime_fingerprint_tracks_the_batch_size() -> None:
     """n_batch caps how many tokens the server embeds per input, so it changes
     what the daemon does. It also has to be in the alias so a daemon left
     running by a version that never passed --n_batch is not silently reused
     with its old 512-token cap."""
     small = llama_cpp_runtime_fingerprint(
-        model_path="m.gguf", n_ctx=2048, n_batch=512, n_gpu_layers=0, verbose=False
+        model_path="m.gguf", n_ctx=2048, n_batch=512, n_gpu_layers=0
     )
     matched = llama_cpp_runtime_fingerprint(
-        model_path="m.gguf", n_ctx=2048, n_batch=2048, n_gpu_layers=0, verbose=False
+        model_path="m.gguf", n_ctx=2048, n_batch=2048, n_gpu_layers=0
     )
 
     assert small != matched
@@ -1482,7 +1496,7 @@ class TestRuntimeFingerprintIsPathSpellingIndependent:
         model.write_bytes(b"gguf")
         monkeypatch.chdir(tmp_path)
 
-        kwargs = {"n_ctx": 512, "n_batch": 512, "n_gpu_layers": 0, "verbose": False}
+        kwargs = {"n_ctx": 512, "n_batch": 512, "n_gpu_layers": 0}
         relative = llama_cpp_runtime_fingerprint(model_path="models/m.gguf", **kwargs)
         absolute = llama_cpp_runtime_fingerprint(model_path=str(model), **kwargs)
 
@@ -1494,7 +1508,7 @@ class TestRuntimeFingerprintIsPathSpellingIndependent:
             (tmp_path / "models" / name).write_bytes(b"gguf")
         monkeypatch.chdir(tmp_path)
 
-        kwargs = {"n_ctx": 512, "n_batch": 512, "n_gpu_layers": 0, "verbose": False}
+        kwargs = {"n_ctx": 512, "n_batch": 512, "n_gpu_layers": 0}
         assert llama_cpp_runtime_fingerprint(
             model_path="models/a.gguf", **kwargs
         ) != llama_cpp_runtime_fingerprint(model_path="models/b.gguf", **kwargs)

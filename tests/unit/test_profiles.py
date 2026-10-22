@@ -362,9 +362,8 @@ class TestModelIdentityByContent:
 class TestVerboseExcludedFromEmbeddingProfile:
     """`verbose` is a launch argument, not part of what vectors mean.
 
-    It stays in embedding_runtime.llama_cpp_runtime_fingerprint (the runtime
-    alias), but two profiles that differ only in `verbose` must not fork the
-    corpus into two vector spaces.
+    Two profiles that differ only in `verbose` must not fork the corpus into two
+    vector spaces. (Since 2026-10-22 it is out of the runtime alias too.)
     """
 
     def test_toggling_verbose_does_not_change_the_fingerprint(self) -> None:

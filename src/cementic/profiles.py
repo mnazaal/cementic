@@ -227,9 +227,9 @@ def build_embedding_profile_payload(
         "distance_metric": facts.distance_metric,
         "n_ctx": spec.n_ctx,
         "n_gpu_layers": spec.n_gpu_layers,
-        # `verbose` is deliberately absent: it is a launch argument (see
-        # embedding_runtime.llama_cpp_runtime_fingerprint, where it correctly
-        # stays), not a fact about the vectors this profile identifies.
+        # `verbose` is deliberately absent: it is a launch argument, not a
+        # fact about the vectors this profile identifies (nor, since
+        # 2026-10-22, part of the runtime fingerprint either).
         # Toggling it must not fork the corpus into two vector spaces.
         "text_format_version": EMBEDDING_TEXT_FORMAT_VERSION,
         # The task-prefix policy is chosen from the model *filename*, so
