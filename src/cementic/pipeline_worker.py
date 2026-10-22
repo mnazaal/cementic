@@ -823,7 +823,12 @@ class PipelineWorker:
             if candidate_row is None:
                 return False
             # Before claiming, so an offline machine with no cached tokenizer
-            # raises to the loop's back-off without touching any row.
+            # raises to the loop's back-off without touching any row. The read
+            # transaction ends first: an uncached tokenizer is a download with
+            # no timeout, and holding the candidate SELECT's locks through it
+            # would queue a starting worker's ALTER TABLE, and searches behind
+            # that. The objects stay usable (expire_on_commit=False).
+            session.commit()
             tokenizer()
             extracted, chunked = candidate_row
 
