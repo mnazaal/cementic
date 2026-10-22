@@ -20,6 +20,7 @@ from cementic.search import (
     _score_from_distance,
     _searchable_revisions,
     arm_fetch_limit,
+    merge_arms,
 )
 
 
@@ -662,3 +663,68 @@ class TestArmFetchLimit:
         """A limit below top_k would silently truncate the returned list."""
         for hybrid in (True, False):
             assert arm_fetch_limit(top_k, hybrid=hybrid) >= top_k
+
+
+def _row(
+    path: str, score: float, *, kind: str = "cosine_similarity", collection: str = "c"
+) -> SearchResult:
+    return SearchResult(
+        collection=collection,
+        source_path=path,
+        content=f"{path} @ {score}",
+        score=score,
+        distance=None if kind == "lexical_rank" else 1.0 - score,
+        score_kind=kind,
+        rank=0,
+    )
+
+
+class TestMergeArmsKeepsEachDocumentsBestChunk:
+    """A document is shown with the chunk that ranked it (2026-10-22 audit).
+
+    The projection was last-write-wins over best-first arms, so a multi-chunk
+    paper was ranked by its best chunk and displayed with its worst.
+    """
+
+    def test_a_multi_chunk_document_shows_its_best_chunk(self):
+        vector = [_row("A", 0.9), _row("B", 0.8), _row("A", 0.3)]
+        lexical = [_row("A", 0.5, kind="lexical_rank")]
+
+        merged = merge_arms(vector, lexical, lead="vector", top_k=10)
+
+        assert [(r["source_path"], r["score"]) for r in merged] == [("A", 0.9), ("B", 0.8)]
+
+    def test_scores_then_explain_the_order(self):
+        """The score column is hidden when it contradicts the order; it must not."""
+        from cementic.hybrid import scores_explain_order
+
+        vector = [_row("A", 0.9), _row("B", 0.8), _row("A", 0.3), _row("B", 0.2)]
+        lexical = [_row("B", 0.4, kind="lexical_rank")]
+
+        merged = merge_arms(vector, lexical, lead="vector", top_k=10)
+
+        assert scores_explain_order([r["score"] for r in merged])
+
+    def test_a_document_both_arms_found_carries_its_vector_row(self):
+        vector = [_row("A", 0.7)]
+        lexical = [_row("A", 0.9, kind="lexical_rank"), _row("B", 0.5, kind="lexical_rank")]
+
+        merged = merge_arms(vector, lexical, lead="lexical", top_k=10)
+
+        assert merged[0]["score_kind"] == "cosine_similarity"
+
+    def test_the_same_path_in_two_collections_is_two_documents(self):
+        vector = [_row("A", 0.9, collection="work"), _row("A", 0.8, collection="home")]
+        lexical = [_row("A", 0.5, kind="lexical_rank", collection="home")]
+
+        merged = merge_arms(vector, lexical, lead="vector", top_k=10)
+
+        assert sorted(r["collection"] for r in merged) == ["home", "work"]
+
+    def test_top_k_cuts_documents_not_chunks(self):
+        vector = [_row(p, 1.0 - i / 10) for i, p in enumerate("AABBCC")]
+        lexical = [_row("A", 0.5, kind="lexical_rank")]
+
+        merged = merge_arms(vector, lexical, lead="vector", top_k=2)
+
+        assert [r["source_path"] for r in merged] == ["A", "B"]

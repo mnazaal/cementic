@@ -256,6 +256,41 @@ def split_arms(
     return vector_arm, lexical_arm
 
 
+def _document_key(result: SearchResult) -> tuple[str, str]:
+    """A result's document: the same path in two collections is two documents."""
+    return (result["collection"], result["source_path"])
+
+
+def merge_arms(
+    vector_arm: list[SearchResult],
+    lexical_arm: list[SearchResult],
+    *,
+    lead: str,
+    top_k: int,
+) -> list[SearchResult]:
+    """One row per document, ordered by `combine` with `lead` owning rank 1 (pure).
+
+    Each arm arrives best-first, so the first row seen for a document is its
+    best chunk, and that row represents it. Vector rows are offered first so a
+    document both arms found carries its vector score, which is comparable
+    across queries where `ts_rank` is not.
+
+    The projection used to be last-write-wins, so a paper with chunks at cosine
+    0.90 and 0.30 was ranked by the 0.90 chunk and shown with the 0.30 one --
+    the wrong passage, a score that is not the match, and an out-of-order
+    score column that `scores_explain_order` then hid (2026-10-22 audit).
+    """
+    by_document: dict[tuple[str, str], SearchResult] = {}
+    for result in vector_arm + lexical_arm:
+        by_document.setdefault(_document_key(result), result)
+    ordering = combine(
+        [_document_key(r) for r in vector_arm],
+        [_document_key(r) for r in lexical_arm],
+        lead=lead,
+    )
+    return [by_document[key] for key in ordering][:top_k]
+
+
 class Searcher:
     """Searcher for semantic search over active revisions."""
 
@@ -475,20 +510,8 @@ class Searcher:
         vector_arm, lexical_arm = split_arms(session_free_results)
         if not lexical_arm or not vector_arm:
             return session_free_results[:top_k]
-
-        by_path: dict[str, SearchResult] = {}
-        # Vector results win the projection: their score is comparable across
-        # queries, which `ts_rank` is not.
-        for result in lexical_arm + vector_arm:
-            by_path[result["source_path"]] = result
-
         lead = "lexical" if self.lexical_should_lead(query) else "vector"
-        ordering = combine(
-            [r["source_path"] for r in vector_arm],
-            [r["source_path"] for r in lexical_arm],
-            lead=lead,
-        )
-        return [by_path[path] for path in ordering][:top_k]
+        return merge_arms(vector_arm, lexical_arm, lead=lead, top_k=top_k)
 
     def lexical_should_lead(self, query: str) -> bool:
         """Whether this query is a single token rare enough to trust exactly.

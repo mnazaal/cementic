@@ -26,6 +26,7 @@ reached at once, because the two metrics are decided in different places.
 from __future__ import annotations
 
 from collections import defaultdict
+from collections.abc import Hashable
 
 #: Reciprocal-rank-fusion smoothing constant, and the reason it is not tuned.
 #:
@@ -44,14 +45,14 @@ from collections import defaultdict
 RRF_K = 60
 
 
-def deduplicate(paths: list[str]) -> list[str]:
+def deduplicate[K: Hashable](paths: list[K]) -> list[K]:
     """Drop repeats, keeping first position (pure).
 
     Both arms return one row per *chunk*, and a document usually owns many
     chunks, so its best-ranked chunk is what should represent it.
     """
-    seen: set[str] = set()
-    ordered: list[str] = []
+    seen: set[K] = set()
+    ordered: list[K] = []
     for path in paths:
         if path not in seen:
             seen.add(path)
@@ -59,10 +60,10 @@ def deduplicate(paths: list[str]) -> list[str]:
     return ordered
 
 
-def reciprocal_rank_fusion(
-    *rankings: list[str],
+def reciprocal_rank_fusion[K: Hashable](
+    *rankings: list[K],
     k: int = RRF_K,
-) -> list[str]:
+) -> list[K]:
     """Merge ranked lists by summed reciprocal rank (pure).
 
     Each list contributes ``1/(k + rank)`` per document. Chosen over blending
@@ -75,7 +76,7 @@ def reciprocal_rank_fusion(
     dominates -- and burying it behind an arbitrary sort order is what made the
     first measurement of this look like a fusion failure.
     """
-    scores: dict[str, float] = defaultdict(float)
+    scores: dict[K, float] = defaultdict(float)
     for ranking in rankings:
         for rank, path in enumerate(ranking, start=1):
             scores[path] += 1.0 / (k + rank)
@@ -112,13 +113,13 @@ def looks_like_identifier(query: str) -> bool:
     return bool(stripped) and len(stripped.split()) == 1
 
 
-def combine(
-    vector_ranking: list[str],
-    lexical_ranking: list[str],
+def combine[K: Hashable](
+    vector_ranking: list[K],
+    lexical_ranking: list[K],
     *,
     lead: str = "vector",
     k: int = RRF_K,
-) -> list[str]:
+) -> list[K]:
     """One ranking from two, with ``lead`` owning the first position (pure).
 
     ``lead`` names the arm trusted for the top slot: ``"lexical"`` for a query
