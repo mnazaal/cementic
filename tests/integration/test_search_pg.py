@@ -344,3 +344,35 @@ def test_a_full_rarity_sample_does_not_claim_the_term_is_rare(
 
     assert not Searcher(pg_config).lexical_should_lead("zyxqterm", ["narrow"])
     cleanup_pg_tables(pg_session)
+
+
+@pytest.mark.pg
+def test_a_typo_reaches_the_lexical_arm_through_the_fallback(
+    pg_engine, pg_session, pg_config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No chunk holds every term of a typo'd query; most of them still match."""
+    cleanup_pg_tables(pg_session)
+    seed_active_vector_collection(
+        pg_session,
+        collection="typo",
+        source_path="/docs/typo.pdf",
+        chunks=[("neural networks and semantic vectors", [1.0, 0.0, 0.0, 0.0])],
+    )
+    pg_session.commit()
+    monkeypatch.setattr(
+        "cementic.search._create_embedding_provider",
+        lambda config_json, config=None: FakeSearchEmbeddingClient(),
+    )
+    pg_config.search.hybrid = True
+    searcher = Searcher(pg_config)
+
+    _, lexical = split_arms(searcher.candidates("nueral networks semantic", top_k=2))
+    assert [row["source_path"] for row in lexical] == ["/docs/typo.pdf"]
+
+    # An exact match never reaches the fallback.
+    monkeypatch.setattr(
+        searcher, "_typo_fallback", lambda *a: pytest.fail("fallback ran on an exact match")
+    )
+    _, lexical = split_arms(searcher.candidates("neural networks semantic", top_k=2))
+    assert lexical
+    cleanup_pg_tables(pg_session)

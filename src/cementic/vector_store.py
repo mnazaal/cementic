@@ -134,7 +134,7 @@ def knn_sql(profile_id: int, *, distance_operator: str) -> str:
     )
 
 
-def lexical_sql(profile_id: int, *, text_config: str) -> str:
+def lexical_sql(profile_id: int, *, text_config: str, relaxed: bool = False) -> str:
     """Full-text search over the same rows ``knn_sql`` searches.
 
     Scope parity with the vector arm is structural, not coincidental: this joins
@@ -154,17 +154,19 @@ def lexical_sql(profile_id: int, *, text_config: str) -> str:
     scan.
     """
     table = vector_table_name(profile_id)
-    rank = (
-        f"ts_rank(to_tsvector('{text_config}', c.content), "
-        f"plainto_tsquery('{text_config}', :query))"
-    )
+    if relaxed:
+        # The typo fallback (`search.relaxed_tsquery`): match most of the terms,
+        # rank by any of them. Both arrive as tsquery text, already stemmed.
+        match, ranked = "CAST(:tsq AS tsquery)", "CAST(:orq AS tsquery)"
+    else:
+        match = ranked = f"plainto_tsquery('{text_config}', :query)"
+    rank = f"ts_rank(to_tsvector('{text_config}', c.content), {ranked})"
     return (
         "SELECT sd.id AS document_id, sd.collection AS collection, "
         f"sd.source_path AS source_path, c.content AS content, {rank} AS rank "
         "FROM ("
         "  SELECT id, document_id, content FROM chunks_v2 "
-        f"  WHERE to_tsvector('{text_config}', content) "
-        f"        @@ plainto_tsquery('{text_config}', :query) "
+        f"  WHERE to_tsvector('{text_config}', content) @@ {match} "
         "  LIMIT :pool"
         ") c "
         f"JOIN {table} ev ON ev.chunk_id = c.id "

@@ -72,7 +72,6 @@ import time
 import urllib.request
 from collections.abc import Iterator
 from dataclasses import asdict, dataclass
-from itertools import combinations
 from pathlib import Path
 
 from sqlalchemy import text
@@ -85,7 +84,14 @@ from cementic.embedding_text import (
     format_query_text_for_model,
 )
 from cementic.hybrid import combine, reciprocal_rank_fusion
-from cementic.search import Searcher, arm_fetch_limit, split_arms
+from cementic.search import (
+    RELAXED_TERM_SHARE,
+    Searcher,
+    arm_fetch_limit,
+    quote_lexeme,
+    relaxed_tsquery,
+    split_arms,
+)
 from cementic.storage import read_extracted_text
 from cementic.vector_store import vector_table_name
 
@@ -840,11 +846,10 @@ def reconstruct_span(long_chunks: list[str]) -> str:
 
 
 #: Fuzzy-matching candidates (PLAN.md "Fuzzy matching"). pg_trgm's defaults for
-#: `similarity_threshold` and `word_similarity_threshold`, and the share of a
-#: query's terms the relaxed full-text match must hit.
+#: `similarity_threshold` and `word_similarity_threshold`. The relaxed
+#: full-text match is the shipped typo fallback's (`cementic.search`).
 TRIGRAM_SIMILARITY = 0.3
 TRIGRAM_WORD_SIMILARITY = 0.6
-RELAXED_TERM_SHARE = 0.6
 
 #: Sets the fuzzy measurement reads by default: the exact phrases, their
 #: perturbations, and the typo'd set the fallbacks exist for.
@@ -868,29 +873,6 @@ class FuzzyRecord:
     similarity: list[str]
     word_similarity: list[str]
     relaxed: list[str]
-
-
-def quote_lexeme(lexeme: str) -> str:
-    """A lexeme as a quoted tsquery literal (pure)."""
-    return "'" + lexeme.replace("'", "''") + "'"
-
-
-def relaxed_tsquery(lexemes: list[str], share: float) -> str | None:
-    """A tsquery matching any ``ceil(share * n)`` of the n lexemes (pure).
-
-    An OR of every conjunction of that size, so the GIN index serves it and a
-    row must still hold most of the terms: a bare OR of all terms matches every
-    chunk containing one common word. Lexemes are quoted for a ``::tsquery``
-    cast, which takes them as already stemmed.
-    """
-    terms = list(dict.fromkeys(lexemes))
-    if not terms:
-        return None
-    need = max(1, math.ceil(share * len(terms) - 1e-9))
-    return " | ".join(
-        "(" + " & ".join(quote_lexeme(t) for t in combo) + ")"
-        for combo in combinations(terms, need)
-    )
 
 
 def fuzzy_lexical(record: FuzzyRecord, variant: str) -> list[str]:

@@ -66,7 +66,8 @@ indexing another collection.
   that writes text to stdout.
 - Local embeddings through an OpenAI-compatible `llama.cpp` server.
 - Versioned extraction, chunking, and embedding artifacts.
-- Hybrid vector and PostgreSQL full-text search.
+- Hybrid vector and PostgreSQL full-text search; when no chunk holds every
+  word of a short query (a typo, say), the full-text side matches most of them.
 - HNSW and DiskANN vector indexes.
 
 ## Commands

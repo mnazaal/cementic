@@ -493,28 +493,6 @@ class TestRiderCensus:
         assert census["soft hyphens"] == 1
 
 
-class TestRelaxedTsquery:
-    def test_ors_every_conjunction_of_the_required_size(self) -> None:
-        # ceil(0.6 * 4) = 3 of 4 terms
-        query = harness.relaxed_tsquery(["a", "b", "c", "d"], 0.6)
-        assert query is not None
-        assert query.count("|") == 3  # C(4, 3) = 4 conjunctions
-        assert "('a' & 'b' & 'c')" in query
-        assert "('b' & 'c' & 'd')" in query
-
-    def test_a_single_term_is_itself(self) -> None:
-        assert harness.relaxed_tsquery(["a"], 0.6) == "('a')"
-
-    def test_repeated_terms_count_once(self) -> None:
-        assert harness.relaxed_tsquery(["a", "a", "b"], 1.0) == "('a' & 'b')"
-
-    def test_no_terms_is_no_query(self) -> None:
-        assert harness.relaxed_tsquery([], 0.6) is None
-
-    def test_quotes_are_escaped(self) -> None:
-        assert harness.relaxed_tsquery(["o'neil"], 0.6) == "('o''neil')"
-
-
 def fuzzy_record(**overrides) -> "harness.FuzzyRecord":
     fields = {
         "query": "q", "gold": "g.pdf", "kind": "phrase-typo",

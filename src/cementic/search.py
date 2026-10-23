@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import dataclasses
 import logging
+import math
 
 # mypy: disable-error-code="import-untyped"
 from collections.abc import Iterable
+from itertools import combinations
 from typing import Any, TypedDict
 
 from sqlalchemy import text
@@ -83,6 +85,43 @@ def _reject_query_over_context(query: str, n_ctx: int) -> None:
             f"context window is {n_ctx} (usable {budget}). Shorten the query -- "
             "the model would silently ignore everything past the limit."
         )
+
+
+#: The typo fallback (PLAN.md "Fuzzy matching"): when the exact lexical arm
+#: finds nothing, match chunks holding this share of the query's terms. Chosen
+#: 2026-10-23 on the live corpus: `phrase-typo` recall@10 0.233 -> 0.650, and
+#: no other query set changes because their lexical arm is never empty.
+RELAXED_TERM_SHARE = 0.6
+#: Above this many distinct terms the fallback is skipped: the tsquery is an OR
+#: of every C(n, ceil(0.6 n)) conjunction, 56 at 8 terms and 210 at 10. The
+#: measured queries have at most 6.
+RELAXED_MAX_TERMS = 8
+
+
+def quote_lexeme(lexeme: str) -> str:
+    """A lexeme as a quoted tsquery literal (pure)."""
+    return "'" + lexeme.replace("'", "''") + "'"
+
+
+def relaxed_tsquery(
+    lexemes: list[str], share: float, max_terms: int = RELAXED_MAX_TERMS
+) -> str | None:
+    """A tsquery matching any ``ceil(share * n)`` of the n lexemes (pure).
+
+    An OR of every conjunction of that size, so the GIN index serves it and a
+    row must still hold most of the terms: a bare OR of all terms matches every
+    chunk containing one common word. Lexemes are quoted for a ``::tsquery``
+    cast, which takes them as already stemmed. None for no terms, or for more
+    than ``max_terms``, where the OR grows combinatorially.
+    """
+    terms = list(dict.fromkeys(lexemes))
+    if not terms or len(terms) > max_terms:
+        return None
+    need = max(1, math.ceil(share * len(terms) - 1e-9))
+    return " | ".join(
+        "(" + " & ".join(quote_lexeme(t) for t in combo) + ")"
+        for combo in combinations(terms, need)
+    )
 
 
 def probe_documents(rows: Iterable[Any], *, cap: int) -> set[int]:
@@ -424,9 +463,11 @@ class Searcher:
             arm_k = arm_fetch_limit(top_k)
 
             combined: list[SearchResult] = []
+            searched: list[PipelineRevision] = []
             for revision in revisions:
                 if not vector_table_exists(session.connection(), revision.embedding_profile_id):
                     continue
+                searched.append(revision)
                 # Tune for the index that actually exists rather than the
                 # configured method, which can drift until the index is rebuilt.
                 actual_method = (
@@ -488,11 +529,45 @@ class Searcher:
                 if self.config.search.hybrid:
                     combined.extend(self._lexical_results(session, revision, query, arm_k))
 
+            if self.config.search.hybrid and not split_arms(combined)[1]:
+                combined.extend(self._typo_fallback(session, searched, query, arm_k))
+
         combined.sort(key=lambda result: result["score"], reverse=True)
         return combined
 
+    def _typo_fallback(
+        self, session: Any, revisions: list[PipelineRevision], query: str, top_k: int
+    ) -> list[SearchResult]:
+        """The relaxed lexical arm, for a search whose exact arm found nothing.
+
+        A one-character typo makes every chunk fail `plainto_tsquery`'s
+        conjunction; most of the terms still match. Postgres stems the query
+        with the same text configuration the index uses.
+        """
+        lexemes = [
+            row.lexeme
+            for row in session.execute(
+                text(f"SELECT lexeme FROM unnest(to_tsvector('{LEXICAL_TEXT_CONFIG}', :q))"),
+                {"q": query},
+            )
+        ]
+        tsquery = relaxed_tsquery(lexemes, RELAXED_TERM_SHARE)
+        if tsquery is None:
+            return []
+        relaxed = {"tsq": tsquery, "orq": " | ".join(quote_lexeme(t) for t in lexemes)}
+        return [
+            result
+            for revision in revisions
+            for result in self._lexical_results(session, revision, query, top_k, relaxed)
+        ]
+
     def _lexical_results(
-        self, session: Any, revision: PipelineRevision, query: str, top_k: int
+        self,
+        session: Any,
+        revision: PipelineRevision,
+        query: str,
+        top_k: int,
+        relaxed: dict[str, str] | None = None,
     ) -> list[SearchResult]:
         """Exact-word matches, over exactly the rows the vector arm searched.
 
@@ -502,7 +577,13 @@ class Searcher:
         than by score for the same reason.
         """
         rows = session.execute(
-            text(lexical_sql(revision.embedding_profile_id, text_config=LEXICAL_TEXT_CONFIG)),
+            text(
+                lexical_sql(
+                    revision.embedding_profile_id,
+                    text_config=LEXICAL_TEXT_CONFIG,
+                    relaxed=relaxed is not None,
+                )
+            ),
             {
                 "query": query,
                 "collection": revision.collection,
@@ -510,6 +591,7 @@ class Searcher:
                 "extractor_profile_id": revision.extractor_profile_id,
                 "pool": self.config.search.lexical_candidate_pool,
                 "k": top_k,
+                **(relaxed or {}),
             },
         )
         return [

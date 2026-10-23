@@ -13,6 +13,7 @@ from cementic.db import Base, PipelineRevision
 from cementic.search import (
     MAX_SEARCH_RESULTS,
     OVERFETCH_MULTIPLE,
+    RELAXED_MAX_TERMS,
     Searcher,
     SearchResult,
     _create_embedding_provider,
@@ -23,6 +24,7 @@ from cementic.search import (
     arm_fetch_limit,
     merge_arms,
     probe_documents,
+    relaxed_tsquery,
 )
 
 
@@ -919,3 +921,30 @@ class TestEveryPathReturnsOneRowPerDocument:
 
         with patch.object(searcher, "candidates", return_value=self._chunks()):
             searcher.search("q", top_k=3)
+
+
+class TestRelaxedTsquery:
+    def test_ors_every_conjunction_of_the_required_size(self) -> None:
+        # ceil(0.6 * 4) = 3 of 4 terms
+        query = relaxed_tsquery(["a", "b", "c", "d"], 0.6)
+        assert query is not None
+        assert query.count("|") == 3  # C(4, 3) = 4 conjunctions
+        assert "('a' & 'b' & 'c')" in query
+        assert "('b' & 'c' & 'd')" in query
+
+    def test_a_single_term_is_itself(self) -> None:
+        assert relaxed_tsquery(["a"], 0.6) == "('a')"
+
+    def test_repeated_terms_count_once(self) -> None:
+        assert relaxed_tsquery(["a", "a", "b"], 1.0) == "('a' & 'b')"
+
+    def test_no_terms_is_no_query(self) -> None:
+        assert relaxed_tsquery([], 0.6) is None
+
+    def test_quotes_are_escaped(self) -> None:
+        assert relaxed_tsquery(["o'neil"], 0.6) == "('o''neil')"
+
+    def test_too_many_terms_is_no_query(self) -> None:
+        terms = [f"t{i}" for i in range(RELAXED_MAX_TERMS + 1)]
+        assert relaxed_tsquery(terms, 0.6) is None
+        assert relaxed_tsquery(terms[:-1], 0.6) is not None
