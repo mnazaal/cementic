@@ -3,11 +3,10 @@
 <!-- session-handoff:begin (2026-10-23) -->
 ## Where the work stands
 
-**Entry point: "Execution order (2026-10-22)" → "Waves (2026-10-23)" → Wave
-B.** Wave A and Wave R passed the user's gate on 2026-10-23 (`claude/wave-a`,
-fast-forwarded to main once the user runs it); Wave D is empty because the
-riders failed their rule. Wave B is on `claude/wave-b`, rebased onto
-`claude/wave-a`, pending review and its gate.
+**Entry point: "Execution order (2026-10-22)" → "Waves (2026-10-23)" → the
+typo fallback, then Wave C.** Waves A, R and B passed the user's gate on
+2026-10-23 (A is on main; B is on `claude/wave-b`, fast-forwarded to main
+once the user runs it). Wave D is empty because the riders failed their rule.
 
 **Phase 2a closed 2026-10-23: stay on v2-moe.** Qwen3 and Harrier pass the
 title rule and fail the phrase rule; see "Retrieval Phase 2" → 2a → "RUN
@@ -387,7 +386,15 @@ Phase 2". The scoring runs go to the user's terminal.
   both edit `search.py` and `vector_store.py`.
 - *One table printer* ("Functional core" 8).
 
-**Wave C — after Wave B's gate, alone.** "Functional core" 7, public names. It
+**Wave B — DONE 2026-10-23**, gate passed (`claude/wave-b`); results under
+"Lexical arm" and the systemd copy below.
+
+**Typo fallback — after Wave B, before Wave C.** "Fuzzy matching" chose relaxed
+OR as a fallback for an empty lexical arm; implement it in `search.py` and
+`vector_store.py`. It goes before Wave C because that wave renames across
+every module.
+
+**Wave C — after the typo fallback, alone.** "Functional core" 7, public names. It
 renames across every module, so it runs when nothing else is in flight.
 
 **Wave D — the rebuild, if the riders pass. EMPTY (2026-10-23):** the riders
@@ -898,6 +905,19 @@ one-arm-empty paths (`search.py:295, 476-477`) return one row per document,
 like the fused path.
 *Ends when:* harness `score` before and after shows no set losing more than one
 query, 0.017, on recall@1 or recall@10, and the verdict is recorded here.
+**DONE 2026-10-23 (Wave B).** Before (`c55c4b2`) against after (`5505ebc`): no
+set moved except `phrase-typo` recall@10, 0.217 to 0.233. Pool 2000 against
+10000 on the after code: identical on all six sets, so the pool stays 2000 and
+is documented as an unranked sample (`search.lexical_candidate_pool`). The
+rarity probe could not take the scope under its LIMIT, which leaves the GIN
+index (`lexical_sql`'s 2026-09-06 note); it marks each sampled chunk in or out
+of scope instead, and `search.probe_documents` counts every sampled document
+when the 400-chunk sample is full. `EXPLAIN ANALYZE` old against new: same
+Bitmap Index Scan on `ix_chunks_v2_fts`, 0.4-6.9 ms for both on four terms.
+*Known limits, unchanged from before:* a term that fills the sample from at
+most 20 documents still looks rare; at `-n` near 50 the over-fetch has no
+headroom, so a search can return fewer documents than asked. Logs:
+`~/.cache/cementic-waves/lexical-*.run.log`, `explain_probe.log`.
 
 #### Retrieval Phase 2 — the single rebuild, batched
 
@@ -1115,6 +1135,23 @@ model change moves 0.233).
 *Ends when:* one of the three is chosen with a measured recall@10 on
 `phrase-typo` to justify it, or the item is closed as "not worth it" with the
 0.233 recorded as the accepted floor.
+**CHOSEN 2026-10-23: relaxed OR, as a fallback only.** Fuzzy run on the live
+corpus (`fuzzy --no-trigram`, 240 queries, 256 s), recall@10:
+
+| Set (n = 60) | shipped | relaxed OR, every query | relaxed OR, only when the lexical arm is empty |
+|---|---|---|---|
+| phrase | 1.000 | 0.817 | 1.000 |
+| phrase-reordered | 1.000 | 0.783 | 1.000 |
+| phrase-dropped | 0.950 | 0.650 | 0.950 |
+| phrase-typo | 0.233 | 0.650 | 0.650 (29 better, 0 worse) |
+
+Replacing the arm loses 30-35 queries on every exact set; as a fallback it
+fires only where the lexical arm is empty (all 60 typo'd queries, none of the
+others), so it changes nothing else. The fallback column is computed offline
+from the saved records (`~/.cache/cementic-waves/fuzzy-records.json`).
+Recall@1 is 0.100 in every cell. Implementation is "Typo fallback" under
+"Waves". *Ends when:* it lands and harness `score` shows `phrase-typo`
+recall@10 near 0.650 with no other set losing more than one query.
 **Trigram without an index: not viable (2026-10-23).** A probe of 20,000
 chunks took 7.65 s, so `similarity`/`word_similarity` over the ~2.3M chunks is
 about 879 s per query on one core, and the full measurement about 14.6 h. Not
@@ -1138,6 +1175,12 @@ Independent of the code phases, except where noted.
   Dotfiles stay untouched. The decision log records the accepted drift.
   *Ends when:* the copy starts under `systemctl --user` from a checkout at a
   path other than `~/projects/cementic`.
+  **DONE 2026-10-23 (Wave B).** Started as `cementic-copytest@copytest` from
+  `~/.cache/cementic-waves/wt-81f9392a9580`, active at 15 s and 30 s, beside
+  `cementic@papers`. That needed its own state and log paths: the defaults are
+  shared, so a second instance reports "already running" and loops. The
+  template now says so; the dotfiles unit's comment still claims a second
+  instance just works.
 - **Shared-machine warning.** Add it to `docs/setup.md` and the template README:
   the default Postgres role is superuser `cementic`/`cementic`. Give the
   `ALTER ROLE` command. *Ends when:* both docs carry it.
