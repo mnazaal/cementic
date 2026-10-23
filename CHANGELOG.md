@@ -9,6 +9,61 @@ changelog that is 10% complete is worse than none, because it reads as
 authoritative. `git log --oneline <last-tag>..HEAD` is the source for the next
 release's entries; conventional-commit prefixes make it filterable.
 
+## [0.3.0] — 2026-10-23
+
+### Changed (breaking)
+
+- **`cementic doctor` replaces `status --doctor`**, with no alias.
+- **`search --limit` is gone**; use `-n`.
+- **Python 3.12+ is required.**
+- **Search returns one row per document**, showing its best chunk, and fuses the
+  two arms by document rather than by chunk. `--json` results carry
+  `document_id`, and `distance` is `null` for a lexical-only hit.
+- **Existing indexes rebuild once on upgrade.** The fingerprint now records the
+  model file's content digest and the installed versions of the extraction
+  libraries, so a profile built by 0.2.0 does not match.
+
+### Added
+
+- **Hybrid search.** `cementic search` runs a vector arm and a full-text arm and
+  merges them: the leading arm takes rank 1, reciprocal rank fusion the rest. A
+  query whose words are misspelt falls back to a relaxed full-text match.
+  `[search] hybrid = false` turns the full-text arm off.
+- **`extraction` hardening and choice.** PDFs are parsed in a child process
+  bounded by `extraction.timeout_seconds` and `extraction.memory_limit_mb`; a
+  crash or hang fails that one document. A `command` extractor runs any external
+  tool that prints text, and `pymupdf-raw` skips layout analysis.
+- **`llama_cpp.daemon_command`** supervises an external embedding server (e.g. a
+  Vulkan `llama-server`) instead of the bundled one.
+- **`cementic run watcher|worker`** and a templated `cementic@<collection>`
+  systemd user unit, so an interrupted import resumes on its own.
+- **`--json` on `collection list`, `collection revisions` and `embedding
+  status`**; the shapes are documented in `docs/operations.md` and checked by
+  tests.
+- **A retrieval quality harness** (`scripts/`) scoring recall on query sets
+  drawn from the corpus, and comparing embedding models on shared pools.
+
+### Fixed
+
+- **Renaming or moving files under a watched tree repaths them** instead of
+  re-extracting and re-embedding everything below.
+- **One bad document no longer stalls a collection**: over-long chunks are
+  embedded as the mean of pieces that fit, NUL bytes are stripped, and a chunk
+  PostgreSQL refuses fails alone.
+- **`hnsw.ef_search` defaults to 100.** At 2.3M vectors the old 40 dropped
+  recall@10 to 0 on some queries.
+- **The score column agrees with the result order**, and `doctor` no longer
+  reports a fresh install as unreachable.
+
+### Performance
+
+- **`cementic --help` and other light commands no longer import SQLAlchemy,
+  requests or tiktoken.**
+- **Watcher restarts skip re-hashing unchanged files** (683 s to 219 s on a
+  23,796-document corpus).
+- **Embedding claims and status counts stay flat at scale**, and embedding
+  request size follows search activity, restoring bulk-indexing throughput.
+
 ## [0.2.0] — 2026-08-18
 
 ### Added
