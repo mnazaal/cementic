@@ -1,51 +1,70 @@
 # cementic — architecture & design
 
-<!-- session-handoff:begin (2026-10-22, night) -->
+<!-- session-handoff:begin (2026-10-23) -->
 ## Where the work stands
 
-**Entry point: "Execution order (2026-10-22)" below, the only live plan.**
-Correctness steps 1-8, the four "Audit additions" and four "Packaging, docs and
-deletions" items are DONE on branch `claude/audit-fixes`. The user's gate
-passed on `92fce41`, all checks including integration-pg (2026-10-22). Each step carries its commit. Next unstarted work: "User-facing CLI"
-(the import diet first), then "Schema retrofits and efficiency".
+**Entry point: "Execution order (2026-10-22)" → "User-facing CLI" → "Import
+diet", the first unstarted item.** Start it on a fresh `claude/` branch from
+main. Everything above it in the execution order is DONE and on main.
 
-**Branch `claude/audit-fixes`**, 15 commits on `73b5d4c`, not merged. Last
-commit `f667e21` repairs a cold review's findings, and a second cold review of
-it ran before merge. After the gate, `check.sh` gained `--extra dev` on every
-`uv run`: a fresh checkout's first run failed mypy, unit and integration
-because the plain sync left out the dev tools.
+**State on main (`7d58d66` plus this handoff's commit).** Branch
+`claude/audit-fixes` (16 commits: correctness steps 1-8, audit additions,
+packaging/docs/deletions) fast-forwarded on 2026-10-23. The user's gate passed
+on the final commits, including integration-pg. `cementic@papers` restarted on
+it: `doctor` ok, `status` workers running, 2,383,903/2,383,903 chunks
+embedded. `doctor` warned "tokenizer not cached" once after the restart; that
+is the expected re-download into `~/.local/share/cementic/tiktoken`, not a
+fault. `status` read `workers partial` for a few seconds after the restart,
+then `running`.
 
-**Open from the review, accepted for now.** A file renamed while its
-extraction is in flight fails with FileNotFoundError and stays failed until
-the next `cementic start`. The window is one document per worker.
+**Phase 2a closed 2026-10-23: stay on v2-moe.** Qwen3 and Harrier pass the
+title rule and fail the phrase rule; see "Retrieval Phase 2" → 2a → "RUN
+2026-10-23". 2b-2e are now judged alone. The noise-floor anomaly (21 refused
+chunks dropped by `score_arm`) is still unchecked.
 
-**Deploying the branch.** The unit runs the working tree, so the merge takes
-effect at `systemctl --user restart cementic@papers`. Expect three things once:
-the daemon alias changes (`verbose` left the fingerprint), the restart adds
-the `attempts` column to two tables, and the tokenizer is downloaded again
-into `~/.local/share/cementic/tiktoken`.
+**Open from review, accepted.** A file renamed while its extraction is in
+flight fails with FileNotFoundError and stays failed until the next `cementic
+start`. The window is one document per worker.
 
-**Phase 2a closed 2026-10-23: stay on v2-moe.** Qwen3 and Harrier both lose
-on phrase queries and embed 2.1-3.3x slower; see "Retrieval Phase 2" → 2a →
-"RUN 2026-10-23". The overnight run is finished, so the branch can merge. The
-noise-floor anomaly (21 refused chunks dropped by `score_arm`) is unchanged.
+**Leftover git state for the user to clear.** The gate checkout
+`~/projects/cementic-audit-fixes`, the stale registration of the agent's
+deleted worktree, the merged branch `claude/audit-fixes`, and a stray branch
+`claude/handoff-2026-10-23` (points at main; a failed `worktree add` created
+it). Commands are in "Exit criteria".
 
 **Environment quirks.**
+- This session the sandbox could write refs but not `.git/worktrees`, so it
+  could neither add nor remove a worktree. Branch work then needs the user, or
+  the change ships as a patch under `~/.cache/patches/`.
 - Claude Code kills its own background jobs under memory pressure. Long runs
   belong in the user's terminal.
 - `git diff`/`git status` with no pathspec fail in the sandbox on the masked
-  `.env`. Pass a pathspec.
-- Bash hooks block `git config` and `ls` of the session scratchpad.
+  `.env`. Pass a pathspec. Untracked dotfiles (`.bashrc`, `.claude/`, ...) in
+  sandbox `git status` are bind-mount stubs; never stage them.
+- The sandbox cannot see systemd (`Failed to connect to bus`) or the real
+  daemon; `cementic status` there reports everything stopped. Ask the user
+  for `status`/`doctor` output.
+- Bash hooks block `git config`, branch deletion (the pattern matches even
+  inside a heredoc) and `ls` of the session scratchpad.
+- In the sandbox about 60 suite tests fail on the blocked tiktoken download,
+  plus two tokenizer pre-check tests; the user's gate is the authority.
 - `llama-bench -p 2048` aborts on encoder models whose window is at or below
   2048; bench them at 512.
 
 **Artifacts outside the repo.** Audit: `notes/review-codebase.html`
-(gitignored). Gate logs and baselines: `~/.cache/cementic-audit/`. Model
-comparison: `~/.cache/cementic-model-compare/`.
+(gitignored). The six subagent audit reports behind it and the branch
+review: `~/.cache/cementic-audit/reviews-2026-10-22/`. Gate logs and
+baselines: `~/.cache/cementic-audit/`. Model comparison:
+`~/.cache/cementic-model-compare/` and `~/.cache/cementic-model-compare-all.log`.
 
 **Exit criteria.**
 ```bash
-git -C ~/projects/cementic merge-base --is-ancestor main claude/audit-fixes && echo fast-forwardable
+git -C ~/projects/cementic log --oneline -1 main      # the handoff commit, parent 7d58d66
+git -C ~/projects/cementic worktree prune
+git -C ~/projects/cementic worktree remove ~/projects/cementic-audit-fixes
+git -C ~/projects/cementic branch -d claude/audit-fixes claude/handoff-2026-10-23
+git -C ~/projects/cementic worktree list              # only ~/projects/cementic
+cementic status                                        # workers running, 100.0% embedded
 ```
 <!-- session-handoff:end -->
 
@@ -277,7 +296,7 @@ what ends it. Line numbers are as of `73b5d4c`.
 
 ### Correctness
 
-**1. Search shows each document's best chunk.** **DONE on `claude/audit-fixes`, pending the user's gate (`b756181`).** `_merge_arms` (`search.py:479-491`)
+**1. Search shows each document's best chunk.** **DONE, on main since 2026-10-23 (`b756181`).** `_merge_arms` (`search.py:479-491`)
 fills `by_path` last-write-wins over score-ordered rows, so a multi-chunk paper
 carries its *worst* vector chunk while ranked by its best, and
 `scores_explain_order` then hides the score column. Use first-write-wins, key on
@@ -289,7 +308,7 @@ not move.
 *Anti-scope:* no ranking change, no `document_id` yet (the CLI step "A document
 id in search results" re-keys on it later).
 
-**2. Attempt cap for work that kills the worker.** **DONE on `claude/audit-fixes`, pending the user's gate (`350aeca`).** The pg retrofit test has not run; the crash loop is tested on SQLite. Today a document whose
+**2. Attempt cap for work that kills the worker.** **DONE, on main since 2026-10-23 (`350aeca`).** The pg retrofit test has not run; the crash loop is tested on SQLite. Today a document whose
 extraction segfaults MuPDF or OOM-kills the worker is re-claimed first on every
 restart, because the claim orders by lowest id and `requeue_interrupted_artifacts`
 (`revisions.py:364-420`) resets every `processing` row. Add `attempts` to
@@ -302,7 +321,7 @@ the next document is claimed; `status --verbose` shows the reason.
 *Anti-scope:* no timeout here, since hangs are the isolation step's job; leave
 embeddings alone, because an embed crash is the server's, not the worker's.
 
-**3. Tokenizer offline.** **DONE on `claude/audit-fixes`, pending the user's gate (`696dd55`).** Proven here: cold and blocked. Not provable in the sandbox: warm and blocked. tiktoken caches `cl100k_base` in
+**3. Tokenizer offline.** **DONE, on main since 2026-10-23 (`696dd55`).** Proven here: cold and blocked. Not provable in the sandbox: warm and blocked. tiktoken caches `cl100k_base` in
 `$TMPDIR/data-gym-cache`, which is wiped at reboot, and re-downloads it on
 first use. Offline, `cementic chunk` prints a 26 KB traceback, the worker
 stamps chunks failed, and 57 tests fail. Route the three `get_encoding` sites
@@ -314,7 +333,7 @@ server-side counting.
 *Ends when:* with the cache warm and the network blocked, `chunk` works; cold
 and blocked, `chunk` exits 1 in one line and `doctor` names the fix.
 
-**4. A rename re-paths instead of re-embedding.** **DONE on `claude/audit-fixes`, pending the user's gate (`655f4c7`, `1974aa6`).** The directory case uses watchdog's synthesised per-file events, not a live observer. `on_moved`
+**4. A rename re-paths instead of re-embedding.** **DONE, on main since 2026-10-23 (`655f4c7`, `1974aa6`).** The directory case uses watchdog's synthesised per-file events, not a live observer. `on_moved`
 (`source_watcher.py:439-449`) runs delete-then-create, and the delete purges
 vectors at once. When the destination is unregistered and the source row is
 live, update `source_path` in place: the same outcome
@@ -325,17 +344,17 @@ watcher and the chunk ids survive with no re-embed.
 delete-then-create trade at `source_watcher.py:285-298` is documented and
 separate.
 
-**5. Clear `last_error` after any productive pass.** **DONE on `claude/audit-fixes`, pending the user's gate (`fde1f1c`).** The clear at
+**5. Clear `last_error` after any productive pass.** **DONE, on main since 2026-10-23 (`fde1f1c`).** The clear at
 `pipeline_worker.py:598-600` runs only on an idle pass, so a 10-second server
 blip stays red in `status` for a whole import.
 *Ends when:* a unit test of error, then productive pass, sees it cleared.
 
-**6. Drop `verbose` from the runtime fingerprint.** **DONE on `claude/audit-fixes`, pending the user's gate (`fe6d057`).** It reverses a 2026-08-23
+**6. Drop `verbose` from the runtime fingerprint.** **DONE, on main since 2026-10-23 (`fe6d057`).** It reverses a 2026-08-23
 line, and the reason is in the decision log. It stays in the launch command.
 *Ends when:* two configs differing only in `verbose` fingerprint equally. Expect
 one daemon restart on deploy, because the alias changes once.
 
-**7. Two CLI lies.** **DONE on `claude/audit-fixes`, pending the user's gate (`3fd2dd7`).** The `search` synopsis shows `[TRAILING_COLLECTIONS]...`,
+**7. Two CLI lies.** **DONE, on main since 2026-10-23 (`3fd2dd7`).** The `search` synopsis shows `[TRAILING_COLLECTIONS]...`,
 which only works after `-c` (`cli.py:387-402`). Make usage and help show the
 working form, `search "q" -c a b`, which the `tool-cementic` skill uses.
 `config init` always writes the user-dir path (`cli.py:166`). Write the path
@@ -343,7 +362,7 @@ working form, `search "q" -c a b`, which the `tool-cementic` skill uses.
 *Ends when:* `--help` shows only accepted forms, and `config init` with
 `./cementic.toml` present does not write a file nothing reads.
 
-**8. The small ones, one commit.** **DONE on `claude/audit-fixes`, pending the user's gate (`ebb2672`).** Usage errors exit 2 through `typer.Exit(2)`, not `BadParameter`, which would have changed every message's wording.
+**8. The small ones, one commit.** **DONE, on main since 2026-10-23 (`ebb2672`).** Usage errors exit 2 through `typer.Exit(2)`, not `BadParameter`, which would have changed every message's wording.
 - The extractor profile display name exceeds `String(100)` with about eight
   backends (`profiles.py:250-255`), so truncate it, since the fingerprint
   carries identity.
@@ -573,17 +592,17 @@ and no unifying of the `--force` short forms.
 
 #### Audit additions
 
-- **Drop `search --limit`.** **DONE on `claude/audit-fixes`, pending the user's gate (`239e565`).** It is a third spelling of `-n` and clashes with
+- **Drop `search --limit`.** **DONE, on main since 2026-10-23 (`239e565`).** It is a third spelling of `-n` and clashes with
   `status --limit` (`cli.py:966`). *Ends when:* `search --limit` is a usage
   error, and no doc or test names it.
-- **README lists the filters.** **DONE on `claude/audit-fixes`, pending the user's gate (`239e565`).** `extract`, `chunk` and `embed` are the only way
+- **README lists the filters.** **DONE, on main since 2026-10-23 (`239e565`).** `extract`, `chunk` and `embed` are the only way
   to test an extractor without a database. *Ends when:* README's command block
   names them.
-- **Document the JSON shapes.** **DONE on `claude/audit-fixes`, pending the user's gate (`239e565`).** Cover `status --json` and `doctor --json` in
+- **Document the JSON shapes.** **DONE, on main since 2026-10-23 (`239e565`).** Cover `status --json` and `doctor --json` in
   `docs/operations.md`, including the `error` key and which keys vanish when the
   database is down (`render.py:355-386`). Do it alongside the JSONL convention
   above. *Ends when:* the documented keys match a test that asserts them.
-- **Delete `collection_callback`** **DONE on `claude/audit-fixes`, pending the user's gate (`a4eeb5b`).** (`cli_collection.py:33-38`). It never runs,
+- **Delete `collection_callback`** **DONE, on main since 2026-10-23 (`a4eeb5b`).** (`cli_collection.py:33-38`). It never runs,
   because `no_args_is_help` fires first, and its unit test calls it directly.
   *Ends when:* the function and that test are gone and `cementic collection`
   still prints help.
@@ -901,7 +920,7 @@ Independent of the code phases, except where noted.
 - **Shared-machine warning.** Add it to `docs/setup.md` and the template README:
   the default Postgres role is superuser `cementic`/`cementic`. Give the
   `ALTER ROLE` command. *Ends when:* both docs carry it.
-- **Delete dead and duplicate code.** **DONE on `claude/audit-fixes`, pending the user's gate (`a4eeb5b`).**
+- **Delete dead and duplicate code.** **DONE, on main since 2026-10-23 (`a4eeb5b`).**
   - `vector_store.backfill_filter_columns_sql` and `enforce_filter_columns_sql`,
     which have zero callers.
   - `tests/integration/test_runner.py`, after folding its two unique cases into
@@ -911,10 +930,10 @@ Independent of the code phases, except where noted.
     imports a private test helper.
 
   *Ends when:* every check passes.
-- **Structural debounce tests.** **DONE on `claude/audit-fixes`, pending the user's gate (`a4eeb5b`).** Replace the four wall-clock tests
+- **Structural debounce tests.** **DONE, on main since 2026-10-23 (`a4eeb5b`).** Replace the four wall-clock tests
   (`tests/integration/test_source_watcher.py:336-389`) with an injected timer.
   *Ends when:* no `time.sleep` remains in them.
-- **Doc anchors.** **DONE on `claude/audit-fixes`, pending the user's gate (`a4eeb5b`).** Both docs that count gates say six. Fix TODO.md's three dead anchors: `tests/unit/conftest.py`
+- **Doc anchors.** **DONE, on main since 2026-10-23 (`a4eeb5b`).** Both docs that count gates say six. Fix TODO.md's three dead anchors: `tests/unit/conftest.py`
   and two README headings removed in `6df8ab9`. State one gate count everywhere.
   *Ends when:* every path TODO.md cites exists.
 - **`tool-cementic` skill.** It lives outside the repo and is not writable by
