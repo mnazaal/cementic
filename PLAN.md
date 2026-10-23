@@ -3,9 +3,11 @@
 <!-- session-handoff:begin (2026-10-23) -->
 ## Where the work stands
 
-**Entry point: "Execution order (2026-10-22)" → "User-facing CLI" → "Import
-diet", the first unstarted item.** Start it on a fresh `claude/` branch from
-main. Everything above it in the execution order is DONE and on main.
+**Entry point: "Execution order (2026-10-22)" → "User-facing CLI" →
+"Machine-readable output for the three query commands", the first unstarted
+item.** The import diet before it is DONE on branch `claude/import-diet`
+(2026-10-23), pending the user's pg gate and a fast-forward to main; start the
+next item from that branch or from main once it lands.
 
 **State on main (`7d58d66` plus this handoff's commit).** Branch
 `claude/audit-fixes` (16 commits: correctness steps 1-8, audit additions,
@@ -388,6 +390,16 @@ The key rename is independent. Then four audit additions.
 
 #### Import diet — stop the CLI importing the database and HTTP layers
 
+**DONE on `claude/import-diet` since 2026-10-23 (`1b5d7f6`..`b6a6632`), pending
+the pg gate.** `import cementic.cli` loads none of the six guarded modules
+(`test_cli_import_does_not_pull_in_the_database_or_http_layers`). Interleaved,
+best of 10, measured under load average ~20 so absolute numbers run high:
+`import cementic.cli` 477 ms median against 1060 ms on `791c406`, `cementic
+--version` 502 ms against 1264 ms. An independent review found no behaviour
+change across 26 `status` scenarios diffed against `791c406`. The pg tests
+whose patches were repointed (`test_cli_pg.py:114,134`,
+`test_pipeline_worker.py:660,681`) have not run.
+
 The measured defect. Import time for `cementic.cli`, and for the set a light
 command actually needs, six runs each (import only, excluding interpreter
 startup). **Measure on an idle machine**: the first numbers taken for this plan
@@ -717,7 +729,7 @@ change beyond the one split named below.
 4. **Target-revision rule.** The resurrect, supersede or create decision in
    `get_target_revision` (`revisions.py:222-279`) becomes a pure function over
    existing revisions and profile ids. *Ends when:* tested without a session.
-5. **Status document split.** **Pulled forward into the import diet
+5. **Status document split.** **DONE on `claude/import-diet` (`4989219`).** **Pulled forward into the import diet
    (2026-10-23, user's call): it runs before the diet's `render.py` commit.**
    `render.build_status_document` becomes a query function in `status_service`
    and a pure document builder, dropping the two smuggled callables and the
