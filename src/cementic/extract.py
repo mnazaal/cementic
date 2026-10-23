@@ -2,13 +2,19 @@
 
 from __future__ import annotations
 
+import atexit
 import contextlib
 import importlib.util
 import json
+import os
+import select
 import shlex
 import signal
 import subprocess
 import sys
+import tempfile
+import threading
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -505,44 +511,133 @@ def _run_in_process(fn: ExtractorFn, path: str, config: Config) -> str:
     return fn(path, config)
 
 
+class _Child:
+    """One long-lived extraction child (see `_run_isolated`)."""
+
+    def __init__(self, limits: Any) -> None:
+        self.stderr = tempfile.TemporaryFile()
+        self.process = subprocess.Popen(
+            [sys.executable, "-m", "cementic.extract_child", limits.model_dump_json()],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=self.stderr,
+        )
+        self.pid = self.process.pid
+
+    def ask(self, target: str, path: str, timeout: float) -> dict[str, Any]:
+        """Send one request and read its one-line answer; raise on death or timeout."""
+        assert self.process.stdin is not None and self.process.stdout is not None
+        request = json.dumps({"target": target, "path": path}) + "\n"
+        deadline = time.monotonic() + timeout
+        reply = b""
+        try:
+            self.process.stdin.write(request.encode())
+            self.process.stdin.flush()
+        except BrokenPipeError:
+            pass  # the child is already gone; the read below sees EOF
+        fd = self.process.stdout.fileno()
+        while not reply.endswith(b"\n"):
+            left = deadline - time.monotonic()
+            if left <= 0 or not select.select([fd], [], [], left)[0]:
+                raise subprocess.TimeoutExpired(target, timeout)
+            chunk = os.read(fd, 1 << 20)
+            if not chunk:
+                break
+            reply += chunk
+        if not reply.endswith(b"\n"):
+            returncode = self.process.wait()
+            self.stderr.seek(0)
+            raise ChildDiedError(returncode, self.stderr.read())
+        answer: dict[str, Any] = json.loads(reply)
+        return answer
+
+    def close(self) -> None:
+        """End the child: stdin EOF asks it to exit, a kill follows if it will not."""
+        for stream in (self.process.stdin, self.process.stdout):
+            with contextlib.suppress(OSError):
+                if stream is not None:
+                    stream.close()
+        try:
+            self.process.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            self.process.kill()
+            self.process.wait()
+        self.stderr.close()
+
+
+class ChildDiedError(Exception):
+    def __init__(self, returncode: int, stderr: bytes) -> None:
+        super().__init__(returncode)
+        self.returncode = returncode
+        self.stderr = stderr
+
+
+#: One child per extraction config, started on first use and replaced after a
+#: death or timeout. The lock makes the registry safe if several threads extract
+#: (the pipeline worker uses one); it serializes them, which one child would do
+#: anyway.
+_children: dict[str, _Child] = {}
+_children_lock = threading.Lock()
+
+
+def _close_children() -> None:
+    with _children_lock:
+        for child in _children.values():
+            child.close()
+        _children.clear()
+
+
+atexit.register(_close_children)
+
+
 def _run_isolated(fn: ExtractorFn, path: str, config: Config) -> str:
-    """Run an extractor in a fresh child process and take its stdout.
+    """Run an extractor in a long-lived child process and take its answer.
 
     A native parser that segfaults, hangs or exhausts memory on one malformed
     PDF used to take the worker -- which holds the database credentials --
     down with it. The child gets the wall-clock and address-space limits from
     `[extraction]`, and any way it dies becomes an ordinary exception that the
-    caller stamps on that one document. Text crosses the pipe as UTF-8 with
-    surrogates preserved, so it is byte-identical to the in-process result.
-    The child sees the ``extraction`` section only, which is all the isolated
+    caller stamps on that one document. One child serves every document, so
+    interpreter start and imports are paid once; after a death or a timeout the
+    next document starts a fresh one. A parser exception is reported by the
+    child and does not end it. Text crosses the pipe as JSON, so it is
+    byte-identical to the in-process result (lone surrogates included). The
+    child sees the ``extraction`` section only, which is all the isolated
     extractors read.
     """
     limits = config.extraction
-    argv = [
-        sys.executable,
-        "-m",
-        "cementic.extract_child",
-        f"{fn.__module__}:{fn.__qualname__}",
-        path,
-        limits.model_dump_json(),
-    ]
-    try:
-        completed = subprocess.run(
-            argv, capture_output=True, timeout=limits.timeout_seconds, check=False
-        )
-    except subprocess.TimeoutExpired:
-        raise RuntimeError(f"extraction timed out after {limits.timeout_seconds:g}s")
-    if completed.returncode == 0:
-        return completed.stdout.decode("utf-8", errors="surrogatepass")
-    raise RuntimeError(_child_failure(completed.returncode, completed.stderr, limits))
+    key = limits.model_dump_json()
+    target = f"{fn.__module__}:{fn.__qualname__}"
+    with _children_lock:
+        child = _children.get(key)
+        if child is None or child.process.poll() is not None:
+            if child is not None:
+                child.close()
+            child = _children[key] = _Child(limits)
+        try:
+            answer = child.ask(target, path, limits.timeout_seconds)
+        except subprocess.TimeoutExpired:
+            _drop(key)
+            raise RuntimeError(f"extraction timed out after {limits.timeout_seconds:g}s")
+        except ChildDiedError as died:
+            _drop(key)
+            raise RuntimeError(_death_reason(died.returncode, died.stderr))
+    if "error" in answer:
+        raise RuntimeError(_reported_failure(answer["error"], limits))
+    return str(answer["text"])
 
 
-def _child_failure(returncode: int, stderr: bytes, limits: Any) -> str:
-    """Explain a failed extraction child (pure).
+def _drop(key: str) -> None:
+    """Kill and forget the child for `key` (caller holds the lock)."""
+    child = _children.pop(key)
+    child.process.kill()
+    child.close()
 
-    The child reports a Python exception as a final JSON line on stderr; an
-    exit without one (a signal, or the interpreter dying) has only the return
-    code to go on.
+
+def _death_reason(returncode: int, stderr: bytes) -> str:
+    """Explain a child that died mid-document (pure).
+
+    Only the return code and whatever the interpreter wrote to stderr are left.
     """
     if returncode < 0:
         try:
@@ -551,11 +646,12 @@ def _child_failure(returncode: int, stderr: bytes, limits: Any) -> str:
             cause = f"signal {-returncode}"
         return f"extraction process crashed ({cause})"
     lines = stderr.decode("utf-8", errors="replace").strip().splitlines()
-    try:
-        report = json.loads(lines[-1])
-    except (IndexError, ValueError):
-        detail = f": {lines[-1]}" if lines else ""
-        return f"extraction process exited {returncode}{detail}"
+    detail = f": {lines[-1]}" if lines else ""
+    return f"extraction process exited {returncode}{detail}"
+
+
+def _reported_failure(report: dict[str, str], limits: Any) -> str:
+    """Explain an exception the child caught and reported (pure)."""
     if report.get("type") == "MemoryError":
         return (
             "extraction ran out of memory "

@@ -1,5 +1,6 @@
 """PDF extraction runs in a child process with a time and memory limit."""
 
+import os
 from pathlib import Path
 
 import pytest
@@ -80,3 +81,64 @@ def test_isolation_does_not_move_the_extractor_fingerprint():
     config.extraction.timeout_seconds = 5
     config.extraction.memory_limit_mb = 0
     assert build_extractor_profile_payload(config) == payload
+
+
+def pid_of_child(monkeypatch, config) -> int:
+    use_extractor(monkeypatch, "child_pid")
+    return int(extract_document("/x/a.pdf", config))
+
+
+def test_documents_reuse_one_child(monkeypatch):
+    config = use_extractor(monkeypatch, "child_pid")
+
+    first = pid_of_child(monkeypatch, config)
+    assert pid_of_child(monkeypatch, config) == first
+    assert first != os.getpid()
+
+
+@pytest.mark.parametrize("fn_name", ["hard_exit", "segfault"])
+def test_a_death_restarts_the_child_for_the_next_document(monkeypatch, fn_name):
+    config = use_extractor(monkeypatch, "child_pid")
+    first = pid_of_child(monkeypatch, config)
+
+    use_extractor(monkeypatch, fn_name)
+    with pytest.raises(RuntimeError):
+        extract_document("/x/a.pdf", config)
+
+    second = pid_of_child(monkeypatch, config)
+    assert second != first
+    assert pid_of_child(monkeypatch, config) == second
+
+
+def test_a_timeout_restarts_the_child_for_the_next_document(monkeypatch):
+    config = use_extractor(monkeypatch, "child_pid")
+    config.extraction.timeout_seconds = 5
+    first = pid_of_child(monkeypatch, config)
+
+    use_extractor(monkeypatch, "hang")
+    config.extraction.timeout_seconds = 5
+    with pytest.raises(RuntimeError, match="timed out"):
+        extract_document("/x/a.pdf", config)
+
+    assert pid_of_child(monkeypatch, config) != first
+
+
+def test_a_parser_exception_keeps_the_child(monkeypatch):
+    config = use_extractor(monkeypatch, "child_pid")
+    first = pid_of_child(monkeypatch, config)
+
+    use_extractor(monkeypatch, "raises")
+    with pytest.raises(RuntimeError, match="bad pdf"):
+        extract_document("/x/a.pdf", config)
+
+    assert pid_of_child(monkeypatch, config) == first
+
+
+def test_the_child_exits_when_its_parent_closes_it(monkeypatch):
+    config = use_extractor(monkeypatch, "child_pid")
+    pid = pid_of_child(monkeypatch, config)
+
+    extract_mod._close_children()
+
+    with pytest.raises(ProcessLookupError):
+        os.kill(pid, 0)

@@ -37,3 +37,7 @@ def dies_on_a(path, config):
     if "test_doc_a" in path:
         os._exit(9)
     return "extracted fine"
+
+
+def child_pid(path, config):
+    return str(os.getpid())
