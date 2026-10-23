@@ -3,11 +3,10 @@
 <!-- session-handoff:begin (2026-10-23) -->
 ## Where the work stands
 
-**Entry point: "Release 0.3.0".** Waves A, R, B, the typo fallback and C
-passed the user's gate on 2026-10-23. The release commit is on
-`claude/release-0.3.0` (on top of `claude/wave-c`); main fast-forwards to it,
-then the user tags and pushes. Wave D is empty because the riders failed
-their rule.
+**Entry point: none scheduled.** The 2026-10-22 execution order is finished:
+waves A, R, B, the typo fallback and C passed the user's gate, and 0.3.0 was
+tagged, pushed and installed on 2026-10-23. Wave D is empty because the
+riders failed their rule. Next work comes from the user.
 
 **Phase 2a closed 2026-10-23: stay on v2-moe.** Qwen3 and Harrier pass the
 title rule and fail the phrase rule; see "Retrieval Phase 2" → 2a → "RUN
@@ -50,7 +49,8 @@ baselines: `~/.cache/cementic-audit/`. Model comparison:
 
 **Exit criteria.**
 ```bash
-git -C ~/projects/cementic log --oneline -1 main      # eae6f16 or later
+git -C ~/projects/cementic log --oneline -1 main      # cae3b13 or later
+cementic --version                                     # 0.3.0
 git -C ~/projects/cementic worktree list              # only ~/projects/cementic
 cementic status                                        # workers running, 100.0% embedded
 ```
@@ -1231,6 +1231,7 @@ Bump `pyproject.toml`, `uv lock`, write the CHANGELOG entry per its tag-time
 policy, tag, push, then `uv tool upgrade cementic`. The push is outward-facing,
 so it needs the user's go at the time.
 *Ends when:* `cementic --version` from PATH prints `0.3.0`.
+**DONE 2026-10-23:** tag `v0.3.0` on `cae3b13`, pushed; PATH prints `0.3.0`.
 
 ### Not doing (so nobody re-derives it)
 
