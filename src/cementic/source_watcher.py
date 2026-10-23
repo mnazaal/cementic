@@ -802,11 +802,11 @@ class SourceWatcher:
                 # separately because a broken symlink fails is_file() and would
                 # otherwise vanish the same way.
                 if file_path.is_file() or file_path.is_symlink():
-                    self._on_file_detected(str(file_path))
+                    self._on_file_detected(str(file_path), reuse_stored_hash=True)
 
-    def _on_file_detected(self, file_path: str) -> None:
+    def _on_file_detected(self, file_path: str, *, reuse_stored_hash: bool = False) -> None:
         try:
-            self._register_document(file_path)
+            self._register_document(file_path, reuse_stored_hash=reuse_stored_hash)
             # Mirrors the pipeline worker clearing last_error after a clean
             # loop. Without it the watcher published errors and never retracted
             # them, so one transient failure was reported by `cementic status`
@@ -939,7 +939,14 @@ class SourceWatcher:
             return None
         return str(resolved_path)
 
-    def _register_document(self, file_path: str) -> None:
+    def _register_document(self, file_path: str, *, reuse_stored_hash: bool = False) -> None:
+        """Register one file; `reuse_stored_hash` is set only by the start scan.
+
+        A matching size and mtime stands in for hashing only there, where it
+        saves SHA-256ing the whole corpus on every start. A live event always
+        hashes: a different file renamed or copied over a registered one with
+        `cp -p`, `rsync -t` or `tar x` keeps both size and mtime.
+        """
         # Each rejection below counts. They are logged at ERROR level but used to
         # touch neither counter, so `status --verbose` read "processed=N,
         # failed=0" while an arbitrary number of documents had been dropped --
@@ -984,7 +991,8 @@ class SourceWatcher:
             stored = (
                 None if known is None else (known.file_hash, known.size_bytes, known.mtime_ns)
             )
-        file_hash = _reusable_hash(stored, file_size, mtime_ns) or _file_sha256(file_path)
+        reused = _reusable_hash(stored, file_size, mtime_ns) if reuse_stored_hash else None
+        file_hash = reused or _file_sha256(file_path)
 
         self._publish_current_file(file_path)
         # Read-then-insert is not atomic, and the initial scan runs on the main

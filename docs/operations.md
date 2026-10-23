@@ -173,6 +173,9 @@ found by scanning. `error` is set only when `state` is `ambiguous`.
   one `cementic start` command to index them into one collection.
 - Moving a watched root directory is reconciled on the next `start`; moves and
   deletions inside it are handled live.
+- `start` skips hashing a file whose size and modification time match its
+  stored row, so a file replaced while cementic was not running by a different
+  file with identical size and mtime is not re-indexed until it next changes.
 - Searches across collections built with different embedding models are refused,
   because their distances cannot be ranked together.
 - A collection that is a tiny filtered slice of a shared vector index can return

@@ -97,7 +97,7 @@ class TestIgnoredDirectories:
 
         sw = SourceWatcher(watcher_config)
         seen: list[str] = []
-        with patch.object(sw, "_on_file_detected", side_effect=seen.append):
+        with patch.object(sw, "_on_file_detected", side_effect=lambda path, **_: seen.append(path)):
             sw._scan_existing(temp_dir)
 
         assert [Path(p).name for p in seen] == ["keep.md"]
@@ -195,9 +195,10 @@ class TestRestartWithoutRehashing:
         real = source_watcher._file_sha256
 
         with patch.object(source_watcher, "_file_sha256", side_effect=real) as hashed:
-            sw._register_document(str(doc))
+            sw._register_document(str(doc), reuse_stored_hash=True)
             assert hashed.call_count == 1  # first start: the file is new
-            sw._register_document(str(doc))  # second start: nothing changed
+            # second start: nothing changed
+            sw._register_document(str(doc), reuse_stored_hash=True)
             assert hashed.call_count == 1
 
         with session_factory() as session:
@@ -245,9 +246,32 @@ class TestRestartWithoutRehashing:
         with patch.object(
             source_watcher, "_file_sha256", side_effect=source_watcher._file_sha256
         ) as hashed:
-            sw._register_document(str(doc))
+            sw._register_document(str(doc), reuse_stored_hash=True)
 
         assert hashed.call_count == 1
+
+    def test_live_replacement_with_same_size_and_mtime_is_rehashed(
+        self, watcher_config: Config, watcher_db, temp_dir: Path
+    ) -> None:
+        """Regression: `cp -p`, `rsync -t`, `tar x` or a rename over a registered
+        file leaves size and mtime unchanged, so reusing the stored hash on a
+        live event kept the old hash and extraction never re-ran."""
+        _engine, session_factory, _db_path = watcher_db
+        doc = temp_dir / "paper.md"
+        doc.write_text("AAAA", encoding="utf-8")
+        os.utime(doc, ns=(10**18, 10**18))
+        sw = self._watcher(watcher_config, session_factory, temp_dir)
+        sw._register_document(str(doc))
+        other = temp_dir / "other.tmp"
+        other.write_text("BBBB", encoding="utf-8")
+        os.utime(other, ns=(10**18, 10**18))
+        os.replace(other, doc)
+
+        sw._on_file_detected(str(doc))  # the live-event entry point
+
+        with session_factory() as session:
+            row = session.query(SourceDocument).one()
+            assert row.file_hash == hashlib.sha256(b"BBBB").hexdigest()
 
 
 class TestOfflineDeletionReconciliation:

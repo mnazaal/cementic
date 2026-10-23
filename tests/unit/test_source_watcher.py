@@ -347,7 +347,7 @@ class TestSourceWatcherStateManagement:
         daemon = SourceWatcher()
         seen: list[str] = []
 
-        def record(path: str) -> None:
+        def record(path: str, **_: object) -> None:
             seen.append(path)
             daemon._shutdown_event.set()
 
@@ -367,9 +367,13 @@ class TestSourceWatcherStateManagement:
         daemon = SourceWatcher()
         seen: list[str] = []
 
-        with patch.object(daemon, "_on_file_detected", side_effect=seen.append):
+        with patch.object(
+            daemon, "_on_file_detected", side_effect=lambda path, **_: seen.append(path)
+        ) as detected:
             daemon._scan_existing(tmp_path)
 
+        # The scan alone opts in to reusing the stored hash.
+        assert all(c.kwargs == {"reuse_stored_hash": True} for c in detected.call_args_list)
         assert sorted(Path(p).name for p in seen) == ["dangling.md", "link.md", "real.md"]
 
     def test_scan_walk_error_records_the_unreadable_path(self, tmp_path):
