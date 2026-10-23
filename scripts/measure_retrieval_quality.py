@@ -695,6 +695,18 @@ def paired(ranks: list[int], baseline: list[int]) -> tuple[int, int, float]:
     return better, worse, sign_test(better, worse)
 
 
+def paired_at_1(ranks: list[int], baseline: list[int]) -> tuple[int, int, float]:
+    """(better, worse, sign-test p) on recall@1 alone (pure).
+
+    A query counts only when exactly one arm ranks its gold first. `paired`
+    counts any rank movement, so 8 -> 3 there is a win; the rider rule is
+    pre-registered on recall@1, where that query is a tie.
+    """
+    better = sum(a == 1 and b != 1 for a, b in zip(ranks, baseline, strict=True))
+    worse = sum(a != 1 and b == 1 for a, b in zip(ranks, baseline, strict=True))
+    return better, worse, sign_test(better, worse)
+
+
 def shared_pool(pools: list[list]) -> list[int]:
     """Indices every pool holds a vector for (pure).
 
@@ -952,10 +964,11 @@ def format_fuzzy(report: dict, counts: dict[str, int], depth: int) -> str:
 
 
 def rider_verdict(title: tuple[int, int, float], phrase: tuple[int, int, float]) -> bool:
-    """The pre-registered rider rule over two (better, worse, p) results (pure).
+    """The pre-registered rider rule over two recall@1 results (pure).
 
-    Pass when one kind gains (more wins than losses, sign test p < 0.01) and
-    the other does not lose (no more losses than wins).
+    Each result is `paired_at_1`'s (better, worse, p) against the control.
+    Pass when one kind gains (more recall@1 wins than losses, sign test
+    p < 0.01) and the other does not lose (no more recall@1 losses than wins).
     """
     def gains(result: tuple[int, int, float]) -> bool:
         return result[0] > result[1] and result[2] < RIDER_P
@@ -1938,10 +1951,12 @@ def command_riders(args: argparse.Namespace) -> int:
                 f" {better:>7} {worse:>6} {p:>9.2g}"
             )
             if arm.startswith("riders"):
-                outcome[kind] = (better, worse, p)
+                outcome[kind] = paired_at_1(ranks, baseline)
     passed = rider_verdict(outcome["title"], outcome["phrase"])
-    print(f"\nrider rule (vs the control row; p < {RIDER_P} on one kind, no loss on the other): "
-          f"{'PASS' if passed else 'FAIL'}")
+    for kind, (better, worse, p) in outcome.items():
+        print(f"riders vs control, {kind} recall@1: better {better}, worse {worse}, p {p:.2g}")
+    print(f"\nrider rule (recall@1 vs the control row; p < {RIDER_P} on one kind, "
+          f"no loss on the other): {'PASS' if passed else 'FAIL'}")
     return 0
 
 

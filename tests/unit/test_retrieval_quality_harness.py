@@ -468,6 +468,19 @@ class TestRiderVerdict:
     def test_fails_without_significance(self) -> None:
         assert not harness.rider_verdict((30, 20, 0.2), (30, 28, 0.9))
 
+    def test_rank_gains_below_first_do_not_count_toward_recall_at_1(self) -> None:
+        """Regression: the rule was fed `paired`'s any-rank counts, so 30 golds
+        moving 8 -> 3 outweighed 10 golds falling off rank 1, and a riders arm
+        that lowered recall@1 passed."""
+        control = [8] * 30 + [1] * 10 + [1] * 60
+        riders = [3] * 30 + [2] * 10 + [1] * 60
+
+        assert harness.paired(riders, control)[:2] == (30, 10)
+        assert harness.paired_at_1(riders, control)[:2] == (0, 10)
+        steady = harness.paired_at_1([1] * 100, [1] * 100)
+        assert not harness.rider_verdict(harness.paired_at_1(riders, control), steady)
+        assert not harness.rider_verdict(steady, harness.paired_at_1(riders, control))
+
 
 class TestRiderCensus:
     def test_counts_what_each_rider_acts_on(self) -> None:

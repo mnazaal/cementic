@@ -864,13 +864,15 @@ def stop_background(
         still_alive=still_alive,
         timeout_seconds=timeout_seconds,
     )
-    for stream, text in outcome.messages:
-        (console if stream == "out" else err_console).print(text)
+    # State first, as before the split: a failed write must not follow a
+    # "stopped N process(es)" line that it contradicts.
     if outcome.state_action == "clear":
         _get_supervisor_state_path().unlink(missing_ok=True)
         _clear_worker_state_files()
     elif outcome.next_state is not None:
         _save_supervisor_state(outcome.next_state)
+    for stream, text in outcome.messages:
+        (console if stream == "out" else err_console).print(text)
     if outcome.exit_code:
         raise typer.Exit(outcome.exit_code)
 

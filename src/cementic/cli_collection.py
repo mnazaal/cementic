@@ -330,8 +330,11 @@ def list_collection_revision_command(
             _require_known_collection(session, collection)
             rows = list_collection_revisions(session, collection)
             if json_output:
-                for row in rows:
-                    typer.echo(json.dumps(render.revision_record(row)))
+                # Built before any line is printed: the profile relationships
+                # load lazily, and a failure midway must leave stdout empty.
+                records = [render.revision_record(row) for row in rows]
+                for record in records:
+                    typer.echo(json.dumps(record))
                 return
             console.print(f"{'collection':<11} {collection}")
             console.print("revisions")
