@@ -23,6 +23,7 @@ from cementic.db import (
 from cementic.revisions import (
     _default_revision_label,
     _revision_prune_plan,
+    decide_target_revision,
     drain_pending_vector_table_drops,
     get_active_revision,
     get_target_revision,
@@ -643,3 +644,22 @@ class TestRemoveArtifacts:
 
         assert failures == [outside]
         assert not good.exists(), "the valid artifact must still be removed"
+
+
+
+class TestDecideTargetRevision:
+    """The resurrect/reuse/create rule, from plain data."""
+
+    @pytest.mark.parametrize(
+        ("status", "expected"),
+        [
+            (None, "create"),
+            ("building", "reuse"),
+            ("ready", "reuse"),
+            ("active", "reuse"),
+            ("retired", "resurrect"),
+            ("superseded", "resurrect"),
+        ],
+    )
+    def test_decision(self, status, expected):
+        assert decide_target_revision(status) == expected

@@ -219,6 +219,18 @@ def _supersede_other_in_flight_revisions(
     query.update({"status": "superseded"}, synchronize_session=False)
 
 
+def decide_target_revision(existing_status: str | None) -> str:
+    """Decide what ``get_target_revision`` does with the newest revision matching
+    the current profiles, given its status (``None`` when there is none).
+
+    Returns ``"create"`` (no match), ``"resurrect"`` (a ``retired`` or
+    ``superseded`` match comes back as the building target) or ``"reuse"``.
+    """
+    if existing_status is None:
+        return "create"
+    return "resurrect" if existing_status in ("retired", "superseded") else "reuse"
+
+
 def get_target_revision(
     session: Session,
     collection: str,
@@ -246,6 +258,7 @@ def get_target_revision(
         .order_by(PipelineRevision.id.desc())
         .first()
     )
+    decision = decide_target_revision(None if current is None else current.status)
     if current is not None:
         # Whatever else was in flight for this collection is no longer the
         # target, whatever the target's own status is. Skipping this when the
@@ -255,7 +268,7 @@ def get_target_revision(
         # indefinitely, and pruning -- which only collects `superseded` and old
         # `retired` revisions -- pinned its artifacts on disk permanently.
         _supersede_other_in_flight_revisions(session, collection, keep_id=current.id)
-        if current.status in ("retired", "superseded"):
+        if decision == "resurrect":
             # Config reverted to a previously built revision (e.g. rolling back a
             # model change). Resurrect it as the building target — its artifacts
             # are reused, so it completes and becomes promotable again.
