@@ -111,16 +111,19 @@ def list_collection_command(
             console.print("  (none)")
             return
 
-        name_w = max(len(row.name) for row in rows)
-        doc_w = max(len(f"{row.documents:,}") for row in rows)
-        for row in rows:
-            in_flight = render._in_flight_revision_text(
-                row.ready_revision_label, row.building_revision_label
-            )
-            console.print(
-                f"  {row.name:<{name_w}}   {row.documents:>{doc_w},} docs   "
-                f"active={row.active_revision_label or '-'}  {in_flight}"
-            )
+        cells = [
+            [
+                row.name,
+                f"{row.documents:,} docs",
+                f"active={row.active_revision_label or '-'}  "
+                + render._in_flight_revision_text(
+                    row.ready_revision_label, row.building_revision_label
+                ),
+            ]
+            for row in rows
+        ]
+        for line in render.table_lines(cells, "<><", ["   ", "   "]):
+            console.print(line)
 
 
 @collection_app.command(
@@ -342,14 +345,16 @@ def list_collection_revision_command(
                 console.print("  (none)")
                 return
 
-            id_w = max(len(str(row.id)) for row in rows)
-            status_w = max(len(row.status) for row in rows)
-            label_w = max(len(row.label or "-") for row in rows)
-            for row in rows:
-                console.print(
-                    f"  {row.id:>{id_w}}  {row.status:<{status_w}}  "
-                    f"{(row.label or '-'):<{label_w}}  "
+            cells = [
+                [
+                    str(row.id),
+                    row.status,
+                    row.label or "-",
                     f"extract={row.extractor_profile.name} "
                     f"chunk={row.chunk_profile.fingerprint[:8]} "
-                    f"embed={row.embedding_profile.provider}:{row.embedding_profile.fingerprint[:8]}"
-                )
+                    f"embed={row.embedding_profile.provider}:{row.embedding_profile.fingerprint[:8]}",
+                ]
+                for row in rows
+            ]
+            for line in render.table_lines(cells, "><<<", ["  ", "  ", "  "]):
+                console.print(line)

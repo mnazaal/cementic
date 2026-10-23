@@ -2,6 +2,8 @@
 
 from types import SimpleNamespace
 
+import pytest
+
 from cementic import render
 from cementic.config import Config
 from cementic.embedding_runtime import DaemonHealth
@@ -111,3 +113,28 @@ class TestEmbeddingRowDistinguishesRunningFromStopped:
         )
         assert "unknown (found multiple processes" in output
         assert "stopped (autostarts when needed)" not in output
+
+
+@pytest.mark.parametrize(
+    ("rows", "aligns", "seps", "expected"),
+    [
+        ([], "<<", [" "], []),
+        ([["a", "tail"]], "<<", [" "], ["  a tail"]),
+        (
+            [["ab", "1", "x"], ["c", "123", "yy"]],
+            "<><",
+            ["|", "|"],
+            ["  ab|  1|x", "  c |123|yy"],
+        ),
+        # Left-aligned last column is never padded: no trailing spaces.
+        ([["a", "long"], ["bbb", "s"]], "<<", ["  "], ["  a    long", "  bbb  s"]),
+        # Widths count raw characters, so markup is measured, not rendered.
+        ([["[b]x[/b]", "1"], ["yy", "2"]], "<<", ["  "], ["  [b]x[/b]  1", "  yy        2"]),
+    ],
+)
+def test_table_lines(rows, aligns, seps, expected):
+    assert render.table_lines(rows, aligns, seps) == expected
+
+
+def test_table_lines_indent():
+    assert render.table_lines([["a", "b"]], "<<", ["-"], indent="") == ["a-b"]

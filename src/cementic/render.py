@@ -10,6 +10,7 @@ of querying it.
 """
 
 import json
+from collections.abc import Sequence
 from dataclasses import asdict
 from typing import Any
 
@@ -31,6 +32,28 @@ err_console = Console(stderr=True, soft_wrap=True)
 def _state(ok: bool, ok_word: str, bad_word: str) -> str:
     """A status word, colored sparingly (rich drops color off-TTY / NO_COLOR)."""
     return f"[green]{ok_word}[/green]" if ok else f"[red]{bad_word}[/red]"
+
+
+def table_lines(
+    rows: Sequence[Sequence[str]], aligns: str, seps: Sequence[str], indent: str = "  "
+) -> list[str]:
+    """Lay out string cells in aligned columns, one line per row.
+
+    `aligns` holds "<" or ">" per column; every column but the last is padded
+    to its widest cell, and the last is left as-is so free text gets no
+    trailing spaces. `seps` are the gaps between neighbouring columns. Widths
+    are measured on the raw text, so callers pass markup-free cells or accept
+    that rich consumes the tags after padding.
+    """
+    widths = [max(len(row[i]) for row in rows) for i in range(len(aligns))] if rows else []
+    return [
+        indent
+        + "".join(
+            cell if i == len(aligns) - 1 else f"{cell:{aligns[i]}{widths[i]}}{seps[i]}"
+            for i, cell in enumerate(row)
+        )
+        for row in rows
+    ]
 
 
 def _print_database_unavailable(action: str, hint: str) -> None:

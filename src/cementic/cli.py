@@ -691,13 +691,8 @@ def status(
                     _get_config(), [row.name for row in rows]
                 )
                 items = [(row, status_by_collection[row.name]) for row in rows]
-                name_w = max(len(row.name) for row, _ in items)
-                doc_w = max(len(f"{ps.documents:,}") for _, ps in items)
-                frac_w = max(
-                    len(f"{ps.done_embeddings:,}/{ps.total_chunks:,}") for _, ps in items
-                )
+                cells = []
                 for row, ps in items:
-                    frac = f"{ps.done_embeddings:,}/{ps.total_chunks:,}"
                     # Naming the failures is what makes a finished collection
                     # readable as finished. Showing done/total alone, a corpus
                     # whose remainder can never succeed sits at "99.8%" forever
@@ -705,10 +700,16 @@ def status(
                     failed_note = (
                         f", {ps.failed_embeddings:,} failed" if ps.failed_embeddings else ""
                     )
-                    console.print(
-                        f"  {row.name:<{name_w}}   {ps.documents:>{doc_w},} docs   "
-                        f"{frac:>{frac_w}} embedded ({ps.embedding_pct}%{failed_note})"
+                    cells.append(
+                        [
+                            row.name,
+                            f"{ps.documents:,} docs",
+                            f"{ps.done_embeddings:,}/{ps.total_chunks:,}",
+                            f"embedded ({ps.embedding_pct}%{failed_note})",
+                        ]
                     )
+                for line in render.table_lines(cells, "<>><", ["   ", "   ", " "]):
+                    console.print(line)
                 return
             # This session used to be opened and then discarded on the
             # named-collection path. It now earns its connection: a typo'd name
