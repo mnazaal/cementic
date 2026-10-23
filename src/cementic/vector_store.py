@@ -180,24 +180,25 @@ def lexical_sql(profile_id: int, *, text_config: str) -> str:
 def lexical_probe_sql(profile_id: int, *, text_config: str) -> str:
     """Distinct documents matching a term, within the searched revision (pure).
 
-    The rarity probe behind `Searcher.lexical_should_lead`. It has the shape of
-    `lexical_sql` for the same two reasons: the text predicate drives a capped
-    inner LIMIT so the GIN index is used, and the scope filters sit on the
-    per-profile vector row so a superseded revision's chunks or another
-    collection's documents are not counted as matches for this search.
+    The rarity probe behind `Searcher.lexical_should_lead`. The scope filters
+    sit on the per-profile vector row, so a superseded revision's chunks or
+    another collection's documents are not counted as matches for this
+    search. Unlike `lexical_sql`, the scope join is inside the capped LIMIT:
+    the cap counts in-scope chunks, so out-of-scope matches cannot fill it and
+    leave a common term looking rare (or a rare one looking absent).
     """
     table = vector_table_name(profile_id)
     return (
         "SELECT DISTINCT c.document_id AS document_id FROM ("
-        "  SELECT id, document_id FROM chunks_v2 "
-        f"  WHERE to_tsvector('{text_config}', content) "
+        "  SELECT ch.document_id FROM chunks_v2 ch "
+        f"  JOIN {table} ev ON ev.chunk_id = ch.id "
+        f"  WHERE to_tsvector('{text_config}', ch.content) "
         f"        @@ plainto_tsquery('{text_config}', :query) "
+        "  AND ev.collection = :collection "
+        "  AND ev.chunk_profile_id = :chunk_profile_id "
+        "  AND ev.extractor_profile_id = :extractor_profile_id "
         "  LIMIT :probe"
-        ") c "
-        f"JOIN {table} ev ON ev.chunk_id = c.id "
-        "WHERE ev.collection = :collection "
-        "AND ev.chunk_profile_id = :chunk_profile_id "
-        "AND ev.extractor_profile_id = :extractor_profile_id"
+        ") c"
     )
 
 
