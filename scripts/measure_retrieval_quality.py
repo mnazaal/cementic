@@ -1773,8 +1773,9 @@ def command_fuzzy(args: argparse.Namespace) -> int:
     config = get_config()
     engine = get_engine(config.database.url)
 
-    with engine.begin() as conn:
-        conn.execute(text("CREATE EXTENSION IF NOT EXISTS pg_trgm"))
+    if not args.no_trigram:
+        with engine.begin() as conn:
+            conn.execute(text("CREATE EXTENSION IF NOT EXISTS pg_trgm"))
     with engine.connect() as conn:
         revision = active_revision(conn, collection)
         table = vector_table_name(int(revision.embedding_profile_id))
@@ -1783,29 +1784,30 @@ def command_fuzzy(args: argparse.Namespace) -> int:
             "chunk_profile_id": revision.chunk_profile_id,
             "extractor_profile_id": revision.extractor_profile_id,
         }
-        chunks = conn.execute(
-            text("SELECT reltuples::bigint FROM pg_class WHERE relname = 'chunks_v2'")
-        ).scalar_one()
-        typo = next((q.query for q in queries if q.kind == "phrase-typo"), queries[0].query)
-        began = time.perf_counter()
-        conn.execute(
-            text(
-                "SELECT max(word_similarity(:q, content)), max(similarity(content, :q)) "
-                "FROM (SELECT content FROM chunks_v2 LIMIT :n) t"
-            ),
-            {"q": typo, "n": TRIGRAM_PROBE_ROWS},
-        )
-        probe = time.perf_counter() - began
-        per_query = probe / TRIGRAM_PROBE_ROWS * chunks
-        print(
-            f"trigram scan: {probe:.2f}s for {TRIGRAM_PROBE_ROWS} of ~{chunks:,} chunks; "
-            f"about {per_query:.0f}s per query on one core (parallel workers divide it), "
-            f"~{per_query * sum(q.kind == 'phrase-typo' for q in queries) / 60:.0f} min "
-            "for the typo'd set",
-            flush=True,
-        )
-        if args.estimate_only:
-            return 0
+        if not args.no_trigram:
+            chunks = conn.execute(
+                text("SELECT reltuples::bigint FROM pg_class WHERE relname = 'chunks_v2'")
+            ).scalar_one()
+            typo = next((q.query for q in queries if q.kind == "phrase-typo"), queries[0].query)
+            began = time.perf_counter()
+            conn.execute(
+                text(
+                    "SELECT max(word_similarity(:q, content)), max(similarity(content, :q)) "
+                    "FROM (SELECT content FROM chunks_v2 LIMIT :n) t"
+                ),
+                {"q": typo, "n": TRIGRAM_PROBE_ROWS},
+            )
+            probe = time.perf_counter() - began
+            per_query = probe / TRIGRAM_PROBE_ROWS * chunks
+            print(
+                f"trigram scan: {probe:.2f}s for {TRIGRAM_PROBE_ROWS} of ~{chunks:,} chunks; "
+                f"about {per_query:.0f}s per query on one core (parallel workers divide it), "
+                f"~{per_query * sum(q.kind == 'phrase-typo' for q in queries) / 60:.0f} min "
+                "for the typo'd set",
+                flush=True,
+            )
+            if args.estimate_only:
+                return 0
         # Unscanned, the trigram arms would score as "never fired", not as absent.
         variants = (
             tuple(v for v in FUZZY_VARIANTS if not v.startswith("trigram"))
