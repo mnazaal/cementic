@@ -18,7 +18,6 @@ from rich.console import Console
 from rich.markup import escape
 
 from cementic.config import Config
-from cementic.embedding_runtime import DaemonHealth
 
 # soft_wrap: off a TTY rich falls back to an 80-column hard wrap, which split
 # paths and aligned rows mid-word in piped or redirected output. Line breaking
@@ -74,6 +73,10 @@ def _print_status_summary(
     config: Config,
 ) -> None:
     """Print the concise worker + health summary; full detail behind --verbose."""
+    # Imported here: embedding_runtime loads the HTTP and database layers, which
+    # no other printer in this module needs.
+    from cementic.embedding_runtime import DaemonHealth
+
     source_running = source_watcher_status.process == "running"
     pipeline_running = pipeline_worker_status.process == "running"
     running = int(source_running) + int(pipeline_running)
