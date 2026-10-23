@@ -79,7 +79,7 @@ class TestListCollectionsCommand:
     """Tests for the list-collections CLI command."""
 
     def test_list_collections_empty(self, runner, sqlite_engine):
-        with patch("cementic.cli_shared.get_engine", return_value=sqlite_engine):
+        with patch("cementic.db.get_engine", return_value=sqlite_engine):
             result = runner.invoke(app, ["collection", "list"])
         assert result.exit_code == 0
 
@@ -90,7 +90,7 @@ class TestListCollectionsCommand:
         sqlite_session.add(doc)
         sqlite_session.commit()
 
-        with patch("cementic.cli_shared.get_engine", return_value=sqlite_engine):
+        with patch("cementic.db.get_engine", return_value=sqlite_engine):
             result = runner.invoke(app, ["collection", "list"])
         assert result.exit_code == 0
         assert "c1" in result.stdout
@@ -174,7 +174,7 @@ class TestPromoteCommand:
     def test_promote_ready_revision(self, runner, sqlite_engine, sqlite_session):
         _seed_ready_revision(sqlite_session, "pcol", with_document=True)
 
-        with patch("cementic.cli_shared.get_engine", return_value=sqlite_engine):
+        with patch("cementic.db.get_engine", return_value=sqlite_engine):
             result = runner.invoke(app, ["collection", "promote", "pcol"])
         assert result.exit_code == 0
         assert "promoted" in result.stdout
@@ -186,7 +186,7 @@ class TestPromoteCommand:
         removes search coverage rather than merely adding none."""
         _seed_ready_revision(sqlite_session, "emptycol", with_document=False)
 
-        with patch("cementic.cli_shared.get_engine", return_value=sqlite_engine):
+        with patch("cementic.db.get_engine", return_value=sqlite_engine):
             result = runner.invoke(app, ["collection", "promote", "emptycol"])
         assert result.exit_code == 1
         # On stderr, per the README's stream convention: a refusal is an error,
@@ -205,7 +205,7 @@ class TestListRevisionCommand:
         a real collection with no revisions yet looks like -- so a typo was
         indistinguishable from an idle collection.
         """
-        with patch("cementic.cli_shared.get_engine", return_value=sqlite_engine):
+        with patch("cementic.db.get_engine", return_value=sqlite_engine):
             result = runner.invoke(app, ["collection", "revisions", "nocol"])
         assert result.exit_code == 1
         # On stderr since the error-stream sweep: errors must not pollute the
@@ -229,7 +229,7 @@ class TestListRevisionCommand:
         sqlite_session.add(rev)
         sqlite_session.commit()
 
-        with patch("cementic.cli_shared.get_engine", return_value=sqlite_engine):
+        with patch("cementic.db.get_engine", return_value=sqlite_engine):
             result = runner.invoke(app, ["collection", "revisions", "revcol"])
         assert result.exit_code == 0
         assert "v1" in result.stdout

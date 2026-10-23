@@ -16,17 +16,14 @@ import typer
 from pydantic import ValidationError
 from pydantic_settings import SettingsError
 from rich.console import Console
-from sqlalchemy.exc import InterfaceError, OperationalError, ProgrammingError
 
 from cementic import render
-from cementic.collections import collection_exists
 from cementic.config import (
     Config,
     ConfigError,
     get_config,
     render_config_error,
 )
-from cementic.db import get_engine, get_session_factory
 from cementic.supervisor import (
     SupervisorState,
     is_managed_process_alive,
@@ -83,6 +80,8 @@ def _db_session() -> Iterator[Any]:
     seven times; `collection remove` keeps its own copy because it needs the
     engine again after the session closes.
     """
+    from cementic.db import get_engine, get_session_factory
+
     engine = get_engine(_get_config().database.url)
     session_factory = get_session_factory(engine)
     with session_factory() as session:
@@ -137,6 +136,8 @@ def _is_managed_proc_alive(process: dict[str, object]) -> bool:
 
 def _is_database_unavailable(error: Exception) -> bool:
     """Return whether the error indicates an unreachable database."""
+    from sqlalchemy.exc import InterfaceError, OperationalError
+
     return isinstance(error, (OperationalError, InterfaceError))
 
 
@@ -146,6 +147,8 @@ def _is_schema_missing(error: Exception) -> bool:
     The schema is created by the pipeline worker on first `cementic start`, so a
     reachable-but-empty database is the normal pre-first-run state, not a fault.
     """
+    from sqlalchemy.exc import ProgrammingError
+
     return isinstance(error, ProgrammingError) and "does not exist" in str(error.orig)
 
 
@@ -165,6 +168,8 @@ def _require_known_collection(session: Any, collection: str) -> None:
     "no ready revision", each at exit 0 -- so a typo'd collection name read as a
     real but idle one, and no script could tell the difference.
     """
+    from cementic.collections import collection_exists
+
     if collection_exists(session, collection):
         return
     err_console.print(f"collection: {collection}")
