@@ -33,6 +33,7 @@ from cementic.pipeline_worker import (
     _try_acquire_pipeline_worker_lock,
     embed_submit_size,
     is_retryable_embed_error,
+    plan_embed_outcome,
     revision_is_complete,
     should_yield_to_search,
 )
@@ -1974,3 +1975,25 @@ class TestClaimedAttempts:
         from cementic.revisions import claimed_attempts
 
         assert claimed_attempts(7, same_input=False) == 1
+
+
+class TestPlanEmbedOutcome:
+    """The outcome policy of an embed batch, as data."""
+
+    @pytest.mark.parametrize(
+        ("results", "expected_done", "expected_failed"),
+        [
+            ([[1.0], [2.0]], [(10, [1.0]), (11, [2.0])], {}),
+            ([None, None], [], {10: "e0", 11: "e1"}),
+            ([[1.0], None], [(10, [1.0])], {11: "e1"}),
+            ([None, [2.0]], [(11, [2.0])], {10: "e0"}),
+            ([], [], {}),
+        ],
+    )
+    def test_splits_claim_by_whether_a_vector_came_back(
+        self, results, expected_done, expected_failed
+    ) -> None:
+        claimed = [(10, "a"), (11, "b")][: len(results)]
+        outcome = plan_embed_outcome(claimed, results, ["e0", "e1"][: len(results)])
+        assert outcome.done == expected_done
+        assert outcome.failed == expected_failed

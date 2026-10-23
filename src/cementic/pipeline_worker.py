@@ -388,6 +388,36 @@ def compute_revision_counts(
     )
 
 
+@dataclass(frozen=True)
+class EmbedOutcome:
+    """What a claimed embed batch ends as: vectors to store, rows to fail."""
+
+    done: list[tuple[int, list[float]]]
+    failed: dict[int, str]
+
+
+def plan_embed_outcome(
+    claimed: list[tuple[int, str]],
+    results: list[list[float] | None],
+    errors: list[str],
+) -> EmbedOutcome:
+    """Split a claim by whether its embedding came back.
+
+    ``claimed`` is ``(chunk_id, content)`` and ``results`` and ``errors`` are
+    parallel to it: a vector or None, and the message to stamp if it is None.
+    Releasing a claim back to ``pending`` is not decided here -- it follows a
+    provider failure or a shutdown, before any result exists.
+    """
+    done: list[tuple[int, list[float]]] = []
+    failed: dict[int, str] = {}
+    for (chunk_id, _), embedding, error in zip(claimed, results, errors):
+        if embedding is None:
+            failed[chunk_id] = error
+        else:
+            done.append((chunk_id, embedding))
+    return EmbedOutcome(done=done, failed=failed)
+
+
 def _over_budget_reasons(
     provider: Any, texts: list[str], embeddings: list[list[float] | None]
 ) -> list[str | None]:
@@ -1135,11 +1165,6 @@ class PipelineWorker:
             fallback_messages.extend([sub_failure] * len(sub_texts))
             start += len(sub_texts)
 
-        successes = [
-            (chunk_id, embedding)
-            for (chunk_id, _), embedding in zip(claimed, embeddings)
-            if embedding is not None
-        ]
         # A claim is a lease: every exit path from here must either write a
         # terminal status or return the rows to `pending`. Leaving them
         # `processing` would stall the revision short of completion with no
@@ -1151,44 +1176,48 @@ class PipelineWorker:
         # stamp into a released claim that the next poll re-embeds and fails
         # again. A missing reason is not worth either.
         reasons = _over_budget_reasons(provider, texts, embeddings)
+        # Prefer the provider's per-text reason: a chunk over the context
+        # window used to be stamped with the generic "Failed to generate
+        # embedding", leaving the actual cause -- and the chunk_size fix --
+        # invisible in `status --verbose`.
+        errors = [reason or fallback for reason, fallback in zip(reasons, fallback_messages)]
+        outcome = plan_embed_outcome(claimed, embeddings, errors)
         try:
             with self.Session() as session:
-                if successes:
+                if outcome.done:
                     conn = session.connection()
                     ensure_vector_table_schema(conn, profile_id, embedding_dim)
                     upsert_vectors(
                         conn,
                         profile_id,
-                        successes,
+                        outcome.done,
                         collection=self.collection,
                         extractor_profile_id=extractor_profile_id,
                         chunk_profile_id=chunk_profile_id,
                     )
-                for offset, ((chunk_id, _), embedding) in enumerate(zip(claimed, embeddings)):
-                    row = (
-                        session.query(ChunkEmbedding)
-                        .filter_by(chunk_id=chunk_id, embedding_profile_id=profile_id)
-                        .first()
-                    )
-                    if row is None:
-                        continue
-                    if embedding is None:
-                        # Prefer the provider's per-text reason: a chunk over
-                        # the context window used to be stamped with the
-                        # generic "Failed to generate embedding", leaving the
-                        # actual cause -- and the chunk_size fix -- invisible
-                        # in `status --verbose`.
-                        row.status = "failed"
-                        row.error_message = reasons[offset] or fallback_messages[offset]
-                    else:
-                        row.status = "done"
-                        row.error_message = None
+                for chunk_id, _ in outcome.done:
+                    self._stamp_embedding(session, chunk_id, profile_id, "done", None)
+                for chunk_id, message in outcome.failed.items():
+                    self._stamp_embedding(session, chunk_id, profile_id, "failed", message)
                 session.commit()
         except Exception:
             self._release_claimed_embeddings([chunk_id for chunk_id, _ in claimed], profile_id)
             raise
         self.state_manager.update(current_activity=None)
         return True
+
+    @staticmethod
+    def _stamp_embedding(
+        session: Session, chunk_id: int, profile_id: int, status: str, error: str | None
+    ) -> None:
+        row = (
+            session.query(ChunkEmbedding)
+            .filter_by(chunk_id=chunk_id, embedding_profile_id=profile_id)
+            .first()
+        )
+        if row is not None:
+            row.status = status
+            row.error_message = error
 
     def _read_search_lease(self) -> datetime | None:
         """When an interactive search last ran, normalised to aware UTC."""
