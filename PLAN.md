@@ -3,11 +3,11 @@
 <!-- session-handoff:begin (2026-10-23) -->
 ## Where the work stands
 
-**Entry point: "Execution order (2026-10-22)" → "Waves (2026-10-23)" → Wave
-C, then release 0.3.0.** Waves A, R, B and the typo fallback passed the user's
-gate on 2026-10-23 (A and B are on main; the typo fallback is on
-`claude/typo-fallback`, fast-forwarded to main once the user runs it). Wave D
-is empty because the riders failed their rule.
+**Entry point: "Release 0.3.0".** Waves A, R, B, the typo fallback and C
+passed the user's gate on 2026-10-23. The release commit is on
+`claude/release-0.3.0` (on top of `claude/wave-c`); main fast-forwards to it,
+then the user tags and pushes. Wave D is empty because the riders failed
+their rule.
 
 **Phase 2a closed 2026-10-23: stay on v2-moe.** Qwen3 and Harrier pass the
 title rule and fail the phrase rule; see "Retrieval Phase 2" → 2a → "RUN
@@ -396,8 +396,9 @@ OR as a fallback for an empty lexical arm; implement it in `search.py` and
 `vector_store.py`. It goes before Wave C because that wave renames across
 every module.
 
-**Wave C — after the typo fallback, alone.** "Functional core" 7, public names. It
-renames across every module, so it runs when nothing else is in flight.
+**Wave C — DONE 2026-10-23**, gate passed (`claude/wave-c`): `check.sh` with
+pg, a service restart, `status` and `doctor` all exit 0. "Functional core" 7,
+public names.
 
 **Wave D — the rebuild, if the riders pass. EMPTY (2026-10-23):** the riders
 failed their rule ("Rider measurement"), so there is no rebuild, and "Schema
@@ -866,6 +867,11 @@ change beyond the one split named below.
    `_over_budget_reasons`, which may make an HTTP call. Capture
    `extracted.content_hash` into a local in `_step_chunk`, not off a detached
    instance. *Ends when:* no `_`-prefixed name is imported across modules.
+   **DONE 2026-10-23** (`a97a0ff`, `3d22027`): an AST scan of `src/` finds no
+   `_`-prefixed name imported or attribute-read across modules.
+   `_get_config` became `cli_config` and `_load_supervisor_state`
+   `read_supervisor_state`, since `config` and `supervisor` export the bare
+   names.
 8. **One table printer.** Replace the three hand-rolled column-width printers
    (`cli.py:674-691`, `cli_collection.py:114-123`, `:329-339`) with a single
    pure rows-to-lines helper. *Ends when:* the CLI tests are unchanged and the
