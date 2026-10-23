@@ -375,4 +375,8 @@ def test_a_typo_reaches_the_lexical_arm_through_the_fallback(
     )
     _, lexical = split_arms(searcher.candidates("neural networks semantic", top_k=2))
     assert lexical
+    # Nor does a search without the lexical arm.
+    pg_config.search.hybrid = False
+    _, lexical = split_arms(Searcher(pg_config).candidates("nueral networks semantic", top_k=2))
+    assert lexical == []
     cleanup_pg_tables(pg_session)

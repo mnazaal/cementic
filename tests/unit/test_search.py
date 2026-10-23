@@ -944,6 +944,9 @@ class TestRelaxedTsquery:
     def test_quotes_are_escaped(self) -> None:
         assert relaxed_tsquery(["o'neil"], 0.6) == "('o''neil')"
 
+    def test_backslashes_are_escaped(self) -> None:
+        assert relaxed_tsquery(["a\\b"], 0.6) == "('a\\\\b')"
+
     def test_too_many_terms_is_no_query(self) -> None:
         terms = [f"t{i}" for i in range(RELAXED_MAX_TERMS + 1)]
         assert relaxed_tsquery(terms, 0.6) is None

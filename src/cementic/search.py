@@ -99,8 +99,12 @@ RELAXED_MAX_TERMS = 8
 
 
 def quote_lexeme(lexeme: str) -> str:
-    """A lexeme as a quoted tsquery literal (pure)."""
-    return "'" + lexeme.replace("'", "''") + "'"
+    """A lexeme as a quoted tsquery literal (pure).
+
+    Inside the quotes a backslash escapes the next character and a quote is
+    doubled, so both are escaped.
+    """
+    return "'" + lexeme.replace("\\", "\\\\").replace("'", "''") + "'"
 
 
 def relaxed_tsquery(
