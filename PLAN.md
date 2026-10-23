@@ -3,10 +3,9 @@
 <!-- session-handoff:begin (2026-10-23) -->
 ## Where the work stands
 
-**Entry point: "Execution order (2026-10-22)" → "User-facing CLI" →
-"Machine-readable output for the three query commands", the first unstarted
-item.** Start it on a fresh `claude/` branch from main. Everything above it in
-the execution order is DONE and on main.
+**Entry point: "Execution order (2026-10-22)" → "Waves (2026-10-23)" → Wave A
+and Wave R, run concurrently.** Each member starts on its own `claude/` branch
+from main. Everything marked DONE in the execution order is on main.
 
 **State on main (`eae6f16`).** The audit fixes (`claude/audit-fixes`) and the
 import diet (`claude/import-diet`, `1b5d7f6`..`eae6f16`) are both
@@ -129,6 +128,40 @@ the execution-order step that carries it out.
 - **Why tag 0.3.0?** HEAD is 144 commits past `v0.2.0` and `uv tool` installs
   from HEAD, so the version string currently means nothing. CHANGELOG keeps its
   tag-time policy.
+
+### 2026-10-23 — decisions from the next-steps interview
+
+All **live**. Each names the plan section that carries it out.
+
+- **Why is the Phase 2 rebuild gated on a measurement now?** With 2a closed on
+  v2-moe, no model change rides the rebuild, so its ~108 h buys only the
+  riders 2b, 2c and 2e, whose effect nobody has measured. The riders are scored
+  together as one harness arm first ("Retrieval Phase 2" → "Rider
+  measurement"). *Rejected:* rebuilding unmeasured (108 h on an unknown gain);
+  dropping the rebuild (de-hyphenation and boundaries would never reach the
+  existing corpus); per-rider arms (about 3x the harness time, and the riders
+  ship together anyway).
+- **Why is the rider arm's control fresh v2-moe, not the stored vectors?**
+  Agent correction to the interview question, which said "stored". On sample
+  `8d3c95f989f5`, fresh v2-moe at 320 beat its own stored vectors on 99 phrase
+  queries and lost 9 (p = 2.6e-20), so any freshly embedded arm beats stored on
+  re-embedding drift alone. Fresh v2-moe at 320 without riders isolates the
+  riders.
+- **Why does 0.3.0 wait for everything?** User's call: one release after the
+  whole execution order, including the rebuild if the riders pass. *Rejected:*
+  releasing after the CLI track, which would ship the output-contract changes
+  sooner. *Accepted cost:* the breaking output changes sit unreleased on main
+  for weeks.
+- **Why is fuzzy matching scheduled?** A one-character typo returns zero
+  lexical rows and recall@10 0.233, and that is the case a person searching
+  their own library from memory hits most. It gets a measurement, then a
+  choice or a recorded floor. *Rejected:* closing at 0.233 unmeasured; leaving
+  it unowned.
+- **Why does the user run the gate after every wave?** The sandbox cannot
+  reach PostgreSQL, and the schema retrofits and the embed planner are pg-only
+  behaviour. One `check.sh` per wave catches a pg regression inside the wave
+  that caused it. *Rejected:* one gate at the end, which would mean bisecting
+  across all waves.
 
 ## Design principles
 
@@ -284,7 +317,62 @@ what ends it. Line numbers are as of `73b5d4c`.
 - **The functional-core refactors are behaviour-preserving, one commit each.**
   The embed planner lands before the rebuild. The rest can land any time after
   correctness.
-- **The release comes last.**
+- **The release comes last.** It waits for everything, the rebuild included
+  if the riders pass (decision log, 2026-10-23).
+- **Rider code stays out of the live pipeline until the rebuild is
+  authorized.** Wiring 2b, 2c or 2e into extraction or chunking re-versions the
+  profile, and the next restart of `cementic@papers` would start the 108 h
+  rebuild by itself. Until the verdict, the riders exist as pure functions the
+  harness calls.
+
+### Waves (2026-10-23)
+
+The open items below, grouped so each wave's members edit disjoint functions
+and run concurrently. Each member works on its own `claude/` branch in a
+worktree under `$TMPDIR` (handoff → environment quirks), lands on one wave
+branch, and the user runs `./scripts/check.sh` before the next wave starts.
+Test files are shared; their hunks touch different tests.
+
+**Wave A — five members, concurrent.**
+- *CLI output contracts* (`cli_collection.py`, the `embedding status` and
+  `chunk` commands in `cli.py`, `embedding_runtime.py`, `vector_store.py`,
+  `search.py`), one member, in this order: "Machine-readable output for the
+  three query commands" → "Rename the filter's chunk index key" → "A document id
+  in search results".
+- *Watcher* (`source_watcher.py`, `db.py`, `revisions.py:303`), one member:
+  "Functional core" 3 (watcher identity choice) → "Schema retrofits and
+  efficiency" 1 (one retrofit pass) → 2 (restart without re-hashing). Identity
+  goes first because 2 edits the same function.
+- *Extraction isolation* (`extract.py`, the extract step of
+  `pipeline_worker.py`). The 200-PDF byte-identity and wall-clock numbers run
+  in the user's terminal on an idle machine; the member hands over the command.
+- *Embed planner* ("Functional core" 1; `_step_embed` in
+  `pipeline_worker.py`).
+- *Small cores* (`revisions.py`, `collections.py`, `config.py`, `stop` in
+  `cli.py`): "Functional core" 4, 6 and 2, and "Schema retrofits and
+  efficiency" 4, one commit each.
+
+**Wave R — the measurements, concurrent with Wave A.** Harness work only
+(`scripts/measure_retrieval_quality.py`, new pure functions); nothing reaches
+the live pipeline. "Rider measurement" and "Fuzzy matching" under "Retrieval
+Phase 2". The scoring runs go to the user's terminal.
+
+**Wave B — after Wave A's gate.**
+- *`cementic run`*, then the systemd copy and the shared-machine warning
+  ("Packaging, docs and deletions").
+- *Lexical arm* ("Retrieval"), after "A document id in search results", since
+  both edit `search.py` and `vector_store.py`.
+- *One table printer* ("Functional core" 8).
+
+**Wave C — after Wave B's gate, alone.** "Functional core" 7, public names. It
+renames across every module, so it runs when nothing else is in flight.
+
+**Wave D — the rebuild, if the riders pass.** Wire the riders, rebuild in the
+user's terminal, and record "Schema retrofits and efficiency" 3 (the claim
+`EXPLAIN`) at about 90%. If they fail, the riders are parked with the verdict
+and Wave D is empty.
+
+**Then "Release 0.3.0".**
 
 ### Correctness
 
@@ -931,10 +1019,25 @@ cites a paper absent from its own tree (`hybrid.py:232`); no chonkie or NLTK
 chunker (2c does it with a separator); no second embedding provider added
 merely to exercise a one-entry registry; no Postgres search extension.
 
-**The rebuild runs only after** correctness steps 2 and 4, the schema
+**Rider measurement (scheduled 2026-10-23, Wave R).** Implement 2b
+(punctuation-dominated chunk drop), 2c (structure-aware boundaries) and 2e
+(de-hyphenation) as pure functions, not wired into the pipeline. Add one
+harness arm that applies all three to the spans of sample `8d3c95f989f5` and
+embeds with v2-moe at 320. 2d moves no vector and is not scored.
+*First:* settle the noise-floor anomaly (21 refused chunks dropped by
+`score_arm`), because the control below is a fresh arm and inherits it.
+*Pre-registered rule:* the riders arm, paired against fresh v2-moe at 320
+without riders, must beat it on title or phrase recall@1 by sign test at
+p < 0.01, and must not lose on the other. Pass: Wave D runs. Fail: park 2b, 2c
+and 2e with the numbers, and Wave D is empty.
+*Ends when:* the verdict and its table are recorded here.
+*Anti-scope:* no per-rider attribution and no new chunk size; 2b's re-derived
+`chunk_size` rides along only if the rebuild runs.
+
+**The rebuild runs only after** the rider measurement passes, and after correctness steps 2 and 4, the schema
 retrofits, the embed planner, and extraction isolation are in.
 
-**Fuzzy matching (opened 2026-09-19 as Phase 1 step 3) — open, unscheduled.**
+**Fuzzy matching (opened 2026-09-19 as Phase 1 step 3) — scheduled 2026-10-23, Wave R.**
 No rebuild, no re-versioning, independent of everything above; ordered last
 within Phase 1 because it is the only item here with no measured target yet.
 
