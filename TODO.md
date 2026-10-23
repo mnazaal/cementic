@@ -94,7 +94,7 @@ index, versioned revisions) are documented in [PLAN.md](PLAN.md).
 
 - ~~**Two papers were silently unsearchable.**~~ **Fixed 2026-09-07**, found
   while chasing a 103-chunk discrepancy in `chunked_documents.total_chunks`.
-  When re-extraction fails, `_purge_all_chunks` drops the document's chunks but
+  When re-extraction fails, `purge_all_chunks` drops the document's chunks but
   left the chunking `done` with its old `source_content_hash`; a file that then
   extracted to the *same* text matched its own stale hash, so `_step_chunk`
   never re-claimed it. Zero chunks, zero embeddings, counted as 100% chunked,
@@ -203,7 +203,7 @@ give it a condition someone could actually notice.
   module holding registry *names*, so `config` can validate against them without
   importing the implementations. Three validators still use function-local
   imports for this, and one reaches for a private symbol
-  (`_TASK_PREFIX_TOKEN_ALLOWANCE`). *Reopen when:* `config.py` is next open for
+  (`TASK_PREFIX_TOKEN_ALLOWANCE`). *Reopen when:* `config.py` is next open for
   another reason — the change touches four modules and is not worth a slot on
   its own.
 - **Stop the extractor registry re-versioning corpora that cannot be affected.**
