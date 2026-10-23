@@ -12,7 +12,7 @@ import time
 from collections.abc import Callable, Iterable
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -152,6 +152,27 @@ def _merge_prior_root_document(
     session.flush()
     prior.source_path = file_path
     return prior
+
+
+def _choose_registered_document(
+    at_path: SourceDocument | None,
+    merged: SourceDocument | None,
+    prior_root: SourceDocument | None,
+    by_hash: SourceDocument | None,
+) -> tuple[SourceDocument | None, Literal["merged", "at_path", "moved", "new"]]:
+    """Which existing row a file being registered is, from the lookups' results.
+
+    The lookups run in the shell; this only ranks their answers. A row already
+    at the file's path wins, and a prior-root row folded into it
+    (`merged`) wins over the empty twin there. Otherwise the row reached
+    through a prior root's name beats the one reached by content hash. `how`
+    says what the shell must do: log and repath a "moved" row, insert a row for
+    "new" (the document is None then).
+    """
+    if at_path is not None:
+        return (merged, "merged") if merged is not None else (at_path, "at_path")
+    moved = prior_root or by_hash
+    return (moved, "moved") if moved is not None else (None, "new")
 
 
 def _identity_is_stale(source_path: str) -> bool:
@@ -941,47 +962,52 @@ class SourceWatcher:
         for attempt in range(2):
             try:
                 with self.Session() as session:
-                    document = (
+                    at_path = (
                         session.query(SourceDocument)
                         .filter_by(source_path=file_path, collection=self.collection)
                         .first()
                     )
                     alternates = _alternate_paths(file_path, self._root_aliases)
-                    if document is not None:
+                    merged = None
+                    prior_root = by_hash = None
+                    if at_path is not None:
                         merged = _merge_prior_root_document(
-                            session, self.collection, file_path, alternates, document
+                            session, self.collection, file_path, alternates, at_path
                         )
-                        if merged is not None:
-                            self._logger.info(
-                                "Document folded back into its move: %s -> %s "
-                                "(collection=%s)",
-                                merged.source_path,
-                                file_path,
-                                self.collection,
-                            )
-                            document = merged
-                    if document is None:
+                    else:
                         # The alias first: it is an indexed lookup and it holds
                         # whether or not the file was edited on its way, which
-                        # the hash probe below cannot say.
-                        document = _document_under_a_prior_root(
+                        # the hash probe cannot say.
+                        prior_root = _document_under_a_prior_root(
                             session, self.collection, alternates
-                        ) or _document_reached_by_another_path(
-                            session, self.collection, file_path, file_hash
                         )
-                        if document is not None:
-                            self._logger.info(
-                                "Document moved: %s -> %s (collection=%s)",
-                                document.source_path,
-                                file_path,
-                                self.collection,
+                        if prior_root is None:
+                            by_hash = _document_reached_by_another_path(
+                                session, self.collection, file_path, file_hash
                             )
-                            document.source_path = file_path
+                    document, how = _choose_registered_document(
+                        at_path, merged, prior_root, by_hash
+                    )
                     if document is None:
                         document = SourceDocument(
                             source_path=file_path, collection=self.collection
                         )
                         session.add(document)
+                    elif how == "merged":
+                        self._logger.info(
+                            "Document folded back into its move: %s -> %s (collection=%s)",
+                            document.source_path,
+                            file_path,
+                            self.collection,
+                        )
+                    elif how == "moved":
+                        self._logger.info(
+                            "Document moved: %s -> %s (collection=%s)",
+                            document.source_path,
+                            file_path,
+                            self.collection,
+                        )
+                        document.source_path = file_path
 
                     document.file_hash = file_hash
                     document.status = "pending"

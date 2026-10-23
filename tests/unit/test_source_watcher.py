@@ -6,6 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
@@ -98,7 +99,6 @@ class TestDocumentEventHandler:
 
         assert deleted == ["/notes/old.md"]
         assert detected == ["/notes/new.md"]
-
 
     def test_a_rename_between_tracked_paths_is_a_move_not_a_delete(self):
         detected, deleted, moved = [], [], []
@@ -700,3 +700,31 @@ class TestPurgeDocumentChunks:
         session.commit()
 
         assert session.query(Chunk).count() == 2
+
+
+class TestChooseRegisteredDocument:
+    """`_choose_registered_document` ranks the lookups' answers, no session."""
+
+    @pytest.mark.parametrize(
+        ("at_path", "merged", "prior_root", "by_hash", "expect_row", "expect_how"),
+        [
+            ("at", None, None, None, "at", "at_path"),
+            ("at", "merged", "prior", "hash", "merged", "merged"),
+            ("at", None, "prior", "hash", "at", "at_path"),
+            (None, None, "prior", "hash", "prior", "moved"),
+            (None, None, None, "hash", "hash", "moved"),
+            (None, None, None, None, None, "new"),
+        ],
+    )
+    def test_ranking(self, at_path, merged, prior_root, by_hash, expect_row, expect_how):
+        from cementic.source_watcher import _choose_registered_document
+
+        rows = {
+            name: object() if name else None
+            for name in {at_path, merged, prior_root, by_hash, expect_row}
+        }
+        row, how = _choose_registered_document(
+            rows[at_path], rows[merged], rows[prior_root], rows[by_hash]
+        )
+        assert how == expect_how
+        assert row is rows[expect_row]
