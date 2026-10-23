@@ -323,6 +323,45 @@ class TestDeleteCollectionRecordsWithoutDocuments:
         assert delete_collection_records(session, "never-existed") is None
 
 
+class TestDeleteCollectionByStatement:
+    """Removal selects documents in SQL; it never ships their ids back."""
+
+    @staticmethod
+    def _bound_parameters(n_docs: int) -> tuple[int, int]:
+        engine, session = _new_session()
+        extractor, chunk_profile, embedding_profile = _seed_profiles(session)
+        session.add(
+            PipelineRevision(
+                collection="c1",
+                label="v1",
+                status="active",
+                extractor_profile_id=extractor.id,
+                chunk_profile_id=chunk_profile.id,
+                embedding_profile_id=embedding_profile.id,
+            )
+        )
+        for i in range(n_docs):
+            session.add(SourceDocument(collection="c1", source_path=f"/{i}.pdf", file_hash=f"h{i}"))
+        session.commit()
+
+        bound: list[int] = []
+
+        def _on_execute(conn, cursor, statement, parameters, *args, **kwargs):
+            bound.append(len(parameters))
+
+        event.listen(engine, "before_cursor_execute", _on_execute)
+        result = delete_collection_records(session, "c1")
+        assert result is not None
+        return sum(bound), result.deleted_docs
+
+    def test_statements_do_not_grow_with_the_document_count(self) -> None:
+        small, small_deleted = self._bound_parameters(2)
+        large, large_deleted = self._bound_parameters(60)
+
+        assert (small_deleted, large_deleted) == (2, 60)
+        assert small == large, "document ids must not be bound into any statement"
+
+
 class TestDeleteCollectionRecords:
     """Tests for delete_collection_records."""
 

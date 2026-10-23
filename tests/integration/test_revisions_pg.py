@@ -659,3 +659,29 @@ def test_status_embedding_counts_match_the_worker_against_postgres(
     assert status.done_embeddings == worker_counts.done_embeddings
     assert status.failed_embeddings == worker_counts.failed_embeddings
     assert status.total_chunks == worker_counts.total_chunks
+
+
+@pytest.mark.pg
+def test_collection_remove_deletes_by_subselect(pg_engine, pg_session) -> None:
+    """`collection remove` deletes documents, chunks and revisions in SQL."""
+    from cementic.collections import delete_collection_records
+
+    cleanup_pg_tables(pg_session)
+    seed_active_vector_collection(
+        pg_session,
+        collection="gone",
+        source_path="/docs/gone.pdf",
+        chunks=[("gone one", [1.0, 0.0, 0.0, 0.0]), ("gone two", [0.0, 1.0, 0.0, 0.0])],
+    )
+    pg_session.commit()
+    assert pg_session.query(SourceDocument).filter_by(collection="gone").count() == 1
+
+    result = delete_collection_records(pg_session, "gone")
+
+    assert result is not None
+    assert result.deleted_docs == 1
+    assert result.deleted_chunks == 2
+    assert pg_session.query(SourceDocument).count() == 0
+    assert pg_session.query(Chunk).count() == 0
+    assert pg_session.query(PipelineRevision).count() == 0
+    cleanup_pg_tables(pg_session)

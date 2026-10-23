@@ -6,7 +6,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any, cast
 
-from sqlalchemy import func
+from sqlalchemy import func, select
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -140,12 +140,16 @@ def delete_collection_records(session: Session, collection: str) -> DeleteCollec
     document check left those rows undeletable: `collection list` (which reads
     document rows) never showed them, and `collection remove` said "not found".
     """
-    docs = session.query(SourceDocument).filter_by(collection=collection).all()
+    has_documents = session.query(
+        session.query(SourceDocument.id).filter_by(collection=collection).exists()
+    ).scalar()
     revision_count = session.query(PipelineRevision).filter_by(collection=collection).count()
-    if not docs and not revision_count:
+    if not has_documents and not revision_count:
         return None
 
-    doc_ids = [doc.id for doc in docs]
+    # Subselects, not id lists: a large collection would otherwise be loaded as
+    # ORM objects and its ids shipped back three times as literal IN lists.
+    doc_ids = select(SourceDocument.id).where(SourceDocument.collection == collection)
     artifact_paths = [
         path
         for (path,) in session.query(ExtractedDocument.artifact_path)
@@ -170,7 +174,7 @@ def delete_collection_records(session: Session, collection: str) -> DeleteCollec
     )
     deleted_docs = (
         session.query(SourceDocument)
-        .filter(SourceDocument.id.in_(doc_ids))
+        .filter_by(collection=collection)
         .delete(synchronize_session=False)
     )
     vector_profile_ids: list[int] = []
