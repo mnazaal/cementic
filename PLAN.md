@@ -3,10 +3,11 @@
 <!-- session-handoff:begin (2026-10-23) -->
 ## Where the work stands
 
-**Entry point: "Execution order (2026-10-22)" → "Waves (2026-10-23)" → the
-typo fallback, then Wave C.** Waves A, R and B passed the user's gate on
-2026-10-23 (A is on main; B is on `claude/wave-b`, fast-forwarded to main
-once the user runs it). Wave D is empty because the riders failed their rule.
+**Entry point: "Execution order (2026-10-22)" → "Waves (2026-10-23)" → Wave
+C, then release 0.3.0.** Waves A, R, B and the typo fallback passed the user's
+gate on 2026-10-23 (A and B are on main; the typo fallback is on
+`claude/typo-fallback`, fast-forwarded to main once the user runs it). Wave D
+is empty because the riders failed their rule.
 
 **Phase 2a closed 2026-10-23: stay on v2-moe.** Qwen3 and Harrier pass the
 title rule and fail the phrase rule; see "Retrieval Phase 2" → 2a → "RUN
@@ -389,7 +390,8 @@ Phase 2". The scoring runs go to the user's terminal.
 **Wave B — DONE 2026-10-23**, gate passed (`claude/wave-b`); results under
 "Lexical arm" and the systemd copy below.
 
-**Typo fallback — after Wave B, before Wave C.** "Fuzzy matching" chose relaxed
+**Typo fallback — DONE 2026-10-23**, gate passed (`claude/typo-fallback`);
+result under "Fuzzy matching". "Fuzzy matching" chose relaxed
 OR as a fallback for an empty lexical arm; implement it in `search.py` and
 `vector_store.py`. It goes before Wave C because that wave renames across
 every module.
@@ -1152,6 +1154,19 @@ from the saved records (`~/.cache/cementic-waves/fuzzy-records.json`).
 Recall@1 is 0.100 in every cell. Implementation is "Typo fallback" under
 "Waves". *Ends when:* it lands and harness `score` shows `phrase-typo`
 recall@10 near 0.650 with no other set losing more than one query.
+**DONE 2026-10-23.** Harness `score`, main (`18e89cb`) against the fallback
+(`78320ff`), recall@10:
+
+| Set (n = 60) | main | fallback |
+|---|---|---|
+| phrase | 1.000 | 1.000 |
+| phrase-dropped | 0.950 | 0.950 |
+| phrase-reordered | 1.000 | 1.000 |
+| phrase-typo | 0.233 | 0.650 |
+| rare-token | 0.983 | 0.983 |
+| title | 0.867 | 0.883 |
+
+Recall@1 is unchanged on every set. `check.sh` with pg passed on the branch.
 **Trigram without an index: not viable (2026-10-23).** A probe of 20,000
 chunks took 7.65 s, so `similarity`/`word_similarity` over the ~2.3M chunks is
 about 879 s per query on one core, and the full measurement about 14.6 h. Not
