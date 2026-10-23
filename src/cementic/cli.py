@@ -63,10 +63,12 @@ app = CementicTyper(help="Index and semantically search document collections")
 embedding_app = CementicTyper(help="Manage embedding runtime service")
 config_app = CementicTyper(help="View and manage the config file")
 init_app = CementicTyper(help="Initialize local setup files")
+run_app = CementicTyper(help="Run one indexing process in the foreground (for a service manager)")
 app.add_typer(collection_app, name="collection")
 app.add_typer(embedding_app, name="embedding")
 app.add_typer(config_app, name="config")
 app.add_typer(init_app, name="init")
+app.add_typer(run_app, name="run")
 
 
 def _version_callback(value: bool) -> None:
@@ -876,6 +878,40 @@ def stop_background(
         (console if stream == "out" else err_console).print(text)
     if outcome.exit_code:
         raise typer.Exit(outcome.exit_code)
+
+
+@run_app.command("watcher", short_help="Run the source watcher in the foreground")
+def run_watcher(
+    directories: list[str] = typer.Argument(..., help="Directories to watch for documents"),
+    collection: str = typer.Option(
+        "default", "-c", "--collection", help="Collection name for indexed documents"
+    ),
+) -> None:
+    """Run the source watcher in the foreground until signalled.
+
+    Unlike `start`, this spawns nothing and records no supervisor state: it is
+    the process a service manager supervises. A fatal startup failure exits 1.
+    """
+    # Deferred: the runner imports the watcher and its database layer.
+    from cementic.runner import run_source_watcher
+
+    run_source_watcher(directories=directories, collection=collection)
+
+
+@run_app.command("worker", short_help="Run the pipeline worker in the foreground")
+def run_worker(
+    collection: str = typer.Option(
+        "default", "-c", "--collection", help="Collection name for indexed documents"
+    ),
+) -> None:
+    """Run the pipeline worker in the foreground until signalled.
+
+    Unlike `start`, this spawns nothing and records no supervisor state: it is
+    the process a service manager supervises. A fatal startup failure exits 1.
+    """
+    from cementic.runner import run_pipeline_worker
+
+    run_pipeline_worker(collection=collection)
 
 
 @embedding_app.command("start", short_help="Start embedding runtime")

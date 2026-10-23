@@ -3374,3 +3374,40 @@ class TestStopEpermWorkers:
         # EPERM-only remainder sends the user at a guaranteed-identical failure.
         assert "use --force" not in result.stderr
         assert state_path.exists()
+
+
+class TestRunGroup:
+    """`cementic run` surfaces the runner's foreground commands."""
+
+    def test_run_help_lists_both_commands(self) -> None:
+        result = runner.invoke(app, ["run", "--help"])
+        assert result.exit_code == 0
+        assert "watcher" in result.output
+        assert "worker" in result.output
+
+    def test_root_help_lists_run(self) -> None:
+        assert "run" in runner.invoke(app, ["--help"]).output
+
+    def test_watcher_dispatches_directories_and_collection(self) -> None:
+        with patch("cementic.runner.run_source_watcher") as body:
+            result = runner.invoke(app, ["run", "watcher", "-c", "papers", "/a", "/b"])
+        assert result.exit_code == 0, result.output
+        body.assert_called_once_with(directories=["/a", "/b"], collection="papers")
+
+    def test_worker_dispatches_collection(self) -> None:
+        with patch("cementic.runner.run_pipeline_worker") as body:
+            result = runner.invoke(app, ["run", "worker", "--collection", "papers"])
+        assert result.exit_code == 0, result.output
+        body.assert_called_once_with(collection="papers")
+
+    @pytest.mark.parametrize(
+        ("args", "target"),
+        [
+            (["run", "watcher", "/a"], "cementic.runner.run_source_watcher"),
+            (["run", "worker"], "cementic.runner.run_pipeline_worker"),
+        ],
+    )
+    def test_fatal_startup_exit_code_reaches_the_process(self, args, target) -> None:
+        with patch(target, side_effect=typer.Exit(1)):
+            result = runner.invoke(app, args)
+        assert result.exit_code == 1

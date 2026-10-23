@@ -74,6 +74,7 @@ indexing another collection.
 ```text
 cementic start DIRECTORY... -c COLLECTION   # watch and index
 cementic search QUERY -c COLLECTION         # search active revision
+cementic run watcher|worker                  # one foreground process, for a service manager
 cementic status                              # progress and health
 cementic doctor                              # diagnose local setup
 cementic extract FILE                        # one document to Markdown, no database
