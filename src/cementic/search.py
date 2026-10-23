@@ -28,9 +28,9 @@ from cementic.embedding_runtime import (
 from cementic.hybrid import combine, looks_like_identifier
 from cementic.revisions import BUILDING_STATUSES
 from cementic.vector_store import (
-    LEXICAL_CANDIDATE_POOL,
     index_access_method,
     knn_sql,
+    lexical_probe_sql,
     lexical_sql,
     pgvector_version,
     query_tuning_statements,
@@ -330,9 +330,15 @@ class Searcher:
     ) -> list[SearchResult]:
         combined = self.candidates(query, top_k=top_k, collections=collections)
         if not self.config.search.hybrid:
-            return _numbered(combined[:top_k])
+            vector_arm, _ = split_arms(combined)
+            return _numbered(merge_arms(vector_arm, [], lead="vector", top_k=top_k))
         return _numbered(
-            self._merge_arms(session_free_results=combined, query=query, top_k=top_k)
+            self._merge_arms(
+                session_free_results=combined,
+                query=query,
+                top_k=top_k,
+                collections=collections,
+            )
         )
 
     def candidates(
@@ -483,7 +489,7 @@ class Searcher:
                 "collection": revision.collection,
                 "chunk_profile_id": revision.chunk_profile_id,
                 "extractor_profile_id": revision.extractor_profile_id,
-                "pool": LEXICAL_CANDIDATE_POOL,
+                "pool": self.config.search.lexical_candidate_pool,
                 "k": top_k,
             },
         )
@@ -502,7 +508,11 @@ class Searcher:
         ]
 
     def _merge_arms(
-        self, session_free_results: list[SearchResult], query: str, top_k: int
+        self,
+        session_free_results: list[SearchResult],
+        query: str,
+        top_k: int,
+        collections: list[str] | None = None,
     ) -> list[SearchResult]:
         """Interleave the two arms: leading arm takes rank 1, fusion takes the rest.
 
@@ -511,36 +521,54 @@ class Searcher:
         suits, because reciprocal rank fusion is symmetric and a document ranked
         first by one arm ties exactly with the other arm's first. Routing only
         position one recovers that without giving back the recall fusion earns.
+
+        With one arm empty `merge_arms` still runs, so that case also returns one
+        row per document rather than the other arm's chunk rows.
         """
         vector_arm, lexical_arm = split_arms(session_free_results)
-        if not lexical_arm or not vector_arm:
-            return session_free_results[:top_k]
-        lead = "lexical" if self.lexical_should_lead(query) else "vector"
+        both = bool(vector_arm and lexical_arm)
+        lead = (
+            "lexical"
+            if both and self.lexical_should_lead(query, collections)
+            else "vector"
+        )
         return merge_arms(vector_arm, lexical_arm, lead=lead, top_k=top_k)
 
-    def lexical_should_lead(self, query: str) -> bool:
+    def lexical_should_lead(self, query: str, collections: list[str] | None = None) -> bool:
         """Whether this query is a single token rare enough to trust exactly.
 
         Two cheap tests rather than a classifier. The syntactic one is pure; the
-        rarity one costs a capped index probe, which stops at the threshold and
-        so never scans a common term's full posting list.
+        rarity one costs a capped index probe per searched revision, which stops
+        at the cap and so never scans a common term's full posting list. The
+        probe counts documents in the revisions `collections` selects, as the
+        lexical arm does: counting the whole table also counted superseded
+        revisions and other collections, so a token rare in the searched
+        collection could look common.
         """
         if not looks_like_identifier(query):
             return False
         threshold = self.config.search.lexical_lead_max_documents
+        found: set[int] = set()
         with self.Session() as session:
-            rows = session.execute(
-                text(
-                    "SELECT DISTINCT document_id FROM ("
-                    "  SELECT document_id FROM chunks_v2 "
-                    f"  WHERE to_tsvector('{LEXICAL_TEXT_CONFIG}', content) "
-                    f"        @@ plainto_tsquery('{LEXICAL_TEXT_CONFIG}', :query) "
-                    "  LIMIT :probe"
-                    ") c"
-                ),
-                {"query": query, "probe": threshold * 20},
-            ).fetchall()
-        return 0 < len(rows) <= threshold
+            for revision in self._load_searchable_revisions(session, collections):
+                if not vector_table_exists(session.connection(), revision.embedding_profile_id):
+                    continue
+                rows = session.execute(
+                    text(
+                        lexical_probe_sql(
+                            revision.embedding_profile_id, text_config=LEXICAL_TEXT_CONFIG
+                        )
+                    ),
+                    {
+                        "query": query,
+                        "probe": threshold * 20,
+                        "collection": revision.collection,
+                        "chunk_profile_id": revision.chunk_profile_id,
+                        "extractor_profile_id": revision.extractor_profile_id,
+                    },
+                ).fetchall()
+                found.update(row.document_id for row in rows)
+        return 0 < len(found) <= threshold
 
     def unsearchable_collections(self, collections: list[str]) -> list[str]:
         """Return requested collections that have no searchable revision.

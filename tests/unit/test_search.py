@@ -755,3 +755,147 @@ class TestMergeArmsKeepsEachDocumentsBestChunk:
         merged = merge_arms(vector, lexical, lead="vector", top_k=2)
 
         assert [r["source_path"] for r in merged] == ["A", "B"]
+
+
+def _searcher(**search_overrides) -> Searcher:
+    config = Config()
+    for name, value in search_overrides.items():
+        setattr(config.search, name, value)
+    with patch("cementic.search.get_engine"), patch("cementic.search.get_session_factory"):
+        return Searcher(config=config)
+
+
+def _revision_ns(collection: str, chunk_profile_id: int = 2) -> SimpleNamespace:
+    return SimpleNamespace(
+        collection=collection,
+        embedding_profile_id=1,
+        chunk_profile_id=chunk_profile_id,
+        extractor_profile_id=3,
+    )
+
+
+class TestRarityProbeIsScopedToTheSearchedRevisions:
+    """The probe used to count matches in all of `chunks_v2`, so superseded
+    revisions and other collections made a rare token look common."""
+
+    def _probe(self, searcher, revisions, rows_per_revision, query="zyxq"):
+        session = MagicMock()
+        session.__enter__.return_value = session
+        session.__exit__.return_value = False
+        results = [
+            MagicMock(fetchall=lambda ids=ids: [SimpleNamespace(document_id=d) for d in ids])
+            for ids in rows_per_revision
+        ]
+        session.execute.side_effect = results
+        searcher.Session = lambda: session
+        with (
+            patch.object(searcher, "_load_searchable_revisions", return_value=revisions) as load,
+            patch("cementic.search.vector_table_exists", return_value=True),
+        ):
+            return searcher.lexical_should_lead(query, ["a"]), session, load
+
+    def test_the_statement_filters_on_the_vector_row_per_revision(self):
+        searcher = _searcher(lexical_lead_max_documents=5)
+
+        led, session, load = self._probe(searcher, [_revision_ns("a")], [[1]])
+
+        assert led
+        load.assert_called_once()
+        assert load.call_args.args[1] == ["a"]
+        statement, params = session.execute.call_args.args
+        sql = str(statement)
+        assert "ev.collection = :collection" in sql
+        assert "ev.chunk_profile_id = :chunk_profile_id" in sql
+        assert "ev.extractor_profile_id = :extractor_profile_id" in sql
+        assert params == {
+            "query": "zyxq",
+            "probe": 100,
+            "collection": "a",
+            "chunk_profile_id": 2,
+            "extractor_profile_id": 3,
+        }
+
+    def test_documents_are_counted_across_revisions_without_double_counting(self):
+        searcher = _searcher(lexical_lead_max_documents=3)
+
+        led, _, _ = self._probe(
+            searcher, [_revision_ns("a"), _revision_ns("b")], [[1, 2], [2, 3]]
+        )
+
+        assert led  # {1, 2, 3}
+
+    def test_more_documents_than_the_threshold_does_not_lead(self):
+        searcher = _searcher(lexical_lead_max_documents=2)
+
+        led, _, _ = self._probe(
+            searcher, [_revision_ns("a"), _revision_ns("b")], [[1, 2], [3]]
+        )
+
+        assert not led
+
+    def test_no_match_in_scope_does_not_lead(self):
+        led, _, _ = self._probe(_searcher(), [_revision_ns("a")], [[]])
+
+        assert not led
+
+    def test_a_multiword_query_never_touches_the_database(self):
+        searcher = _searcher()
+        searcher.Session = MagicMock(side_effect=AssertionError("database reached"))
+
+        assert not searcher.lexical_should_lead("two words", ["a"])
+
+
+class TestPoolSizeIsConfig:
+    def test_the_lexical_arm_passes_the_configured_pool(self):
+        searcher = _searcher(lexical_candidate_pool=10_000)
+        session = MagicMock()
+        session.execute.return_value = []
+
+        searcher._lexical_results(session, _revision_ns("a"), "q", 10)
+
+        assert session.execute.call_args.args[1]["pool"] == 10_000
+
+    def test_the_default_is_the_recorded_pool(self):
+        assert Config().search.lexical_candidate_pool == 2000
+
+
+class TestEveryPathReturnsOneRowPerDocument:
+    """The fused path collapsed chunks to documents; the others returned chunk
+    rows, so a multi-chunk paper took several of the top_k slots."""
+
+    def _chunks(self):
+        return [_row(p, 1.0 - i / 10) for i, p in enumerate("AABBC")]
+
+    def test_non_hybrid_search_collapses_chunks_to_documents(self):
+        searcher = _searcher(hybrid=False)
+
+        with patch.object(searcher, "candidates", return_value=self._chunks()):
+            results = searcher.search("q", top_k=2)
+
+        assert [r["source_path"] for r in results] == ["A", "B"]
+        assert [r["rank"] for r in results] == [1, 2]
+        assert results[0]["score"] == 1.0  # the best chunk represents A
+
+    def test_hybrid_search_with_an_empty_lexical_arm_collapses_chunks(self):
+        searcher = _searcher(hybrid=True)
+
+        with patch.object(searcher, "candidates", return_value=self._chunks()):
+            results = searcher.search("q", top_k=3)
+
+        assert [r["source_path"] for r in results] == ["A", "B", "C"]
+
+    def test_hybrid_search_with_an_empty_vector_arm_collapses_chunks(self):
+        searcher = _searcher(hybrid=True)
+        lexical = [_row(p, 1.0 - i / 10, kind="lexical_rank") for i, p in enumerate("AABBC")]
+
+        with patch.object(searcher, "candidates", return_value=lexical):
+            results = searcher.search("q", top_k=3)
+
+        assert [r["source_path"] for r in results] == ["A", "B", "C"]
+
+    def test_a_one_arm_search_does_not_run_the_rarity_probe(self):
+        searcher = _searcher(hybrid=True)
+        searcher.lexical_should_lead = MagicMock(side_effect=AssertionError("probed"))
+
+        with patch.object(searcher, "candidates", return_value=self._chunks()):
+            searcher.search("q", top_k=3)

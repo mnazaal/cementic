@@ -134,16 +134,6 @@ def knn_sql(profile_id: int, *, distance_operator: str) -> str:
     )
 
 
-#: Chunks pulled from the full-text index before ranking and scope filtering.
-#: Two reasons it exists. ``ts_rank`` recomputes a tsvector per candidate row,
-#: so ranking every match of a common term scores hundreds of thousands of
-#: chunks -- measured as a hang of minutes. And the scope filter is applied
-#: *after* this cap, so the pool needs headroom over ``top_k``: mid-rebuild a
-#: collection has two revisions in ``chunks_v2`` and up to half the candidates
-#: can be out of scope.
-LEXICAL_CANDIDATE_POOL = 2000
-
-
 def lexical_sql(profile_id: int, *, text_config: str) -> str:
     """Full-text search over the same rows ``knn_sql`` searches.
 
@@ -184,6 +174,30 @@ def lexical_sql(profile_id: int, *, text_config: str) -> str:
         "AND ev.extractor_profile_id = :extractor_profile_id "
         f"ORDER BY {rank} DESC "
         "LIMIT :k"
+    )
+
+
+def lexical_probe_sql(profile_id: int, *, text_config: str) -> str:
+    """Distinct documents matching a term, within the searched revision (pure).
+
+    The rarity probe behind `Searcher.lexical_should_lead`. It has the shape of
+    `lexical_sql` for the same two reasons: the text predicate drives a capped
+    inner LIMIT so the GIN index is used, and the scope filters sit on the
+    per-profile vector row so a superseded revision's chunks or another
+    collection's documents are not counted as matches for this search.
+    """
+    table = vector_table_name(profile_id)
+    return (
+        "SELECT DISTINCT c.document_id AS document_id FROM ("
+        "  SELECT id, document_id FROM chunks_v2 "
+        f"  WHERE to_tsvector('{text_config}', content) "
+        f"        @@ plainto_tsquery('{text_config}', :query) "
+        "  LIMIT :probe"
+        ") c "
+        f"JOIN {table} ev ON ev.chunk_id = c.id "
+        "WHERE ev.collection = :collection "
+        "AND ev.chunk_profile_id = :chunk_profile_id "
+        "AND ev.extractor_profile_id = :extractor_profile_id"
     )
 
 

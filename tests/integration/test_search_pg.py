@@ -284,3 +284,31 @@ def test_search_does_not_return_superseded_content(
 
     assert Searcher(pg_config).search("neural", top_k=5, collections=["superseded"]) == []
     cleanup_pg_tables(pg_session)
+
+
+@pytest.mark.pg
+def test_the_rarity_probe_counts_only_the_searched_collection(
+    pg_engine, pg_session, pg_config
+) -> None:
+    """A token rare in the searched collection leads, however common elsewhere."""
+    cleanup_pg_tables(pg_session)
+    threshold = pg_config.search.lexical_lead_max_documents
+    seed_active_vector_collection(
+        pg_session,
+        collection="narrow",
+        source_path="/docs/only.pdf",
+        chunks=[("the zyxqterm appears once here", [1.0, 0.0, 0.0, 0.0])],
+    )
+    for i in range(threshold + 1):
+        seed_active_vector_collection(
+            pg_session,
+            collection=f"broad{i}",
+            source_path=f"/docs/broad{i}.pdf",
+            chunks=[("the zyxqterm appears everywhere", [1.0, 0.0, 0.0, 0.0])],
+        )
+    pg_session.commit()
+    searcher = Searcher(pg_config)
+
+    assert searcher.lexical_should_lead("zyxqterm", ["narrow"])
+    assert not searcher.lexical_should_lead("zyxqterm")
+    cleanup_pg_tables(pg_session)

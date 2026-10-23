@@ -8,6 +8,7 @@ from sqlalchemy.orm import sessionmaker
 
 from cementic import vector_store
 from cementic.collections import _reconcile_lexical_index
+from cementic.config import Config
 from cementic.db import (
     LEXICAL_INDEX_NAME,
     LEXICAL_TEXT_CONFIG,
@@ -617,7 +618,7 @@ class TestLexicalScope:
                     "collection": current.collection,
                     "chunk_profile_id": current.chunk_profile_id,
                     "extractor_profile_id": current.extractor_profile_id,
-                    "pool": vector_store.LEXICAL_CANDIDATE_POOL,
+                    "pool": Config().search.lexical_candidate_pool,
                     "k": 10,
                 },
             ).fetchall()

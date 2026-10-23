@@ -215,12 +215,12 @@ class TestFusedRanking:
         vector = [f"d{i}" for i in range(30)]
         assert len(harness.fused_ranking(vector, ["d0"], "vector", 10)) == 10
 
-    def test_one_empty_arm_cuts_chunks_before_collapsing_documents(self) -> None:
-        # `_merge_arms` returns chunk rows [:top_k] when an arm is empty, so a
-        # document repeated across those rows leaves fewer than top_k documents.
+    def test_one_empty_arm_collapses_documents_before_cutting(self) -> None:
+        # `_merge_arms` returns one row per document with an arm empty, so a
+        # document repeated across chunk rows does not use up a slot.
         vector = ["a", "a", "b", "c"]
-        assert harness.fused_ranking(vector, [], "lexical", 2) == ["a"]
-        assert harness.fused_ranking([], vector, "vector", 3) == ["a", "b"]
+        assert harness.fused_ranking(vector, [], "lexical", 2) == ["a", "b"]
+        assert harness.fused_ranking([], vector, "vector", 3) == ["a", "b", "c"]
 
 
 class TestPolicyRanking:

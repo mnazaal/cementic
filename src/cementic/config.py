@@ -751,6 +751,20 @@ class SearchConfig(_SectionSettings):
     )
 
 
+    lexical_candidate_pool: int = Field(
+        default=2000,
+        ge=1,
+        description="Chunks pulled from the full-text index, unranked, before "
+        "ranking and scope filtering. Capped because ts_rank recomputes a "
+        "tsvector per candidate, so ranking every match of a common term scores "
+        "hundreds of thousands of chunks -- measured as a hang of minutes. The "
+        "scope filter runs after the cap, so it needs headroom over top_k: "
+        "mid-rebuild a collection has two revisions and up to half the "
+        "candidates can be out of scope. For a common term the pool is an "
+        "arbitrary sample, not the best matches.",
+    )
+
+
 class SourceWatcherConfig(_SectionSettings):
     """Source watcher configuration."""
 

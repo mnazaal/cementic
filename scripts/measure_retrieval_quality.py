@@ -87,7 +87,7 @@ from cementic.embedding_text import (
 from cementic.hybrid import combine, reciprocal_rank_fusion
 from cementic.search import Searcher, arm_fetch_limit, split_arms
 from cementic.storage import read_extracted_text
-from cementic.vector_store import LEXICAL_CANDIDATE_POOL, vector_table_name
+from cementic.vector_store import vector_table_name
 
 #: Default ranking depth requested from search. Matches
 #: `search.MAX_SEARCH_RESULTS`, so recall@10 and MRR are measured over the
@@ -527,13 +527,13 @@ def fused_ranking(
 
     ``lead=None`` is plain reciprocal rank fusion with nobody routed. Mirrors
     `Searcher._merge_arms` rather than calling it: with one arm empty that
-    method returns the other arm's chunk rows cut to `depth` *before* collapsing
-    to documents, so the fallback slices first here too. `ablate` checks this
+    method collapses the other arm to documents and then cuts to `depth`, as the
+    fused path does. `ablate` checks this
     mirror against the live system by requiring the ``shipped`` row to
     reproduce `score` exactly.
     """
     if not vector or not lexical:
-        return deduplicate((vector or lexical)[:depth])
+        return deduplicate(vector or lexical)[:depth]
     if lead is None:
         ordering = reciprocal_rank_fusion(deduplicate(vector), deduplicate(lexical))
     else:
@@ -1223,6 +1223,8 @@ def command_score(args: argparse.Namespace) -> int:
     collection = payload["collection"]
 
     config = get_config()
+    if args.lexical_pool is not None:
+        config.search.lexical_candidate_pool = args.lexical_pool
     searcher = Searcher(config)
     t0 = time.perf_counter()
 
@@ -1288,7 +1290,9 @@ def command_arms(args: argparse.Namespace) -> int:
                     vector=[document_key(r["source_path"]) for r in vector],
                     lexical=[document_key(r["source_path"]) for r in lexical],
                     shipped_lead=(
-                        "lexical" if searcher.lexical_should_lead(query.query) else "vector"
+                        "lexical"
+                        if searcher.lexical_should_lead(query.query, [collection])
+                        else "vector"
                     ),
                 )
             )
@@ -1753,7 +1757,7 @@ def relaxed_arm(conn, table: str, scope: dict, query: str, limit: int) -> list[s
         {
             "tsq": tsquery,
             "orq": " | ".join(quote_lexeme(t) for t in lexemes),
-            "pool": LEXICAL_CANDIDATE_POOL,
+            "pool": get_config().search.lexical_candidate_pool,
             "k": limit,
             **scope,
         },
@@ -1824,7 +1828,9 @@ def command_fuzzy(args: argparse.Namespace) -> int:
                     vector=[document_key(r["source_path"]) for r in vector],
                     lexical=lexical_docs,
                     shipped_lead=(
-                        "lexical" if searcher.lexical_should_lead(query.query) else "vector"
+                        "lexical"
+                        if searcher.lexical_should_lead(query.query, [collection])
+                        else "vector"
                     ),
                     similarity=similarity,
                     word_similarity=word,
@@ -1982,6 +1988,13 @@ def main() -> int:
         default=DEFAULT_DEPTH,
         help=f"per-arm fetch limit and returned list length (default {DEFAULT_DEPTH}; "
         f"`cementic search` ships {PRODUCTION_DEPTH})",
+    )
+    score.add_argument(
+        "--lexical-pool",
+        type=int,
+        default=None,
+        help="override search.lexical_candidate_pool for this run "
+        "(the shipped value is the config default)",
     )
     score.add_argument("--json", action="store_true", help="also emit machine-readable totals")
     score.set_defaults(func=command_score)
