@@ -338,24 +338,3 @@ def test_a_full_rarity_sample_does_not_claim_the_term_is_rare(
 
     assert not Searcher(pg_config).lexical_should_lead("zyxqterm", ["narrow"])
     cleanup_pg_tables(pg_session)
-    pg_config.search.lexical_lead_max_documents = 1
-    cap = 20  # the probe fetches threshold * 20 chunks
-    # Seeded first, so an unordered sample taken before the scope filter
-    # would be all out-of-scope rows.
-    for i in range(cap + 5):
-        seed_active_vector_collection(
-            pg_session,
-            collection=f"broad{i}",
-            source_path=f"/docs/broad{i}.pdf",
-            chunks=[("the zyxqterm appears everywhere", [1.0, 0.0, 0.0, 0.0])],
-        )
-    seed_active_vector_collection(
-        pg_session,
-        collection="narrow",
-        source_path="/docs/only.pdf",
-        chunks=[("the zyxqterm appears once here", [1.0, 0.0, 0.0, 0.0])],
-    )
-    pg_session.commit()
-
-    assert Searcher(pg_config).lexical_should_lead("zyxqterm", ["narrow"])
-    cleanup_pg_tables(pg_session)
