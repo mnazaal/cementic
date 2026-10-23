@@ -178,27 +178,28 @@ def lexical_sql(profile_id: int, *, text_config: str) -> str:
 
 
 def lexical_probe_sql(profile_id: int, *, text_config: str) -> str:
-    """Distinct documents matching a term, within the searched revision (pure).
+    """A capped sample of a term's matching chunks, each marked in or out of scope (pure).
 
-    The rarity probe behind `Searcher.lexical_should_lead`. The scope filters
-    sit on the per-profile vector row, so a superseded revision's chunks or
-    another collection's documents are not counted as matches for this
-    search. Unlike `lexical_sql`, the scope join is inside the capped LIMIT:
-    the cap counts in-scope chunks, so out-of-scope matches cannot fill it and
-    leave a common term looking rare (or a rare one looking absent).
+    The rarity probe behind `Searcher.lexical_should_lead`, read by
+    `probe_documents`. The text predicate drives the capped inner LIMIT, as in
+    `lexical_sql` and for the reason measured there: with the scope filters in
+    the same WHERE clause the planner leaves the GIN index, and a term matching
+    nothing costs a full scan. So the scope cannot sit under the LIMIT; instead
+    each sampled chunk carries whether its vector row is in the searched
+    revision, and the caller decides what an incomplete sample can show.
     """
     table = vector_table_name(profile_id)
     return (
-        "SELECT DISTINCT c.document_id AS document_id FROM ("
-        "  SELECT ch.document_id FROM chunks_v2 ch "
-        f"  JOIN {table} ev ON ev.chunk_id = ch.id "
-        f"  WHERE to_tsvector('{text_config}', ch.content) "
+        "SELECT c.document_id AS document_id, ev.chunk_id IS NOT NULL AS in_scope FROM ("
+        "  SELECT id, document_id FROM chunks_v2 "
+        f"  WHERE to_tsvector('{text_config}', content) "
         f"        @@ plainto_tsquery('{text_config}', :query) "
-        "  AND ev.collection = :collection "
-        "  AND ev.chunk_profile_id = :chunk_profile_id "
-        "  AND ev.extractor_profile_id = :extractor_profile_id "
         "  LIMIT :probe"
-        ") c"
+        ") c "
+        f"LEFT JOIN {table} ev ON ev.chunk_id = c.id "
+        "AND ev.collection = :collection "
+        "AND ev.chunk_profile_id = :chunk_profile_id "
+        "AND ev.extractor_profile_id = :extractor_profile_id"
     )
 
 

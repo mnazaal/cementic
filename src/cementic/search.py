@@ -6,6 +6,7 @@ import dataclasses
 import logging
 
 # mypy: disable-error-code="import-untyped"
+from collections.abc import Iterable
 from typing import Any, TypedDict
 
 from sqlalchemy import text
@@ -43,7 +44,7 @@ from cementic.vector_store import (
 MAX_SEARCH_RESULTS = 50
 MAX_QUERY_CHARS = 8_000
 
-#: How many results each arm fetches per returned result, under hybrid search.
+#: How many results each arm fetches per returned result.
 #: Chosen 2026-09-19 (PLAN.md, Phase 1 step 1) as the multiple actually
 #: measured: at the default `top_k` of 10 it fetches 50 per arm, which is the
 #: depth the recall and latency numbers in that section were taken at.
@@ -84,6 +85,23 @@ def _reject_query_over_context(query: str, n_ctx: int) -> None:
         )
 
 
+def probe_documents(rows: Iterable[Any], *, cap: int) -> set[int]:
+    """The documents a rarity-probe sample shows a term to match (pure).
+
+    ``rows`` are `lexical_probe_sql`'s: up to ``cap`` matching chunks, each with
+    ``document_id`` and ``in_scope``. Below the cap the sample is every match,
+    so the in-scope documents are exact. At the cap it is an arbitrary subset
+    taken before the scope filter, which can hide in-scope matches and make a
+    common term look rare; then every sampled document counts, as the probe
+    did before it was scoped, so a full sample never claims more rarity than
+    the unscoped probe did.
+    """
+    rows = list(rows)
+    if len(rows) < cap:
+        return {row.document_id for row in rows if row.in_scope}
+    return {row.document_id for row in rows}
+
+
 def arm_fetch_limit(top_k: int) -> int:
     """How many results each arm fetches to return `top_k` of them (pure).
 
@@ -104,7 +122,9 @@ def arm_fetch_limit(top_k: int) -> int:
 
     Without hybrid the multiple is still needed: every path merges chunk rows
     to one row per document, so `top_k` chunk rows from multi-chunk papers
-    would return fewer than `top_k` documents.
+    would return fewer than `top_k` documents. Near `MAX_SEARCH_RESULTS` the
+    cap leaves little or no headroom, so a large `top_k` can still come back
+    short when papers match with several chunks.
 
     **Sound only because `combine` fuses at document level.** Fusion scored per
     *chunk* until 2026-09-19, and under that fusion this same over-fetch
@@ -537,12 +557,12 @@ class Searcher:
         """Whether this query is a single token rare enough to trust exactly.
 
         Two cheap tests rather than a classifier. The syntactic one is pure; the
-        rarity one costs a capped index probe per searched revision, which stops
-        at the cap and so never scans a common term's full posting list. The
-        probe counts documents in the revisions `collections` selects, as the
-        lexical arm does: counting the whole table also counted superseded
-        revisions and other collections, so a token rare in the searched
-        collection could look common.
+        rarity one costs a capped index probe per searched revision, which
+        fetches at most the cap of matching chunks. The probe counts documents
+        in the revisions `collections` selects, as the lexical arm does:
+        counting the whole table also counted superseded revisions and other
+        collections, so a token rare in the searched collection could look
+        common. See `probe_documents` for what a full sample can show.
         """
         if not looks_like_identifier(query):
             return False
@@ -566,7 +586,7 @@ class Searcher:
                         "extractor_profile_id": revision.extractor_profile_id,
                     },
                 ).fetchall()
-                found.update(row.document_id for row in rows)
+                found |= probe_documents(rows, cap=threshold * 20)
         return 0 < len(found) <= threshold
 
     def unsearchable_collections(self, collections: list[str]) -> list[str]:

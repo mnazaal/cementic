@@ -314,10 +314,29 @@ def test_the_rarity_probe_counts_only_the_searched_collection(
 
 
 @pytest.mark.pg
-def test_the_rarity_probe_cap_counts_only_in_scope_chunks(
+def test_a_full_rarity_sample_does_not_claim_the_term_is_rare(
     pg_engine, pg_session, pg_config
 ) -> None:
-    """Out-of-scope matches past the probe's cap cannot crowd out the scope's own."""
+    """Past the probe's cap the sample is unscoped, so its documents all count."""
+    cleanup_pg_tables(pg_session)
+    pg_config.search.lexical_lead_max_documents = 1
+    cap = 20  # the probe fetches threshold * 20 chunks
+    seed_active_vector_collection(
+        pg_session,
+        collection="narrow",
+        source_path="/docs/only.pdf",
+        chunks=[("the zyxqterm appears once here", [1.0, 0.0, 0.0, 0.0])],
+    )
+    for i in range(cap + 5):
+        seed_active_vector_collection(
+            pg_session,
+            collection=f"broad{i}",
+            source_path=f"/docs/broad{i}.pdf",
+            chunks=[("the zyxqterm appears everywhere", [1.0, 0.0, 0.0, 0.0])],
+        )
+    pg_session.commit()
+
+    assert not Searcher(pg_config).lexical_should_lead("zyxqterm", ["narrow"])
     cleanup_pg_tables(pg_session)
     pg_config.search.lexical_lead_max_documents = 1
     cap = 20  # the probe fetches threshold * 20 chunks

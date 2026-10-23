@@ -22,6 +22,7 @@ from cementic.search import (
     _searchable_revisions,
     arm_fetch_limit,
     merge_arms,
+    probe_documents,
 )
 
 
@@ -777,7 +778,11 @@ class TestRarityProbeIsScopedToTheSearchedRevisions:
         session.__enter__.return_value = session
         session.__exit__.return_value = False
         results = [
-            MagicMock(fetchall=lambda ids=ids: [SimpleNamespace(document_id=d) for d in ids])
+            MagicMock(
+                fetchall=lambda ids=ids: [
+                    SimpleNamespace(document_id=d, in_scope=True) for d in ids
+                ]
+            )
             for ids in rows_per_revision
         ]
         session.execute.side_effect = results
@@ -798,7 +803,7 @@ class TestRarityProbeIsScopedToTheSearchedRevisions:
         assert load.call_args.args[1] == ["a"]
         statement, params = session.execute.call_args.args
         sql = str(statement)
-        assert "ev.collection = :collection" in sql
+        assert "AND ev.collection = :collection" in sql
         assert "ev.chunk_profile_id = :chunk_profile_id" in sql
         assert "ev.extractor_profile_id = :extractor_profile_id" in sql
         assert params == {
@@ -837,6 +842,27 @@ class TestRarityProbeIsScopedToTheSearchedRevisions:
         searcher.Session = MagicMock(side_effect=AssertionError("database reached"))
 
         assert not searcher.lexical_should_lead("two words", ["a"])
+
+
+def _sample(*pairs):
+    return [SimpleNamespace(document_id=d, in_scope=s) for d, s in pairs]
+
+
+class TestProbeDocuments:
+    """What a capped, unscoped sample of matching chunks can show."""
+
+    def test_below_the_cap_counts_only_in_scope_documents(self):
+        rows = _sample((1, True), (2, False), (1, True), (3, False))
+        assert probe_documents(rows, cap=5) == {1}
+
+    def test_a_full_sample_counts_every_sampled_document(self):
+        # Out-of-scope rows may have crowded in-scope matches out of the
+        # sample, so it cannot show the term is rare in scope.
+        rows = _sample((1, False), (2, False), (3, True))
+        assert probe_documents(rows, cap=3) == {1, 2, 3}
+
+    def test_no_match_is_no_document(self):
+        assert probe_documents([], cap=3) == set()
 
 
 class TestPoolSizeIsConfig:
