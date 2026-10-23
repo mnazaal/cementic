@@ -101,7 +101,9 @@ def test_pg_search_results_carry_the_document_id(
 
     assert pool and results
     assert {row["document_id"] for row in pool} == {document_id}
-    assert [row["document_id"] for row in results] == [document_id]
+    # Without fusion a search returns one row per matching chunk, so the one
+    # document can appear twice; every row must still name it.
+    assert {row["document_id"] for row in results} == {document_id}
     if hybrid:
         assert any(row["score_kind"] == "lexical_rank" for row in pool)
 
