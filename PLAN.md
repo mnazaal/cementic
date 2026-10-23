@@ -5,19 +5,13 @@
 
 **Entry point: "Execution order (2026-10-22)" → "User-facing CLI" →
 "Machine-readable output for the three query commands", the first unstarted
-item.** The import diet before it is DONE on branch `claude/import-diet`
-(2026-10-23), pending the user's pg gate and a fast-forward to main; start the
-next item from that branch or from main once it lands.
+item.** Start it on a fresh `claude/` branch from main. Everything above it in
+the execution order is DONE and on main.
 
-**State on main (`7d58d66` plus this handoff's commit).** Branch
-`claude/audit-fixes` (16 commits: correctness steps 1-8, audit additions,
-packaging/docs/deletions) fast-forwarded on 2026-10-23. The user's gate passed
-on the final commits, including integration-pg. `cementic@papers` restarted on
-it: `doctor` ok, `status` workers running, 2,383,903/2,383,903 chunks
-embedded. `doctor` warned "tokenizer not cached" once after the restart; that
-is the expected re-download into `~/.local/share/cementic/tiktoken`, not a
-fault. `status` read `workers partial` for a few seconds after the restart,
-then `running`.
+**State on main (`eae6f16`).** The audit fixes (`claude/audit-fixes`) and the
+import diet (`claude/import-diet`, `1b5d7f6`..`eae6f16`) are both
+fast-forwarded, each after the user's full gate including integration-pg. The
+merged branches are deleted and no extra worktrees remain.
 
 **Phase 2a closed 2026-10-23: stay on v2-moe.** Qwen3 and Harrier pass the
 title rule and fail the phrase rule; see "Retrieval Phase 2" → 2a → "RUN
@@ -28,16 +22,11 @@ chunks dropped by `score_arm`) is still unchecked.
 flight fails with FileNotFoundError and stays failed until the next `cementic
 start`. The window is one document per worker.
 
-**Leftover git state for the user to clear.** The gate checkout
-`~/projects/cementic-audit-fixes`, the stale registration of the agent's
-deleted worktree, the merged branch `claude/audit-fixes`, and a stray branch
-`claude/handoff-2026-10-23` (points at main; a failed `worktree add` created
-it). Commands are in "Exit criteria".
-
 **Environment quirks.**
-- This session the sandbox could write refs but not `.git/worktrees`, so it
-  could neither add nor remove a worktree. Branch work then needs the user, or
-  the change ships as a patch under `~/.cache/patches/`.
+- Worktrees work from the sandbox (2026-10-23): `git worktree add
+  "$TMPDIR/wt-<topic>"`, then `uv sync --extra dev --offline` there (PyPI is
+  blocked; the uv cache covers the lock). An earlier session could not write
+  `.git/worktrees`; if that recurs, ship a patch under `~/.cache/patches/`.
 - Claude Code kills its own background jobs under memory pressure. Long runs
   belong in the user's terminal.
 - `git diff`/`git status` with no pathspec fail in the sandbox on the masked
@@ -48,8 +37,12 @@ it). Commands are in "Exit criteria".
   for `status`/`doctor` output.
 - Bash hooks block `git config`, branch deletion (the pattern matches even
   inside a heredoc) and `ls` of the session scratchpad.
-- In the sandbox about 60 suite tests fail on the blocked tiktoken download,
-  plus two tokenizer pre-check tests; the user's gate is the authority.
+- In the sandbox, run the suite with
+  `TIKTOKEN_CACHE_DIR=$HOME/.local/share/cementic/tiktoken`. The non-pg suite
+  then fails exactly 3 tests, `test_embedding_runtime.py`
+  `test_get_runtime_client_*`, on the blocked HuggingFace download (88 s,
+  2026-10-23). Without the variable about 60 fail on tiktoken. pg tests cannot
+  reach 5432; the user's gate is the authority.
 - `llama-bench -p 2048` aborts on encoder models whose window is at or below
   2048; bench them at 512.
 
@@ -61,10 +54,7 @@ baselines: `~/.cache/cementic-audit/`. Model comparison:
 
 **Exit criteria.**
 ```bash
-git -C ~/projects/cementic log --oneline -1 main      # the handoff commit, parent 7d58d66
-git -C ~/projects/cementic worktree prune
-git -C ~/projects/cementic worktree remove ~/projects/cementic-audit-fixes
-git -C ~/projects/cementic branch -d claude/audit-fixes claude/handoff-2026-10-23
+git -C ~/projects/cementic log --oneline -1 main      # eae6f16 or later
 git -C ~/projects/cementic worktree list              # only ~/projects/cementic
 cementic status                                        # workers running, 100.0% embedded
 ```
@@ -390,15 +380,15 @@ The key rename is independent. Then four audit additions.
 
 #### Import diet — stop the CLI importing the database and HTTP layers
 
-**DONE on `claude/import-diet` since 2026-10-23 (`1b5d7f6`..`b6a6632`), pending
-the pg gate.** `import cementic.cli` loads none of the six guarded modules
+**DONE, on main since 2026-10-23 (`1b5d7f6`..`b6a6632`); the user's gate,
+including pg, passed.** `import cementic.cli` loads none of the six guarded modules
 (`test_cli_import_does_not_pull_in_the_database_or_http_layers`). Interleaved,
 best of 10, measured under load average ~20 so absolute numbers run high:
 `import cementic.cli` 477 ms median against 1060 ms on `791c406`, `cementic
 --version` 502 ms against 1264 ms. An independent review found no behaviour
 change across 26 `status` scenarios diffed against `791c406`. The pg tests
 whose patches were repointed (`test_cli_pg.py:114,134`,
-`test_pipeline_worker.py:660,681`) have not run.
+`test_pipeline_worker.py:660,681`) passed in the user's gate.
 
 The measured defect. Import time for `cementic.cli`, and for the set a light
 command actually needs, six runs each (import only, excluding interpreter
@@ -729,7 +719,7 @@ change beyond the one split named below.
 4. **Target-revision rule.** The resurrect, supersede or create decision in
    `get_target_revision` (`revisions.py:222-279`) becomes a pure function over
    existing revisions and profile ids. *Ends when:* tested without a session.
-5. **Status document split.** **DONE on `claude/import-diet` (`4989219`).** **Pulled forward into the import diet
+5. **Status document split.** **DONE, on main since 2026-10-23 (`4989219`).** **Pulled forward into the import diet
    (2026-10-23, user's call): it runs before the diet's `render.py` commit.**
    `render.build_status_document` becomes a query function in `status_service`
    and a pure document builder, dropping the two smuggled callables and the
