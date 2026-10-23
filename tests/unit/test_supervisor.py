@@ -3,8 +3,11 @@
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 from cementic.supervisor import (
     ManagedProcess,
+    decide_stop,
     find_pids_by_cmdline,
     force_kill,
     is_managed_process_alive,
@@ -377,3 +380,128 @@ class TestFindPidsByCmdline:
         with patch("cementic.supervisor._PROC_ROOT", tmp_path):
             matches = find_pids_by_cmdline(lambda argv: "match" in argv)
         assert matches == [111]
+
+
+def _proc(pid: int) -> dict[str, object]:
+    return {"name": f"w{pid}", "pid": pid, "log_file": "x.log", "start_token": None}
+
+
+_BASE: dict = {
+    "state": {"collection": "c", "directories": ["/d"]},
+    "processes": [_proc(1), _proc(2)],
+    "recovered": False,
+    "signaled": [1, 2],
+    "unsignalable": [],
+    "remaining": [],
+    "force": False,
+    "activity": None,
+    "still_alive": [],
+    "timeout_seconds": 30.0,
+}
+
+
+@pytest.mark.parametrize(
+    ("changes", "messages", "state_action", "exit_code"),
+    [
+        pytest.param(
+            {"processes": []},
+            [("out", "no background cementic processes found")],
+            "keep",
+            0,
+            id="nothing-found",
+        ),
+        pytest.param(
+            {"recovered": True},
+            [("out", "stopped 2 process(es)")],
+            "clear",
+            0,
+            id="recovered-then-stopped",
+        ),
+        pytest.param(
+            {"signaled": [], "remaining": []},
+            [("out", "no running processes found; cleared stale state")],
+            "clear",
+            0,
+            id="all-already-gone",
+        ),
+        pytest.param(
+            {"force": True, "remaining": [1, 2], "activity": "building an index"},
+            [("out", "force stopped 2 process(es)")],
+            "clear",
+            0,
+            id="force-kills-all",
+        ),
+        pytest.param(
+            {"force": True, "remaining": [1, 2], "still_alive": [2]},
+            [("err", "force killed 1 process(es); could not kill: 2")],
+            "keep",
+            1,
+            id="force-leaves-survivor",
+        ),
+        pytest.param(
+            {"remaining": [2]},
+            [
+                ("err", "stopped 1 process(es)"),
+                ("err", "stop timed out after 30.0s; still running PID(s): 2"),
+                ("err", "use --force to kill stubborn processes"),
+            ],
+            "save",
+            1,
+            id="partial-timeout",
+        ),
+        pytest.param(
+            {"signaled": [1], "unsignalable": [2], "remaining": [2]},
+            [
+                ("err", "stopped 1 process(es)"),
+                (
+                    "err",
+                    "could not signal PID(s) 2: permission denied; "
+                    "still running, likely started by another user",
+                ),
+            ],
+            "save",
+            1,
+            id="eperm-offers-no-force-hint",
+        ),
+        pytest.param(
+            {"remaining": [1, 2], "activity": "building an index"},
+            [
+                ("err", "stop timed out after 30.0s; still running PID(s): 1, 2"),
+                ("err", "the pipeline worker is building an index, which does not stop on request"),
+                ("err", "--force will discard that work; it restarts from scratch next run"),
+            ],
+            "save",
+            1,
+            id="busy-worker-replaces-force-hint",
+        ),
+        pytest.param(
+            {
+                "signaled": [],
+                "unsignalable": [1, 2],
+                "remaining": [1, 2],
+                "force": True,
+                "still_alive": [1, 2],
+            },
+            [("err", "force killed 0 process(es); could not kill: 1, 2")],
+            "keep",
+            1,
+            id="force-on-eperm-reports-unkillable",
+        ),
+    ],
+)
+def test_decide_stop(changes, messages, state_action, exit_code):
+    outcome = decide_stop(**{**_BASE, **changes})
+
+    assert list(outcome.messages) == messages
+    assert outcome.state_action == state_action
+    assert outcome.exit_code == exit_code
+
+
+def test_decide_stop_saves_only_the_survivors():
+    outcome = decide_stop(**{**_BASE, "remaining": [2]})
+
+    assert outcome.next_state == {
+        "collection": "c",
+        "directories": ["/d"],
+        "processes": [_proc(2)],
+    }

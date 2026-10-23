@@ -476,6 +476,43 @@ class TestStopFallsBackToWorkerStateFiles:
         assert "supervisor record missing" in result.output
         mock_kill.assert_called_once_with(4242, 15)
 
+    def test_announcements_precede_the_effects_they_announce(self, tmp_path):
+        """The recovery note prints before the 30 s grace period, and the
+        discarded-work note before SIGKILL, not after both have happened."""
+        config = self._config_with_state(tmp_path, pid=4242)
+        events: list[str] = []
+
+        def record_print(text, *args, **kwargs):
+            events.append(str(text))
+
+        with (
+            patch("cementic.cli._get_config", return_value=config),
+            patch("cementic.cli._load_supervisor_state", return_value={}),
+            patch("cementic.cli._get_supervisor_state_path", return_value=tmp_path / "sup.json"),
+            patch("cementic.cli.is_managed_process_alive", return_value=True),
+            patch("cementic.cli_shared.is_managed_process_alive", return_value=True),
+            patch("cementic.cli.is_pid_running", return_value=False),
+            patch("cementic.cli.os.kill"),
+            patch("cementic.cli.time.sleep"),
+            patch(
+                "cementic.cli.wait_for_exit",
+                side_effect=lambda pids, **_: events.append("wait") or list(pids),
+            ),
+            patch(
+                "cementic.cli.force_kill",
+                side_effect=lambda pids: events.append("kill") or [],
+            ),
+            patch("cementic.cli._pipeline_worker_activity", return_value="building an index"),
+            patch("cementic.cli.console.print", side_effect=record_print),
+        ):
+            result = runner.invoke(app, ["stop", "--force"])
+
+        assert result.exit_code == 0, result.output
+        recovered = next(i for i, e in enumerate(events) if "supervisor record missing" in e)
+        discarding = next(i for i, e in enumerate(events) if "discarding in-progress" in e)
+        assert recovered < events.index("wait")
+        assert discarding < events.index("kill")
+
     def test_reports_nothing_when_no_worker_is_alive(self, tmp_path):
         config = self._config_with_state(tmp_path, pid=4242)
 

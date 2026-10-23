@@ -266,3 +266,126 @@ def force_kill(pids: list[int]) -> list[int]:
         if is_pid_running(pid):
             remaining.append(pid)
     return remaining
+
+
+@dataclass(frozen=True)
+class StopOutcome:
+    """What ``cementic stop`` prints, saves and exits with, as plain data.
+
+    ``messages`` are ``(stream, text)`` pairs, stream ``"out"`` or ``"err"``.
+    ``state_action`` is ``"keep"`` (leave the supervisor record alone),
+    ``"clear"`` (delete it and the worker state files) or ``"save"`` (write
+    ``next_state``).
+    """
+
+    messages: tuple[tuple[str, str], ...]
+    state_action: str = "keep"
+    next_state: SupervisorState | None = None
+    exit_code: int = 0
+
+
+def _pid_list(pids: list[int]) -> str:
+    return ", ".join(str(pid) for pid in pids)
+
+
+def decide_stop(
+    *,
+    state: SupervisorState,
+    processes: list[dict[str, object]],
+    recovered: bool,
+    signaled: list[int],
+    unsignalable: list[int],
+    remaining: list[int],
+    force: bool,
+    activity: str | None,
+    still_alive: list[int],
+    timeout_seconds: float,
+) -> StopOutcome:
+    """Decide the outcome of ``cementic stop`` once every effect has happened.
+
+    The two announcements that must precede an effect -- a recovered process
+    list before the grace period, and discarded work before SIGKILL -- are
+    printed by the caller at that point, not returned here.
+
+    ``signaled`` and ``unsignalable`` are the live processes SIGTERM reached and
+    the ones it was refused for (EPERM); processes that were not alive are in
+    neither. ``remaining`` is what survived the grace period (including the
+    unsignalable ones), ``still_alive`` what survived ``--force``'s SIGKILL, and
+    ``activity`` the pipeline worker's uninterruptible work, if any.
+    """
+    if not processes:
+        return StopOutcome((("out", "no background cementic processes found"),))
+    messages: list[tuple[str, str]] = []
+
+    if not remaining:
+        if signaled:
+            messages.append(("out", f"stopped {len(signaled)} process(es)"))
+        else:
+            # Recorded processes had already exited; "stopped 0 process(es)" read
+            # as though a stop had happened and hid that they died on their own.
+            messages.append(("out", "no running processes found; cleared stale state"))
+        return StopOutcome(tuple(messages), state_action="clear")
+
+    if force:
+        if still_alive:
+            # The supervisor record is kept: it is the only place the collection
+            # and watched directories are written down. Exit 1 so
+            # `cementic stop && cementic start` does not proceed.
+            messages.append(
+                (
+                    "err",
+                    f"force killed {len(remaining) - len(still_alive)} process(es); "
+                    f"could not kill: {_pid_list(still_alive)}",
+                )
+            )
+            return StopOutcome(tuple(messages), exit_code=1)
+        messages.append(("out", f"force stopped {len(remaining)} process(es)"))
+        return StopOutcome(tuple(messages), state_action="clear")
+
+    still_running = [p for p in processes if managed_process_pid(p) in remaining]
+    stopped = [pid for pid in signaled if pid not in remaining]
+    timed_out = [pid for pid in remaining if pid not in unsignalable]
+    if stopped:
+        # A mixed outcome used to report only the failure, so a stop that took
+        # down one of two workers read as having done nothing.
+        messages.append(("err", f"stopped {len(stopped)} process(es)"))
+    if timed_out:
+        messages.append(
+            (
+                "err",
+                f"stop timed out after {timeout_seconds}s; still running PID(s): "
+                f"{_pid_list(timed_out)}",
+            )
+        )
+    if unsignalable:
+        # No timeout elapsed for these -- the signal itself was refused.
+        messages.append(
+            (
+                "err",
+                f"could not signal PID(s) {_pid_list(unsignalable)}: "
+                "permission denied; still running, likely started by another user",
+            )
+        )
+    if activity is not None:
+        # The worker cannot answer SIGTERM from inside CREATE INDEX, and the
+        # statement is not resumable, so forcing throws the whole build away.
+        messages.append(
+            ("err", f"the pipeline worker is {activity}, which does not stop on request")
+        )
+        messages.append(
+            ("err", "--force will discard that work; it restarts from scratch next run")
+        )
+    elif timed_out:
+        # Only a timed-out process can be helped by --force; the unsignalable
+        # ones fail the same way on a retry.
+        messages.append(("err", "use --force to kill stubborn processes"))
+    return StopOutcome(
+        tuple(messages),
+        state_action="save",
+        next_state={
+            "collection": state.get("collection"),
+            "directories": state.get("directories", []),
+            "processes": still_running,
+        },
+        exit_code=1,
+    )

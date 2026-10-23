@@ -48,6 +48,7 @@ from cementic.hybrid import scores_explain_order
 from cementic.state import DaemonState, StateManager
 from cementic.supervisor import (
     ManagedProcess,
+    decide_stop,
     force_kill,
     is_managed_process_alive,
     is_pid_running,
@@ -801,10 +802,6 @@ def stop_background(
         processes = _worker_processes_from_state_files()
         recovered = bool(processes)
 
-    if not processes:
-        console.print("no background cementic processes found")
-        return
-
     if recovered:
         console.print(
             "supervisor record missing; found running workers from their own state files"
@@ -840,23 +837,13 @@ def stop_background(
     timeout_seconds = 30.0
     remaining = wait_for_exit(signaled_pids, timeout_seconds=timeout_seconds)
     # SIGTERM never reached the EPERM'd pids, so they are certainly still
-    # running: they rejoin the not-stopped set so no path below clears their
-    # state, and --force reports them as unkillable instead of stale.
+    # running: they rejoin the not-stopped set so no path clears their state,
+    # and --force reports them as unkillable instead of stale.
     remaining += unsignalable_pids
 
-    if not remaining:
-        _get_supervisor_state_path().unlink(missing_ok=True)
-        _clear_worker_state_files()
-        if signaled_pids:
-            console.print(f"stopped {len(signaled_pids)} process(es)")
-        else:
-            # Recorded processes had already exited; "stopped 0 process(es)" read
-            # as though a stop had happened and hid that they died on their own.
-            console.print("no running processes found; cleared stale state")
-        return
-
-    if force:
-        activity = _pipeline_worker_activity()
+    activity = _pipeline_worker_activity() if remaining else None
+    still_alive: list[int] = []
+    if force and remaining:
         if activity is not None:
             console.print(f"discarding in-progress work: {activity}")
         # force_kill returns the pids it could NOT kill; the old name `killed`
@@ -864,66 +851,28 @@ def stop_background(
         unkilled = force_kill(remaining)
         time.sleep(0.5)
         still_alive = [pid for pid in unkilled if is_pid_running(pid)]
-        if not still_alive:
-            _get_supervisor_state_path().unlink(missing_ok=True)
-            _clear_worker_state_files()
-        if still_alive:
-            # The supervisor record is deliberately kept: it is the only place
-            # the collection and watched directories are written down, and
-            # discarding it while the workers are still indexing left the next
-            # `stop` to rediscover them from worker state files with no idea
-            # what they were watching.
-            err_console.print(
-                f"force killed {len(remaining) - len(still_alive)} process(es); "
-                f"could not kill: {', '.join(str(pid) for pid in still_alive)}"
-            )
-            # Exiting 0 here told `cementic stop && cementic start` that the
-            # workers were gone; the start then refused with "already running".
-            raise typer.Exit(1)
-        console.print(f"force stopped {len(remaining)} process(es)")
-        return
 
-    still_running = [proc for proc in processes if managed_process_pid(proc) in remaining]
-    stopped_pids = [pid for pid in signaled_pids if pid not in remaining]
-    _save_supervisor_state(
-        {
-            "collection": state.get("collection"),
-            "directories": state.get("directories", []),
-            "processes": still_running,
-        }
+    outcome = decide_stop(
+        state=state,
+        processes=processes,
+        recovered=recovered,
+        signaled=signaled_pids,
+        unsignalable=unsignalable_pids,
+        remaining=remaining,
+        force=force,
+        activity=activity,
+        still_alive=still_alive,
+        timeout_seconds=timeout_seconds,
     )
-
-    timed_out = [pid for pid in remaining if pid not in unsignalable_pids]
-    if stopped_pids:
-        # A mixed outcome used to report only the failure, so a stop that took
-        # down one of two workers read as having done nothing.
-        err_console.print(f"stopped {len(stopped_pids)} process(es)")
-    if timed_out:
-        err_console.print(
-            f"stop timed out after {timeout_seconds}s; "
-            f"still running PID(s): {', '.join(str(pid) for pid in timed_out)}"
-        )
-    if unsignalable_pids:
-        # No timeout elapsed for these -- the signal itself was refused.
-        err_console.print(
-            f"could not signal PID(s) {', '.join(str(pid) for pid in unsignalable_pids)}: "
-            "permission denied; still running, likely started by another user"
-        )
-    activity = _pipeline_worker_activity()
-    if activity is not None:
-        # Otherwise this reads as a hung worker. It is not: the worker cannot
-        # answer SIGTERM from inside CREATE INDEX, and the statement is not
-        # resumable, so forcing now throws the whole build away.
-        err_console.print(f"the pipeline worker is {activity}, which does not stop on request")
-        err_console.print("--force will discard that work; it restarts from scratch next run")
-    elif timed_out:
-        # Only a timed-out process can be helped by --force. Printing this when
-        # every remaining PID was EPERM-unsignalable sent the user at a retry
-        # that is guaranteed to fail the same way, for the same reason.
-        err_console.print("use --force to kill stubborn processes")
-    # Same reason as the force path above: nothing was stopped, so a caller
-    # chaining on success must not proceed.
-    raise typer.Exit(1)
+    for stream, text in outcome.messages:
+        (console if stream == "out" else err_console).print(text)
+    if outcome.state_action == "clear":
+        _get_supervisor_state_path().unlink(missing_ok=True)
+        _clear_worker_state_files()
+    elif outcome.next_state is not None:
+        _save_supervisor_state(outcome.next_state)
+    if outcome.exit_code:
+        raise typer.Exit(outcome.exit_code)
 
 
 @embedding_app.command("start", short_help="Start embedding runtime")
