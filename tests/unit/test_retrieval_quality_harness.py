@@ -543,6 +543,11 @@ class TestFuzzyReport:
         assert rows["trigram word_similarity"][3:] == (1, 0, 1)
         assert rows["trigram similarity"][5] == 0  # never fired: ranking unchanged
 
+    def test_reports_only_the_variants_asked_for(self) -> None:
+        variants = ("shipped", "relaxed OR")
+        report = harness.fuzzy_report([fuzzy_record()], depth=10, variants=variants)
+        assert set(report["phrase-typo"]) == set(variants)
+
     def test_formats_every_variant(self) -> None:
         report = harness.fuzzy_report([fuzzy_record()], depth=10)
         text = harness.format_fuzzy(report, {"phrase-typo": 1}, 10)

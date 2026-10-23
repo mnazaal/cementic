@@ -908,7 +908,7 @@ def fuzzy_lexical(record: FuzzyRecord, variant: str) -> list[str]:
 
 
 def fuzzy_report(
-    records: list[FuzzyRecord], depth: int
+    records: list[FuzzyRecord], depth: int, variants: tuple[str, ...] = FUZZY_VARIANTS
 ) -> dict[str, dict[str, tuple[float, float, float, int, int, int]]]:
     """Per kind, per variant: recall@1, recall@10, MRR, better, worse, changed (pure).
 
@@ -925,7 +925,7 @@ def fuzzy_report(
             fused_ranking(r.vector, r.lexical, r.shipped_lead, depth) for r in group
         ]
         rows = {}
-        for variant in FUZZY_VARIANTS:
+        for variant in variants:
             totals = [0.0, 0.0, 0.0]
             better = worse = changed = 0
             for record, shipped in zip(group, base, strict=True):
@@ -1806,6 +1806,12 @@ def command_fuzzy(args: argparse.Namespace) -> int:
         )
         if args.estimate_only:
             return 0
+        # Unscanned, the trigram arms would score as "never fired", not as absent.
+        variants = (
+            tuple(v for v in FUZZY_VARIANTS if not v.startswith("trigram"))
+            if args.no_trigram
+            else FUZZY_VARIANTS
+        )
 
         searcher = Searcher(config)
         arm_limit = arm_fetch_limit(PRODUCTION_DEPTH, hybrid=True)
@@ -1818,7 +1824,7 @@ def command_fuzzy(args: argparse.Namespace) -> int:
             lexical_docs = [document_key(r["source_path"]) for r in lexical]
             similarity: list[str] = []
             word: list[str] = []
-            if not lexical_docs:
+            if not lexical_docs and not args.no_trigram:
                 similarity, word = trigram_arms(conn, table, scope, query.query)
             records.append(
                 FuzzyRecord(
@@ -1845,7 +1851,8 @@ def command_fuzzy(args: argparse.Namespace) -> int:
     counts = {k: sum(r.kind == k for r in records) for k in kinds}
     fired = sum(not r.lexical for r in records)
     print(f"{fired}/{len(records)} queries had an empty lexical arm; records in {out}")
-    print(format_fuzzy(fuzzy_report(records, PRODUCTION_DEPTH), counts, PRODUCTION_DEPTH))
+    report = fuzzy_report(records, PRODUCTION_DEPTH, variants)
+    print(format_fuzzy(report, counts, PRODUCTION_DEPTH))
     return 0
 
 
@@ -2042,6 +2049,11 @@ def main() -> int:
     )
     fuzzy.add_argument(
         "--estimate-only", action="store_true", help="time a trigram probe scan and stop"
+    )
+    fuzzy.add_argument(
+        "--no-trigram",
+        action="store_true",
+        help="skip the trigram scan (~15 min per query unindexed); score relaxed OR only",
     )
     fuzzy.set_defaults(func=command_fuzzy)
 
