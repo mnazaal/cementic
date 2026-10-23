@@ -406,9 +406,20 @@ invocation of `--version`, `config path`, `extract` and `chunk`, none of which
 touch a database. For scale, `cementic --version` end to end is 0.50–0.68 s
 idle, so this is most of what that command spends.
 
-**What changes: 17 module-level import statements move inside the functions that
-use them**, across `config.py`, `render.py`, `cli_shared.py`, `cli_collection.py`
-and `cli.py`. Two of those are the crux: `config.py:27`
+**Refined 2026-10-23 against `791c406`.** Re-probed: all six guarded modules
+are still in `sys.modules` after `import cementic.cli`. The counts below
+replace the 2026-09-10 ones, which undercounted the test cost about 45×.
+
+**What changes: 18 heavy module-level import statements move inside the
+functions that use them**: `config.py` 2, `render.py` 3 (1 after the status document split), `cli_shared.py` 3,
+`cli_collection.py` 2, `cli.py` 8. "Heavy" means importing the module alone
+loads `sqlalchemy`, `requests` or `tiktoken`, probed per module; `supervisor`,
+`state`, `hybrid`, `filelock`, `validation`, `cli_format`, `embedding_text` and
+`index_strategies` are light and stay. `extract` and `chunk` are heavy only
+through `config.py`, so fixing `config.py` also lightens `cementic extract` and
+`cementic chunk` — but `chunk` still loads `tiktoken`, so `cli.py`'s
+`chunk_text` and `TokenizerUnavailableError` imports move too. Two of those are
+the crux: `config.py:27`
 (`from sqlalchemy.engine import URL, make_url`) and `config.py:30`
 (`from cementic.vector_store import HNSW_ITERATIVE_SCAN_MODES`). Verified
 2026-09-10: `import cementic.config` alone pulls SQLAlchemy, and every light
@@ -416,21 +427,54 @@ command reaches `_get_config` or `resolve_config_path`, so **leaving `config.py`
 alone caps the payoff at about 250 ms and fails the new guard test.** It is
 all-or-nothing per dependency: one surviving edge re-imports the whole layer.
 
-Two edges are not plain moves. `render.py:25`'s `DaemonHealth` is a runtime enum
-comparison at `render.py:101`, so a `TYPE_CHECKING` guard does not work and it
-needs a real function-local import. And `search.MAX_SEARCH_RESULTS` is consumed
-at `cli.py:955` inside a `typer.Option(max=…)` default, evaluated at import
-time — so it must move to a module with no cementic imports, or be inlined as
-`max=50` with a test pinning the invariant.
+Three edges are not plain moves, each decided 2026-10-23:
+- `render.py:25`'s `DaemonHealth` is a runtime enum comparison at
+  `render.py:106`, so a `TYPE_CHECKING` guard does not work; it gets a real
+  function-local import.
+- `search.MAX_SEARCH_RESULTS` is consumed at `cli.py:977` inside a
+  `typer.Option(max=…)` default, evaluated at import time. **Inline `max=50`**
+  and add a test pinning it equal to `search.MAX_SEARCH_RESULTS`; no new
+  module.
+- `HNSW_ITERATIVE_SCAN_MODES` is read by the `hnsw_iterative_scan` validator
+  (`config.py:814`), which runs whenever a config sets that field, so a
+  function-local import there would load SQLAlchemy on every command for those
+  users. **Relocate the tuple to `index_strategies.py`**, already a light module
+  `config.py` imports; `vector_store.py` imports it from there.
 
-**Hidden cost, and the largest one in this plan.** Five tests patch by module
-attribute: `cementic.cli.Searcher`, `cementic.cli.list_collections`,
-`cementic.cli.check_health`, `cementic.cli_shared.get_engine`,
-`cementic.cli_shared.get_session_factory`
-(`tests/unit/test_cli_performance.py:96, 112–116, 180–181`). Moving an import
-into a function deletes the module attribute and `unittest.mock.patch` then
-raises `AttributeError`. All five must be repointed at their source modules in
-the same change.
+**Hidden cost, and the largest one in this plan: 225 patch sites, 30 names,
+5 test files.** Tests patch names bound by these imports at the importing
+module (`cementic.cli_shared.get_engine` 42, `get_session_factory` 34,
+`cementic.cli.Searcher` 17, `check_health` 17, ...). Moving an import into a
+function deletes that module attribute and `unittest.mock.patch` raises
+`AttributeError`. **Repoint each to its source module** (`cementic.db.get_engine`);
+the function-local import reads the patched attribute at call time. Decided
+2026-10-23 over thin wrapper seams, which would keep ~30 production functions
+whose only reason is the tests.
+
+**Patches cannot be repointed ahead of the import move.** While `cli.py` still
+does `from cementic.search import Searcher` at module level, it holds its own
+binding, so patching `cementic.search.Searcher` does not reach it. Each import
+move and its repoints land together.
+
+**Commits, one per file, each green, in two parallel waves.** Each runs on its
+own branch and worktree off `claude/import-diet`, and merges back. The waves are
+cut along the source files each commit edits; the test files are shared, but
+their repoint hunks touch different patch strings.
+- **Wave 1, concurrent:** `config.py` (with the `index_strategies`
+  relocation); "Functional core" step 5, the status document split (edits
+  `render.py`, `status_service.py` and the two `cli.py` call sites);
+  `cli_shared.py`; `cli_collection.py`.
+- **Wave 2, after the split merges, concurrent:** `render.py` (`DaemonHealth`
+  only); `cli.py` (with the `max=50` pin). `cli.py` waits because the split
+  edits its status call sites.
+- **Last:** the guard test below, which can only pass once both waves are in.
+
+**Why the split goes first (2026-10-23):** `render.py`'s heavy imports exist
+because it runs queries, which breaks functional core / imperative shell.
+Deferring them would hide the dependency; the split removes it. After the
+split, `render.py`'s diet commit moves only `DaemonHealth`. Without it,
+`render.py` would be edited twice, once to defer the imports and once to delete
+them.
 
 *Exit condition:* a new structural guard beside the existing PDF one, asserting
 that after `import cementic.cli` in a subprocess, none of `sqlalchemy`,
@@ -441,7 +485,7 @@ under machine load. Probe for `sqlalchemy`, not `sqlalchemy.orm`: the cost is in
 point at the module that reintroduced it. Plus `./scripts/check.sh` green,
 including the seven other budgets in `test_cli_performance.py`.
 
-*Anti-scope:* move imports and repoint the five patch targets. Do not restructure
+*Anti-scope:* move imports, relocate the one tuple, and repoint the patch targets. Do not restructure
 the module graph, do not defer `pydantic_settings` or `importlib.resources`
 (that is the next ~400 ms and a separate, larger change), and do not make
 `cli_collection` lazily loaded — `collection_app` is bound at `cli.py:79`, and
@@ -450,9 +494,8 @@ deferring it needs a lazy Typer group.
 *Risk:* `config.py` already carries four function-local imports to dodge cycles
 with `embedding_runtime` and `extract`. Moving an import *into* a function
 cannot create a cycle, only break one, so the hazard is exposure rather than
-creation. If `HNSW_ITERATIVE_SCAN_MODES` is relocated rather than
-function-imported, it must land somewhere with no cementic imports, or it just
-reshuffles the knot.
+creation. `index_strategies.py` has no cementic imports, so relocating
+`HNSW_ITERATIVE_SCAN_MODES` there does not reshuffle the knot.
 
 #### Machine-readable output for the three query commands
 
@@ -674,9 +717,17 @@ change beyond the one split named below.
 4. **Target-revision rule.** The resurrect, supersede or create decision in
    `get_target_revision` (`revisions.py:222-279`) becomes a pure function over
    existing revisions and profile ids. *Ends when:* tested without a session.
-5. **Status document split.** `render.build_status_document` becomes a query
-   function and a pure document builder, dropping the two smuggled callables
-   and the hint parameter. *Ends when:* the builder is tested from plain data.
+5. **Status document split.** **Pulled forward into the import diet
+   (2026-10-23, user's call): it runs before the diet's `render.py` commit.**
+   `render.build_status_document` becomes a query function in `status_service`
+   and a pure document builder, dropping the two smuggled callables and the
+   hint parameter. `_print_collection_detail` stops loading file progress
+   mid-print (`render.py:259`); its caller loads `files` and passes them in.
+   *Ends when:* the builder is tested from plain data, and `render.py` imports
+   nothing from `collections` or `status_service`. Exception to the phase's
+   no-test-changes rule: `tests/unit/test_json_shapes.py` imports
+   `build_status_document` and passes the callables this step drops, so it is
+   rewritten to the new signature. The JSON shapes it asserts must not change.
 6. **`Config` as a value.** Move the path defaulting out of `Config.__init__`
    (`config.py:1160-1191`) into an after-validator. Split the diagnostics half
    (`config.py:129-412`) into `config_diagnostics.py`, the one module-graph
