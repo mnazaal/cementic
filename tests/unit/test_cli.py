@@ -23,7 +23,7 @@ from cementic.config import Config, default_config_path
 from cementic.embedding_runtime import DaemonHealth
 from cementic.pipeline_worker import PipelineCounts, PipelineWorker
 from cementic.state import StateManager
-from cementic.status_service import WorkerStatus
+from cementic.status_service import PipelineStatus, StatusData, WorkerStatus
 from cementic.supervisor import ManagedProcess
 
 runner = CliRunner()
@@ -720,6 +720,49 @@ class TestSearchCommand:
         parsed = json.loads(result.output)
         assert "unknown collection" in parsed["error"]
         assert "pipeline" not in parsed
+
+    @pytest.mark.parametrize("json_flag", [[], ["--json"]])
+    @patch("cementic.cli_shared.get_session_factory")
+    @patch("cementic.cli_shared.get_engine")
+    def test_status_verbose_file_listing_failure_keeps_the_summary(
+        self, mock_get_engine, mock_get_session_factory, json_flag
+    ):
+        """The per-collection summary survives a failed --verbose file listing.
+
+        Both modes reported the pipeline before listing files, so a listing
+        that fails still leaves the summary (human) or the pipeline block
+        (JSON) beside the error.
+        """
+        mock_session = MagicMock()
+        mock_session.__enter__.return_value = mock_session
+        mock_session.__exit__.return_value = False
+        mock_get_session_factory.return_value = lambda: mock_session
+        pipeline = PipelineStatus(
+            **{name: 0 for name in PipelineStatus.__dataclass_fields__} | {"documents": 3}
+        )
+
+        with (
+            patch("cementic.cli_shared.collection_exists", return_value=True),
+            patch("cementic.cli.check_health", return_value=_healthy_health()),
+            patch("cementic.cli.load_pipeline_status", return_value=pipeline),
+            patch(
+                "cementic.cli.load_status_data",
+                return_value=StatusData(pipeline=pipeline),
+            ),
+            patch("cementic.cli.load_file_progress", side_effect=RuntimeError("boom")),
+        ):
+            result = runner.invoke(
+                app, ["status", "-c", "work", "--verbose", *json_flag]
+            )
+
+        assert result.exit_code == 1
+        if json_flag:
+            parsed = json.loads(result.output)
+            assert parsed["error"] == "boom"
+            assert parsed["pipeline"]["documents"] == 3
+        else:
+            assert "documents" in result.output
+            assert "files: could not be listed: boom" in result.output
 
     @patch("cementic.cli.Searcher")
     def test_human_and_json_modes_agree_on_the_unknown_collection_exit_code(

@@ -5,6 +5,7 @@ import os
 import shutil
 import sys
 import time
+from dataclasses import replace
 from importlib import resources
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
@@ -61,8 +62,10 @@ from cementic.state import DaemonState, StateManager
 from cementic.status_service import (
     build_supervisor_status,
     check_health,
+    load_file_progress,
     load_pipeline_status,
     load_pipeline_status_bulk,
+    load_status_data,
     load_worker_statuses,
 )
 from cementic.supervisor import (
@@ -625,11 +628,20 @@ def status(
         health_error = str(error)
 
     if json_output:
+        data = None
+        status_error = None
+        try:
+            with _db_session() as session:
+                data = load_status_data(session, _get_config(), collection)
+            if verbose and collection is not None:
+                # Loaded after `data` is bound, so a failed listing still
+                # reports the pipeline block beside the error.
+                data = replace(
+                    data, files=load_file_progress(_get_config(), collection, file_limit)
+                )
+        except Exception as db_error:
+            status_error = _NO_SCHEMA_HINT if _is_schema_missing(db_error) else str(db_error)
         document = render.build_status_document(
-            _db_session,
-            _is_schema_missing,
-            _NO_SCHEMA_HINT,
-            _get_config(),
             supervisor_status,
             source_watcher_status,
             pipeline_worker_status,
@@ -637,7 +649,8 @@ def status(
             health,
             health_error,
             collection,
-            verbose,
+            data,
+            status_error,
             file_limit,
         )
         failed = render.print_status_document(document)
@@ -709,9 +722,17 @@ def status(
             _require_known_collection(session, collection)
 
         pipeline_status = load_pipeline_status(_get_config(), collection)
-        render._print_collection_detail(
-            collection, pipeline_status, verbose, _get_config(), file_limit
-        )
+        render._print_collection_detail(collection, pipeline_status)
+        if verbose and collection:
+            try:
+                files = load_file_progress(_get_config(), collection, file_limit)
+            except Exception as error:
+                # This used to be swallowed at exit 0 (and the database-unavailable
+                # case printed nothing at all), so a truncated report read as the
+                # complete answer.
+                err_console.print(f"files: could not be listed: {error}")
+                raise typer.Exit(1)
+            render._print_file_progress(files, file_limit)
 
 
 @app.command(

@@ -5,14 +5,11 @@ used to reach for the config singleton themselves, and `_print_status_json`
 opened its own database session and ran queries -- a command implementation
 wearing a printer's name. Moving them here forces those dependencies into
 parameters: `config` is passed in, and the status-document builder below takes
-an `open_session` callable (and an `is_schema_missing` classifier) instead of
-importing cli.py's `_db_session`/`_is_schema_missing` and risking an import
-cycle back to the module that imports this one.
+the already-loaded database data (see status_service.load_status_data) instead
+of querying it.
 """
 
 import json
-from collections.abc import Callable
-from contextlib import AbstractContextManager
 from dataclasses import asdict
 from typing import Any
 
@@ -20,14 +17,8 @@ import typer
 from rich.console import Console
 from rich.markup import escape
 
-from cementic.collections import collection_exists, list_collections
 from cementic.config import Config
 from cementic.embedding_runtime import DaemonHealth
-from cementic.status_service import (
-    load_file_progress,
-    load_pipeline_status,
-    load_pipeline_status_bulk,
-)
 
 # soft_wrap: off a TTY rich falls back to an 80-column hard wrap, which split
 # paths and aligned rows mid-word in piped or redirected output. Line breaking
@@ -198,14 +189,8 @@ def _in_flight_revision_text(ready_label: str | None, building_label: str | None
     return f"building={escape(building_label) if building_label else '-'}"
 
 
-def _print_collection_detail(
-    collection: str,
-    pipeline_status: Any,
-    verbose: bool,
-    config: Config,
-    file_limit: int | None = None,
-) -> None:
-    """Print a concise per-collection summary; per-file detail behind --verbose."""
+def _print_collection_detail(collection: str, pipeline_status: Any) -> None:
+    """Print a concise per-collection summary; `_print_file_progress` adds per-file detail."""
     ps = pipeline_status
     console.print(f"{'collection':<11} {collection}")
     console.print(f"{'documents':<11} {ps.documents:,}")
@@ -254,45 +239,35 @@ def _print_collection_detail(
     if failures:
         console.print(f"{'failures':<11} {', '.join(failures)}")
 
-    if verbose and collection:
-        try:
-            files = load_file_progress(config, collection, file_limit)
-            if not files:
-                console.print("files: none")
-                return
-            console.print("files:")
-            for f in files:
-                status_line = (
-                    f"- {f.source_path} | extract={f.extraction_status}"
-                    f" | chunk={f.chunking_status}"
-                    f" | embeddings={f.embeddings_done}/{f.embeddings_total}"
-                )
-                if f.embeddings_failed:
-                    status_line += f" (failed: {f.embeddings_failed})"
-                if f.error_message:
-                    status_line += f" | error: {f.error_message[:80]}"
-                console.print(status_line)
-            if file_limit is not None and len(files) == file_limit:
-                # Saying so is the whole point of having a cap. An unannounced
-                # truncation is the same defect as the swallowed exception
-                # below: a partial listing that reads as the complete answer.
-                console.print(
-                    f"  ... capped at {file_limit}; failures and unfinished files sort first."
-                    " Use --limit 0 for all."
-                )
-        except Exception as error:
-            # This used to be swallowed at exit 0 (and the database-unavailable
-            # case printed nothing at all), so a truncated report read as the
-            # complete answer.
-            err_console.print(f"files: could not be listed: {error}")
-            raise typer.Exit(1)
+
+def _print_file_progress(files: list[Any], file_limit: int | None) -> None:
+    """Print the --verbose per-file listing under a collection summary."""
+    if not files:
+        console.print("files: none")
+        return
+    console.print("files:")
+    for f in files:
+        status_line = (
+            f"- {f.source_path} | extract={f.extraction_status}"
+            f" | chunk={f.chunking_status}"
+            f" | embeddings={f.embeddings_done}/{f.embeddings_total}"
+        )
+        if f.embeddings_failed:
+            status_line += f" (failed: {f.embeddings_failed})"
+        if f.error_message:
+            status_line += f" | error: {f.error_message[:80]}"
+        console.print(status_line)
+    if file_limit is not None and len(files) == file_limit:
+        # Saying so is the whole point of having a cap. An unannounced
+        # truncation is the same defect as a swallowed exception: a partial
+        # listing that reads as the complete answer.
+        console.print(
+            f"  ... capped at {file_limit}; failures and unfinished files sort first."
+            " Use --limit 0 for all."
+        )
 
 
 def build_status_document(
-    open_session: Callable[[], AbstractContextManager[Any]],
-    is_schema_missing: Callable[[Exception], bool],
-    no_schema_hint: str,
-    config: Config,
     supervisor_status: Any,
     source_watcher_status: Any,
     pipeline_worker_status: Any,
@@ -300,15 +275,14 @@ def build_status_document(
     health: Any,
     health_error: str | None,
     collection: str | None,
-    verbose: bool,
+    data: Any | None,
+    error: str | None,
     file_limit: int | None = None,
 ) -> dict[str, Any]:
-    """Build the `status --json` document.
+    """Build the `status --json` document from already-loaded data.
 
-    Takes a session opener and a schema-missing classifier as parameters
-    rather than importing cli.py's `_db_session`/`_is_schema_missing`
-    directly, which would import back into the module that imports this one.
-    Print with `print_status_document`.
+    ``data`` is status_service.StatusData, or None when loading it failed with
+    ``error``. Print with `print_status_document`.
     """
     output: dict[str, Any] = {
         "supervisor": {
@@ -357,38 +331,23 @@ def build_status_document(
             "error": health_error,
         }
 
-    try:
-        with open_session() as session:
-            if collection is None:
-                rows = list_collections(session)
-                status_by_collection = load_pipeline_status_bulk(
-                    config, [row.name for row in rows]
+    if data is not None:
+        if data.collections is not None:
+            # asdict: PipelineStatus *is* the JSON contract, so a hand-kept
+            # key list here (which existed twice, identically) is a copy
+            # waiting to drift, not one that had already drifted.
+            output["collections"] = {
+                name: asdict(ps) for name, ps in data.collections.items()
+            }
+        else:
+            output["pipeline"] = {"collection": collection, **asdict(data.pipeline)}
+            if data.files is not None:
+                output["files"] = [asdict(f) for f in data.files]
+                output["files_truncated"] = (
+                    file_limit is not None and len(data.files) == file_limit
                 )
-                # asdict: PipelineStatus *is* the JSON contract, so a hand-kept
-                # key list here (which existed twice, identically) is a copy
-                # waiting to drift, not one that had already drifted.
-                output["collections"] = {
-                    row.name: asdict(status_by_collection[row.name]) for row in rows
-                }
-            else:
-                # Mirror _require_known_collection on the human path: a typo'd
-                # name otherwise produced a full zero-filled pipeline block at
-                # exit 0, indistinguishable from a real collection not started.
-                if not collection_exists(session, collection):
-                    raise ValueError(
-                        f"unknown collection: {collection}"
-                        " (check `cementic collection list`)"
-                    )
-                ps = load_pipeline_status(config, collection)
-                output["pipeline"] = {"collection": collection, **asdict(ps)}
-                if verbose:
-                    files = load_file_progress(config, collection, file_limit)
-                    output["files"] = [asdict(f) for f in files]
-                    output["files_truncated"] = (
-                        file_limit is not None and len(files) == file_limit
-                    )
-    except Exception as error:
-        output["error"] = no_schema_hint if is_schema_missing(error) else str(error)
+    if error is not None:
+        output["error"] = error
 
     return output
 

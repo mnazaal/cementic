@@ -5,7 +5,9 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from sqlalchemy import ColumnElement, and_, case, func, or_, text
+from sqlalchemy.orm import Session
 
+from cementic.collections import collection_exists, list_collections
 from cementic.config import Config
 from cementic.db import (
     Chunk,
@@ -653,3 +655,39 @@ def load_file_progress(
             )
 
     return result
+
+
+@dataclass(frozen=True)
+class StatusData:
+    """What `status --json` reports from the database, as plain values.
+
+    ``collections`` is set when no collection was named, ``pipeline`` when one
+    was. The caller adds ``files`` under --verbose.
+    """
+
+    collections: dict[str, PipelineStatus] | None = None
+    pipeline: PipelineStatus | None = None
+    files: list[FileProgress] | None = None
+
+
+def load_status_data(
+    session: Session,
+    config: Config,
+    collection: str | None,
+) -> StatusData:
+    """Gather the database half of the status document.
+
+    Raises ValueError for an unknown collection, mirroring
+    _require_known_collection on the human path: a typo'd name otherwise
+    produced a full zero-filled pipeline block at exit 0, indistinguishable
+    from a real collection not started.
+    """
+    if collection is None:
+        names = [row.name for row in list_collections(session)]
+        by_name = load_pipeline_status_bulk(config, names)
+        return StatusData(collections={name: by_name[name] for name in names})
+    if not collection_exists(session, collection):
+        raise ValueError(
+            f"unknown collection: {collection} (check `cementic collection list`)"
+        )
+    return StatusData(pipeline=load_pipeline_status(config, collection))
