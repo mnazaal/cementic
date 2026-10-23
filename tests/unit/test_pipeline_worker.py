@@ -23,6 +23,7 @@ from cementic.db import (
     PipelineRevision,
     SourceDocument,
 )
+from cementic.extract import ExtractionProcessError
 from cementic.pipeline_worker import (
     PipelineCounts,
     PipelineWorker,
@@ -1367,6 +1368,45 @@ class TestFailArtifactStampsTheScopingHash:
             patch.object(worker.state_manager, "update"),
         ):
             assert worker._step_extract(revision_id) is False
+
+
+class TestExtractionLostToShutdown:
+    """A child lost while the worker stops is requeued, not stamped failed."""
+
+    def _step(self, temp_dir: Path, error: Exception, *, shutting_down: bool):
+        engine = create_engine("sqlite:///:memory:")
+        Base.metadata.create_all(engine)
+        session_factory = sessionmaker(bind=engine, expire_on_commit=False)
+        with session_factory() as session:
+            revision_id, pending_id = _seed_extract_selection_data(session, "stopping", 0)
+        config = Config()
+        config.pipeline_worker.log_file = temp_dir / "worker.log"
+        worker = PipelineWorker(config)
+        worker.Session = session_factory
+        worker.collection = "stopping"
+        if shutting_down:
+            worker._shutdown_event.set()
+        with (
+            patch("cementic.pipeline_worker.extract_document", side_effect=error),
+            patch.object(worker.state_manager, "update"),
+        ):
+            worker._step_extract(revision_id)
+        with session_factory() as session:
+            row = session.query(ExtractedDocument).filter_by(document_id=pending_id).one()
+            return row.status, row.attempts
+
+    def test_death_during_shutdown_is_requeued(self, temp_dir: Path) -> None:
+        died = ExtractionProcessError("extraction process crashed (SIGTERM)")
+        assert self._step(temp_dir, died, shutting_down=True) == ("pending", 0)
+
+    def test_death_while_running_is_failed(self, temp_dir: Path) -> None:
+        died = ExtractionProcessError("extraction process crashed (SIGSEGV)")
+        status, _ = self._step(temp_dir, died, shutting_down=False)
+        assert status == "failed"
+
+    def test_other_errors_during_shutdown_are_failed(self, temp_dir: Path) -> None:
+        status, _ = self._step(temp_dir, ValueError("bad pdf"), shutting_down=True)
+        assert status == "failed"
 
 
 def _seed_chunk_selection_data(session, collection: str, n_already_done: int) -> tuple[int, int]:

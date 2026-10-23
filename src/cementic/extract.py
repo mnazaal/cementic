@@ -240,6 +240,18 @@ class ExtractorSpec:
 ExtractorFn = Callable[[str, Config], str]
 
 
+#: Wall-clock default per kind of extractor when `extraction.timeout_seconds` is
+#: unset. A command extractor keeps the 900 s it always had; the isolated PDF
+#: parsers had no limit before, and a 540k-character book took 291 s, so theirs
+#: only has to catch a hang.
+_DEFAULT_TIMEOUT_SECONDS = {True: 3600.0, False: 900.0}
+
+
+def extraction_timeout(configured: float | None, *, isolated: bool) -> float:
+    """The wall-clock limit for one extraction: the setting, else the kind's default (pure)."""
+    return configured if configured is not None else _DEFAULT_TIMEOUT_SECONDS[isolated]
+
+
 def _pdf_extractor(path: str, config: Config) -> str:
     return extract_pdf_markdown(path, use_ocr=config.extraction.use_ocr)
 
@@ -274,16 +286,17 @@ def _command_extractor(path: str, config: Config) -> str:
             "extractor cannot run without one"
         )
     rendered = [argument.format_map({"path": path}) for argument in argv]
+    timeout = extraction_timeout(config.extraction.timeout_seconds, isolated=False)
     try:
         completed = subprocess.run(
             rendered,
             capture_output=True,
             text=True,
-            timeout=config.extraction.timeout_seconds,
+            timeout=timeout,
         )
     except subprocess.TimeoutExpired:
         raise RuntimeError(
-            f"extraction command timed out after {config.extraction.timeout_seconds:g}s: "
+            f"extraction command timed out after {timeout:g}s: "
             f"{shlex.join(rendered)}"
         )
     except OSError as error:
@@ -517,7 +530,13 @@ class _Child:
     def __init__(self, limits: Any) -> None:
         self.stderr = tempfile.TemporaryFile()
         self.process = subprocess.Popen(
-            [sys.executable, "-m", "cementic.extract_child", limits.model_dump_json()],
+            [
+                sys.executable,
+                "-m",
+                "cementic.extract_child",
+                limits.model_dump_json(),
+                str(os.getpid()),
+            ],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=self.stderr,
@@ -529,26 +548,26 @@ class _Child:
         assert self.process.stdin is not None and self.process.stdout is not None
         request = json.dumps({"target": target, "path": path}) + "\n"
         deadline = time.monotonic() + timeout
-        reply = b""
+        parts: list[bytes] = []
         try:
             self.process.stdin.write(request.encode())
             self.process.stdin.flush()
         except BrokenPipeError:
             pass  # the child is already gone; the read below sees EOF
         fd = self.process.stdout.fileno()
-        while not reply.endswith(b"\n"):
+        while not (parts and parts[-1].endswith(b"\n")):
             left = deadline - time.monotonic()
             if left <= 0 or not select.select([fd], [], [], left)[0]:
                 raise subprocess.TimeoutExpired(target, timeout)
             chunk = os.read(fd, 1 << 20)
             if not chunk:
                 break
-            reply += chunk
-        if not reply.endswith(b"\n"):
+            parts.append(chunk)
+        if not (parts and parts[-1].endswith(b"\n")):
             returncode = self.process.wait()
             self.stderr.seek(0)
             raise ChildDiedError(returncode, self.stderr.read())
-        answer: dict[str, Any] = json.loads(reply)
+        answer: dict[str, Any] = json.loads(b"".join(parts))
         return answer
 
     def close(self) -> None:
@@ -563,6 +582,22 @@ class _Child:
             self.process.kill()
             self.process.wait()
         self.stderr.close()
+
+
+class ExtractionProcessError(RuntimeError):
+    """The extraction child died mid-document (a signal or an unexpected exit)."""
+
+
+def extraction_fate(error: Exception, *, shutting_down: bool) -> str:
+    """What becomes of a document whose extraction raised: "failed" or "requeue" (pure).
+
+    A child lost while the worker is stopping was most likely taken down by the
+    same stop (a control-group SIGTERM), not by the document, so it is retried
+    on restart instead of being stamped failed for good.
+    """
+    if shutting_down and isinstance(error, ExtractionProcessError):
+        return "requeue"
+    return "failed"
 
 
 class ChildDiedError(Exception):
@@ -608,6 +643,7 @@ def _run_isolated(fn: ExtractorFn, path: str, config: Config) -> str:
     limits = config.extraction
     key = limits.model_dump_json()
     target = f"{fn.__module__}:{fn.__qualname__}"
+    timeout = extraction_timeout(limits.timeout_seconds, isolated=True)
     with _children_lock:
         child = _children.get(key)
         if child is None or child.process.poll() is not None:
@@ -615,13 +651,13 @@ def _run_isolated(fn: ExtractorFn, path: str, config: Config) -> str:
                 child.close()
             child = _children[key] = _Child(limits)
         try:
-            answer = child.ask(target, path, limits.timeout_seconds)
+            answer = child.ask(target, path, timeout)
         except subprocess.TimeoutExpired:
             _drop(key)
-            raise RuntimeError(f"extraction timed out after {limits.timeout_seconds:g}s")
+            raise RuntimeError(f"extraction timed out after {timeout:g}s")
         except ChildDiedError as died:
             _drop(key)
-            raise RuntimeError(_death_reason(died.returncode, died.stderr))
+            raise ExtractionProcessError(_death_reason(died.returncode, died.stderr))
     if "error" in answer:
         raise RuntimeError(_reported_failure(answer["error"], limits))
     return str(answer["text"])

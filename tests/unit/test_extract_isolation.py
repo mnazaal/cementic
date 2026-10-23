@@ -1,5 +1,6 @@
 """PDF extraction runs in a child process with a time and memory limit."""
 
+import contextlib
 import os
 from pathlib import Path
 
@@ -142,3 +143,108 @@ def test_the_child_exits_when_its_parent_closes_it(monkeypatch):
 
     with pytest.raises(ProcessLookupError):
         os.kill(pid, 0)
+
+
+def test_a_stop_signal_during_a_parse_does_not_lose_the_document(monkeypatch):
+    """Systemd's control-group SIGTERM reaches the worker and the child together."""
+    import subprocess
+    import sys
+    import textwrap
+
+    use_extractor(monkeypatch, "slow")
+    script = textwrap.dedent(
+        """
+        import os, signal, threading, time
+        from cementic import extract
+        from cementic.config import Config
+        from tests.unit import isolation_extractors as ie
+        from cementic.extract import ExtractorSpec
+        spec = ExtractorSpec(name="pymupdf4llm", version=1, extensions=(".pdf",), isolated=True)
+        extract._EXTRACTORS["pymupdf4llm"] = (spec, ie.slow)
+        signal.signal(signal.SIGTERM, lambda s, f: None)
+        def stop():
+            time.sleep(1)
+            for pid in [os.getpid()] + [c.pid for c in extract._children.values()]:
+                os.kill(pid, signal.SIGTERM)
+        threading.Thread(target=stop, daemon=True).start()
+        config = Config()
+        config.extraction.backends = {}
+        print(extract.extract_document("/x/a.pdf", config))
+        """
+    )
+    done = subprocess.run(
+        [sys.executable, "-c", script], capture_output=True, text=True, timeout=60,
+        cwd=REPO_ROOT, env={**os.environ, "PYTHONPATH": str(REPO_ROOT)},
+    )
+
+    assert done.stdout.strip() == "full text", done.stderr
+
+
+@pytest.mark.parametrize(
+    ("error", "shutting_down", "fate"),
+    [
+        (extract_mod.ExtractionProcessError("x"), True, "requeue"),
+        (extract_mod.ExtractionProcessError("x"), False, "failed"),
+        (RuntimeError("extraction timed out"), True, "failed"),
+        (ValueError("bad pdf"), True, "failed"),
+    ],
+)
+def test_extraction_fate(error, shutting_down, fate):
+    assert extract_mod.extraction_fate(error, shutting_down=shutting_down) == fate
+
+
+def test_default_timeouts_by_kind():
+    timeout = extract_mod.extraction_timeout
+    assert Config().extraction.timeout_seconds is None
+    assert timeout(None, isolated=True) == 3600.0
+    assert timeout(None, isolated=False) == 900.0
+    assert timeout(5.0, isolated=True) == timeout(5.0, isolated=False) == 5.0
+
+
+def test_a_large_reply_is_read_whole(monkeypatch):
+    config = use_extractor(monkeypatch, "big")
+    config.extraction.memory_limit_mb = 0
+
+    assert len(extract_document("/x/a.pdf", config)) == 20_000_000
+
+
+def test_a_child_dies_with_a_killed_parent():
+    import signal
+    import subprocess
+    import sys
+    import time
+
+    parent_code = (
+        "import subprocess, sys, os;"
+        "c = subprocess.Popen([sys.executable, '-m', 'cementic.extract_child', '{}',"
+        " str(os.getpid())], stdin=sys.stdin);"
+        "print(c.pid, flush=True); c.wait()"
+    )
+    read_end, write_end = os.pipe()
+    parent = subprocess.Popen(
+        [sys.executable, "-c", parent_code], stdin=read_end, stdout=subprocess.PIPE,
+        cwd=REPO_ROOT, env={**os.environ, "PYTHONPATH": str(REPO_ROOT)},
+    )
+    os.close(read_end)
+    assert parent.stdout is not None
+    child_pid = int(parent.stdout.readline())
+    parent.stdout.close()
+    # The child is parsing (stdin stays open, so EOF cannot be what ends it).
+    os.write(write_end, b'{"target": "tests.unit.isolation_extractors:hang", "path": "x"}\n')
+    time.sleep(1)
+    parent.send_signal(signal.SIGKILL)
+    parent.wait()
+    try:
+        for _ in range(50):
+            try:
+                alive = "Z" not in Path(f"/proc/{child_pid}/stat").read_text().split(")")[-1][:3]
+            except OSError:
+                alive = False
+            if not alive:
+                break
+            time.sleep(0.1)
+        assert not alive
+    finally:
+        os.close(write_end)
+        with contextlib.suppress(OSError):
+            os.kill(child_pid, signal.SIGKILL)

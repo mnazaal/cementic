@@ -41,3 +41,12 @@ def dies_on_a(path, config):
 
 def child_pid(path, config):
     return str(os.getpid())
+
+
+def slow(path, config):
+    time.sleep(2)
+    return "full text"
+
+
+def big(path, config):
+    return "x" * 20_000_000

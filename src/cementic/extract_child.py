@@ -1,6 +1,6 @@
 """Child-process server for isolated extraction (see `extract._run_isolated`).
 
-Run as ``python -m cementic.extract_child <extraction config JSON>``. It imports
+Run as ``python -m cementic.extract_child <extraction config JSON> <parent pid>``. It imports
 once, then answers one JSON object per stdin line (``{"target": "module:function",
 "path": ...}``) with one JSON line on the real stdout: ``{"text": ...}`` or
 ``{"error": {"type": ..., "message": ...}}``. JSON escapes keep lone surrogates
@@ -15,11 +15,34 @@ import importlib
 import json
 import os
 import resource
+import signal
 import sys
 
 
+def _tie_to_parent(parent_pid: int) -> None:
+    """Die with the parent, and ignore the stop signals meant for the worker.
+
+    A stop (systemd's control-group SIGTERM, Ctrl-C) reaches the child with the
+    worker; ignoring it lets the current parse finish as in-process extraction
+    did. An abrupt parent death (SIGKILL) sends no stop, so on Linux ask the
+    kernel to kill the child with it, then check the parent did not die first.
+    """
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+    if sys.platform == "linux":
+        try:
+            import ctypes
+
+            ctypes.CDLL(None, use_errno=True).prctl(1, signal.SIGKILL)  # PR_SET_PDEATHSIG
+        except (OSError, AttributeError):
+            pass
+    if os.getppid() != parent_pid:
+        os._exit(0)
+
+
 def main(argv: list[str]) -> int:
-    (extraction_json,) = argv
+    extraction_json, parent_pid = argv
+    _tie_to_parent(int(parent_pid))
     # A parser may print to fd 1; keep the real stdout for the protocol alone.
     reply = os.fdopen(os.dup(1), "w", encoding="utf-8")
     os.dup2(2, 1)

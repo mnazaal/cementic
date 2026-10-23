@@ -611,14 +611,14 @@ class ExtractionConfig(_SectionSettings):
         "record a constant that never changes on upgrade.",
     )
 
-    timeout_seconds: float = Field(
-        default=900.0,
+    timeout_seconds: float | None = Field(
+        default=None,
         gt=0,
         description="Wall-clock limit for one extraction, in seconds: the "
         "command extractor's process and the child process that parses a PDF. "
-        "Generous, because OCR over a long scanned document is minutes of work "
-        "and the alternative to waiting is a half-extracted corpus. A document "
-        "that exceeds it is marked failed.",
+        "Unset means the extractor's own default: 900 for a command, 3600 for "
+        "a PDF parser (a long book takes minutes, so the limit only has to "
+        "catch a hang). A document that exceeds it is marked failed.",
     )
     memory_limit_mb: int = Field(
         default=8192,

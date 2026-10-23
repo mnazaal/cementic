@@ -34,7 +34,7 @@ from cementic.db import (
 )
 from cementic.embedding_provider import EmbeddingProvider
 from cementic.embedding_runtime import create_provider, runtime_spec_from_config
-from cementic.extract import extract_document
+from cementic.extract import extract_document, extraction_fate
 from cementic.index_strategies import index_dimension_error
 from cementic.revisions import (
     _purge_all_chunks,
@@ -720,6 +720,9 @@ class PipelineWorker:
             status = "done"
             error_message = None
         except Exception as error:
+            if extraction_fate(error, shutting_down=self._shutdown_event.is_set()) == "requeue":
+                self._release_extraction_claim(extracted_id)
+                return True
             content_hash = None
             status = "failed"
             error_message = str(error)
@@ -745,6 +748,16 @@ class PipelineWorker:
 
         self.state_manager.update(current_file=None)
         return True
+
+    def _release_extraction_claim(self, extracted_id: int) -> None:
+        """Return an extraction claim to ``pending`` without counting the attempt."""
+        with self.Session() as session:
+            extracted = session.get(ExtractedDocument, extracted_id)
+            if extracted is not None:
+                extracted.status = "pending"
+                extracted.attempts = max((extracted.attempts or 1) - 1, 0)
+                session.commit()
+        self.state_manager.update(current_file=None)
 
     def _write_back_extraction(
         self,
