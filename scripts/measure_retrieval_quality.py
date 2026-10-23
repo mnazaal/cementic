@@ -26,6 +26,9 @@ are allowed to move the query set:
               Embedding models head to head on one body-text span per paper,
               each at 320- and 1300-token chunks, with the stored index as the
               control. Starts one llama-server per model; hours, resumable.
+    riders    The chunking riders 2b, 2c and 2e applied to the same spans and
+              embedded with v2-moe, scored per document against fresh v2-moe.
+              Needs `compare-models` to have run; one llama-server, minutes.
 
 Splitting them is the point. A judgment re-derived on every run is not a
 judgment, it is a coin flip with a seed -- so `build`'s output is checked into
@@ -45,6 +48,7 @@ Usage:
     python scripts/measure_retrieval_quality.py arms -q eval/queries.json
     python scripts/measure_retrieval_quality.py ablate
     python scripts/measure_retrieval_quality.py compare-models
+    python scripts/measure_retrieval_quality.py riders
 
 The database is not reachable from an agent sandbox; run these unsandboxed.
 """
@@ -52,6 +56,7 @@ The database is not reachable from an agent sandbox; run these unsandboxed.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import json
 import math
@@ -61,12 +66,13 @@ import subprocess
 import sys
 import time
 import urllib.request
+from collections.abc import Iterator
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from sqlalchemy import text
 
-from cementic.chunk import TOKENIZER, chunk_text, tokenizer
+from cementic.chunk import chunk_text, tokenizer
 from cementic.config import get_config
 from cementic.db import LEXICAL_TEXT_CONFIG, get_engine
 from cementic.embedding_text import (
@@ -683,6 +689,171 @@ def paired(ranks: list[int], baseline: list[int]) -> tuple[int, int, float]:
     return better, worse, sign_test(better, worse)
 
 
+def shared_pool(pools: list[list]) -> list[int]:
+    """Indices every pool holds a vector for (pure).
+
+    The pools are the arms of one granularity, row-aligned, with None where the
+    model refused a chunk. Scoring each arm on its own surviving rows lets a
+    refusal delete a distractor from one arm and not from the control; every
+    arm has to be scored on the rows they all have.
+    """
+    return [i for i in range(len(pools[0])) if all(pool[i] is not None for pool in pools)]
+
+
+#: Rider thresholds and tables. Policy, kept out of the functions.
+#:
+#: A chunk is punctuation-dominated when at least this share of its
+#: whitespace-separated words contain no letter or digit (the dots of a
+#: dot-leader table of contents). Measured on the 4,000 sample chunks: the
+#: share is below 0.45 for 98% of them and above 0.73 for every chunk the
+#: server refused, with 75 chunks at or above this value.
+PUNCTUATION_WORD_SHARE = 0.5
+
+#: Significance level of the rider rule, pre-registered 2026-10-23.
+RIDER_P = 0.01
+
+#: Name and cache file of the rider arm, next to the other models' caches.
+RIDERS_ARM = "v2-moe+riders"
+
+#: Where a structure-aware chunker may cut: a Markdown heading line, and a line
+#: holding only form feeds (the page break PyMuPDF text output would write).
+#: Form feeds inside a line are glyph noise from math fonts in this corpus and
+#: are deliberately not a boundary.
+HEADING_RE = re.compile(r"(?m)^#{1,6} \S")
+PAGE_BREAK_RE = re.compile(r"(?m)^\f+[ \t]*\n")
+
+#: A line-break hyphen: letters, the hyphen, then a break (newline or spaces)
+#: and a continuation. `max- imizing` and `func-\ntion` are both this shape.
+HYPHEN_BREAK_RE = re.compile(
+    r"(?P<left>[^\W\d_]+)-(?:[ \t]*\n[ \t]*|[ \t]+)(?P<right>[^\W\d_]+)"
+)
+WORD_RE = re.compile(r"[^\W\d_]+")
+
+#: Left fragments that start a real compound, so `well-\nknown` keeps its
+#: hyphen. The continuation being a function word (`fixed-\nand`) keeps it too.
+COMPOUND_PREFIXES = frozenset(
+    "well self non cross high low long short large small real state end first "
+    "second multi inter intra semi anti pre post sub".split()
+)
+#: ... except these, which join: `multi-\nvariate` is one word.
+JOINING_PREFIXES = frozenset("multi inter intra semi anti pre post sub non".split())
+
+
+def is_punctuation_dominated(chunk: str) -> bool:
+    """Whether most of a chunk's words are bare punctuation (pure). 2b."""
+    words = chunk.split()
+    if not words:
+        return True
+    bare = sum(not any(ch.isalnum() for ch in word) for word in words)
+    return bare / len(words) >= PUNCTUATION_WORD_SHARE
+
+
+def dehyphenate(text: str) -> str:
+    """Join words a PDF line break split with a hyphen (pure). 2e.
+
+    `max- imizing` becomes `maximizing`, `func-\\ntion` becomes `function`.
+    Stays out of real compounds with three signals, none of them a dictionary:
+    the continuation is a function word (`fixed-\\nand random-effects`), the left
+    fragment is a compound prefix (`well-\\nknown`), or the document spells the
+    hyphenated form intact elsewhere. A soft hyphen is deleted outright.
+    """
+    text = text.replace("­", "")
+    words = set(WORD_RE.findall(text))
+    compounds = {
+        (m.group("left"), m.group("right"))
+        for m in re.finditer(r"(?P<left>[^\W\d_]+)-(?P<right>[^\W\d_]+)", text)
+    }
+
+    def join(match: re.Match[str]) -> str:
+        left, right = match.group("left"), match.group("right")
+        if not (left[-1].islower() and right[0].islower()) or len(left) < 2:
+            return match.group(0)
+        if right in FUNCTION_WORDS or (left, right) in compounds:
+            return match.group(0)
+        if left in COMPOUND_PREFIXES and left not in JOINING_PREFIXES and left + right not in words:
+            return match.group(0)
+        return left + right
+
+    return HYPHEN_BREAK_RE.sub(join, text)
+
+
+def structure_chunks(text: str, size: int, overlap: int) -> list[str]:
+    """Chunks that start at headings and page breaks, windowed past `size` (pure). 2c.
+
+    Each stretch between two boundaries is a chunk; one longer than `size`
+    tokens falls back to `chunk_text`'s sliding window, which is also all that
+    happens to text with no boundary at all.
+    """
+    cuts = sorted(
+        {0, len(text)}
+        | {m.start() for m in HEADING_RE.finditer(text)}
+        | {m.end() for m in PAGE_BREAK_RE.finditer(text)}
+    )
+    encoding = tokenizer()
+    chunks: list[str] = []
+    for start, end in zip(cuts, cuts[1:], strict=False):
+        segment = text[start:end]
+        if not segment.strip():
+            continue
+        if len(encoding.encode(segment, disallowed_special=())) <= size:
+            chunks.append(segment)
+        else:
+            chunks.extend(c.content for c in chunk_text(segment, size, overlap))
+    return chunks
+
+
+def rider_chunks(span: str, size: int, overlap: int) -> list[str]:
+    """The span as the riders would chunk it: 2e, then 2c, then 2b (pure)."""
+    chunks = structure_chunks(dehyphenate(span), size, overlap)
+    return [c for c in chunks if not is_punctuation_dominated(c)]
+
+
+def reconstruct_span(long_chunks: list[str]) -> str:
+    """The span text back from its overlapping 1,300-token chunks (pure).
+
+    `compare_sample` stores the span only as those chunks. Each next chunk
+    starts inside the previous one, so the join is where its opening lands.
+    """
+    span = long_chunks[0]
+    for chunk in long_chunks[1:]:
+        at = span.rfind(chunk[:200])
+        span = span[:at] + chunk if at >= 0 else span + chunk
+    return span
+
+
+def rider_verdict(title: tuple[int, int, float], phrase: tuple[int, int, float]) -> bool:
+    """The pre-registered rider rule over two (better, worse, p) results (pure).
+
+    Pass when one kind gains (more wins than losses, sign test p < 0.01) and
+    the other does not lose (no more losses than wins).
+    """
+    def gains(result: tuple[int, int, float]) -> bool:
+        return result[0] > result[1] and result[2] < RIDER_P
+
+    def loses(result: tuple[int, int, float]) -> bool:
+        return result[1] > result[0]
+
+    return (gains(title) and not loses(phrase)) or (gains(phrase) and not loses(title))
+
+
+def rider_census(spans: list[str]) -> dict[str, int]:
+    """How much each rider has to act on across the spans (pure)."""
+    census = {
+        "spans": len(spans),
+        "markdown heading lines": sum(len(HEADING_RE.findall(s)) for s in spans),
+        "spans with a heading": sum(bool(HEADING_RE.search(s)) for s in spans),
+        "page-break lines": sum(len(PAGE_BREAK_RE.findall(s)) for s in spans),
+        "form feeds anywhere": sum(s.count("\f") for s in spans),
+        "line-break hyphens": sum(len(HYPHEN_BREAK_RE.findall(s)) for s in spans),
+        "line-break hyphens joined": sum(
+            len(HYPHEN_BREAK_RE.findall(s)) - len(HYPHEN_BREAK_RE.findall(dehyphenate(s)))
+            for s in spans
+        ),
+        "soft hyphens": sum(s.count("­") for s in spans),
+    }
+    return census
+
+
 # --------------------------------------------------------------------------
 # Corpus probes (shell)
 # --------------------------------------------------------------------------
@@ -1166,23 +1337,9 @@ def embed_all(
     return out, tokens, time.perf_counter() - began
 
 
-def run_model(config, spec: ModelSpec, sample: dict, out_dir: Path, port: int) -> None:
-    """Embed every text this model needs, resuming from whatever is cached.
-
-    Each finished step is written to a partial file at once, so a run killed
-    mid-model -- one was, by memory pressure from other work on the machine --
-    loses at most the step in flight. The final file appears only when every
-    step is done, and it is what scoring reads.
-    """
-    cache = out_dir / f"{spec.name}.json"
-    if cache.exists():
-        print(f"  {spec.name}: cached", flush=True)
-        return
-    partial = out_dir / f"{spec.name}.partial.json"
-    result: dict = (
-        json.loads(partial.read_text()) if partial.exists()
-        else {"model": spec.name, "gguf": spec.gguf}
-    )
+@contextlib.contextmanager
+def serving(config, spec: ModelSpec, out_dir: Path, port: int) -> Iterator[str]:
+    """Run `spec`'s llama-server for the block and yield its base URL."""
     models_dir = Path(config.llama_cpp.model_path).expanduser().parent
     log = out_dir / f"server-{spec.name}.log"
     with log.open("w") as handle:
@@ -1203,7 +1360,33 @@ def run_model(config, spec: ModelSpec, sample: dict, out_dir: Path, port: int) -
             time.sleep(1)
         else:
             raise SystemExit(f"{spec.name}: server not ready in 180s; see {log}")
+        yield url
+    finally:
+        server.terminate()
+        try:
+            server.wait(timeout=20)
+        except subprocess.TimeoutExpired:
+            server.kill()
 
+
+def run_model(config, spec: ModelSpec, sample: dict, out_dir: Path, port: int) -> None:
+    """Embed every text this model needs, resuming from whatever is cached.
+
+    Each finished step is written to a partial file at once, so a run killed
+    mid-model -- one was, by memory pressure from other work on the machine --
+    loses at most the step in flight. The final file appears only when every
+    step is done, and it is what scoring reads.
+    """
+    cache = out_dir / f"{spec.name}.json"
+    if cache.exists():
+        print(f"  {spec.name}: cached", flush=True)
+        return
+    partial = out_dir / f"{spec.name}.partial.json"
+    result: dict = (
+        json.loads(partial.read_text()) if partial.exists()
+        else {"model": spec.name, "gguf": spec.gguf}
+    )
+    with serving(config, spec, out_dir, port) as url:
         papers = sample["papers"]
         for kind in ("title", "phrase"):
             if f"q_{kind}" in result:
@@ -1231,17 +1414,20 @@ def run_model(config, spec: ModelSpec, sample: dict, out_dir: Path, port: int) -
             )
             partial.write_text(json.dumps(result))
         partial.rename(cache)
-    finally:
-        server.terminate()
-        try:
-            server.wait(timeout=20)
-        except subprocess.TimeoutExpired:
-            server.kill()
 
 
-def score_arm(np, queries, query_docs, pool, pool_docs) -> tuple[list[int], list[float]]:
-    """Gold rank and margin per query for one (queries, pool) pair."""
-    keep = [i for i, v in enumerate(pool) if v is not None]
+
+def score_arm(
+    np, queries, query_docs, pool, pool_docs, keep: list[int] | None = None
+) -> tuple[list[int], list[float]]:
+    """Gold rank and margin per query for one (queries, pool) pair.
+
+    `keep` is the rows to score. Arms that are compared with each other must be
+    given the same rows (`shared_pool`): the default, each arm's own non-refused
+    rows, is right only for an arm compared with nothing of the same chunking.
+    """
+    if keep is None:
+        keep = [i for i, v in enumerate(pool) if v is not None]
     matrix = np.array([pool[i] for i in keep], dtype=np.float32)
     matrix /= np.linalg.norm(matrix, axis=1, keepdims=True)
     documents = [pool_docs[i] for i in keep]
@@ -1292,23 +1478,33 @@ def command_compare_models(args: argparse.Namespace) -> int:
     long_docs = [p["id"] for p in papers for _ in p["long"]]
     stored = [v for p in papers for v in p["stored"]]
     loaded = {name: json.loads((out_dir / f"{name}.json").read_text()) for name in names}
-    lines = []
+    # Every arm of a granularity is scored on the rows all of them embedded. A
+    # refusal used to delete a chunk from the fresh arm's pool only, and the
+    # chunks the server refuses are dot-leader tables of contents that sit in
+    # the stored index as hubs outranking the gold document: 21 refusals made
+    # fresh v2-moe "beat" stored on 99 phrase queries it merely never saw them on.
+    short_keep = shared_pool([stored] + [r["short"] for r in loaded.values()])
+    long_keep = shared_pool([r["long"] for r in loaded.values() if "long" in r])
+    lines = [
+        f"\nscored on shared pools: {len(short_keep)}/{len(short_docs)} chunks at 320, "
+        f"{len(long_keep)}/{len(long_docs)} at 1300"
+    ]
     for kind in ("title", "phrase"):
         query_docs = [p["id"] for p in papers if p[kind]]
         # The control pairs fresh v2-moe queries with the stored index vectors,
         # which is what production search does.
         arms = {
             "v2-moe stored@320": score_arm(
-                np, loaded[BASELINE_MODEL][f"q_{kind}"], query_docs, stored, short_docs
+                np, loaded[BASELINE_MODEL][f"q_{kind}"], query_docs, stored, short_docs, short_keep
             )
         }
         for name, result in loaded.items():
             arms[f"{name}@320"] = score_arm(
-                np, result[f"q_{kind}"], query_docs, result["short"], short_docs
+                np, result[f"q_{kind}"], query_docs, result["short"], short_docs, short_keep
             )
             if "long" in result:
                 arms[f"{name}@1300"] = score_arm(
-                    np, result[f"q_{kind}"], query_docs, result["long"], long_docs
+                    np, result[f"q_{kind}"], query_docs, result["long"], long_docs, long_keep
                 )
         baseline = arms["v2-moe stored@320"][0]
         lines.append(f"\n{kind} -> body  (n={len(query_docs)}, pool {len(papers)} papers)")
@@ -1335,6 +1531,121 @@ def command_compare_models(args: argparse.Namespace) -> int:
                     f"{tokens / seconds:>6.0f} tok/s  {refused} refused"
                 )
     print("\n".join(lines))
+    return 0
+
+
+def command_riders(args: argparse.Namespace) -> int:
+    """Score the three chunking riders against fresh v2-moe, per document."""
+    try:
+        import numpy as np
+    except ImportError:
+        print("riders needs numpy in the environment running it", file=sys.stderr)
+        return 1
+    out_dir = Path(args.out).expanduser()
+    control_path = out_dir / f"{BASELINE_MODEL}.json"
+    if not (out_dir / "sample.json").exists() or not control_path.exists():
+        print(f"riders needs sample.json and {control_path.name} (compare-models)", file=sys.stderr)
+        return 1
+    papers = json.loads((out_dir / "sample.json").read_text())["papers"]
+    control = json.loads(control_path.read_text())
+
+    spans = [reconstruct_span(p["long"]) for p in papers]
+    texts = [rider_chunks(span, STORED_CHUNK_SIZE, STORED_CHUNK_OVERLAP) for span in spans]
+    counts = [len(t) for t in texts]
+    flat = [c for t in texts for c in t]
+    short = [c for p in papers for c in p["short"]]
+    encoding = tokenizer()
+
+    def tiktoken_of(chunks: list[str]) -> int:
+        return sum(len(encoding.encode(c, disallowed_special=())) for c in chunks)
+
+    print(f"{len(papers)} papers, rider census over their spans:")
+    for name, value in rider_census(spans).items():
+        print(f"  {name:<28} {value:>7}")
+    dropped = sum(is_punctuation_dominated(c) for c in short)
+    print(
+        f"  control chunks {len(short)}, riders chunks {len(flat)}, "
+        f"punctuation-dominated control chunks {dropped}"
+    )
+    # Model tokens per tiktoken token, from the control run, projects the rider
+    # arm's cost at the control's throughput.
+    ratio = control["short_tokens"] / tiktoken_of(short)
+    projected = tiktoken_of(flat) * ratio
+    rate = control["short_tokens"] / control["short_seconds"]
+    print(
+        f"  embedding {projected:,.0f} model tokens at the control's {rate:.0f} tok/s "
+        f"= about {projected / rate / 60:.0f} min"
+    )
+    if args.dry_run:
+        return 0
+
+    cache = out_dir / f"{RIDERS_ARM}.json"
+    if cache.exists():
+        print(f"  {RIDERS_ARM}: cached", flush=True)
+    else:
+        spec = MODELS[BASELINE_MODEL]
+        with serving(get_config(), spec, out_dir, args.port) as url:
+            vectors, tokens, seconds = embed_all(
+                url, [format_for(spec, c, query=False) for c in flat], RIDERS_ARM
+            )
+        refused = sum(v is None for v in vectors)
+        print(
+            f"  {RIDERS_ARM}: {len(flat)} chunks, {tokens} tokens in {seconds:.0f}s "
+            f"({tokens / seconds:.0f} tok/s), {refused} refused",
+            flush=True,
+        )
+        cache.write_text(
+            json.dumps(
+                {"model": RIDERS_ARM, "counts": counts, "chunks": vectors,
+                 "tokens": tokens, "seconds": seconds}
+            )
+        )
+    riders = json.loads(cache.read_text())
+    if riders["counts"] != counts:
+        print(f"{cache} was built by different riders; delete it", file=sys.stderr)
+        return 1
+
+    docs = [p["id"] for p in papers for _ in p["short"]]
+    rider_docs = [p["id"] for p, n in zip(papers, counts, strict=True) for _ in range(n)]
+    stored = [v for p in papers for v in p["stored"]]
+    keep = shared_pool([stored, control["short"]])
+    # The control without the chunks 2b would drop, so 2c and 2e are visible
+    # apart from the hubs the server's refusals already removed from it.
+    keep_clean = [i for i in keep if not is_punctuation_dominated(short[i])]
+    results: dict[str, dict[str, tuple[list[int], list[float]]]] = {}
+    for kind in ("title", "phrase"):
+        query_docs = [p["id"] for p in papers if p[kind]]
+        queries = control[f"q_{kind}"]
+        results[kind] = {
+            "stored@320": score_arm(np, queries, query_docs, stored, docs, keep),
+            "control: fresh v2-moe@320": score_arm(
+                np, queries, query_docs, control["short"], docs, keep
+            ),
+            "control without 2b chunks": score_arm(
+                np, queries, query_docs, control["short"], docs, keep_clean
+            ),
+            "riders (2b+2c+2e)": score_arm(np, queries, query_docs, riders["chunks"], rider_docs),
+        }
+    outcome = {}
+    for kind, arms in results.items():
+        baseline = arms["control: fresh v2-moe@320"][0]
+        print(f"\n{kind} -> body  (n={len(arms['stored@320'][0])}, pool {len(papers)} papers)")
+        print(
+            f"  {'arm':<28} {'recall@1':>9} {'recall@10':>10} {'MRR':>7}"
+            f" {'better':>7} {'worse':>6} {'sign p':>9}"
+        )
+        for arm, (ranks, margins) in arms.items():
+            m = summarise(ranks, margins)
+            better, worse, p = paired(ranks, baseline)
+            print(
+                f"  {arm:<28} {m['recall@1']:>9.3f} {m['recall@10']:>10.3f} {m['MRR']:>7.3f}"
+                f" {better:>7} {worse:>6} {p:>9.2g}"
+            )
+            if arm.startswith("riders"):
+                outcome[kind] = (better, worse, p)
+    passed = rider_verdict(outcome["title"], outcome["phrase"])
+    print(f"\nrider rule (vs the control row; p < {RIDER_P} on one kind, no loss on the other): "
+          f"{'PASS' if passed else 'FAIL'}")
     return 0
 
 
@@ -1390,6 +1701,14 @@ def main() -> int:
     )
     compare.add_argument("--port", type=int, default=11557)
     compare.set_defaults(func=command_compare_models)
+
+    riders = sub.add_parser("riders", help="score chunking riders 2b/2c/2e against fresh v2-moe")
+    riders.add_argument("-o", "--out", default=COMPARE_DIR)
+    riders.add_argument("--port", type=int, default=11557)
+    riders.add_argument(
+        "--dry-run", action="store_true", help="print the census and cost estimate; embed nothing"
+    )
+    riders.set_defaults(func=command_riders)
 
     args = parser.parse_args()
     return int(args.func(args))

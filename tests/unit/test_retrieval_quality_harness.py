@@ -347,3 +347,134 @@ class TestSummariseAndPaired:
     def test_paired_counts_lower_rank_as_better(self) -> None:
         better, worse, _ = harness.paired([1, 3, 2], [2, 3, 1])
         assert (better, worse) == (1, 1)
+
+
+class TestSharedPool:
+    def test_keeps_rows_every_pool_has(self) -> None:
+        assert harness.shared_pool([[[1], None, [1], [1]], [[1], [1], None, [1]]]) == [0, 3]
+
+    def test_score_arm_scores_the_rows_it_is_given(self) -> None:
+        np = pytest.importorskip("numpy")
+        pool = [[1.0, 0.0], [0.0, 1.0], None]
+        docs = [1, 2, 3]
+        own = harness.score_arm(np, [[0.0, 1.0]], [2], pool, docs)
+        forced = harness.score_arm(np, [[0.0, 1.0]], [2], pool, docs, keep=[0])
+        assert own[0] == [1]
+        assert forced[0] == [2]  # gold has no row in the pool: ranks after the others
+
+
+class TestPunctuationDominated:
+    def test_dot_leader_contents_line(self) -> None:
+        assert harness.is_punctuation_dominated(". . . . . . . 117 C.5.4 Proof . . . . . .")
+
+    def test_prose_and_equations_are_kept(self) -> None:
+        assert not harness.is_punctuation_dominated("We show that x = y + 1 holds for all n.")
+
+    def test_empty_chunk_is_dropped(self) -> None:
+        assert harness.is_punctuation_dominated("  \n ")
+
+
+class TestDehyphenate:
+    @pytest.mark.parametrize(
+        ("raw", "clean"),
+        [
+            ("by max- imizing the agreement", "by maximizing the agreement"),
+            ("a func-\ntion of time", "a function of time"),
+            ("a func- \n  tion of time", "a function of time"),
+            ("a multi-\nvariate model", "a multivariate model"),
+            ("well­-conducted", "well-conducted"),
+        ],
+    )
+    def test_joins_a_split_word(self, raw: str, clean: str) -> None:
+        assert harness.dehyphenate(raw) == clean
+
+    @pytest.mark.parametrize(
+        "kept",
+        [
+            "fixed-\nand random-effects",  # continuation is a function word
+            "pre- and post-match",
+            "a well-\nknown result",  # compound prefix
+            "state-of-the-art",  # no break at all
+            "x-\n3 and y",  # digit continuation
+            "low-\nDimensional",  # capitalised continuation
+        ],
+    )
+    def test_leaves_real_compounds(self, kept: str) -> None:
+        assert harness.dehyphenate(kept) == kept
+
+    def test_keeps_a_compound_the_document_spells_intact(self) -> None:
+        text = "an over-\nparameterized net and an over-parameterized one"
+        assert harness.dehyphenate(text) == text
+
+    def test_joins_when_the_document_spells_the_word_whole(self) -> None:
+        assert harness.dehyphenate("a well-\nknown fact; wellknown too").startswith("a wellknown")
+
+
+class TestStructureChunks:
+    def test_no_boundary_is_the_plain_window(self) -> None:
+        text = "word " * 400
+        plain = [c.content for c in harness.chunk_text(text, 100, 20)]
+        assert harness.structure_chunks(text, 100, 20) == plain
+
+    def test_cuts_at_headings_and_page_breaks(self) -> None:
+        text = "intro text\n# Methods\nbody one\n\f\nbody two\n## Results\nbody three\n"
+        assert harness.structure_chunks(text, 100, 20) == [
+            "intro text\n",
+            "# Methods\nbody one\n\f\n",
+            "body two\n",
+            "## Results\nbody three\n",
+        ]
+
+    def test_form_feed_inside_a_line_is_not_a_boundary(self) -> None:
+        text = "a = \f\f det(x)\n b = c\n"
+        assert harness.structure_chunks(text, 100, 20) == [text]
+
+    def test_a_long_section_falls_back_to_the_window(self) -> None:
+        text = "# Head\n" + "word " * 400
+        chunks = harness.structure_chunks(text, 100, 20)
+        assert len(chunks) > 3
+        assert max(len(harness.tokenizer().encode(c)) for c in chunks) <= 100
+
+    def test_a_hash_that_is_not_a_heading_is_ignored(self) -> None:
+        assert harness.structure_chunks("x #notheading\n#also not", 100, 20) == [
+            "x #notheading\n#also not"
+        ]
+
+
+class TestRiderChunks:
+    def test_applies_all_three(self) -> None:
+        span = "# Intro\nby max- imizing the agree-\nment\n# TOC\n" + ". " * 60 + "\n"
+        assert harness.rider_chunks(span, 100, 20) == [
+            "# Intro\nby maximizing the agreement\n"
+        ]
+
+
+class TestReconstructSpan:
+    def test_rebuilds_the_span_from_overlapping_chunks(self) -> None:
+        words = [f"w{i}" for i in range(2000)]
+        text = " ".join(words)
+        chunks = [c.content for c in harness.chunk_text(text, 1300, 325)]
+        assert len(chunks) > 1
+        assert harness.reconstruct_span(chunks) == text
+
+
+class TestRiderVerdict:
+    def test_passes_on_one_gain_and_no_loss(self) -> None:
+        assert harness.rider_verdict((60, 20, 1e-5), (30, 28, 0.9))
+
+    def test_fails_when_the_other_kind_loses(self) -> None:
+        assert not harness.rider_verdict((60, 20, 1e-5), (10, 28, 0.9))
+
+    def test_fails_without_significance(self) -> None:
+        assert not harness.rider_verdict((30, 20, 0.2), (30, 28, 0.9))
+
+
+class TestRiderCensus:
+    def test_counts_what_each_rider_acts_on(self) -> None:
+        census = harness.rider_census(["# A\nfunc-\ntion\n\f\nx­", "plain"])
+        assert census["markdown heading lines"] == 1
+        assert census["spans with a heading"] == 1
+        assert census["page-break lines"] == 1
+        assert census["line-break hyphens"] == 1
+        assert census["line-break hyphens joined"] == 1
+        assert census["soft hyphens"] == 1
