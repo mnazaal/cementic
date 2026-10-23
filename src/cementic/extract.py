@@ -588,18 +588,6 @@ class ExtractionProcessError(RuntimeError):
     """The extraction child died mid-document (a signal or an unexpected exit)."""
 
 
-def extraction_fate(error: Exception, *, shutting_down: bool) -> str:
-    """What becomes of a document whose extraction raised: "failed" or "requeue" (pure).
-
-    A child lost while the worker is stopping was most likely taken down by the
-    same stop (a control-group SIGTERM), not by the document, so it is retried
-    on restart instead of being stamped failed for good.
-    """
-    if shutting_down and isinstance(error, ExtractionProcessError):
-        return "requeue"
-    return "failed"
-
-
 class ChildDiedError(Exception):
     def __init__(self, returncode: int, stderr: bytes) -> None:
         super().__init__(returncode)

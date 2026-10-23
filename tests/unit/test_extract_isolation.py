@@ -180,19 +180,6 @@ def test_a_stop_signal_during_a_parse_does_not_lose_the_document(monkeypatch):
     assert done.stdout.strip() == "full text", done.stderr
 
 
-@pytest.mark.parametrize(
-    ("error", "shutting_down", "fate"),
-    [
-        (extract_mod.ExtractionProcessError("x"), True, "requeue"),
-        (extract_mod.ExtractionProcessError("x"), False, "failed"),
-        (RuntimeError("extraction timed out"), True, "failed"),
-        (ValueError("bad pdf"), True, "failed"),
-    ],
-)
-def test_extraction_fate(error, shutting_down, fate):
-    assert extract_mod.extraction_fate(error, shutting_down=shutting_down) == fate
-
-
 def test_default_timeouts_by_kind():
     timeout = extract_mod.extraction_timeout
     assert Config().extraction.timeout_seconds is None

@@ -265,9 +265,11 @@ class TestRetrofitLock:
         ):
             db._retrofit_schema(engine)
 
-        assert order[0] == "sql:SELECT pg_advisory_xact_lock(:key)"
-        assert order[1:] == ["add", "drop", "null"]
-        assert engine.begin.call_count == 1  # one transaction covers every retrofit
+        lock = "sql:SELECT pg_advisory_xact_lock(:key)"
+        # Two transactions, each locked first: the catalog-only changes commit
+        # before the NOT NULL step, whose refusal must not roll them back.
+        assert order == [lock, "add", "drop", lock, "null"]
+        assert engine.begin.call_count == 2
 
     def test_sqlite_issues_no_lock_and_no_transaction(self):
         from cementic import db

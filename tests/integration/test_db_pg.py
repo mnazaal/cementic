@@ -3,7 +3,7 @@
 from typing import NamedTuple
 
 import pytest
-from sqlalchemy import text
+from sqlalchemy import inspect, text
 from sqlalchemy.orm import sessionmaker
 
 from cementic import vector_store
@@ -695,6 +695,10 @@ class TestSchemaRetrofitPass:
 
         with pytest.raises(RuntimeError, match=r"2 rows with a NULL"):
             create_tables(pg_engine)
+        # The refusal must not roll back the catalog-only retrofits: code that
+        # loads SourceDocument needs the new columns whatever the NULL count.
+        source_columns = {c["name"] for c in inspect(pg_engine).get_columns("source_documents")}
+        assert {"size_bytes", "mtime_ns"} <= source_columns
 
         with pg_engine.begin() as conn:
             conn.execute(text("DELETE FROM chunk_embeddings"))

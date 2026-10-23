@@ -689,23 +689,24 @@ _RETROFIT_LOCK_KEY = 0x63656D656E746963  # "cementic"
 
 
 def _retrofit_schema(engine: Engine) -> None:
-    """Run the in-place schema retrofits, one process at a time, in one transaction.
+    """Run the in-place schema retrofits, one process at a time.
 
-    The watcher and the pipeline worker both call `create_tables` at start.
-    `_require_scope_columns_not_null` reads the table (ACCESS SHARE) and then
-    ALTERs it (ACCESS EXCLUSIVE): with two processes each holding the share
-    lock while waiting for the upgrade, PostgreSQL kills one with a deadlock.
-    The transaction-scoped advisory lock, taken first, makes the second process
-    wait for the first to commit; the catalog checks then find nothing left to
-    do. SQLite is only the test backend and has nothing to retrofit.
+    The watcher and the pipeline worker both call `create_tables` at start, so
+    each transaction takes a transaction-scoped advisory lock first: the second
+    process waits for the first to commit, and the catalog checks then find
+    nothing left to do. Two transactions, not one: the catalog-only changes
+    commit before the NOT NULL step, so its refusal does not roll them back,
+    and their ACCESS EXCLUSIVE locks are not held through its table scan.
+    SQLite is only the test backend and has nothing to retrofit.
     """
     if engine.dialect.name != "postgresql":
         return
-    with engine.begin() as conn:
-        conn.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": _RETROFIT_LOCK_KEY})
-        _add_missing_columns(conn)
-        _drop_retired_indexes(conn)
-        _require_scope_columns_not_null(conn)
+    steps = ((_add_missing_columns, _drop_retired_indexes), (_require_scope_columns_not_null,))
+    for group in steps:
+        with engine.begin() as conn:
+            conn.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": _RETROFIT_LOCK_KEY})
+            for retrofit in group:
+                retrofit(conn)
 
 
 def _add_missing_columns(conn: Connection) -> None:
@@ -755,30 +756,33 @@ def _require_scope_columns_not_null(conn: Connection) -> None:
     Refuses, with the count, while any row holds a NULL in one: such a row
     matches no claim and no progress count, so it is data to look at, not to
     constrain away. SET NOT NULL scans the table under an ACCESS EXCLUSIVE lock,
-    once for all three columns because they share one statement.
+    once for all three columns because they share one statement; the rows are
+    counted only when that scan finds a NULL, so the usual case scans once.
     """
     columns = {c["name"]: c for c in inspect(conn).get_columns("chunk_embeddings")}
     nullable = [name for name in _SCOPE_COLUMNS if columns[name]["nullable"]]
     if not nullable:
         return
-    null_rows = conn.execute(
-        text(
-            "SELECT count(*) FROM chunk_embeddings WHERE "
-            + " OR ".join(f"{name} IS NULL" for name in nullable)
-        )
-    ).scalar_one()
-    if null_rows:
+    try:
+        with conn.begin_nested():
+            conn.execute(
+                text(
+                    "ALTER TABLE chunk_embeddings "
+                    + ", ".join(f"ALTER COLUMN {name} SET NOT NULL" for name in nullable)
+                )
+            )
+    except IntegrityError:
+        null_rows = conn.execute(
+            text(
+                "SELECT count(*) FROM chunk_embeddings WHERE "
+                + " OR ".join(f"{name} IS NULL" for name in nullable)
+            )
+        ).scalar_one()
         raise RuntimeError(
             f"chunk_embeddings has {null_rows} rows with a NULL in "
             f"{', '.join(nullable)}; backfill or delete them before the "
             "columns can be made NOT NULL"
-        )
-    conn.execute(
-        text(
-            "ALTER TABLE chunk_embeddings "
-            + ", ".join(f"ALTER COLUMN {name} SET NOT NULL" for name in nullable)
-        )
-    )
+        ) from None
 
 
 def _source_file_hash_index_exists(engine: Engine) -> bool:
