@@ -1,5 +1,6 @@
 """Tests for the content-type extractor registry (Move 4)."""
 
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -30,6 +31,17 @@ def config() -> Config:
     return Config()
 
 
+@pytest.fixture
+def in_process(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Run PDF extractors in this process, where a test can patch their parser.
+
+    PDFs normally parse in a child (see test_extract_isolation.py), which a
+    `patch` here cannot reach.
+    """
+    for name, (spec, fn) in list(extract_mod._EXTRACTORS.items()):
+        monkeypatch.setitem(extract_mod._EXTRACTORS, name, (replace(spec, isolated=False), fn))
+
+
 def test_supported_extensions_covers_pdf_and_text():
     exts = supported_extensions()
     assert {".pdf", ".txt", ".md", ".markdown"} <= exts
@@ -47,6 +59,7 @@ def test_extract_document_reads_plain_text(tmp_path, config):
     assert extract_document(str(f), config) == "# Heading\n\nbody"
 
 
+@pytest.mark.usefixtures("in_process")
 def test_extract_document_dispatches_pdf(config):
     with patch("cementic.extract.extract_pdf_markdown", return_value="PDF MD") as mock_pdf:
         assert extract_document("/docs/paper.pdf", config) == "PDF MD"
@@ -232,6 +245,7 @@ class TestRawPdfBackend:
         config = Config(extraction=ExtractionConfig(backends={"pdf": "pymupdf-raw"}))
         assert extractor_for("/docs/a.pdf", config)[0] == "pymupdf-raw"
 
+    @pytest.mark.usefixtures("in_process")
     def test_it_never_loads_the_layout_model(self, config):
         """The ONNX layout import is the whole cost this backend avoids.
 
@@ -251,7 +265,9 @@ class TestRawPdfBackend:
 
     def test_a_missing_file_is_reported_as_such(self, config):
         config = Config(extraction=ExtractionConfig(backends={"pdf": "pymupdf-raw"}))
-        with pytest.raises(FileNotFoundError):
+        # Raised in the extraction child, so it arrives as a RuntimeError
+        # carrying the same message.
+        with pytest.raises(RuntimeError, match="PDF not found"):
             extract_document("/docs/definitely-absent.pdf", config)
 
     def test_selecting_it_reversions_the_extractor_profile(self, config):
@@ -282,6 +298,7 @@ class TestEmptyExtractionIsAFailure:
         with pytest.raises(ValueError, match="extracted no text"):
             extract_document(str(f), config)
 
+    @pytest.mark.usefixtures("in_process")
     def test_pdf_message_names_the_ocr_setting(self, config):
         """The likeliest cause is a scan with OCR off, so say which knob to change."""
         config.extraction.use_ocr = False
@@ -444,10 +461,11 @@ class TestCommandExtractor:
     def test_a_timeout_is_reported_as_one(self, tmp_path, monkeypatch) -> None:
         source = tmp_path / "a.txt"
         source.write_text("x")
-        monkeypatch.setattr(extract_mod, "COMMAND_TIMEOUT_SECONDS", 0.2)
+        config = self._config(["sleep", "5"])
+        config.extraction.timeout_seconds = 0.2
 
         with pytest.raises(RuntimeError, match="timed out"):
-            extract_document(str(source), self._config(["sleep", "5"]))
+            extract_document(str(source), config)
 
 
 class TestCommandVersionProbe:

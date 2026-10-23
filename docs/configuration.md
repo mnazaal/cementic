@@ -42,6 +42,12 @@ path and must write only extracted text to stdout. Provide its version command
 too, so tool upgrades create a new extraction profile instead of silently
 changing indexed text.
 
+PDF parsing runs in a child process, so a malformed PDF that crashes, hangs or
+exhausts memory marks that one document failed instead of stopping the worker.
+`extraction.timeout_seconds` (default 900) bounds one extraction, including a
+command extractor, and `extraction.memory_limit_mb` (default 8192, `0` for no
+limit) caps the child's address space. Neither enters the extraction profile.
+
 Changing an extractor setting creates a replacement revision. See
 [Operations](operations.md#revisions).
 

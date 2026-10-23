@@ -611,6 +611,24 @@ class ExtractionConfig(_SectionSettings):
         "record a constant that never changes on upgrade.",
     )
 
+    timeout_seconds: float = Field(
+        default=900.0,
+        gt=0,
+        description="Wall-clock limit for one extraction, in seconds: the "
+        "command extractor's process and the child process that parses a PDF. "
+        "Generous, because OCR over a long scanned document is minutes of work "
+        "and the alternative to waiting is a half-extracted corpus. A document "
+        "that exceeds it is marked failed.",
+    )
+    memory_limit_mb: int = Field(
+        default=8192,
+        ge=0,
+        description="Address-space limit (RLIMIT_AS) in MiB for the child "
+        "process that parses a PDF; 0 removes it. A document that needs more "
+        "is marked failed instead of exhausting the machine. Address space "
+        "counts mapped-but-untouched memory, so it runs above resident use.",
+    )
+
     @field_validator("commands", "command_versions")
     @classmethod
     def _validate_command_tables(cls, value: dict[str, list[str]]) -> dict[str, list[str]]:

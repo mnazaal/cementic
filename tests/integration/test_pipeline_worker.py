@@ -874,6 +874,46 @@ def _restart(session_factory, collection: str, revision_id: int) -> None:
         session.commit()
 
 
+class TestIsolatedExtraction:
+    """A PDF whose parser kills its process fails that document, not the worker."""
+
+    def test_a_killed_child_is_stamped_failed_and_the_next_document_proceeds(
+        self, sqlite_setup, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cementic import extract as extract_mod
+        from tests.unit import isolation_extractors
+
+        config, session_factory, pdf_fixtures_dir = sqlite_setup
+        collection = "test_isolated_extraction"
+        spec = extract_mod.ExtractorSpec(
+            name="pymupdf4llm", version=1, extensions=(".pdf",), isolated=True
+        )
+        monkeypatch.setitem(
+            extract_mod._EXTRACTORS,
+            "pymupdf4llm",
+            (spec, isolation_extractors.dies_on_a),
+        )
+        monkeypatch.setenv("PYTHONPATH", str(Path(__file__).resolve().parents[2]))
+        pipeline, source_watcher = _setup_worker(config, session_factory, collection, monkeypatch)
+        source_watcher._register_document(str(pdf_fixtures_dir / "test_doc_a.pdf"))
+        source_watcher._register_document(str(pdf_fixtures_dir / "test_doc_b.pdf"))
+        revision_id = pipeline._ensure_target_revision()
+
+        assert pipeline._step_extract(revision_id) is True
+        assert pipeline._step_extract(revision_id) is True
+
+        with session_factory() as session:
+            rows = {
+                Path(doc.source_path).name: extracted
+                for extracted, doc in session.query(ExtractedDocument, SourceDocument)
+                .join(SourceDocument, ExtractedDocument.document_id == SourceDocument.id)
+                .all()
+            }
+        assert rows["test_doc_a.pdf"].status == "failed"
+        assert "exited 9" in rows["test_doc_a.pdf"].error_message
+        assert rows["test_doc_b.pdf"].status == "done"
+
+
 class TestCrashingDocumentIsCapped:
     """A document that kills the worker must not pin the collection (2026-10-22 audit).
 

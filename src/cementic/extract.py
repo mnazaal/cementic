@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import contextlib
 import importlib.util
+import json
 import shlex
+import signal
 import subprocess
 import sys
 from collections.abc import Callable
@@ -222,6 +224,10 @@ class ExtractorSpec:
     name: str
     version: int
     extensions: tuple[str, ...] | None
+    #: Parse in a child process (see `_run_isolated`). For extractors that run
+    #: a native parser over untrusted bytes in this process; ones that already
+    #: spawn their own process, or only read text, gain nothing from it.
+    isolated: bool = False
 
 
 # An extractor turns a file path into Markdown/plain text. Pure w.r.t. the file.
@@ -242,12 +248,6 @@ def _plaintext_extractor(path: str, config: Config) -> str:
     # (2026-10-22 audit). Valid UTF-8 extracts exactly as before, so no
     # document that succeeded before changes.
     return Path(path).read_text(encoding="utf-8", errors="replace")
-
-
-#: How long an extraction command may run before it is killed. Generous: OCR
-#: over a long scanned document is minutes of work, and the alternative to
-#: waiting is a half-extracted corpus.
-COMMAND_TIMEOUT_SECONDS = 900.0
 
 
 def _command_extractor(path: str, config: Config) -> str:
@@ -273,11 +273,11 @@ def _command_extractor(path: str, config: Config) -> str:
             rendered,
             capture_output=True,
             text=True,
-            timeout=COMMAND_TIMEOUT_SECONDS,
+            timeout=config.extraction.timeout_seconds,
         )
     except subprocess.TimeoutExpired:
         raise RuntimeError(
-            f"extraction command timed out after {COMMAND_TIMEOUT_SECONDS:g}s: "
+            f"extraction command timed out after {config.extraction.timeout_seconds:g}s: "
             f"{shlex.join(rendered)}"
         )
     except OSError as error:
@@ -299,7 +299,7 @@ COMMAND_EXTRACTOR_NAME = "command"
 
 
 #: A version probe answers in milliseconds or it is broken. Short, unlike
-#: COMMAND_TIMEOUT_SECONDS, because this one runs during revision creation and
+#: `extraction.timeout_seconds`, because this one runs during revision creation and
 #: a hang there stalls indexing before any document is touched.
 VERSION_PROBE_TIMEOUT_SECONDS = 30.0
 
@@ -344,14 +344,14 @@ def command_version(argv: list[str]) -> str:
 # single entry here; the watcher, worker, and CLI never branch on file type.
 _EXTRACTORS: dict[str, tuple[ExtractorSpec, ExtractorFn]] = {
     "pymupdf4llm": (
-        ExtractorSpec(name="pymupdf4llm", version=1, extensions=(".pdf",)),
+        ExtractorSpec(name="pymupdf4llm", version=1, extensions=(".pdf",), isolated=True),
         _pdf_extractor,
     ),
     # Order matters: `extractor_for` falls back to the first entry handling a
     # suffix, so this must stay below pymupdf4llm to leave the .pdf default
     # alone. Selected with `[extraction.backends] pdf = "pymupdf-raw"`.
     "pymupdf-raw": (
-        ExtractorSpec(name="pymupdf-raw", version=1, extensions=(".pdf",)),
+        ExtractorSpec(name="pymupdf-raw", version=1, extensions=(".pdf",), isolated=True),
         _raw_pdf_extractor,
     ),
     "plaintext": (
@@ -501,6 +501,69 @@ def _empty_extraction_reason(path: str, config: Config) -> str:
     return "extracted no text: the file has no readable text content"
 
 
+def _run_in_process(fn: ExtractorFn, path: str, config: Config) -> str:
+    return fn(path, config)
+
+
+def _run_isolated(fn: ExtractorFn, path: str, config: Config) -> str:
+    """Run an extractor in a fresh child process and take its stdout.
+
+    A native parser that segfaults, hangs or exhausts memory on one malformed
+    PDF used to take the worker -- which holds the database credentials --
+    down with it. The child gets the wall-clock and address-space limits from
+    `[extraction]`, and any way it dies becomes an ordinary exception that the
+    caller stamps on that one document. Text crosses the pipe as UTF-8 with
+    surrogates preserved, so it is byte-identical to the in-process result.
+    The child sees the ``extraction`` section only, which is all the isolated
+    extractors read.
+    """
+    limits = config.extraction
+    argv = [
+        sys.executable,
+        "-m",
+        "cementic.extract_child",
+        f"{fn.__module__}:{fn.__qualname__}",
+        path,
+        limits.model_dump_json(),
+    ]
+    try:
+        completed = subprocess.run(
+            argv, capture_output=True, timeout=limits.timeout_seconds, check=False
+        )
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(f"extraction timed out after {limits.timeout_seconds:g}s")
+    if completed.returncode == 0:
+        return completed.stdout.decode("utf-8", errors="surrogatepass")
+    raise RuntimeError(_child_failure(completed.returncode, completed.stderr, limits))
+
+
+def _child_failure(returncode: int, stderr: bytes, limits: Any) -> str:
+    """Explain a failed extraction child (pure).
+
+    The child reports a Python exception as a final JSON line on stderr; an
+    exit without one (a signal, or the interpreter dying) has only the return
+    code to go on.
+    """
+    if returncode < 0:
+        try:
+            cause = signal.Signals(-returncode).name
+        except ValueError:
+            cause = f"signal {-returncode}"
+        return f"extraction process crashed ({cause})"
+    lines = stderr.decode("utf-8", errors="replace").strip().splitlines()
+    try:
+        report = json.loads(lines[-1])
+    except (IndexError, ValueError):
+        detail = f": {lines[-1]}" if lines else ""
+        return f"extraction process exited {returncode}{detail}"
+    if report.get("type") == "MemoryError":
+        return (
+            "extraction ran out of memory "
+            f"(extraction.memory_limit_mb={limits.memory_limit_mb})"
+        )
+    return str(report["message"])
+
+
 def extract_document(path: str, config: Config) -> str:
     """Extract any supported document to Markdown/text — the single dispatch.
 
@@ -512,8 +575,9 @@ def extract_document(path: str, config: Config) -> str:
     resolved = extractor_for(path, config)
     if resolved is None:
         raise ValueError(f"no extractor for '{Path(path).suffix.lower() or '(none)'}'")
-    _name, fn = resolved
-    content = strip_unstorable(fn(path, config))
+    name, fn = resolved
+    run = _run_isolated if _EXTRACTORS[name][0].isolated else _run_in_process
+    content = strip_unstorable(run(fn, path, config))
     if extraction_is_empty(content):
         raise ValueError(_empty_extraction_reason(path, config))
     return content
