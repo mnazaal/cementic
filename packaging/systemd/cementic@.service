@@ -43,7 +43,19 @@
 # profile and re-extracts every document. Check `extractor_profiles.config_json`
 # before pointing CEMENTIC_CHECKOUT at another environment.
 #
-# A second collection is a second instance, and the two share one llama-server.
+# A second collection is a second instance, but it needs its own state and log
+# files: their default paths are shared, so the second instance's watcher and
+# worker find the first one's state, report "already running", and the unit
+# restarts in a loop. Give each extra instance its own in its env file:
+#
+#   CEMENTIC_SOURCE_WATCHER_STATE_PATH=/home/you/.local/share/cementic/notes/source_watcher_state.json
+#   CEMENTIC_SOURCE_WATCHER_LOG_FILE=/home/you/.local/share/cementic/notes/source_watcher.log
+#   CEMENTIC_PIPELINE_WORKER_STATE_PATH=/home/you/.local/share/cementic/notes/pipeline_worker_state.json
+#   CEMENTIC_PIPELINE_WORKER_LOG_FILE=/home/you/.local/share/cementic/notes/pipeline_worker.log
+#
+# (an EnvironmentFile expands no specifiers, so spell the home directory out).
+# `cementic status` and `cementic stop` read the default paths, so they see the
+# first instance only. The instances share one llama-server.
 # Whichever worker started it owns it, so that instance's restart takes the
 # server from the other, which recovers by autostarting a replacement -- one
 # failed batch and a model reload. If that churn ever matters, run the server in
