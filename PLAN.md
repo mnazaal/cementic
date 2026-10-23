@@ -25,11 +25,10 @@ the daemon alias changes (`verbose` left the fingerprint), the restart adds
 the `attempts` column to two tables, and the tokenizer is downloaded again
 into `~/.local/share/cementic/tiktoken`.
 
-**Still pending outside the repo: the Phase 2a overnight run.** Harrier and
-Qwen3 have not been embedded. It reads search code from `~/projects/cementic`,
-so merge the branch after the run, not during it. The noise-floor anomaly
-(21 refused chunks dropped by `score_arm`) is unchanged; see "Retrieval
-Phase 2" → 2a → "RUN 2026-09-29".
+**Phase 2a closed 2026-10-23: stay on v2-moe.** Qwen3 and Harrier both lose
+on phrase queries and embed 2.1-3.3x slower; see "Retrieval Phase 2" → 2a →
+"RUN 2026-10-23". The overnight run is finished, so the branch can merge. The
+noise-floor anomaly (21 refused chunks dropped by `score_arm`) is unchanged.
 
 **Environment quirks.**
 - Claude Code kills its own background jobs under memory pressure. Long runs
@@ -47,7 +46,6 @@ comparison: `~/.cache/cementic-model-compare/`.
 **Exit criteria.**
 ```bash
 git -C ~/projects/cementic merge-base --is-ancestor main claude/audit-fixes && echo fast-forwardable
-ls ~/.cache/cementic-model-compare/                         # harrier/qwen3 json appear after the run
 ```
 <!-- session-handoff:end -->
 
@@ -724,7 +722,9 @@ is recommended here, and any name predating this line is stale. Method is Phase
 5M tokens per candidate at two chunk sizes)* with the stored index as control, before
 committing ~108 h.
 
-**IN PROGRESS 2026-09-24 — instrument built; v2-moe and EmbeddingGemma embedded (2026-09-29).**
+**CLOSED 2026-10-23 — stay on v2-moe; no candidate passes the pre-registered rules.**
+2b-2d are now judged alone. History: instrument built 2026-09-24, Gemma run
+2026-09-29, Qwen3 and Harrier run 2026-10-23.
 `measure_retrieval_quality.py compare-models` replaces the v1.5 script in
 `~/.cache/cementic-igpu/calibration/` (not yet deleted; delete it once a full
 run has completed). **Before deleting, move out `calibrate.sh` and its `*-cpu`
@@ -754,8 +754,8 @@ nothing adds one. All three are in `models/`, gitignored.
 | v2-moe | 320 | 568 | 838 |
 | EmbeddingGemma | 320 | 1,036 | 902 |
 | EmbeddingGemma | 1,300 | 1,164 | 609 (stopped at 40%, not saved) |
-| Qwen3-0.6B | 320 / 1,300 | 124 / 138 | not run |
-| Harrier-0.6B | 320 / 1,300 | 217 / 209 | not run |
+| Qwen3-0.6B | 320 / 1,300 | 124 / 138 | 277 / 253 |
+| Harrier-0.6B | 320 / 1,300 | 217 / 209 | 393 / 290 |
 
 The absolute numbers are load-bound (v2-moe benched 754 under load against
 2,468 recorded idle), so read ratios. Qwen3 and Harrier run 2.6-4.6x slower
@@ -768,7 +768,7 @@ only candidate at or above v2-moe's speed.
 verified the pipeline (fresh v2-moe margin 0.1286 against stored 0.1285, zero
 misaligned chunks, zero refusals).
 
-**RUN 2026-09-29 — EmbeddingGemma fails; Harrier and Qwen3 pending.** 500
+**RUN 2026-09-29 — EmbeddingGemma fails.** 500
 papers (sample `8d3c95f989f5`), run in the user's terminal, log
 `~/.cache/cementic-model-compare-gemma.log`. Recall@1, with the paired sign
 test against stored v2-moe:
@@ -795,6 +795,26 @@ from the pool, which likely explains it: a refused distractor raises the gold
 by one rank, and a refused gold chunk sinks it. Until that is checked, the
 "gain more margin than fresh-versus-stored" rule has no clean floor. The
 Gemma verdict does not depend on it.
+
+**RUN 2026-10-23 — Qwen3 and Harrier fail; 2a closes on v2-moe.** Same
+sample `8d3c95f989f5`, run in the user's terminal, log
+`~/.cache/cementic-model-compare-all.log`. Sign test against stored v2-moe:
+
+| arm | title r@1 | title better/worse, p | phrase r@1 | phrase r@10 | phrase better/worse, p | tok/s |
+| --- | --- | --- | --- | --- | --- | --- |
+| v2-moe stored@320 | 0.850 | control | 0.301 | 0.545 | control | 838 |
+| Qwen3@320 | 0.876 | 55/27, 0.0026 | 0.236 | 0.533 | 169/223, 0.0074 | 277 |
+| Qwen3@1300 | 0.894 | 61/25, 0.00013 | 0.238 | 0.473 | 161/235, 0.00023 | 253 |
+| Harrier@320 | 0.906 | 59/24, 0.00015 | 0.230 | 0.513 | 167/220, 0.0081 | 393 |
+| Harrier@1300 | 0.920 | 63/16, 9.4e-08 | 0.246 | 0.481 | 163/234, 0.00043 | 290 |
+
+Verdict: both pass the title rule at 1,300 and both fail "not lose on
+phrases", so no candidate wins. Harrier@1300 is the strongest title arm
+measured (+0.070 recall@1). Its phrase loss reaches recall@10 too (0.481
+against 0.545), so routing to the lexical arm cannot be assumed to cover it.
+By throughput ratio, a Harrier@1300 rebuild projects to about 270 h and a
+Qwen3@1300 rebuild to about 310 h, against ~108 h today. Both are above the 2x
+threshold. The verdict does not depend on the noise-floor anomaly below.
 
 *Pre-registered rules (2026-09-24):* a candidate at 1,300 must beat stored
 v2-moe on title queries by a paired sign test at p < 0.01, not lose on
@@ -857,8 +877,8 @@ most likely to produce.
 fallback only when the lexical arm returns zero rows (narrow, adds an extension
 and an index); relaxing `plainto_tsquery`'s conjunction to an OR-with-threshold
 (no extension, but it changes recall on every query, not just typo'd ones); or
-accepting the vector arm as the only typo path and measuring how far a better
-Phase 2a model moves 0.233.
+accepting the vector arm as the only typo path (Phase 2a kept v2-moe, so no
+model change moves 0.233).
 
 *Ends when:* one of the three is chosen with a measured recall@10 on
 `phrase-typo` to justify it, or the item is closed as "not worth it" with the
