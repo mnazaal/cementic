@@ -7,13 +7,14 @@ import os
 import signal
 import threading
 import zlib
+from collections.abc import Collection
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, NoReturn
 
 import requests
-from sqlalchemy import and_, or_, select, text
+from sqlalchemy import and_, case, or_, select, text, update
 from sqlalchemy.orm import Session
 
 from cementic.chunk import TextChunk, TokenizerUnavailableError, chunk_text, tokenizer
@@ -400,17 +401,22 @@ def plan_embed_outcome(
     claimed: list[tuple[int, str]],
     results: list[list[float] | None],
     errors: list[str],
+    live: Collection[int],
 ) -> EmbedOutcome:
     """Split a claim by whether its embedding came back.
 
     ``claimed`` is ``(chunk_id, content)`` and ``results`` and ``errors`` are
     parallel to it: a vector or None, and the message to stamp if it is None.
+    A chunk not in ``live`` was deleted while the request was in flight; it is
+    dropped from both sets, because its vector row would break the foreign key.
     Releasing a claim back to ``pending`` is not decided here -- it follows a
     provider failure or a shutdown, before any result exists.
     """
     done: list[tuple[int, list[float]]] = []
     failed: dict[int, str] = {}
     for (chunk_id, _), embedding, error in zip(claimed, results, errors):
+        if chunk_id not in live:
+            continue
         if embedding is None:
             failed[chunk_id] = error
         else:
@@ -1181,9 +1187,20 @@ class PipelineWorker:
         # embedding", leaving the actual cause -- and the chunk_size fix --
         # invisible in `status --verbose`.
         errors = [reason or fallback for reason, fallback in zip(reasons, fallback_messages)]
-        outcome = plan_embed_outcome(claimed, embeddings, errors)
         try:
             with self.Session() as session:
+                # Chunks deleted while the request was in flight (a re-index or
+                # a removed file) would fail the vector table's foreign key and
+                # roll the whole batch back. Share-lock the survivors so none
+                # can be deleted before this transaction commits.
+                live = set(
+                    session.scalars(
+                        select(Chunk.id)
+                        .where(Chunk.id.in_([chunk_id for chunk_id, _ in claimed]))
+                        .with_for_update(read=True)
+                    )
+                )
+                outcome = plan_embed_outcome(claimed, embeddings, errors, live)
                 if outcome.done:
                     conn = session.connection()
                     ensure_vector_table_schema(conn, profile_id, embedding_dim)
@@ -1195,10 +1212,7 @@ class PipelineWorker:
                         extractor_profile_id=extractor_profile_id,
                         chunk_profile_id=chunk_profile_id,
                     )
-                for chunk_id, _ in outcome.done:
-                    self._stamp_embedding(session, chunk_id, profile_id, "done", None)
-                for chunk_id, message in outcome.failed.items():
-                    self._stamp_embedding(session, chunk_id, profile_id, "failed", message)
+                self._write_embed_outcome(session, profile_id, outcome)
                 session.commit()
         except Exception:
             self._release_claimed_embeddings([chunk_id for chunk_id, _ in claimed], profile_id)
@@ -1207,17 +1221,26 @@ class PipelineWorker:
         return True
 
     @staticmethod
-    def _stamp_embedding(
-        session: Session, chunk_id: int, profile_id: int, status: str, error: str | None
-    ) -> None:
-        row = (
-            session.query(ChunkEmbedding)
-            .filter_by(chunk_id=chunk_id, embedding_profile_id=profile_id)
-            .first()
-        )
-        if row is not None:
-            row.status = status
-            row.error_message = error
+    def _write_embed_outcome(session: Session, profile_id: int, outcome: EmbedOutcome) -> None:
+        """Stamp a batch's rows terminal: one UPDATE per outcome, not per row."""
+        scope = [ChunkEmbedding.embedding_profile_id == profile_id]
+        if outcome.done:
+            session.execute(
+                update(ChunkEmbedding)
+                .where(ChunkEmbedding.chunk_id.in_([chunk_id for chunk_id, _ in outcome.done]))
+                .where(*scope)
+                .values(status="done", error_message=None)
+            )
+        if outcome.failed:
+            session.execute(
+                update(ChunkEmbedding)
+                .where(ChunkEmbedding.chunk_id.in_(list(outcome.failed)))
+                .where(*scope)
+                .values(
+                    status="failed",
+                    error_message=case(outcome.failed, value=ChunkEmbedding.chunk_id),
+                )
+            )
 
     def _read_search_lease(self) -> datetime | None:
         """When an interactive search last ran, normalised to aware UTC."""

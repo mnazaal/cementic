@@ -39,7 +39,7 @@ from cementic.pipeline_worker import (
 from cementic.revisions import promote_revision, requeue_interrupted_artifacts
 from cementic.source_watcher import SourceWatcher
 from cementic.status_service import WorkerStatus
-from cementic.vector_store import index_access_method, vector_index_name
+from cementic.vector_store import index_access_method, vector_index_name, vector_table_name
 from tests.integration.pg_helpers import cleanup_pg_tables
 
 
@@ -1591,3 +1591,56 @@ class TestChunksLostToADeletedAndRestoredFile:
             chunks_after = session.query(Chunk).count()
 
         assert chunks_after == chunks_before, "the file came back but was never re-chunked"
+
+
+class TestChunkDeletedWhileEmbedding:
+    @pytest.mark.pg
+    def test_a_chunk_deleted_mid_request_is_dropped_not_fatal(
+        self, pg_setup, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A re-index deleting a claimed chunk must not roll the batch back.
+
+        Regression: the vector upsert named every claimed chunk, so one chunk
+        deleted while the provider call was in flight violated the vector
+        table's foreign key, and the whole batch -- and every later attempt at
+        it -- failed. The vanished chunk is dropped; the rest are stored.
+        """
+        config, session_factory, pdf_fixtures_dir = pg_setup
+        collection = "test_vanished_chunk"
+
+        pipeline, source_watcher = _setup_worker(config, session_factory, collection, monkeypatch)
+        source_watcher._register_document(str(pdf_fixtures_dir / "test_doc_a.pdf"))
+        revision_id = pipeline._ensure_target_revision()
+        pipeline._step_extract(revision_id)
+        pipeline._step_chunk(revision_id)
+        with session_factory() as session:
+            chunk_ids = [row.id for row in session.query(Chunk).order_by(Chunk.id)]
+        assert len(chunk_ids) >= 2
+        vanished = chunk_ids[0]
+
+        class DeletesAChunkMidRequest(FakeEmbeddingClient):
+            def embed_batch(self, texts: list[str]) -> list[list[float] | None]:
+                with session_factory() as session:
+                    session.query(Chunk).filter_by(id=vanished).delete()
+                    session.commit()
+                return super().embed_batch(texts)
+
+        pipeline.embedding_client = DeletesAChunkMidRequest()
+
+        assert pipeline._step_embed(revision_id) is True
+
+        with session_factory() as session:
+            profile_id = session.get(PipelineRevision, revision_id).embedding_profile_id
+            stored = {
+                row[0]
+                for row in session.execute(
+                    text(f"SELECT chunk_id FROM {vector_table_name(profile_id)}")
+                )
+            }
+            statuses = {
+                row.chunk_id: row.status
+                for row in session.query(ChunkEmbedding).filter_by(embedding_profile_id=profile_id)
+            }
+        assert vanished not in stored
+        assert stored == set(chunk_ids) - {vanished}
+        assert set(statuses.values()) == {"done"}

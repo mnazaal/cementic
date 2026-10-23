@@ -1994,6 +1994,79 @@ class TestPlanEmbedOutcome:
         self, results, expected_done, expected_failed
     ) -> None:
         claimed = [(10, "a"), (11, "b")][: len(results)]
-        outcome = plan_embed_outcome(claimed, results, ["e0", "e1"][: len(results)])
+        outcome = plan_embed_outcome(claimed, results, ["e0", "e1"][: len(results)], {10, 11})
         assert outcome.done == expected_done
         assert outcome.failed == expected_failed
+
+    @pytest.mark.parametrize(
+        ("live", "expected_done", "expected_failed"),
+        [
+            ({10, 11}, [(10, [1.0])], {11: "e1"}),
+            ({11}, [], {11: "e1"}),
+            ({10}, [(10, [1.0])], {}),
+            (set(), [], {}),
+        ],
+    )
+    def test_drops_chunks_deleted_while_the_request_was_in_flight(
+        self, live, expected_done, expected_failed
+    ) -> None:
+        outcome = plan_embed_outcome([(10, "a"), (11, "b")], [[1.0], None], ["e0", "e1"], live)
+        assert outcome.done == expected_done
+        assert outcome.failed == expected_failed
+
+
+class _EveryOtherFailsClient:
+    """Embeds the even-numbered texts and returns None for the odd ones."""
+
+    def format_document(self, text: str) -> str:
+        return text
+
+    def embed_batch(self, texts: list[str]) -> list[list[float] | None]:
+        return [[1.0, 0.0] if index % 2 == 0 else None for index in range(len(texts))]
+
+
+class TestEmbedWriteBackStatementCount:
+    def test_a_32_chunk_batch_is_written_back_in_a_constant_number_of_statements(
+        self, temp_dir: Path, monkeypatch
+    ) -> None:
+        """Measured before the change at 64 write-back statements (32 chunks):
+        a SELECT and an UPDATE per row.
+
+        The count is taken from the vector upsert (stubbed; Postgres-only) to
+        the end of the step, so it is the write-back alone.
+        """
+        import cementic.pipeline_worker as worker_module
+
+        statements: list[str] = []
+        upsert_at: list[int] = []
+
+        def fake_upsert(*args, **kwargs) -> None:
+            upsert_at.append(len(statements))
+
+        monkeypatch.setattr(worker_module, "ensure_vector_table_schema", lambda *a, **k: None)
+        monkeypatch.setattr(worker_module, "upsert_vectors", fake_upsert)
+        engine = create_engine("sqlite:///:memory:")
+        Base.metadata.create_all(engine)
+        session_factory = sessionmaker(bind=engine, expire_on_commit=False)
+        with session_factory() as session:
+            revision_id = _seed_embedding_batch(session, n_chunks=32)
+        event.listen(
+            engine,
+            "before_cursor_execute",
+            lambda conn, cursor, statement, *a, **k: statements.append(statement),
+        )
+
+        config = Config()
+        config.pipeline_worker.log_file = temp_dir / "worker.log"
+        config.pipeline_worker.batch_size = 32
+        worker = PipelineWorker(config)
+        worker.Session = session_factory
+        worker.embedding_client = _EveryOtherFailsClient()
+
+        assert worker._step_embed(revision_id) is True
+
+        write_back = len(statements) - upsert_at[0]
+        with session_factory() as session:
+            rows = session.query(ChunkEmbedding).order_by(ChunkEmbedding.chunk_id).all()
+        assert [row.status for row in rows] == ["done", "failed"] * 16
+        assert write_back == 2
