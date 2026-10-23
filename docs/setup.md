@@ -74,7 +74,10 @@ Postgres directory includes an optional Podman Quadlet user service at
 the one-time install steps. With `loginctl enable-linger $USER`, that service
 can survive logout and reboot.
 
-For long indexing jobs, use the user systemd units in
-[`packaging/systemd/`](../packaging/systemd/). They manage the embedding server,
-per-collection watcher and worker, and server-health restart timer. Do not run
-those units alongside `cementic start`; each collection permits only one worker.
+For long indexing jobs, use the user systemd unit
+[`packaging/systemd/cementic@.service`](../packaging/systemd/cementic@.service).
+One instance per collection runs the watcher, the pipeline worker and an
+embedding-server health check, and restarts all three together. It needs
+`llama_cpp.daemon_autostart = true` and a checkout with a built `.venv`; the
+install steps are in the unit's header. Do not run it alongside `cementic start`;
+each collection permits only one worker.

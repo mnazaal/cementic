@@ -35,12 +35,13 @@ permanent failures.
 ## Long-running indexing
 
 For a multi-day import, run the watcher and worker under your platform's service
-manager so they restart after logout or reboot. The repository includes systemd
-user-unit templates in [`packaging/systemd/`](../packaging/systemd/) as a Linux
-example; other init systems should supervise the equivalent embedding server,
-watcher, and pipeline-worker processes.
+manager so they restart after logout or reboot. The repository includes a
+systemd user unit, [`packaging/systemd/cementic@.service`](../packaging/systemd/cementic@.service),
+which runs `cementic run watcher` and `cementic run worker` plus an
+embedding-server health check; other init systems should supervise the
+equivalent foreground processes.
 
-Use either those service units or `cementic start`, not both for the same
+Use either that service unit or `cementic start`, not both for the same
 collection.
 
 ## Machine-readable output
