@@ -693,6 +693,8 @@ class TestSearchCommand:
         # the collection check it is about.
         with (
             patch("cementic.collections.collection_exists", return_value=False),
+            # `status --json` checks through status_service's own binding.
+            patch("cementic.status_service.collection_exists", return_value=False),
             patch("cementic.cli.check_health", return_value=_healthy_health()),
         ):
             result = runner.invoke(app, argv)
@@ -713,7 +715,7 @@ class TestSearchCommand:
         mock_session.__exit__.return_value = False
         mock_get_session_factory.return_value = lambda: mock_session
 
-        with patch("cementic.collections.collection_exists", return_value=False):
+        with patch("cementic.status_service.collection_exists", return_value=False):
             result = runner.invoke(app, ["status", "-c", "nosuch", "--json"])
 
         assert result.exit_code == 1
