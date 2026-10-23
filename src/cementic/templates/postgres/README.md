@@ -53,6 +53,21 @@ If you change these values, set the matching `CEMENTIC_DB_*` environment
 variables before running cementic, or put the equivalent values in your cementic
 config file.
 
+## Shared machines
+
+The default role is the Postgres superuser `cementic` with password `cementic`,
+reachable by any local user through `127.0.0.1:5432`. On a machine others log in
+to, change the password once the container is running:
+
+```bash
+docker compose exec postgres psql -U cementic -c "ALTER ROLE cementic WITH PASSWORD 'a-long-secret'"
+# or: podman compose exec postgres psql -U cementic -c "ALTER ROLE cementic WITH PASSWORD 'a-long-secret'"
+```
+
+Then set the same `CEMENTIC_DB_PASSWORD` for cementic. `POSTGRES_PASSWORD` only
+takes effect when the data volume is first created, so editing `.env` does not
+change an existing database.
+
 ## Optional Podman Quadlet service
 
 The `quadlet/cementic-postgres.container` file is an optional user-systemd setup

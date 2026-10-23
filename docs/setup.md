@@ -43,6 +43,20 @@ The generated Compose service binds only to `127.0.0.1:5432` and uses the
 `CEMENTIC_DB_*` defaults. Its `restart: unless-stopped` policy means you do not
 need to run Compose before every cementic command.
 
+**Shared machine.** The default role is the Postgres superuser
+`cementic` with password `cementic`, reachable by any local user through
+`127.0.0.1:5432`. On a machine others log in to, change the password once the
+container is running:
+
+```bash
+docker compose exec postgres psql -U cementic -c "ALTER ROLE cementic WITH PASSWORD 'a-long-secret'"
+# or: podman compose exec postgres psql -U cementic -c "ALTER ROLE cementic WITH PASSWORD 'a-long-secret'"
+```
+
+Then set the same `CEMENTIC_DB_PASSWORD` for cementic (environment variable or
+config file). `POSTGRES_PASSWORD` in `.env` only takes effect when the data
+volume is first created, so it does not change an existing database.
+
 To use your own Postgres, set `CEMENTIC_DB_URL` or the individual
 `CEMENTIC_DB_*` values. The database must provide both required extensions.
 
