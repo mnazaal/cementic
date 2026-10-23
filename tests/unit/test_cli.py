@@ -2168,7 +2168,7 @@ class TestStatusSurfacesWorkerErrors:
             patch("cementic.cli._load_supervisor_state") as mock_state,
             patch("cementic.db.get_engine"),
             patch("cementic.db.get_session_factory"),
-            patch("cementic.collections.list_collections", return_value=[]),
+            patch("cementic.status_service.list_collections", return_value=[]),
             patch("cementic.status_service.load_pipeline_status_bulk", return_value={}),
         ):
             mock_state.return_value = {"collection": "c", "directories": [], "processes": []}
@@ -2363,7 +2363,7 @@ class TestStatusEdgeCases:
             assert "health:" not in result.stdout
             assert "unknown (health check failed)" in result.stdout
 
-    @patch("cementic.collections.list_collections", return_value=[])
+    @patch("cementic.status_service.list_collections", return_value=[])
     def test_status_json_output(self, mock_list_collections):
         """Status with --json prints JSON output."""
         with patch("cementic.status_service.load_worker_statuses") as mock_load:
@@ -2430,7 +2430,7 @@ class TestStatusEdgeCases:
                                 assert parsed["source_watcher"]["current_file"] is None
                                 assert parsed["pipeline_worker"]["current_file"] is None
 
-    @patch("cementic.collections.list_collections", return_value=[])
+    @patch("cementic.status_service.list_collections", return_value=[])
     def test_status_json_output_survives_piping_with_long_paths(self, mock_list_collections):
         """A long path must not be hard-wrapped by rich, which would break JSON parsing."""
         long_path = "/a" + "/very-long-directory-segment" * 10

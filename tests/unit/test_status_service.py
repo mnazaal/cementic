@@ -34,6 +34,7 @@ from cementic.status_service import (
     load_file_progress,
     load_pipeline_status,
     load_pipeline_status_bulk,
+    load_status_data,
     load_worker_statuses,
 )
 
@@ -1228,3 +1229,26 @@ class TestFileProgressLimit:
 
         assert files[0].source_path == "/col/zzz-untouched.pdf"
         assert files[0].extraction_status == "pending"
+
+
+def test_load_status_data_maps_every_listed_collection_in_listing_order() -> None:
+    """`status --json` without -c reports each listed collection's pipeline."""
+    rows = [MagicMock(), MagicMock()]
+    rows[0].name, rows[1].name = "work", "notes"
+    status = {name: MagicMock(spec=PipelineStatus) for name in ("notes", "work")}
+
+    with (
+        patch("cementic.status_service.list_collections", return_value=rows) as listed,
+        patch(
+            "cementic.status_service.load_pipeline_status_bulk", return_value=status
+        ) as bulk,
+    ):
+        data = load_status_data(MagicMock(), Config(), None)
+
+    listed.assert_called_once()
+    bulk.assert_called_once()
+    assert bulk.call_args.args[1] == ["work", "notes"]
+    assert data.collections is not None
+    assert list(data.collections) == ["work", "notes"]
+    assert data.collections["notes"] is status["notes"]
+    assert data.pipeline is None
