@@ -429,9 +429,9 @@ def _over_budget_reasons(
 ) -> list[str | None]:
     """Per-text explanations for the embeddings that came back None.
 
-    Pure bookkeeping around a provider call that may do network I/O, so it runs
-    outside the database transaction that stamps the rows. A provider that
-    cannot answer (unreachable daemon) yields None for that text: the row is
+    Not pure: ``over_budget_reason`` may make an HTTP call to the embedding
+    server, so this runs outside the database transaction that stamps the rows.
+    A provider that cannot answer (unreachable daemon) yields None for that text: the row is
     still stamped terminal with the generic message, which is strictly better
     than losing the stamp to an exception.
     """
@@ -894,6 +894,7 @@ class PipelineWorker:
             extracted_id = extracted.id
             chunked_id = chunked.id
             extracted_path = extracted.artifact_path
+            content_hash = extracted.content_hash
 
         if extracted_path is None:
             with self.Session() as session:
@@ -901,7 +902,7 @@ class PipelineWorker:
                 if chunked is not None:
                     # Record the source hash so the failure is counted by the
                     # hash-scoped revision counts (else the build never settles).
-                    chunked.source_content_hash = extracted.content_hash
+                    chunked.source_content_hash = content_hash
                     chunked.status = "failed"
                     chunked.error_message = "Missing extracted artifact path"
                     chunked.attempts = 0
@@ -960,7 +961,7 @@ class PipelineWorker:
                 error,
                 "chunk",
                 scope_hash_field="source_content_hash",
-                scope_hash=extracted.content_hash,
+                scope_hash=content_hash,
             )
 
         self.state_manager.update(current_file=None)
