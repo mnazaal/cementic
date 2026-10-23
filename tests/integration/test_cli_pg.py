@@ -134,7 +134,7 @@ def test_pg_cli_status_verbose_reports_real_collection(
         "cementic.status_service.load_worker_statuses",
         lambda config: (_stopped_worker(), _stopped_worker()),
     )
-    monkeypatch.setattr("cementic.cli._load_supervisor_state", lambda: {"processes": []})
+    monkeypatch.setattr("cementic.cli.read_supervisor_state", lambda: {"processes": []})
 
     with _QueryCounter() as counter:
         result = runner.invoke(app, ["status", "--verbose", "-c", "cli-status"])

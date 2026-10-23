@@ -43,7 +43,7 @@ err_console = Console(stderr=True, soft_wrap=True)
 _config: Config | None = None
 
 
-def _get_config() -> Config:
+def cli_config() -> Config:
     """Lazy-load the config singleton, reporting config problems in one line.
 
     Every command routes through here, so this is where a broken config stops
@@ -72,7 +72,7 @@ def _get_config() -> Config:
 
 
 @contextmanager
-def _db_session() -> Iterator[Any]:
+def db_session() -> Iterator[Any]:
     """One ORM session against the configured database.
 
     The engine/session-factory ritual around every database command appeared
@@ -81,13 +81,13 @@ def _db_session() -> Iterator[Any]:
     """
     from cementic.db import get_engine, get_session_factory
 
-    engine = get_engine(_get_config().database.url)
+    engine = get_engine(cli_config().database.url)
     session_factory = get_session_factory(engine)
     with session_factory() as session:
         yield session
 
 
-def _validated_collection_name(collection: str) -> str:
+def validated_collection_name(collection: str) -> str:
     """validate_collection_name, rendered as a CLI error instead of a raise.
 
     The five-line try/except around it used to appear at every command that
@@ -103,44 +103,44 @@ def _validated_collection_name(collection: str) -> str:
         raise typer.Exit(2)
 
 
-def _get_data_dir() -> Path:
+def get_data_dir() -> Path:
     """Return cementic data directory path."""
-    state_path = _get_config().source_watcher.state_path or _get_config().pipeline_worker.state_path
+    state_path = cli_config().source_watcher.state_path or cli_config().pipeline_worker.state_path
     if state_path is None:
         raise RuntimeError("State path is not configured")
     return state_path.parent
 
 
-def _get_supervisor_state_path() -> Path:
+def get_supervisor_state_path() -> Path:
     """Lazy supervisor state path."""
-    return _get_data_dir() / "supervisor.json"
+    return get_data_dir() / "supervisor.json"
 
 
-def _load_supervisor_state() -> SupervisorState:
-    return load_supervisor_state(_get_supervisor_state_path())
+def read_supervisor_state() -> SupervisorState:
+    return load_supervisor_state(get_supervisor_state_path())
 
 
-def _supervisor_processes(state: SupervisorState) -> list[dict[str, object]]:
+def supervisor_processes(state: SupervisorState) -> list[dict[str, object]]:
     processes = state.get("processes", [])
     if not isinstance(processes, list):
         return []
     return [proc for proc in processes if isinstance(proc, dict)]
 
 
-def _is_managed_proc_alive(process: dict[str, object]) -> bool:
+def is_managed_proc_alive(process: dict[str, object]) -> bool:
     return is_managed_process_alive(
         managed_process_pid(process), managed_process_start_token(process)
     )
 
 
-def _is_database_unavailable(error: Exception) -> bool:
+def is_database_unavailable(error: Exception) -> bool:
     """Return whether the error indicates an unreachable database."""
     from sqlalchemy.exc import InterfaceError, OperationalError
 
     return isinstance(error, (OperationalError, InterfaceError))
 
 
-def _is_schema_missing(error: Exception) -> bool:
+def is_schema_missing(error: Exception) -> bool:
     """Return whether the error means cementic's tables don't exist yet.
 
     The schema is created by the pipeline worker on first `cementic start`, so a
@@ -151,15 +151,15 @@ def _is_schema_missing(error: Exception) -> bool:
     return isinstance(error, ProgrammingError) and "does not exist" in str(error.orig)
 
 
-_NO_SCHEMA_HINT = "nothing indexed yet — run `cementic start DIRECTORY -c COLLECTION` first"
+NO_SCHEMA_HINT = "nothing indexed yet — run `cementic start DIRECTORY -c COLLECTION` first"
 
-_DB_HINT = (
+DB_HINT = (
     "hint: run `cementic init postgres ./cementic-postgres` once and follow its README, "
     "or set CEMENTIC_DB_URL to an existing Postgres with pgvector and pgvectorscale"
 )
 
 
-def _require_known_collection(session: Any, collection: str) -> None:
+def require_known_collection(session: Any, collection: str) -> None:
     """Exit 1 with a clear message when a named collection does not exist.
 
     "Does not exist" and "exists but has nothing to show" used to be
@@ -176,18 +176,18 @@ def _require_known_collection(session: Any, collection: str) -> None:
     raise typer.Exit(1)
 
 
-def _report_db_error(error: Exception, action: str) -> None:
+def report_db_error(error: Exception, action: str) -> None:
     """Print the right message for a failed database operation."""
-    if _is_database_unavailable(error):
-        render._print_database_unavailable(action, _DB_HINT)
-    elif _is_schema_missing(error):
-        err_console.print(_NO_SCHEMA_HINT)
+    if is_database_unavailable(error):
+        render.print_database_unavailable(action, DB_HINT)
+    elif is_schema_missing(error):
+        err_console.print(NO_SCHEMA_HINT)
     else:
         err_console.print(f"{action} failed: {error}")
 
 
 @contextmanager
-def _reporting_db_errors(action: str) -> Iterator[None]:
+def reporting_db_errors(action: str) -> Iterator[None]:
     """Report a failed database operation the same way at every call site.
 
     A context manager, not a decorator: several call sites do work before and
@@ -204,5 +204,5 @@ def _reporting_db_errors(action: str) -> Iterator[None]:
     except typer.Exit:
         raise
     except Exception as error:
-        _report_db_error(error, action)
+        report_db_error(error, action)
         raise typer.Exit(1)

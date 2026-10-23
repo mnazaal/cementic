@@ -399,7 +399,7 @@ def interrupted_claims_message(attempts: int) -> str:
     )
 
 
-def _purge_all_chunks(session: Session, extracted_document_id: int) -> None:
+def purge_all_chunks(session: Session, extracted_document_id: int) -> None:
     """Drop every chunk of a document whose current content is unknown.
 
     Used when re-extraction *failed*: the file on disk changed (its hash is what
@@ -484,7 +484,7 @@ def requeue_interrupted_artifacts(
                 # The claim stamped the new file's hash, but the chunks still
                 # hold the previous version's text: the same stale-content
                 # case a failed re-extraction purges at write-back.
-                _purge_all_chunks(session, row.id)
+                purge_all_chunks(session, row.id)
         session.flush()
         session.query(model).filter(
             *scope,

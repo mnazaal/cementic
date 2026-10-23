@@ -44,7 +44,7 @@ def _summary(health: SimpleNamespace, *, autostart: bool = True) -> str:
     config = Config()
     config.llama_cpp.daemon_autostart = autostart
     with render.console.capture() as captured:
-        render._print_status_summary("test", [], _worker(), _worker(), health, False, config)
+        render.print_status_summary("test", [], _worker(), _worker(), health, False, config)
     return captured.get()
 
 

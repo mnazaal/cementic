@@ -339,7 +339,7 @@ def _purge_document_chunks(session: Session, document_ids: list[int]) -> None:
     unsearchable for good, while ``chunked_scope`` still counts it done and
     ``cementic status`` reads 100%. Clearing the hash re-opens the work, and
     keeps the row out of ``chunked_done`` until it is genuinely re-chunked --
-    the same repair ``_purge_all_chunks`` makes for the re-extraction path.
+    the same repair ``purge_all_chunks`` makes for the re-extraction path.
     Measured on the live corpus 2026-09-09: 18,101 of 46,139 papers stranded
     this way, 1.8M chunks' worth, none of them reported by anything.
     """

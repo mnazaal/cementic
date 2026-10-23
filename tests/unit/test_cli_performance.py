@@ -5,7 +5,7 @@ for two distinct properties, and each conversion below targets the one that
 applied:
 
 - Help-only/eager-exit paths (namespace help, root `--help`, `--version`) must
-  never reach `_get_config()` -- every slow external call in `cli.py` (DB
+  never reach `cli_config()` -- every slow external call in `cli.py` (DB
   engine, health probe, embedding provider) is downstream of it, so "never
   called" is a direct, machine-load-independent proxy for "never touches a
   slow external service" (see the docstrings this file used to carry).
@@ -84,12 +84,12 @@ def test_cli_import_does_not_pull_in_the_database_or_http_layers() -> None:
     assert loaded == "", f"cementic.cli eagerly imported: {loaded}"
 
 
-@patch("cementic.cli._get_config", side_effect=AssertionError("_get_config must not be called"))
+@patch("cementic.cli.cli_config", side_effect=AssertionError("cli_config must not be called"))
 def test_namespace_help_commands_never_load_config(mock_get_config: MagicMock) -> None:
     """Help-only commands should never touch slow external services.
 
     Every slow call in `cli.py` (DB engine, health probe, embedding provider)
-    is reached through `_get_config()`, so asserting it was never called is a
+    is reached through `cli_config()`, so asserting it was never called is a
     direct proxy for "never touches a slow external service".
     """
     for args in (["collection"], ["start"], ["search"]):
@@ -98,7 +98,7 @@ def test_namespace_help_commands_never_load_config(mock_get_config: MagicMock) -
     assert mock_get_config.call_count == 0
 
 
-@patch("cementic.cli._get_config", side_effect=AssertionError("_get_config must not be called"))
+@patch("cementic.cli.cli_config", side_effect=AssertionError("cli_config must not be called"))
 def test_root_help_never_loads_config(mock_get_config: MagicMock) -> None:
     """Root help must not touch slow external services."""
     result = runner.invoke(app, ["--help"])
@@ -107,7 +107,7 @@ def test_root_help_never_loads_config(mock_get_config: MagicMock) -> None:
     assert mock_get_config.call_count == 0
 
 
-@patch("cementic.cli._get_config", side_effect=AssertionError("_get_config must not be called"))
+@patch("cementic.cli.cli_config", side_effect=AssertionError("cli_config must not be called"))
 @patch("cementic.cli._get_cli_version", return_value="0.1.0")
 def test_version_never_loads_config(mock_version: MagicMock, mock_get_config: MagicMock) -> None:
     """`--version` is an eager exit and must not touch slow external services."""
@@ -148,7 +148,7 @@ def test_search_command_calls_backend_search_exactly_once(mock_searcher_class: M
     ),
 )
 @patch("cementic.status_service.load_worker_statuses")
-@patch("cementic.cli._load_supervisor_state", return_value={"processes": [], "directories": []})
+@patch("cementic.cli.read_supervisor_state", return_value={"processes": [], "directories": []})
 @patch("cementic.status_service.build_supervisor_status")
 def test_status_command_probes_health_and_workers_exactly_once(
     mock_build: MagicMock,
@@ -217,7 +217,7 @@ def test_collection_list_queries_backend_exactly_once(
     assert mock_collections.call_count == 1
 
 
-@patch("cementic.cli._load_supervisor_state", return_value={"processes": []})
+@patch("cementic.cli.read_supervisor_state", return_value={"processes": []})
 def test_stop_does_not_wait_when_no_processes_exist(mock_state: MagicMock) -> None:
     """Stop should not wait (poll/sleep) when no processes exist."""
     output = _invoke_ok(["stop"])

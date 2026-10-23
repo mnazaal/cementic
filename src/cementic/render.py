@@ -1,6 +1,6 @@
 """Rendering `cementic status`, `cementic doctor`, and `--json` output.
 
-Split out of cli.py. `_print_status_summary` and `_print_collection_detail`
+Split out of cli.py. `print_status_summary` and `print_collection_detail`
 used to reach for the config singleton themselves, and `_print_status_json`
 opened its own database session and ran queries -- a command implementation
 wearing a printer's name. Moving them here forces those dependencies into
@@ -56,13 +56,13 @@ def table_lines(
     ]
 
 
-def _print_database_unavailable(action: str, hint: str) -> None:
+def print_database_unavailable(action: str, hint: str) -> None:
     """Print a concise database-unavailable message with a recovery hint."""
     err_console.print(f"{action}: database not reachable")
     err_console.print(hint)
 
 
-def _print_doctor_report(report: dict[str, Any]) -> None:
+def print_doctor_report(report: dict[str, Any]) -> None:
     """Print read-only doctor diagnostics in a compact human format."""
     doctor_status = "[green]ok[/green]" if report["ok"] else "[red]failed[/red]"
     console.print(f"cementic doctor: {doctor_status}")
@@ -86,7 +86,7 @@ def _print_doctor_report(report: dict[str, Any]) -> None:
         console.print(f"{name}: {status_text}" + (f" — {message}" if message else ""))
 
 
-def _print_status_summary(
+def print_status_summary(
     supervisor_collection: str,
     directories: list[str],
     source_watcher_status: Any,
@@ -200,7 +200,7 @@ def _print_status_summary(
         console.print(f"embedding daemon: {health.llama_daemon}")
 
 
-def _in_flight_revision_text(ready_label: str | None, building_label: str | None) -> str:
+def in_flight_revision_text(ready_label: str | None, building_label: str | None) -> str:
     """Render the not-yet-active revision under the status it is actually in.
 
     (Both summary builders used to bucket ready and building together, so a
@@ -215,8 +215,8 @@ def _in_flight_revision_text(ready_label: str | None, building_label: str | None
     return f"building={escape(building_label) if building_label else '-'}"
 
 
-def _print_collection_detail(collection: str, pipeline_status: Any) -> None:
-    """Print a concise per-collection summary; `_print_file_progress` adds per-file detail."""
+def print_collection_detail(collection: str, pipeline_status: Any) -> None:
+    """Print a concise per-collection summary; `print_file_progress` adds per-file detail."""
     ps = pipeline_status
     console.print(f"{'collection':<11} {collection}")
     console.print(f"{'documents':<11} {ps.documents:,}")
@@ -249,7 +249,7 @@ def _print_collection_detail(collection: str, pipeline_status: Any) -> None:
     )
     console.print(
         f"{'revision':<11} active={ps.active_revision_label or '-'}  "
-        f"{_in_flight_revision_text(ps.ready_revision_label, ps.building_revision_label)}"
+        f"{in_flight_revision_text(ps.ready_revision_label, ps.building_revision_label)}"
     )
     if ps.ready_revision_label:
         console.print(
@@ -266,7 +266,7 @@ def _print_collection_detail(collection: str, pipeline_status: Any) -> None:
         console.print(f"{'failures':<11} {', '.join(failures)}")
 
 
-def _print_file_progress(files: list[Any], file_limit: int | None) -> None:
+def print_file_progress(files: list[Any], file_limit: int | None) -> None:
     """Print the --verbose per-file listing under a collection summary."""
     if not files:
         console.print("files: none")

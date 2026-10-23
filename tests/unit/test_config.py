@@ -26,7 +26,7 @@ from cementic.config_diagnostics import (
     config_path_error,
     format_config_error,
 )
-from cementic.embedding_runtime import _TOKEN_RATIO_UPPER_BOUND
+from cementic.embedding_runtime import TOKEN_RATIO_UPPER_BOUND
 from cementic.embedding_text import format_document_text_for_model
 from cementic.index_strategies import supported_index_methods
 from cementic.storage import extracted_document_path
@@ -325,7 +325,7 @@ class TestConfig:
         formatted = format_document_text_for_model(chunk, config.llama_cpp.model_path)
         counted = len(encoding.encode(formatted))
 
-        worst_case_model_tokens = counted * _TOKEN_RATIO_UPPER_BOUND
+        worst_case_model_tokens = counted * TOKEN_RATIO_UPPER_BOUND
         assert worst_case_model_tokens <= config.llama_cpp.n_ctx, (
             f"a full chunk formats to {counted} {TOKENIZER} tokens, which can reach "
             f"{worst_case_model_tokens:.0f} model tokens against n_ctx="

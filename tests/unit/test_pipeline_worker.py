@@ -28,12 +28,12 @@ from cementic.pipeline_worker import (
     PipelineWorker,
     _over_budget_reasons,
     _pipeline_worker_lock_key,
-    _purge_all_chunks,
     _purge_superseded_chunks,
     _try_acquire_pipeline_worker_lock,
     embed_submit_size,
     is_retryable_embed_error,
     plan_embed_outcome,
+    purge_all_chunks,
     revision_is_complete,
     should_yield_to_search,
 )
@@ -1819,7 +1819,7 @@ class TestSupersededChunksArePurged:
         session = sessionmaker(bind=engine, expire_on_commit=False)()
         extracted = self._seed(session, content_hash="old-hash")
 
-        _purge_all_chunks(session, extracted.id)
+        purge_all_chunks(session, extracted.id)
         session.commit()
 
         assert session.query(Chunk).count() == 0

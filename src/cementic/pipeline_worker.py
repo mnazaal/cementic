@@ -37,7 +37,6 @@ from cementic.embedding_runtime import create_provider, runtime_spec_from_config
 from cementic.extract import extract_document
 from cementic.index_strategies import index_dimension_error
 from cementic.revisions import (
-    _purge_all_chunks,
     chunk_scope,
     chunked_scope,
     claimed_attempts,
@@ -49,6 +48,7 @@ from cementic.revisions import (
     get_target_revision,
     mark_revision_ready,
     materialize_pending_embeddings,
+    purge_all_chunks,
     requeue_interrupted_artifacts,
 )
 from cementic.state import DaemonState, StateManager
@@ -782,7 +782,7 @@ class PipelineWorker:
                     # purge above cannot fire -- and skipping it left the old
                     # chunks and vectors serving the previous version of a file
                     # that no longer extracts, forever.
-                    _purge_all_chunks(session, extracted.id)
+                    purge_all_chunks(session, extracted.id)
             session.commit()
 
     def _fail_artifact(

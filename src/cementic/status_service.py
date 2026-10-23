@@ -678,7 +678,7 @@ def load_status_data(
     """Gather the database half of the status document.
 
     Raises ValueError for an unknown collection, mirroring
-    _require_known_collection on the human path: a typo'd name otherwise
+    require_known_collection on the human path: a typo'd name otherwise
     produced a full zero-filled pipeline block at exit 0, indistinguishable
     from a real collection not started.
     """

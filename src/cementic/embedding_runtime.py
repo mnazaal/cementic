@@ -42,18 +42,18 @@ from cementic.supervisor import (
 #: prefix* clears this bound, or the pre-filter fires on every chunk and the
 #: exact check stops being the rare path it is designed to be. The invariant is
 #: pinned by a test; see config.PipelineConfig.chunk_size.
-_TOKEN_RATIO_UPPER_BOUND = 1.45
+TOKEN_RATIO_UPPER_BOUND = 1.45
 
 #: Arithmetic allowance for the task prefix (e.g. "search_document: ") the
 #: client prepends before embedding, in ``chunk.TOKENIZER`` tokens. The real
 #: prefix is 3-4 tokens; 8 keeps the config-time invariant conservative without
 #: putting a tokenizer in the config load path.
-_TASK_PREFIX_TOKEN_ALLOWANCE = 8
+TASK_PREFIX_TOKEN_ALLOWANCE = 8
 
 #: Tokens the server needs beyond the tokenized input. `/tokenize` reports the
 #: text's own tokens; llama-server then wraps the sequence with special tokens
 #: that must also fit the window, so an input measuring exactly `n_ctx` is
-#: refused with a 500. Distinct from `_TASK_PREFIX_TOKEN_ALLOWANCE`, which
+#: refused with a 500. Distinct from `TASK_PREFIX_TOKEN_ALLOWANCE`, which
 #: models the *task prefix* for callers reasoning about unprefixed chunk_size
 #: -- by the time text reaches `over_budget_tokens` that prefix is already in
 #: it, so subtracting the allowance here would double-count.
@@ -427,7 +427,7 @@ class RemoteEmbeddingClient(EmbeddingProvider):
         # such chunks terminally failed here after chunking had passed them.
         approx = (
             len(tokenizer().encode(text, disallowed_special=()))
-            * _TOKEN_RATIO_UPPER_BOUND
+            * TOKEN_RATIO_UPPER_BOUND
         )
         if not exact and approx <= budget:
             return None

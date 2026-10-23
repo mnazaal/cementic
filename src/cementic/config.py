@@ -906,9 +906,9 @@ class Config(BaseSettings):
         if self.pipeline.embedding_provider != "llama-cpp":
             return self
         # Imported here, not at module scope: embedding_runtime imports config.
-        from cementic.embedding_runtime import _TASK_PREFIX_TOKEN_ALLOWANCE
+        from cementic.embedding_runtime import TASK_PREFIX_TOKEN_ALLOWANCE
 
-        smallest_possible = self.pipeline.chunk_size + _TASK_PREFIX_TOKEN_ALLOWANCE
+        smallest_possible = self.pipeline.chunk_size + TASK_PREFIX_TOKEN_ALLOWANCE
         if smallest_possible > self.llama_cpp.n_ctx:
             raise ValueError(
                 f"pipeline.chunk_size={self.pipeline.chunk_size} cannot fit "
@@ -916,7 +916,7 @@ class Config(BaseSettings):
                 f"task prefix is at least {smallest_possible} tokens even if the "
                 "model tokenizes as coarsely as tiktoken, so it would embed "
                 "truncated. Use chunk_size <= "
-                f"{self.llama_cpp.n_ctx - _TASK_PREFIX_TOKEN_ALLOWANCE}, or raise "
+                f"{self.llama_cpp.n_ctx - TASK_PREFIX_TOKEN_ALLOWANCE}, or raise "
                 "n_ctx only if the model's real context length allows it (the "
                 "default Nomic model caps at 512)."
             )

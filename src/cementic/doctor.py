@@ -855,15 +855,15 @@ def _chunk_budget_check(config: Config) -> dict[str, Any]:
     than blocking every command.
     """
     from cementic.embedding_runtime import (
-        _TASK_PREFIX_TOKEN_ALLOWANCE,
-        _TOKEN_RATIO_UPPER_BOUND,
+        TASK_PREFIX_TOKEN_ALLOWANCE,
+        TOKEN_RATIO_UPPER_BOUND,
     )
 
     chunk_size = config.pipeline.chunk_size
     n_ctx = config.llama_cpp.n_ctx
-    worst_case = (chunk_size + _TASK_PREFIX_TOKEN_ALLOWANCE) * _TOKEN_RATIO_UPPER_BOUND
+    worst_case = (chunk_size + TASK_PREFIX_TOKEN_ALLOWANCE) * TOKEN_RATIO_UPPER_BOUND
     fast_path = worst_case <= n_ctx
-    largest_fast = int(n_ctx / _TOKEN_RATIO_UPPER_BOUND) - _TASK_PREFIX_TOKEN_ALLOWANCE
+    largest_fast = int(n_ctx / TOKEN_RATIO_UPPER_BOUND) - TASK_PREFIX_TOKEN_ALLOWANCE
     return {
         "status": "ok" if fast_path else "warning",
         "chunk_size": chunk_size,

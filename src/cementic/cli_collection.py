@@ -7,16 +7,16 @@ import typer
 from cementic import render
 from cementic.cli_format import CementicTyper
 from cementic.cli_shared import (
-    _db_session,
-    _get_config,
-    _is_managed_proc_alive,
-    _load_supervisor_state,
-    _reporting_db_errors,
-    _require_known_collection,
-    _supervisor_processes,
-    _validated_collection_name,
+    cli_config,
     console,
+    db_session,
     err_console,
+    is_managed_proc_alive,
+    read_supervisor_state,
+    reporting_db_errors,
+    require_known_collection,
+    supervisor_processes,
+    validated_collection_name,
 )
 
 collection_app = CementicTyper(help="Inspect and manage collections")
@@ -32,18 +32,18 @@ def remove_collection(
     force: bool = typer.Option(False, "--force", help="Skip confirmation prompt"),
 ) -> None:
     """Delete all documents and chunks belonging to a collection."""
-    collection = _validated_collection_name(collection)
+    collection = validated_collection_name(collection)
 
     if not force:
         confirm = typer.confirm(f"Delete collection '{collection}' and all associated chunks?")
         if not confirm:
             raise typer.Abort()
 
-    with _reporting_db_errors(f"collection remove '{collection}'"):
+    with reporting_db_errors(f"collection remove '{collection}'"):
         from cementic.collections import delete_collection_records
         from cementic.db import get_engine, get_session_factory
 
-        engine = get_engine(_get_config().database.url)
+        engine = get_engine(cli_config().database.url)
         session_factory = get_session_factory(engine)
 
         with session_factory() as session:
@@ -64,9 +64,9 @@ def remove_collection(
     # collection; the pipeline worker notices the deleted revision and exits on
     # its next poll. Deleting is still allowed -- the rows cascade safely --
     # but silently racing the watcher is not.
-    supervisor_state = _load_supervisor_state()
+    supervisor_state = read_supervisor_state()
     if supervisor_state.get("collection") == collection and any(
-        _is_managed_proc_alive(proc) for proc in _supervisor_processes(supervisor_state)
+        is_managed_proc_alive(proc) for proc in supervisor_processes(supervisor_state)
     ):
         console.print(
             "warning: background workers are still watching this collection; "
@@ -75,7 +75,7 @@ def remove_collection(
     from cementic.collections import drop_orphan_vector_tables, remove_artifacts
 
     try:
-        unremoved = remove_artifacts(result.artifact_paths, config=_get_config())
+        unremoved = remove_artifacts(result.artifact_paths, config=cli_config())
         drop_orphan_vector_tables(engine, result.vector_profile_ids)
     except Exception as e:
         # The delete is already committed, so this is a warning about leftovers
@@ -97,8 +97,8 @@ def list_collection_command(
     """Show known collections."""
     from cementic.collections import list_collections
 
-    with _reporting_db_errors("collection list"):
-        with _db_session() as session:
+    with reporting_db_errors("collection list"):
+        with db_session() as session:
             rows = list_collections(session)
 
         if json_output:
@@ -116,7 +116,7 @@ def list_collection_command(
                 row.name,
                 f"{row.documents:,} docs",
                 f"active={row.active_revision_label or '-'}  "
-                + render._in_flight_revision_text(
+                + render.in_flight_revision_text(
                     row.ready_revision_label, row.building_revision_label
                 ),
             ]
@@ -146,13 +146,13 @@ def promote_collection(
     """
     from cementic.collections import promote_ready_revision
 
-    collection = _validated_collection_name(collection)
+    collection = validated_collection_name(collection)
 
-    with _reporting_db_errors("collection promote"):
-        with _db_session() as session:
-            _require_known_collection(session, collection)
+    with reporting_db_errors("collection promote"):
+        with db_session() as session:
+            require_known_collection(session, collection)
             outcome = promote_ready_revision(
-                session, collection, config=_get_config(), force=force
+                session, collection, config=cli_config(), force=force
             )
             # Read everything we need while the session is open. Not because
             # attributes expire on commit -- the session factory sets
@@ -273,18 +273,18 @@ def reindex_collection_command(
     """
     from cementic.collections import reindex_collection
 
-    collection = _validated_collection_name(collection)
+    collection = validated_collection_name(collection)
 
-    with _reporting_db_errors("collection reindex"):
-        with _db_session() as session:
+    with reporting_db_errors("collection reindex"):
+        with db_session() as session:
             # Before the "this can take several minutes" line, so an unknown
             # collection does not first announce work that will never start.
-            _require_known_collection(session, collection)
+            require_known_collection(session, collection)
             console.print(f"collection: {collection}")
             console.print(
                 "building the index — this can take several minutes on a large corpus"
             )
-            outcome = reindex_collection(session, collection, config=_get_config(), force=force)
+            outcome = reindex_collection(session, collection, config=cli_config(), force=force)
 
     # Only when it did work. Silence means the index was already there, and a
     # line saying so on every run is how the one run that mattered gets
@@ -326,11 +326,11 @@ def list_collection_revision_command(
     """Show revision history for one collection."""
     from cementic.collections import list_collection_revisions
 
-    collection = _validated_collection_name(collection)
+    collection = validated_collection_name(collection)
 
-    with _reporting_db_errors("collection revisions"):
-        with _db_session() as session:
-            _require_known_collection(session, collection)
+    with reporting_db_errors("collection revisions"):
+        with db_session() as session:
+            require_known_collection(session, collection)
             rows = list_collection_revisions(session, collection)
             if json_output:
                 # Built before any line is printed: the profile relationships

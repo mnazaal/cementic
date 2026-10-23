@@ -35,7 +35,7 @@ class TestRunnerCommands:
 
     def test_source_watcher_reports_a_broken_config_on_stderr(self, tmp_path, monkeypatch) -> None:
         """`_load_config` was entirely untested before it shared `render_config_error`
-        with the CLI's `_get_config` -- this is the runner-side counterpart of
+        with the CLI's `cli_config` -- this is the runner-side counterpart of
         `test_cli.py::TestErrorStreamDiscipline::test_config_error_under_json_flag_keeps_stdout_clean`.
         """
         bad = tmp_path / "cementic.toml"

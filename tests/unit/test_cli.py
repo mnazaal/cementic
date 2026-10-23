@@ -14,9 +14,9 @@ from cementic import cli as cementic_cli
 from cementic import cli_shared as cementic_cli_shared
 from cementic.cli import (
     _build_collection_filters,
-    _get_data_dir,
-    _supervisor_processes,
     app,
+    get_data_dir,
+    supervisor_processes,
 )
 from cementic.collections import PromotionOutcome, ReindexOutcome
 from cementic.config import Config, default_config_path
@@ -305,7 +305,7 @@ class TestRootHelp:
     @patch("cementic.db.get_session_factory")
     @patch("cementic.db.get_engine")
     @patch("cementic.status_service.load_worker_statuses")
-    @patch("cementic.cli._load_supervisor_state")
+    @patch("cementic.cli.read_supervisor_state")
     @patch("cementic.status_service.build_supervisor_status")
     def test_bare_status_runs_status_command(
         self,
@@ -471,9 +471,9 @@ class TestStopFallsBackToWorkerStateFiles:
         config = self._config_with_state(tmp_path, pid=4242)
 
         with (
-            patch("cementic.cli._get_config", return_value=config),
-            patch("cementic.cli._load_supervisor_state", return_value={}),
-            patch("cementic.cli._get_supervisor_state_path", return_value=tmp_path / "sup.json"),
+            patch("cementic.cli.cli_config", return_value=config),
+            patch("cementic.cli.read_supervisor_state", return_value={}),
+            patch("cementic.cli.get_supervisor_state_path", return_value=tmp_path / "sup.json"),
             patch("cementic.cli.is_managed_process_alive", return_value=True),
             patch("cementic.cli_shared.is_managed_process_alive", return_value=True),
             patch("cementic.cli.is_pid_running", return_value=False),
@@ -496,9 +496,9 @@ class TestStopFallsBackToWorkerStateFiles:
             events.append(str(text))
 
         with (
-            patch("cementic.cli._get_config", return_value=config),
-            patch("cementic.cli._load_supervisor_state", return_value={}),
-            patch("cementic.cli._get_supervisor_state_path", return_value=tmp_path / "sup.json"),
+            patch("cementic.cli.cli_config", return_value=config),
+            patch("cementic.cli.read_supervisor_state", return_value={}),
+            patch("cementic.cli.get_supervisor_state_path", return_value=tmp_path / "sup.json"),
             patch("cementic.cli.is_managed_process_alive", return_value=True),
             patch("cementic.cli_shared.is_managed_process_alive", return_value=True),
             patch("cementic.cli.is_pid_running", return_value=False),
@@ -527,9 +527,9 @@ class TestStopFallsBackToWorkerStateFiles:
         config = self._config_with_state(tmp_path, pid=4242)
 
         with (
-            patch("cementic.cli._get_config", return_value=config),
-            patch("cementic.cli._load_supervisor_state", return_value={}),
-            patch("cementic.cli._get_supervisor_state_path", return_value=tmp_path / "sup.json"),
+            patch("cementic.cli.cli_config", return_value=config),
+            patch("cementic.cli.read_supervisor_state", return_value={}),
+            patch("cementic.cli.get_supervisor_state_path", return_value=tmp_path / "sup.json"),
             patch("cementic.cli.is_managed_process_alive", return_value=False),
         ):
             result = runner.invoke(app, ["stop"])
@@ -545,9 +545,9 @@ class TestStopFallsBackToWorkerStateFiles:
         config = self._config_with_state(tmp_path, pid=4242)
 
         with (
-            patch("cementic.cli._get_config", return_value=config),
-            patch("cementic.cli._load_supervisor_state", return_value={}),
-            patch("cementic.cli._get_supervisor_state_path", return_value=tmp_path / "sup.json"),
+            patch("cementic.cli.cli_config", return_value=config),
+            patch("cementic.cli.read_supervisor_state", return_value={}),
+            patch("cementic.cli.get_supervisor_state_path", return_value=tmp_path / "sup.json"),
             patch("cementic.cli.is_managed_process_alive", return_value=True),
             patch(
                 "cementic.cli.os.kill",
@@ -963,7 +963,7 @@ class TestBackgroundCommands:
     @patch("cementic.db.get_session_factory")
     @patch("cementic.db.get_engine")
     @patch("cementic.status_service.load_worker_statuses")
-    @patch("cementic.cli._load_supervisor_state")
+    @patch("cementic.cli.read_supervisor_state")
     @patch("cementic.status_service.build_supervisor_status")
     def test_status_command_shows_global_overview(
         self,
@@ -1063,7 +1063,7 @@ class TestBackgroundCommands:
         assert "20/30 embedded (66.7%, 2 failed)" in result.output
         mock_list_collections.assert_called_once_with(mock_session)
         mock_load_pipeline_status_bulk.assert_called_once_with(
-            cementic_cli._get_config(), ["research"]
+            cementic_cli.cli_config(), ["research"]
         )
 
     @patch("cementic.cli._llama_daemon_runtime_status", return_value="running, pid=333")
@@ -1073,7 +1073,7 @@ class TestBackgroundCommands:
     @patch("cementic.db.get_session_factory")
     @patch("cementic.db.get_engine")
     @patch("cementic.status_service.load_worker_statuses")
-    @patch("cementic.cli._load_supervisor_state")
+    @patch("cementic.cli.read_supervisor_state")
     @patch("cementic.status_service.build_supervisor_status")
     def test_status_omits_the_failure_note_when_there_are_none(
         self,
@@ -1160,7 +1160,7 @@ class TestBackgroundCommands:
     @patch("cementic.status_service.check_health")
     @patch("cementic.status_service.load_pipeline_status")
     @patch("cementic.status_service.load_worker_statuses")
-    @patch("cementic.cli._load_supervisor_state")
+    @patch("cementic.cli.read_supervisor_state")
     @patch("cementic.status_service.build_supervisor_status")
     def test_status_command_shows_one_collection_when_requested(
         self,
@@ -1238,13 +1238,13 @@ class TestBackgroundCommands:
         # "chunks that exist so far" and the percentage is qualified.
         assert "20/30 (66.7% of chunks created so far)" in result.output
         assert "active=rev-1" in result.output
-        mock_load_pipeline_status.assert_called_once_with(cementic_cli._get_config(), "research")
+        mock_load_pipeline_status.assert_called_once_with(cementic_cli.cli_config(), "research")
 
     @patch("cementic.cli._llama_daemon_runtime_status", return_value="stopped")
     @patch("cementic.status_service.check_health")
     @patch("cementic.status_service.load_pipeline_status")
     @patch("cementic.status_service.load_worker_statuses")
-    @patch("cementic.cli._load_supervisor_state")
+    @patch("cementic.cli.read_supervisor_state")
     @patch("cementic.status_service.build_supervisor_status")
     def test_status_command_shows_dash_when_no_active_revision(
         self,
@@ -1322,7 +1322,7 @@ class TestBackgroundCommands:
     @patch("cementic.status_service.check_health")
     @patch("cementic.status_service.load_pipeline_status")
     @patch("cementic.status_service.load_worker_statuses")
-    @patch("cementic.cli._load_supervisor_state")
+    @patch("cementic.cli.read_supervisor_state")
     @patch("cementic.status_service.build_supervisor_status")
     def test_status_command_accepts_collection_short_flag(
         self,
@@ -1392,7 +1392,7 @@ class TestBackgroundCommands:
 
         assert result.exit_code == 0
         assert "research" in result.output
-        mock_load_pipeline_status.assert_called_once_with(cementic_cli._get_config(), "research")
+        mock_load_pipeline_status.assert_called_once_with(cementic_cli.cli_config(), "research")
 
     @patch("cementic.cli._wait_for_worker_startup", return_value=[])
     @patch("cementic.cli.spawn_detached")
@@ -1400,7 +1400,7 @@ class TestBackgroundCommands:
         mock_spawn.side_effect = [1111, 2222]
         mock_path = temp_dir / "supervisor.json"
 
-        with patch("cementic.cli._get_supervisor_state_path", return_value=mock_path):
+        with patch("cementic.cli.get_supervisor_state_path", return_value=mock_path):
             with patch("cementic.bootstrap.Bootstrapper") as mock_bootstrapper:
                 mock_bootstrapper.return_value.ensure_for_convert.return_value = None
                 mock_bootstrapper.return_value.ensure_for_index.return_value = None
@@ -1430,7 +1430,7 @@ class TestBackgroundCommands:
         mock_spawn.side_effect = [1111, 2222]
         mock_path = temp_dir / "supervisor.json"
 
-        with patch("cementic.cli._get_supervisor_state_path", return_value=mock_path):
+        with patch("cementic.cli.get_supervisor_state_path", return_value=mock_path):
             with patch("cementic.bootstrap.Bootstrapper") as mock_bootstrapper:
                 mock_bootstrapper.return_value.ensure_for_convert.return_value = None
                 mock_bootstrapper.return_value.ensure_for_index.return_value = None
@@ -1478,7 +1478,7 @@ class TestBackgroundCommands:
         dead = ManagedProcess("source-watcher", 1111, "/tmp/sw.log", None)
 
         with (
-            patch("cementic.cli._get_supervisor_state_path", return_value=state_path),
+            patch("cementic.cli.get_supervisor_state_path", return_value=state_path),
             patch("cementic.bootstrap.Bootstrapper"),
             patch("cementic.cli._wait_for_worker_startup", return_value=[dead]),
             patch("cementic.cli._terminate_managed") as mock_terminate,
@@ -1511,7 +1511,7 @@ class TestBackgroundCommands:
         odd_dir.mkdir()
 
         with (
-            patch("cementic.cli._get_supervisor_state_path", return_value=temp_dir / "s.json"),
+            patch("cementic.cli.get_supervisor_state_path", return_value=temp_dir / "s.json"),
             patch("cementic.bootstrap.Bootstrapper"),
         ):
             # `--` is needed at this level too, for the same reason.
@@ -1530,7 +1530,7 @@ class TestBackgroundCommands:
         mock_spawn.side_effect = [1111, 2222]
         mock_path = temp_dir / "supervisor.json"
 
-        with patch("cementic.cli._get_supervisor_state_path", return_value=mock_path):
+        with patch("cementic.cli.get_supervisor_state_path", return_value=mock_path):
             with patch("cementic.bootstrap.Bootstrapper") as mock_bootstrapper:
                 mock_bootstrapper.return_value.ensure_for_convert.return_value = None
                 mock_bootstrapper.return_value.ensure_for_index.return_value = None
@@ -1888,9 +1888,9 @@ class TestCollectionCommands:
                 patch("cementic.collections.remove_artifacts", return_value=[]),
                 patch("cementic.collections.drop_orphan_vector_tables"),
                 patch(
-                    "cementic.cli_collection._load_supervisor_state", return_value=supervisor_state
+                    "cementic.cli_collection.read_supervisor_state", return_value=supervisor_state
                 ),
-                patch("cementic.cli_collection._is_managed_proc_alive", return_value=True),
+                patch("cementic.cli_collection.is_managed_proc_alive", return_value=True),
             ):
                 return runner.invoke(app, ["collection", "remove", "mycol", "--force"])
 
@@ -1969,9 +1969,9 @@ class TestStopCommand:
             )
         )
         with (
-            patch("cementic.cli._get_supervisor_state_path", return_value=state_path),
-            patch("cementic.cli_shared._get_supervisor_state_path", return_value=state_path),
-            patch("cementic.cli._is_managed_proc_alive", return_value=True),
+            patch("cementic.cli.get_supervisor_state_path", return_value=state_path),
+            patch("cementic.cli_shared.get_supervisor_state_path", return_value=state_path),
+            patch("cementic.cli.is_managed_proc_alive", return_value=True),
             patch("cementic.cli.os.kill"),
             patch("cementic.cli.wait_for_exit", return_value=[4321]),
             patch("cementic.cli.force_kill", return_value=[4321]),
@@ -1992,13 +1992,13 @@ class TestCliHelpers:
     """Tests for CLI helper functions."""
 
     def test_supervisor_processes_with_non_list(self):
-        """_supervisor_processes returns [] for non-list 'processes'."""
-        assert _supervisor_processes({"processes": "not_a_list"}) == []
+        """supervisor_processes returns [] for non-list 'processes'."""
+        assert supervisor_processes({"processes": "not_a_list"}) == []
 
     def test_supervisor_processes_filters_non_dict_entries(self):
-        """_supervisor_processes filters out non-dict entries in list."""
+        """supervisor_processes filters out non-dict entries in list."""
         state = {"processes": [{"name": "ok", "pid": 1}, "string", 123, None]}
-        result = _supervisor_processes(state)
+        result = supervisor_processes(state)
         assert len(result) == 1
         assert result[0]["name"] == "ok"
 
@@ -2060,7 +2060,7 @@ class TestCliHelpers:
             assert cementic_cli._llama_daemon_runtime_status() == "stopped"
 
     def test_get_data_dir_runtime_error(self):
-        """_get_data_dir raises RuntimeError when no state_path configured."""
+        """get_data_dir raises RuntimeError when no state_path configured."""
         mock_cfg = MagicMock()
         mock_sw = MagicMock()
         mock_sw.state_path = None
@@ -2070,7 +2070,7 @@ class TestCliHelpers:
         mock_cfg.pipeline_worker = mock_pw
         with patch.object(cementic_cli_shared, "_config", mock_cfg):
             try:
-                _get_data_dir()
+                get_data_dir()
             except RuntimeError:
                 pass
             else:
@@ -2212,7 +2212,7 @@ class TestStatusSurfacesWorkerErrors:
             patch("cementic.cli._llama_daemon_runtime_status", return_value="stopped"),
             patch("cementic.status_service.check_health") as mock_health,
             patch("cementic.status_service.load_worker_statuses") as mock_workers,
-            patch("cementic.cli._load_supervisor_state") as mock_state,
+            patch("cementic.cli.read_supervisor_state") as mock_state,
             patch("cementic.db.get_engine"),
             patch("cementic.db.get_session_factory"),
             patch("cementic.status_service.list_collections", return_value=[]),
@@ -2288,10 +2288,10 @@ class TestStatusRendersARealFatalStartupReason:
         # The real CLI entry point: `load_worker_statuses` is untouched, so it
         # reads the state file the worker above actually wrote.
         with (
-            patch("cementic.cli._get_config", return_value=config),
-            patch("cementic.cli._load_supervisor_state", return_value={}),
+            patch("cementic.cli.cli_config", return_value=config),
+            patch("cementic.cli.read_supervisor_state", return_value={}),
             # DB health is out of scope for this test; a raised probe still
-            # lets `_print_status_summary` (and its last-error line) run first.
+            # lets `print_status_summary` (and its last-error line) run first.
             patch("cementic.status_service.check_health", side_effect=RuntimeError("no db here")),
         ):
             result = runner.invoke(app, ["status"])
@@ -2307,7 +2307,7 @@ class TestStatusExitCodes:
     @patch("cementic.cli._llama_daemon_runtime_status", return_value="stopped")
     @patch("cementic.status_service.check_health")
     @patch("cementic.status_service.load_worker_statuses")
-    @patch("cementic.cli._load_supervisor_state")
+    @patch("cementic.cli.read_supervisor_state")
     def test_status_exits_nonzero_when_database_unreachable(
         self, mock_state, mock_workers, mock_health, mock_daemon
     ):
@@ -2343,7 +2343,7 @@ class TestStatusEdgeCases:
 
     @patch("cementic.cli._llama_daemon_runtime_status", return_value="stopped")
     @patch("cementic.status_service.load_worker_statuses")
-    @patch("cementic.cli._load_supervisor_state")
+    @patch("cementic.cli.read_supervisor_state")
     @patch("cementic.status_service.build_supervisor_status")
     @patch("cementic.collections.list_collections", return_value=[])
     @patch("cementic.db.get_session_factory")
@@ -2434,7 +2434,7 @@ class TestStatusEdgeCases:
                     failed_count=0,
                 ),
             )
-            with patch("cementic.cli._load_supervisor_state") as mock_state:
+            with patch("cementic.cli.read_supervisor_state") as mock_state:
                 mock_state.return_value = {
                     "collection": "research",
                     "directories": ["/docs"],
@@ -2502,7 +2502,7 @@ class TestStatusEdgeCases:
                     failed_count=0,
                 ),
             )
-            with patch("cementic.cli._load_supervisor_state") as mock_state:
+            with patch("cementic.cli.read_supervisor_state") as mock_state:
                 mock_state.return_value = {
                     "collection": "research",
                     "directories": [long_path],
@@ -2552,8 +2552,8 @@ class TestStartEdgeCases:
         assert "is not a directory" in result.stderr
         assert "does not exist" not in result.stderr
 
-    @patch("cementic.cli._is_managed_proc_alive", return_value=True)
-    @patch("cementic.cli._load_supervisor_state")
+    @patch("cementic.cli.is_managed_proc_alive", return_value=True)
+    @patch("cementic.cli.read_supervisor_state")
     def test_start_already_running(self, mock_load_state, mock_is_running):
         """start_background exits 1 when processes already running."""
         mock_load_state.return_value = {
@@ -2570,7 +2570,7 @@ class TestStartEdgeCases:
 
     @patch("cementic.bootstrap.Bootstrapper")
     @patch("cementic.cli.is_pid_running", return_value=False)
-    @patch("cementic.cli._load_supervisor_state")
+    @patch("cementic.cli.read_supervisor_state")
     def test_start_bootstrap_fails(self, mock_load_state, mock_is_running, mock_boot):
         """start_background exits 1 when bootstrap raises RuntimeError."""
         mock_load_state.return_value = {"collection": "", "directories": [], "processes": []}
@@ -2691,7 +2691,7 @@ class TestErrorStreamDiscipline:
         bad = tmp_path / "cementic.toml"
         bad.write_text("this is := not toml", encoding="utf-8")
         monkeypatch.setenv("CEMENTIC_CONFIG", str(bad))
-        # _get_config caches process-wide; an earlier test's good config would
+        # cli_config caches process-wide; an earlier test's good config would
         # mask the broken file this test plants.
         monkeypatch.setattr("cementic.cli_shared._config", None)
 
@@ -2736,7 +2736,7 @@ class TestErrorStreamDiscipline:
     def test_database_hint_is_one_unwrapped_stderr_line(self, mock_get_engine):
         from sqlalchemy.exc import OperationalError
 
-        from cementic.cli import _DB_HINT
+        from cementic.cli import DB_HINT
 
         mock_get_engine.side_effect = OperationalError("statement", {}, Exception("down"))
 
@@ -2745,7 +2745,7 @@ class TestErrorStreamDiscipline:
         assert result.exit_code == 1
         # The full >100-char hint as one contiguous substring pins soft_wrap;
         # its presence on stderr pins the stream.
-        assert _DB_HINT in result.stderr
+        assert DB_HINT in result.stderr
         assert result.stdout.strip() == ""
 
     @patch("cementic.db.get_engine")
@@ -2798,7 +2798,7 @@ class TestErrorStreamDiscipline:
         with (
             patch("cementic.db.get_engine"),
             patch("cementic.db.get_session_factory"),
-            patch("cementic.cli_collection._require_known_collection"),
+            patch("cementic.cli_collection.require_known_collection"),
             patch(
                 "cementic.collections.list_collection_revisions", return_value=[revision]
             ) as listed,
@@ -2824,7 +2824,7 @@ class TestErrorStreamDiscipline:
 
     def test_embedding_start_unsupported_provider_is_on_stderr(self) -> None:
         """Regression: this refusal printed with `console` (stdout)."""
-        with patch("cementic.cli._get_config") as mock_get_config:
+        with patch("cementic.cli.cli_config") as mock_get_config:
             mock_get_config.return_value.pipeline.embedding_provider = "not-llama-cpp"
             result = runner.invoke(app, ["embedding", "start"])
 
@@ -2865,7 +2865,7 @@ class TestErrorStreamDiscipline:
         dead = ManagedProcess("source-watcher", 1111, "/tmp/sw.log", None)
 
         with (
-            patch("cementic.cli._get_supervisor_state_path", return_value=state_path),
+            patch("cementic.cli.get_supervisor_state_path", return_value=state_path),
             patch("cementic.bootstrap.Bootstrapper"),
             patch("cementic.cli._wait_for_worker_startup", return_value=[dead]),
             patch("cementic.cli._terminate_managed"),
@@ -3077,7 +3077,7 @@ class TestFilterCommands:
             json.dumps({"chunk_index": i, "content": f"chunk {i}"}) + "\n" for i in range(5)
         )
         with patch("cementic.embedding_runtime.create_provider", return_value=provider):
-            with patch("cementic.cli._get_config") as mock_get_config:
+            with patch("cementic.cli.cli_config") as mock_get_config:
                 config = mock_get_config.return_value
                 config.pipeline_worker.batch_size = 2
                 result = runner.invoke(app, ["embed"], input=stdin)
@@ -3100,11 +3100,11 @@ class TestStopExplainsAnIndexBuild:
 
     @patch("cementic.cli._pipeline_worker_activity", return_value="building hnsw index")
     @patch("cementic.cli.wait_for_exit", return_value=[4242])
-    @patch("cementic.cli._is_managed_proc_alive", return_value=True)
+    @patch("cementic.cli.is_managed_proc_alive", return_value=True)
     @patch("cementic.cli.os.kill")
     @patch("cementic.cli._save_supervisor_state")
     @patch(
-        "cementic.cli._load_supervisor_state",
+        "cementic.cli.read_supervisor_state",
         return_value={"processes": [{"name": "pipeline-worker", "pid": 4242}]},
     )
     def test_timeout_names_the_build_and_its_cost(
@@ -3118,11 +3118,11 @@ class TestStopExplainsAnIndexBuild:
 
     @patch("cementic.cli._pipeline_worker_activity", return_value=None)
     @patch("cementic.cli.wait_for_exit", return_value=[4242])
-    @patch("cementic.cli._is_managed_proc_alive", return_value=True)
+    @patch("cementic.cli.is_managed_proc_alive", return_value=True)
     @patch("cementic.cli.os.kill")
     @patch("cementic.cli._save_supervisor_state")
     @patch(
-        "cementic.cli._load_supervisor_state",
+        "cementic.cli.read_supervisor_state",
         return_value={"processes": [{"name": "pipeline-worker", "pid": 4242}]},
     )
     def test_ordinary_timeout_keeps_the_plain_advice(
@@ -3207,10 +3207,10 @@ class TestRefusalsUseStderr:
 
     def test_start_refuses_a_second_run_on_stderr(self):
         with patch(
-            "cementic.cli._load_supervisor_state",
+            "cementic.cli.read_supervisor_state",
             return_value={"processes": [{"name": "watcher", "pid": 1}], "directories": []},
         ):
-            with patch("cementic.cli._is_managed_proc_alive", return_value=True):
+            with patch("cementic.cli.is_managed_proc_alive", return_value=True):
                 result = runner.invoke(app, ["start", ".", "-c", "c"])
 
         assert result.exit_code == 1
@@ -3358,9 +3358,9 @@ class TestStopEpermWorkers:
             )
         )
         with (
-            patch("cementic.cli._get_supervisor_state_path", return_value=state_path),
-            patch("cementic.cli_shared._get_supervisor_state_path", return_value=state_path),
-            patch("cementic.cli._is_managed_proc_alive", return_value=True),
+            patch("cementic.cli.get_supervisor_state_path", return_value=state_path),
+            patch("cementic.cli_shared.get_supervisor_state_path", return_value=state_path),
+            patch("cementic.cli.is_managed_proc_alive", return_value=True),
             patch("cementic.cli.os.kill", side_effect=PermissionError("not permitted")),
             patch("cementic.cli.wait_for_exit", return_value=[]),
             patch("cementic.cli._pipeline_worker_activity", return_value=None),

@@ -18,23 +18,23 @@ from cementic import render
 from cementic.cli_collection import collection_app
 from cementic.cli_format import CementicTyper
 from cementic.cli_shared import (
-    _DB_HINT,
-    _NO_SCHEMA_HINT,
-    _db_session,
-    _get_config,
-    _get_data_dir,
-    _get_supervisor_state_path,
-    _is_database_unavailable,
-    _is_managed_proc_alive,
-    _is_schema_missing,
-    _load_supervisor_state,
-    _report_db_error,
-    _reporting_db_errors,
-    _require_known_collection,
-    _supervisor_processes,
-    _validated_collection_name,
+    DB_HINT,
+    NO_SCHEMA_HINT,
+    cli_config,
     console,
+    db_session,
     err_console,
+    get_data_dir,
+    get_supervisor_state_path,
+    is_database_unavailable,
+    is_managed_proc_alive,
+    is_schema_missing,
+    read_supervisor_state,
+    report_db_error,
+    reporting_db_errors,
+    require_known_collection,
+    supervisor_processes,
+    validated_collection_name,
 )
 from cementic.config import (
     config_init_target,
@@ -171,7 +171,7 @@ def config_init(
 @config_app.command("show", short_help="Print the effective merged config as JSON")
 def config_show() -> None:
     """Print the effective configuration (defaults + file + env) as JSON to stdout."""
-    typer.echo(json.dumps(_get_config().model_dump(mode="json"), indent=2, sort_keys=True))
+    typer.echo(json.dumps(cli_config().model_dump(mode="json"), indent=2, sort_keys=True))
 
 
 @init_app.command("postgres", short_help="Write a local Postgres setup directory")
@@ -221,7 +221,7 @@ def init_postgres(
 
 
 def _save_supervisor_state(state: dict[str, object]) -> None:
-    save_supervisor_state(_get_supervisor_state_path(), state)
+    save_supervisor_state(get_supervisor_state_path(), state)
 
 
 def _known_collection_names(candidates: list[str]) -> set[str]:
@@ -229,7 +229,7 @@ def _known_collection_names(candidates: list[str]) -> set[str]:
     from cementic.collections import collection_exists
 
     try:
-        with _db_session() as session:
+        with db_session() as session:
             return {name for name in candidates if collection_exists(session, name)}
     except Exception:
         # Only ever refines an error message; never the reason a search fails.
@@ -271,7 +271,7 @@ def _pipeline_worker_activity() -> str | None:
     must never be the reason a stop fails.
     """
     try:
-        state = StateManager(_get_config().pipeline_worker.state_path).load()
+        state = StateManager(cli_config().pipeline_worker.state_path).load()
     except Exception:
         return None
     return state.current_activity or None
@@ -287,7 +287,7 @@ def _worker_processes_from_state_files() -> list[dict[str, object]]:
     already persists its own pid and start-token, so the information was never
     actually lost; this just looks where it still is.
     """
-    config = _get_config()
+    config = cli_config()
     records: list[dict[str, object]] = []
     for name, state_path in (
         ("source-watcher", config.source_watcher.state_path),
@@ -330,7 +330,7 @@ def _clear_worker_state_files() -> None:
     headline worker state was already correct (it checks liveness), so this
     aligns the detail with it.
     """
-    config = _get_config()
+    config = cli_config()
     for state_path in (
         config.source_watcher.state_path,
         config.pipeline_worker.state_path,
@@ -378,7 +378,7 @@ def _get_cli_version() -> str:
 
 def _get_start_lock_path() -> Path:
     """Lock file serialising `cementic start`'s check-then-spawn sequence."""
-    return _get_data_dir() / "start.lock"
+    return get_data_dir() / "start.lock"
 
 
 def _build_collection_filters(
@@ -403,7 +403,7 @@ def _llama_daemon_runtime_status() -> str:
     """Return llama.cpp daemon runtime status."""
     from cementic.embedding_runtime import llama_daemon_status
 
-    return llama_daemon_status(_get_config())
+    return llama_daemon_status(cli_config())
 
 
 @app.command(
@@ -426,7 +426,7 @@ def start_background(
     Only one background indexing session can run at a time. Pass multiple
     directories to index them into one collection; stop before switching collections.
     """
-    collection = _validated_collection_name(collection)
+    collection = validated_collection_name(collection)
 
     missing = [d for d in directories if not Path(d).is_dir()]
     if missing:
@@ -456,8 +456,8 @@ def start_background(
 
 def _start_background_locked(directories: list[str], collection: str) -> None:
     """The body of `cementic start`, run while holding the start lock."""
-    state = _load_supervisor_state()
-    running = [proc for proc in _supervisor_processes(state) if _is_managed_proc_alive(proc)]
+    state = read_supervisor_state()
+    running = [proc for proc in supervisor_processes(state) if is_managed_proc_alive(proc)]
 
     if running:
         err_console.print("[yellow]Background cementic processes already running:[/yellow]")
@@ -468,7 +468,7 @@ def _start_background_locked(directories: list[str], collection: str) -> None:
     from cementic.bootstrap import Bootstrapper
 
     try:
-        bootstrapper = Bootstrapper(_get_config())
+        bootstrapper = Bootstrapper(cli_config())
         bootstrapper.ensure_for_convert()
         bootstrapper.ensure_for_index()
     except RuntimeError as error:
@@ -476,7 +476,7 @@ def _start_background_locked(directories: list[str], collection: str) -> None:
         raise typer.Exit(1)
 
     base_cmd = [sys.executable, "-m", "cementic.runner"]
-    data_dir = _get_data_dir()
+    data_dir = get_data_dir()
     source_watcher_log = data_dir / "source-watcher-background.log"
     pipeline_log = data_dir / "pipeline-background.log"
 
@@ -542,7 +542,7 @@ def _start_background_locked(directories: list[str], collection: str) -> None:
             _terminate_managed(survivors)
             for managed in survivors:
                 err_console.print(f"- stopped {managed.name} (PID {managed.pid})")
-        _get_supervisor_state_path().unlink(missing_ok=True)
+        get_supervisor_state_path().unlink(missing_ok=True)
         raise typer.Exit(1)
 
     # "Started" is as far as this can honestly claim: the grace period above
@@ -607,17 +607,17 @@ def status(
     )
 
     if collection is not None:
-        collection = _validated_collection_name(collection)
+        collection = validated_collection_name(collection)
     # 0 is the escape hatch, and None is how the query layer spells "no LIMIT".
     file_limit = limit or None
 
-    state = _load_supervisor_state()
-    source_watcher_status, pipeline_worker_status = load_worker_statuses(_get_config())
+    state = read_supervisor_state()
+    source_watcher_status, pipeline_worker_status = load_worker_statuses(cli_config())
     supervisor_status = build_supervisor_status(state)
     directories = supervisor_status.directories or source_watcher_status.watched_directories
 
     try:
-        health = check_health(_get_config())
+        health = check_health(cli_config())
         health_error = None
     except Exception as error:
         # The whole health section used to vanish without a word, making a
@@ -629,16 +629,16 @@ def status(
         data = None
         status_error = None
         try:
-            with _db_session() as session:
-                data = load_status_data(session, _get_config(), collection)
+            with db_session() as session:
+                data = load_status_data(session, cli_config(), collection)
             if verbose and collection is not None:
                 # Loaded after `data` is bound, so a failed listing still
                 # reports the pipeline block beside the error.
                 data = replace(
-                    data, files=load_file_progress(_get_config(), collection, file_limit)
+                    data, files=load_file_progress(cli_config(), collection, file_limit)
                 )
         except Exception as db_error:
-            status_error = _NO_SCHEMA_HINT if _is_schema_missing(db_error) else str(db_error)
+            status_error = NO_SCHEMA_HINT if is_schema_missing(db_error) else str(db_error)
         document = render.build_status_document(
             supervisor_status,
             source_watcher_status,
@@ -656,14 +656,14 @@ def status(
             raise typer.Exit(1)
         return
 
-    render._print_status_summary(
+    render.print_status_summary(
         supervisor_status.collection,
         directories,
         source_watcher_status,
         pipeline_worker_status,
         health,
         verbose,
-        _get_config(),
+        cli_config(),
     )
     if health is None and health_error is not None:
         err_console.print(f"health: unavailable ({health_error})")
@@ -675,13 +675,13 @@ def status(
         # failed on.
         raise typer.Exit(1)
     if not health.db_reachable:
-        err_console.print(_DB_HINT)
+        err_console.print(DB_HINT)
         # Non-zero so `cementic status && ...` cannot succeed against a database
         # cementic could not reach; every other database-backed command exits 1.
         raise typer.Exit(1)
 
-    with _reporting_db_errors("status"):
-        with _db_session() as session:
+    with reporting_db_errors("status"):
+        with db_session() as session:
             if collection is None:
                 rows = list_collections(session)
                 console.print()
@@ -690,7 +690,7 @@ def status(
                     console.print("  (none)")
                     return
                 status_by_collection = load_pipeline_status_bulk(
-                    _get_config(), [row.name for row in rows]
+                    cli_config(), [row.name for row in rows]
                 )
                 items = [(row, status_by_collection[row.name]) for row in rows]
                 cells = []
@@ -718,20 +718,20 @@ def status(
             # otherwise produced a full zero-filled report at exit 0, which
             # reads as a real collection that has not started yet.
             console.print()
-            _require_known_collection(session, collection)
+            require_known_collection(session, collection)
 
-        pipeline_status = load_pipeline_status(_get_config(), collection)
-        render._print_collection_detail(collection, pipeline_status)
+        pipeline_status = load_pipeline_status(cli_config(), collection)
+        render.print_collection_detail(collection, pipeline_status)
         if verbose and collection:
             try:
-                files = load_file_progress(_get_config(), collection, file_limit)
+                files = load_file_progress(cli_config(), collection, file_limit)
             except Exception as error:
                 # This used to be swallowed at exit 0 (and the database-unavailable
                 # case printed nothing at all), so a truncated report read as the
                 # complete answer.
                 err_console.print(f"files: could not be listed: {error}")
                 raise typer.Exit(1)
-            render._print_file_progress(files, file_limit)
+            render.print_file_progress(files, file_limit)
 
 
 @app.command(
@@ -752,9 +752,9 @@ def doctor(
     from cementic.doctor import collect_doctor_report
 
     try:
-        report = collect_doctor_report(_get_config())
+        report = collect_doctor_report(cli_config())
     except typer.Exit:
-        # _get_config already printed the precise config error to stderr.
+        # cli_config already printed the precise config error to stderr.
         # A broken config is exactly what doctor exists to diagnose, so emit
         # the failing report it promises (--json consumers still get JSON)
         # instead of dying with less output than plain `status`.
@@ -772,7 +772,7 @@ def doctor(
     if json_output:
         typer.echo(json.dumps(report, indent=2, sort_keys=True))
     else:
-        render._print_doctor_report(report)
+        render.print_doctor_report(report)
     if not report["ok"]:
         raise typer.Exit(1)
 
@@ -797,8 +797,8 @@ def stop_background(
     Postgres is not managed by cementic; stop it with your container engine
     (e.g. `docker compose down` or `podman compose down`).
     """
-    state = _load_supervisor_state()
-    processes = _supervisor_processes(state)
+    state = read_supervisor_state()
+    processes = supervisor_processes(state)
 
     recovered = False
     if not processes:
@@ -816,7 +816,7 @@ def stop_background(
         pid = managed_process_pid(proc)
         # Only signal a process we can confirm is still ours; a recycled PID
         # (token mismatch) belongs to someone else and must not be killed.
-        if not _is_managed_proc_alive(proc):
+        if not is_managed_proc_alive(proc):
             continue
         try:
             os.kill(pid, 15)
@@ -870,7 +870,7 @@ def stop_background(
     # State first, as before the split: a failed write must not follow a
     # "stopped N process(es)" line that it contradicts.
     if outcome.state_action == "clear":
-        _get_supervisor_state_path().unlink(missing_ok=True)
+        get_supervisor_state_path().unlink(missing_ok=True)
         _clear_worker_state_files()
     elif outcome.next_state is not None:
         _save_supervisor_state(outcome.next_state)
@@ -924,7 +924,7 @@ def start_embedding_runtime() -> None:
     from cementic.bootstrap import Bootstrapper
     from cementic.embedding_runtime import get_llama_cpp_runtime_client
 
-    config = _get_config()
+    config = cli_config()
     if config.pipeline.embedding_provider != "llama-cpp":
         err_console.print(
             f"embedding start failed: unsupported provider "
@@ -960,7 +960,7 @@ def stop_embedding_runtime() -> None:
     """Stop the configured embedding runtime service."""
     from cementic.embedding_runtime import stop_llama_cpp_runtime
 
-    config = _get_config()
+    config = cli_config()
     try:
         stopped = stop_llama_cpp_runtime(config)
     except RuntimeError as error:
@@ -979,7 +979,7 @@ def embedding_runtime_status(
     if json_output:
         from cementic.embedding_runtime import llama_daemon_state
 
-        typer.echo(json.dumps(llama_daemon_state(_get_config()), indent=2))
+        typer.echo(json.dumps(llama_daemon_state(cli_config()), indent=2))
         return
     console.print(f"embedding: {_llama_daemon_runtime_status()}")
 
@@ -1032,11 +1032,11 @@ def search(
         raise typer.Exit(2)
     filters = _build_collection_filters(collections, trailing_collections)
     if filters is not None:
-        filters = [_validated_collection_name(c) for c in filters]
+        filters = [validated_collection_name(c) for c in filters]
 
     from cementic.search import Searcher
 
-    searcher = Searcher(_get_config())
+    searcher = Searcher(cli_config())
 
     try:
         results = searcher.search(query, top_k=top_k, collections=filters)
@@ -1110,14 +1110,14 @@ def search(
     except Exception as e:
         if json_output:
             # Diagnostics must not land on stdout, which is the JSONL stream.
-            if _is_database_unavailable(e):
+            if is_database_unavailable(e):
                 err_console.print(f"search failed: database unavailable: {e}")
-            elif _is_schema_missing(e):
-                err_console.print(f"search failed: {_NO_SCHEMA_HINT}")
+            elif is_schema_missing(e):
+                err_console.print(f"search failed: {NO_SCHEMA_HINT}")
             else:
                 err_console.print(f"search failed: {e}")
         else:
-            _report_db_error(e, "search")
+            report_db_error(e, "search")
         raise typer.Exit(1)
 
 
@@ -1136,7 +1136,7 @@ EXAMPLES:
 )
 def extract(path: str = typer.Argument(..., help="Path to a document file")) -> None:
     """Extract one document to Markdown on stdout — no database, for piping/debugging."""
-    cfg = _get_config()
+    cfg = cli_config()
     if path == "":
         # Path("") is Path("."), so the directory guard below reported an empty
         # subject: "extract failed:  is a directory, not a document file".
@@ -1177,7 +1177,7 @@ def chunk(
 
     Reads from PATH or stdin, so it pipes after `cementic extract`.
     """
-    cfg = _get_config()
+    cfg = cli_config()
     try:
         # An empty PATH means "read stdin" when stdin is a pipe -- an unset
         # shell variable in `... | cementic chunk "$MAYBE_PATH"` is the ordinary
@@ -1226,7 +1226,7 @@ def embed() -> None:
     Reads the JSONL produced by `cementic chunk` (objects with a "content" field);
     needs the embedding model/runtime.
     """
-    cfg = _get_config()
+    cfg = cli_config()
     # Parsed with real stdin line numbers: blank lines used to shift every
     # reported number, so "line 2" could point at a perfectly good record.
     numbered: list[tuple[int, Any]] = []

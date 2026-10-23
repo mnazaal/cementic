@@ -950,9 +950,9 @@ class TestUnreachableDatabaseReadsAsOneLine:
         assert "sqlalche.me" in database["error"]
 
     def test_skipped_extensions_say_why(self, capsys) -> None:
-        from cementic.render import _print_doctor_report
+        from cementic.render import print_doctor_report
 
-        _print_doctor_report(
+        print_doctor_report(
             {"ok": False, "checks": {"database": {"status": "fail"}, "extensions": {}}}
         )
 

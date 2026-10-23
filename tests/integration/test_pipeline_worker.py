@@ -681,7 +681,7 @@ class TestPipelineWorkerErrorPaths:
             "cementic.status_service.load_worker_statuses",
             lambda config: (_stopped_worker(), _stopped_worker()),
         )
-        monkeypatch.setattr("cementic.cli._load_supervisor_state", lambda: {"processes": []})
+        monkeypatch.setattr("cementic.cli.read_supervisor_state", lambda: {"processes": []})
 
         cli_runner = CliRunner()
         result = cli_runner.invoke(app, ["status", "--verbose", "-c", collection])
@@ -1524,7 +1524,7 @@ class TestChunksLostToAFailedReExtraction:
     ) -> None:
         """Re-extraction fails, then succeeds with the same text.
 
-        `_purge_all_chunks` drops the chunks when re-extraction fails -- right,
+        `purge_all_chunks` drops the chunks when re-extraction fails -- right,
         because the old text is gone. But it leaves the chunking `done` with its
         old `source_content_hash`, so when the file extracts again to the *same*
         text, `_step_chunk`'s claim sees a current hash and a terminal status and
