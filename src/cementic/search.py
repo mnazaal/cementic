@@ -84,7 +84,7 @@ def _reject_query_over_context(query: str, n_ctx: int) -> None:
         )
 
 
-def arm_fetch_limit(top_k: int, *, hybrid: bool) -> int:
+def arm_fetch_limit(top_k: int) -> int:
     """How many results each arm fetches to return `top_k` of them (pure).
 
     Fusion can only reorder what the arms handed it, so a document ranked just
@@ -102,8 +102,9 @@ def arm_fetch_limit(top_k: int, *, hybrid: bool) -> int:
     Capped at `MAX_SEARCH_RESULTS` so nothing fetches deeper than a depth that
     has actually been scored.
 
-    Without hybrid there is nothing to fuse: the deeper list would be sliced
-    back to `top_k` in score order, which is what fetching `top_k` returns.
+    Without hybrid the multiple is still needed: every path merges chunk rows
+    to one row per document, so `top_k` chunk rows from multi-chunk papers
+    would return fewer than `top_k` documents.
 
     **Sound only because `combine` fuses at document level.** Fusion scored per
     *chunk* until 2026-09-19, and under that fusion this same over-fetch
@@ -111,8 +112,6 @@ def arm_fetch_limit(top_k: int, *, hybrid: bool) -> int:
     addend per chunk. Do not raise the multiple without re-reading
     `hybrid.combine`'s contract.
     """
-    if not hybrid:
-        return top_k
     return min(top_k * OVERFETCH_MULTIPLE, MAX_SEARCH_RESULTS)
 
 
@@ -402,7 +401,7 @@ class Searcher:
             distance_metric = embedding_profile.distance_metric
             distance_operator = _distance_operator(distance_metric)
 
-            arm_k = arm_fetch_limit(top_k, hybrid=self.config.search.hybrid)
+            arm_k = arm_fetch_limit(top_k)
 
             combined: list[SearchResult] = []
             for revision in revisions:

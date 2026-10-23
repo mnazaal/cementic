@@ -1272,7 +1272,7 @@ def command_arms(args: argparse.Namespace) -> int:
         print("search.hybrid is off: there is no lexical arm to ablate", file=sys.stderr)
         return 1
     searcher = Searcher(config)
-    arm_limit = arm_fetch_limit(PRODUCTION_DEPTH, hybrid=True)
+    arm_limit = arm_fetch_limit(PRODUCTION_DEPTH)
     t0 = time.perf_counter()
 
     records: list[dict] = []
@@ -1314,9 +1314,9 @@ def command_ablate(args: argparse.Namespace) -> int:
     payload = json.loads(Path(args.arms).expanduser().read_text())
     # The cached lists are exactly what `search` fuses only at a depth whose
     # per-arm fetch limit is the one they were fetched at.
-    if arm_fetch_limit(args.depth, hybrid=True) != payload["arm_limit"]:
+    if arm_fetch_limit(args.depth) != payload["arm_limit"]:
         print(
-            f"depth {args.depth} fetches {arm_fetch_limit(args.depth, hybrid=True)} per arm; "
+            f"depth {args.depth} fetches {arm_fetch_limit(args.depth)} per arm; "
             f"the cache holds {payload['arm_limit']}. Re-run `arms` for this depth.",
             file=sys.stderr,
         )
@@ -1814,7 +1814,7 @@ def command_fuzzy(args: argparse.Namespace) -> int:
         )
 
         searcher = Searcher(config)
-        arm_limit = arm_fetch_limit(PRODUCTION_DEPTH, hybrid=True)
+        arm_limit = arm_fetch_limit(PRODUCTION_DEPTH)
         records: list[FuzzyRecord] = []
         began = time.perf_counter()
         for i, query in enumerate(queries, start=1):
