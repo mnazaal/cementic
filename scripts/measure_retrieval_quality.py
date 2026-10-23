@@ -1806,8 +1806,8 @@ def command_fuzzy(args: argparse.Namespace) -> int:
                 "for the typo'd set",
                 flush=True,
             )
-            if args.estimate_only:
-                return 0
+        if args.estimate_only:
+            return 0  # with --no-trigram there is nothing to estimate
         # Unscanned, the trigram arms would score as "never fired", not as absent.
         variants = (
             tuple(v for v in FUZZY_VARIANTS if not v.startswith("trigram"))
