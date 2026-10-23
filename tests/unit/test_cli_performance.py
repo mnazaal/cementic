@@ -24,6 +24,7 @@ import sys
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import typer.main
 from typer.testing import CliRunner
 
 from cementic.cli import app
@@ -93,7 +94,7 @@ def test_version_never_loads_config(mock_version: MagicMock, mock_get_config: Ma
     assert mock_get_config.call_count == 0
 
 
-@patch("cementic.cli.Searcher")
+@patch("cementic.search.Searcher")
 def test_search_command_calls_backend_search_exactly_once(mock_searcher_class: MagicMock) -> None:
     """Search dispatch must not loop/retry against the backend."""
     mock_searcher = MagicMock()
@@ -109,11 +110,11 @@ def test_search_command_calls_backend_search_exactly_once(mock_searcher_class: M
 
 
 @patch("cementic.cli._llama_daemon_runtime_status", return_value="stopped")
-@patch("cementic.cli.list_collections", return_value=[])
+@patch("cementic.collections.list_collections", return_value=[])
 @patch("cementic.db.get_session_factory")
 @patch("cementic.db.get_engine")
 @patch(
-    "cementic.cli.check_health",
+    "cementic.status_service.check_health",
     # A real health object, not None: None now means the probe failed, which
     # exits 1 rather than printing a summary two rows short.
     return_value=SimpleNamespace(
@@ -123,9 +124,9 @@ def test_search_command_calls_backend_search_exactly_once(mock_searcher_class: M
         llama_daemon="running",
     ),
 )
-@patch("cementic.cli.load_worker_statuses")
+@patch("cementic.status_service.load_worker_statuses")
 @patch("cementic.cli._load_supervisor_state", return_value={"processes": [], "directories": []})
-@patch("cementic.cli.build_supervisor_status")
+@patch("cementic.status_service.build_supervisor_status")
 def test_status_command_probes_health_and_workers_exactly_once(
     mock_build: MagicMock,
     mock_state: MagicMock,
@@ -200,3 +201,18 @@ def test_stop_does_not_wait_when_no_processes_exist(mock_state: MagicMock) -> No
 
     assert "no background cementic processes found" in output
     assert mock_state.call_count == 1
+
+
+def test_search_top_k_cap_matches_the_searcher_limit() -> None:
+    """`cli` inlines the cap so it need not import `search` to build the option.
+
+    The literal must track `cementic.search.MAX_SEARCH_RESULTS`, or the CLI would
+    accept a count the searcher rejects (or refuse one it allows).
+    """
+    from cementic.search import MAX_SEARCH_RESULTS
+
+    command = typer.main.get_command(app)
+    search = command.commands["search"]  # type: ignore[attr-defined]
+    top_k = next(p for p in search.params if p.name == "top_k")
+
+    assert top_k.type.max == MAX_SEARCH_RESULTS  # type: ignore[attr-defined]

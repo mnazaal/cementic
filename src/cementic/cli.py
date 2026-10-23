@@ -15,8 +15,6 @@ import typer
 from rich.markup import escape
 
 from cementic import render
-from cementic.bootstrap import Bootstrapper
-from cementic.chunk import TokenizerUnavailableError, chunk_text
 from cementic.cli_collection import collection_app
 from cementic.cli_format import CementicTyper
 from cementic.cli_shared import (
@@ -38,36 +36,16 @@ from cementic.cli_shared import (
     console,
     err_console,
 )
-from cementic.collections import collection_exists, list_collections
 from cementic.config import (
     config_init_target,
     config_path_error,
     default_config_path,
     resolve_config_path,
 )
-from cementic.doctor import collect_doctor_report
-from cementic.embedding_runtime import (
-    create_provider,
-    get_llama_cpp_runtime_client,
-    llama_daemon_status,
-    runtime_spec_from_config,
-    stop_llama_cpp_runtime,
-)
 from cementic.embedding_text import describe_text_policy
-from cementic.extract import extract_document
 from cementic.filelock import LockUnavailableError, file_lock
 from cementic.hybrid import scores_explain_order
-from cementic.search import MAX_SEARCH_RESULTS, Searcher
 from cementic.state import DaemonState, StateManager
-from cementic.status_service import (
-    build_supervisor_status,
-    check_health,
-    load_file_progress,
-    load_pipeline_status,
-    load_pipeline_status_bulk,
-    load_status_data,
-    load_worker_statuses,
-)
 from cementic.supervisor import (
     ManagedProcess,
     force_kill,
@@ -245,6 +223,8 @@ def _save_supervisor_state(state: dict[str, object]) -> None:
 
 def _known_collection_names(candidates: list[str]) -> set[str]:
     """Which of these collections cementic knows about at all."""
+    from cementic.collections import collection_exists
+
     try:
         with _db_session() as session:
             return {name for name in candidates if collection_exists(session, name)}
@@ -418,6 +398,8 @@ def _build_collection_filters(
 
 def _llama_daemon_runtime_status() -> str:
     """Return llama.cpp daemon runtime status."""
+    from cementic.embedding_runtime import llama_daemon_status
+
     return llama_daemon_status(_get_config())
 
 
@@ -479,6 +461,8 @@ def _start_background_locked(directories: list[str], collection: str) -> None:
         for proc in running:
             err_console.print(f"- {proc.get('name')}: PID {proc.get('pid')}")
         raise typer.Exit(1)
+
+    from cementic.bootstrap import Bootstrapper
 
     try:
         bootstrapper = Bootstrapper(_get_config())
@@ -608,6 +592,17 @@ def status(
     ),
 ) -> None:
     """Show background worker status and collection progress."""
+    from cementic.collections import list_collections
+    from cementic.status_service import (
+        build_supervisor_status,
+        check_health,
+        load_file_progress,
+        load_pipeline_status,
+        load_pipeline_status_bulk,
+        load_status_data,
+        load_worker_statuses,
+    )
+
     if collection is not None:
         collection = _validated_collection_name(collection)
     # 0 is the escape hatch, and None is how the query layer spells "no LIMIT".
@@ -750,6 +745,8 @@ def doctor(
 
     This command changes nothing.
     """
+    from cementic.doctor import collect_doctor_report
+
     try:
         report = collect_doctor_report(_get_config())
     except typer.Exit:
@@ -936,6 +933,9 @@ def start_embedding_runtime() -> None:
     Starting it is optional; use this before a first search to pay the model's
     cold-start cost.
     """
+    from cementic.bootstrap import Bootstrapper
+    from cementic.embedding_runtime import get_llama_cpp_runtime_client
+
     config = _get_config()
     if config.pipeline.embedding_provider != "llama-cpp":
         err_console.print(
@@ -970,6 +970,8 @@ def start_embedding_runtime() -> None:
 @embedding_app.command("stop", short_help="Stop embedding runtime")
 def stop_embedding_runtime() -> None:
     """Stop the configured embedding runtime service."""
+    from cementic.embedding_runtime import stop_llama_cpp_runtime
+
     config = _get_config()
     try:
         stopped = stop_llama_cpp_runtime(config)
@@ -995,7 +997,7 @@ def embedding_runtime_status() -> None:
 def search(
     query: str = typer.Argument(..., help="Search query"),
     top_k: int = typer.Option(
-        10, "-n", "--top-k", min=1, max=MAX_SEARCH_RESULTS, help="Number of results"
+        10, "-n", "--top-k", min=1, max=50, help="Number of results"
     ),
     collections: list[str] | None = typer.Option(
         None,
@@ -1036,6 +1038,8 @@ def search(
     filters = _build_collection_filters(collections, trailing_collections)
     if filters is not None:
         filters = [_validated_collection_name(c) for c in filters]
+
+    from cementic.search import Searcher
 
     searcher = Searcher(_get_config())
 
@@ -1148,6 +1152,8 @@ def extract(path: str = typer.Argument(..., help="Path to a document file")) -> 
         # registry's answer for a suffixless path, but nonsense as a message.
         err_console.print(f"extract failed: {path} is a directory, not a document file")
         raise typer.Exit(1)
+    from cementic.extract import extract_document
+
     try:
         markdown = extract_document(path, cfg)
     except (OSError, ValueError, RuntimeError) as error:
@@ -1196,6 +1202,8 @@ def chunk(
         raise typer.Exit(1)
     size = chunk_size if chunk_size is not None else cfg.pipeline.chunk_size
     overlap = chunk_overlap if chunk_overlap is not None else cfg.pipeline.chunk_overlap
+    from cementic.chunk import TokenizerUnavailableError, chunk_text
+
     try:
         pieces = chunk_text(text, chunk_size=size, chunk_overlap=overlap)
     except TokenizerUnavailableError as error:
@@ -1279,6 +1287,8 @@ def embed() -> None:
         contents.append(content)
 
     batch_size = cfg.pipeline_worker.batch_size
+    from cementic.embedding_runtime import create_provider, runtime_spec_from_config
+
     try:
         provider = create_provider(runtime_spec_from_config(cfg), cfg)
         for start in range(0, len(records), batch_size):

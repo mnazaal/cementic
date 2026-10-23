@@ -111,7 +111,7 @@ def test_pg_cli_status_verbose_reports_real_collection(
     # A real health object, not None: None now means the probe *failed*, which
     # exits 1 rather than printing a summary two rows short.
     monkeypatch.setattr(
-        "cementic.cli.check_health",
+        "cementic.status_service.check_health",
         lambda config: SimpleNamespace(
             db_reachable=True,
             embedding_provider="llama-cpp",
@@ -131,7 +131,7 @@ def test_pg_cli_status_verbose_reports_real_collection(
         )
 
     monkeypatch.setattr(
-        "cementic.cli.load_worker_statuses",
+        "cementic.status_service.load_worker_statuses",
         lambda config: (_stopped_worker(), _stopped_worker()),
     )
     monkeypatch.setattr("cementic.cli._load_supervisor_state", lambda: {"processes": []})

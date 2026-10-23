@@ -37,14 +37,10 @@ def _collection_exists_by_default():
     stubbed for one specific call, so the real existence check cannot run
     against it. Tests covering the unknown-collection path patch this to False.
 
-    `collection_exists` is looked up from two places: `cementic.cli` (used
-    directly by `search`) and `cementic.cli_shared` (used by
-    `_require_known_collection`, shared with `cli_collection.py`).
+    Every caller imports `collection_exists` inside its function, so patching
+    `cementic.collections` reaches `cli`, `cli_shared` and `cli_collection`.
     """
-    with (
-        patch("cementic.cli.collection_exists", return_value=True),
-        patch("cementic.collections.collection_exists", return_value=True),
-    ):
+    with patch("cementic.collections.collection_exists", return_value=True):
         yield
 
 
@@ -304,13 +300,13 @@ class TestRootHelp:
         mock_app.assert_called_once()
 
     @patch("cementic.cli._llama_daemon_runtime_status", return_value="stopped")
-    @patch("cementic.cli.list_collections", return_value=[])
-    @patch("cementic.cli.check_health")
+    @patch("cementic.collections.list_collections", return_value=[])
+    @patch("cementic.status_service.check_health")
     @patch("cementic.db.get_session_factory")
     @patch("cementic.db.get_engine")
-    @patch("cementic.cli.load_worker_statuses")
+    @patch("cementic.status_service.load_worker_statuses")
     @patch("cementic.cli._load_supervisor_state")
-    @patch("cementic.cli.build_supervisor_status")
+    @patch("cementic.status_service.build_supervisor_status")
     def test_bare_status_runs_status_command(
         self,
         mock_build_supervisor_status,
@@ -396,8 +392,8 @@ class TestRootHelp:
 class TestEmbeddingCommands:
     """Test embedding runtime lifecycle commands."""
 
-    @patch("cementic.cli.get_llama_cpp_runtime_client")
-    @patch("cementic.cli.Bootstrapper")
+    @patch("cementic.embedding_runtime.get_llama_cpp_runtime_client")
+    @patch("cementic.bootstrap.Bootstrapper")
     def test_embedding_start_starts_llama_runtime(self, mock_bootstrapper, mock_runtime_client):
         mock_bootstrapper.return_value.ensure_embedding_runtime.return_value = None
         client = MagicMock()
@@ -412,8 +408,8 @@ class TestEmbeddingCommands:
         _, kwargs = mock_runtime_client.call_args
         assert kwargs["autostart"] is True
 
-    @patch("cementic.cli.get_llama_cpp_runtime_client")
-    @patch("cementic.cli.Bootstrapper")
+    @patch("cementic.embedding_runtime.get_llama_cpp_runtime_client")
+    @patch("cementic.bootstrap.Bootstrapper")
     def test_embedding_start_fails_fast_when_model_missing(
         self, mock_bootstrapper, mock_runtime_client
     ):
@@ -428,7 +424,7 @@ class TestEmbeddingCommands:
         assert "model not found" in result.output
         mock_runtime_client.assert_not_called()
 
-    @patch("cementic.cli.stop_llama_cpp_runtime", return_value=True)
+    @patch("cementic.embedding_runtime.stop_llama_cpp_runtime", return_value=True)
     def test_embedding_stop_stops_llama_runtime(self, mock_stop):
         result = runner.invoke(app, ["embedding", "stop"])
 
@@ -565,7 +561,7 @@ def _healthy_health() -> SimpleNamespace:
 class TestSearchCommand:
     """Test search command."""
 
-    @patch("cementic.cli.Searcher")
+    @patch("cementic.search.Searcher")
     def test_search_basic(self, mock_searcher_class):
         mock_searcher = MagicMock()
         mock_searcher.search.return_value = [
@@ -585,7 +581,7 @@ class TestSearchCommand:
         assert "test result" in result.output
         mock_searcher.search.assert_called_once_with("test query", top_k=10, collections=None)
 
-    @patch("cementic.cli.Searcher")
+    @patch("cementic.search.Searcher")
     def test_search_shows_database_hint_when_database_unavailable(self, mock_searcher_class):
         mock_searcher = MagicMock()
         mock_searcher.search.side_effect = OperationalError("statement", {}, Exception("down"))
@@ -597,7 +593,7 @@ class TestSearchCommand:
         assert "search: database not reachable" in result.output
         assert "cementic init postgres" in result.output
 
-    @patch("cementic.cli.Searcher")
+    @patch("cementic.search.Searcher")
     def test_search_json_reports_unknown_collection_on_stderr(self, mock_searcher_class):
         """An unindexed collection must not look like a clean no-match.
 
@@ -615,7 +611,7 @@ class TestSearchCommand:
         assert result.exit_code == 1
         assert "no indexed revision for typo" in result.output
 
-    @patch("cementic.cli.Searcher")
+    @patch("cementic.search.Searcher")
     def test_search_json_no_match_still_succeeds(self, mock_searcher_class):
         """A real no-match against an indexed collection stays exit 0."""
         mock_searcher = MagicMock()
@@ -628,7 +624,7 @@ class TestSearchCommand:
         assert result.exit_code == 0
 
     @pytest.mark.parametrize("extra_args", [[], ["--json"]])
-    @patch("cementic.cli.Searcher")
+    @patch("cementic.search.Searcher")
     def test_unknown_collection_is_reported_even_when_others_match(
         self, mock_searcher_class, extra_args
     ):
@@ -695,7 +691,7 @@ class TestSearchCommand:
             patch("cementic.collections.collection_exists", return_value=False),
             # `status --json` checks through status_service's own binding.
             patch("cementic.status_service.collection_exists", return_value=False),
-            patch("cementic.cli.check_health", return_value=_healthy_health()),
+            patch("cementic.status_service.check_health", return_value=_healthy_health()),
         ):
             result = runner.invoke(app, argv)
 
@@ -745,13 +741,13 @@ class TestSearchCommand:
 
         with (
             patch("cementic.collections.collection_exists", return_value=True),
-            patch("cementic.cli.check_health", return_value=_healthy_health()),
-            patch("cementic.cli.load_pipeline_status", return_value=pipeline),
+            patch("cementic.status_service.check_health", return_value=_healthy_health()),
+            patch("cementic.status_service.load_pipeline_status", return_value=pipeline),
             patch(
-                "cementic.cli.load_status_data",
+                "cementic.status_service.load_status_data",
                 return_value=StatusData(pipeline=pipeline),
             ),
-            patch("cementic.cli.load_file_progress", side_effect=RuntimeError("boom")),
+            patch("cementic.status_service.load_file_progress", side_effect=RuntimeError("boom")),
         ):
             result = runner.invoke(
                 app, ["status", "-c", "work", "--verbose", *json_flag]
@@ -766,7 +762,7 @@ class TestSearchCommand:
             assert "documents" in result.output
             assert "files: could not be listed: boom" in result.output
 
-    @patch("cementic.cli.Searcher")
+    @patch("cementic.search.Searcher")
     def test_human_and_json_modes_agree_on_the_unknown_collection_exit_code(
         self, mock_searcher_class
     ):
@@ -781,7 +777,7 @@ class TestSearchCommand:
 
         assert human.exit_code == json_mode.exit_code == 1
 
-    @patch("cementic.cli.Searcher")
+    @patch("cementic.search.Searcher")
     def test_search_json_emits_one_json_object_per_line(self, mock_searcher_class):
         mock_searcher = MagicMock()
         mock_searcher.search.return_value = [
@@ -812,7 +808,7 @@ class TestSearchCommand:
         assert lines[0]["collection"] == "research"
         assert lines[1]["collection"] == "math"
 
-    @patch("cementic.cli.Searcher")
+    @patch("cementic.search.Searcher")
     def test_search_json_no_results_prints_nothing(self, mock_searcher_class):
         mock_searcher = MagicMock()
         mock_searcher.search.return_value = []
@@ -823,7 +819,7 @@ class TestSearchCommand:
         assert result.exit_code == 0
         assert result.output.strip() == ""
 
-    @patch("cementic.cli.Searcher")
+    @patch("cementic.search.Searcher")
     def test_search_json_error_goes_to_stderr_not_stdout(self, mock_searcher_class):
         mock_searcher = MagicMock()
         mock_searcher.search.side_effect = RuntimeError("boom")
@@ -835,7 +831,7 @@ class TestSearchCommand:
         assert result.stdout.strip() == ""
         assert "search failed" in result.stderr
 
-    @patch("cementic.cli.Searcher")
+    @patch("cementic.search.Searcher")
     def test_search_top_k_long_form_aliases(self, mock_searcher_class):
         mock_searcher = MagicMock()
         mock_searcher.search.return_value = []
@@ -854,7 +850,7 @@ class TestSearchCommand:
 class TestBackgroundCommands:
     """Test top-level background process commands."""
 
-    @patch("cementic.cli.collect_doctor_report")
+    @patch("cementic.doctor.collect_doctor_report")
     def test_status_doctor_outputs_json_and_fails_when_not_ok(self, mock_collect):
         mock_collect.return_value = {
             "ok": False,
@@ -891,7 +887,7 @@ class TestBackgroundCommands:
         assert data["ok"] is False
         assert data["checks"]["config"]["status"] == "fail"
 
-    @patch("cementic.cli.collect_doctor_report")
+    @patch("cementic.doctor.collect_doctor_report")
     def test_status_doctor_outputs_human_summary_when_ok(self, mock_collect):
         mock_collect.return_value = {
             "ok": True,
@@ -914,14 +910,14 @@ class TestBackgroundCommands:
         assert "vectorscale: warning" in result.output
 
     @patch("cementic.cli._llama_daemon_runtime_status", return_value="running, pid=333")
-    @patch("cementic.cli.check_health")
-    @patch("cementic.cli.load_pipeline_status_bulk")
-    @patch("cementic.cli.list_collections")
+    @patch("cementic.status_service.check_health")
+    @patch("cementic.status_service.load_pipeline_status_bulk")
+    @patch("cementic.collections.list_collections")
     @patch("cementic.db.get_session_factory")
     @patch("cementic.db.get_engine")
-    @patch("cementic.cli.load_worker_statuses")
+    @patch("cementic.status_service.load_worker_statuses")
     @patch("cementic.cli._load_supervisor_state")
-    @patch("cementic.cli.build_supervisor_status")
+    @patch("cementic.status_service.build_supervisor_status")
     def test_status_command_shows_global_overview(
         self,
         mock_build_supervisor_status,
@@ -1024,14 +1020,14 @@ class TestBackgroundCommands:
         )
 
     @patch("cementic.cli._llama_daemon_runtime_status", return_value="running, pid=333")
-    @patch("cementic.cli.check_health")
-    @patch("cementic.cli.load_pipeline_status_bulk")
-    @patch("cementic.cli.list_collections")
+    @patch("cementic.status_service.check_health")
+    @patch("cementic.status_service.load_pipeline_status_bulk")
+    @patch("cementic.collections.list_collections")
     @patch("cementic.db.get_session_factory")
     @patch("cementic.db.get_engine")
-    @patch("cementic.cli.load_worker_statuses")
+    @patch("cementic.status_service.load_worker_statuses")
     @patch("cementic.cli._load_supervisor_state")
-    @patch("cementic.cli.build_supervisor_status")
+    @patch("cementic.status_service.build_supervisor_status")
     def test_status_omits_the_failure_note_when_there_are_none(
         self,
         mock_build_supervisor_status,
@@ -1114,11 +1110,11 @@ class TestBackgroundCommands:
         assert "failed" not in result.output.split("collections")[1]
 
     @patch("cementic.cli._llama_daemon_runtime_status", return_value="stopped")
-    @patch("cementic.cli.check_health")
-    @patch("cementic.cli.load_pipeline_status")
-    @patch("cementic.cli.load_worker_statuses")
+    @patch("cementic.status_service.check_health")
+    @patch("cementic.status_service.load_pipeline_status")
+    @patch("cementic.status_service.load_worker_statuses")
     @patch("cementic.cli._load_supervisor_state")
-    @patch("cementic.cli.build_supervisor_status")
+    @patch("cementic.status_service.build_supervisor_status")
     def test_status_command_shows_one_collection_when_requested(
         self,
         mock_build_supervisor_status,
@@ -1198,11 +1194,11 @@ class TestBackgroundCommands:
         mock_load_pipeline_status.assert_called_once_with(cementic_cli._get_config(), "research")
 
     @patch("cementic.cli._llama_daemon_runtime_status", return_value="stopped")
-    @patch("cementic.cli.check_health")
-    @patch("cementic.cli.load_pipeline_status")
-    @patch("cementic.cli.load_worker_statuses")
+    @patch("cementic.status_service.check_health")
+    @patch("cementic.status_service.load_pipeline_status")
+    @patch("cementic.status_service.load_worker_statuses")
     @patch("cementic.cli._load_supervisor_state")
-    @patch("cementic.cli.build_supervisor_status")
+    @patch("cementic.status_service.build_supervisor_status")
     def test_status_command_shows_dash_when_no_active_revision(
         self,
         mock_build_supervisor_status,
@@ -1276,11 +1272,11 @@ class TestBackgroundCommands:
         assert "active=None" not in result.output
 
     @patch("cementic.cli._llama_daemon_runtime_status", return_value="stopped")
-    @patch("cementic.cli.check_health")
-    @patch("cementic.cli.load_pipeline_status")
-    @patch("cementic.cli.load_worker_statuses")
+    @patch("cementic.status_service.check_health")
+    @patch("cementic.status_service.load_pipeline_status")
+    @patch("cementic.status_service.load_worker_statuses")
     @patch("cementic.cli._load_supervisor_state")
-    @patch("cementic.cli.build_supervisor_status")
+    @patch("cementic.status_service.build_supervisor_status")
     def test_status_command_accepts_collection_short_flag(
         self,
         mock_build_supervisor_status,
@@ -1358,7 +1354,7 @@ class TestBackgroundCommands:
         mock_path = temp_dir / "supervisor.json"
 
         with patch("cementic.cli._get_supervisor_state_path", return_value=mock_path):
-            with patch("cementic.cli.Bootstrapper") as mock_bootstrapper:
+            with patch("cementic.bootstrap.Bootstrapper") as mock_bootstrapper:
                 mock_bootstrapper.return_value.ensure_for_convert.return_value = None
                 mock_bootstrapper.return_value.ensure_for_index.return_value = None
                 result = runner.invoke(app, ["start", str(temp_dir), "--collection", "test"])
@@ -1388,7 +1384,7 @@ class TestBackgroundCommands:
         mock_path = temp_dir / "supervisor.json"
 
         with patch("cementic.cli._get_supervisor_state_path", return_value=mock_path):
-            with patch("cementic.cli.Bootstrapper") as mock_bootstrapper:
+            with patch("cementic.bootstrap.Bootstrapper") as mock_bootstrapper:
                 mock_bootstrapper.return_value.ensure_for_convert.return_value = None
                 mock_bootstrapper.return_value.ensure_for_index.return_value = None
                 result = runner.invoke(app, ["start", str(temp_dir), "--collection", "test"])
@@ -1412,7 +1408,7 @@ class TestBackgroundCommands:
         lock_path = temp_dir / "start.lock"
         with (
             patch("cementic.cli._get_start_lock_path", return_value=lock_path),
-            patch("cementic.cli.Bootstrapper"),
+            patch("cementic.bootstrap.Bootstrapper"),
         ):
             with file_lock(lock_path, timeout=0):  # stand in for the other process
                 result = runner.invoke(app, ["start", str(temp_dir), "--collection", "test"])
@@ -1436,7 +1432,7 @@ class TestBackgroundCommands:
 
         with (
             patch("cementic.cli._get_supervisor_state_path", return_value=state_path),
-            patch("cementic.cli.Bootstrapper"),
+            patch("cementic.bootstrap.Bootstrapper"),
             patch("cementic.cli._wait_for_worker_startup", return_value=[dead]),
             patch("cementic.cli._terminate_managed") as mock_terminate,
         ):
@@ -1469,7 +1465,7 @@ class TestBackgroundCommands:
 
         with (
             patch("cementic.cli._get_supervisor_state_path", return_value=temp_dir / "s.json"),
-            patch("cementic.cli.Bootstrapper"),
+            patch("cementic.bootstrap.Bootstrapper"),
         ):
             # `--` is needed at this level too, for the same reason.
             result = runner.invoke(app, ["start", "--collection", "test", "--", str(odd_dir)])
@@ -1488,7 +1484,7 @@ class TestBackgroundCommands:
         mock_path = temp_dir / "supervisor.json"
 
         with patch("cementic.cli._get_supervisor_state_path", return_value=mock_path):
-            with patch("cementic.cli.Bootstrapper") as mock_bootstrapper:
+            with patch("cementic.bootstrap.Bootstrapper") as mock_bootstrapper:
                 mock_bootstrapper.return_value.ensure_for_convert.return_value = None
                 mock_bootstrapper.return_value.ensure_for_index.return_value = None
                 result = runner.invoke(app, ["start", str(temp_dir)])
@@ -1896,7 +1892,7 @@ class TestStatusCommand:
         mock_sf.return_value = lambda: mock_session
 
         # Make list_collections return empty
-        with patch("cementic.cli.list_collections", return_value=[]):
+        with patch("cementic.collections.list_collections", return_value=[]):
             result = runner.invoke(app, ["status"])
             # May error on missing infra, just check it handles gracefully
             assert result.exit_code in (0, 1)
@@ -2136,7 +2132,7 @@ class TestListCollectionRevisionsEdgeCases:
 class TestSearchEdgeCases:
     """Edge cases for search command."""
 
-    @patch("cementic.cli.Searcher")
+    @patch("cementic.search.Searcher")
     def test_search_no_results(self, mock_searcher_class):
         """search prints 'none' when no results found."""
         mock_searcher = MagicMock()
@@ -2146,7 +2142,7 @@ class TestSearchEdgeCases:
         assert result.exit_code == 0
         assert "no results" in result.output
 
-    @patch("cementic.cli.Searcher")
+    @patch("cementic.search.Searcher")
     def test_search_generic_error(self, mock_searcher_class):
         """search prints generic error and exits 1."""
         mock_searcher = MagicMock()
@@ -2167,13 +2163,13 @@ class TestStatusSurfacesWorkerErrors:
     def _invoke(self, worker_error, args):
         with (
             patch("cementic.cli._llama_daemon_runtime_status", return_value="stopped"),
-            patch("cementic.cli.check_health") as mock_health,
-            patch("cementic.cli.load_worker_statuses") as mock_workers,
+            patch("cementic.status_service.check_health") as mock_health,
+            patch("cementic.status_service.load_worker_statuses") as mock_workers,
             patch("cementic.cli._load_supervisor_state") as mock_state,
             patch("cementic.db.get_engine"),
             patch("cementic.db.get_session_factory"),
-            patch("cementic.cli.list_collections", return_value=[]),
-            patch("cementic.cli.load_pipeline_status_bulk", return_value={}),
+            patch("cementic.collections.list_collections", return_value=[]),
+            patch("cementic.status_service.load_pipeline_status_bulk", return_value={}),
         ):
             mock_state.return_value = {"collection": "c", "directories": [], "processes": []}
             healthy = WorkerStatus(
@@ -2249,7 +2245,7 @@ class TestStatusRendersARealFatalStartupReason:
             patch("cementic.cli._load_supervisor_state", return_value={}),
             # DB health is out of scope for this test; a raised probe still
             # lets `_print_status_summary` (and its last-error line) run first.
-            patch("cementic.cli.check_health", side_effect=RuntimeError("no db here")),
+            patch("cementic.status_service.check_health", side_effect=RuntimeError("no db here")),
         ):
             result = runner.invoke(app, ["status"])
 
@@ -2262,8 +2258,8 @@ class TestStatusExitCodes:
     """`cementic status` must exit non-zero when it could not report status."""
 
     @patch("cementic.cli._llama_daemon_runtime_status", return_value="stopped")
-    @patch("cementic.cli.check_health")
-    @patch("cementic.cli.load_worker_statuses")
+    @patch("cementic.status_service.check_health")
+    @patch("cementic.status_service.load_worker_statuses")
     @patch("cementic.cli._load_supervisor_state")
     def test_status_exits_nonzero_when_database_unreachable(
         self, mock_state, mock_workers, mock_health, mock_daemon
@@ -2299,10 +2295,10 @@ class TestStatusEdgeCases:
     """Edge cases for the status command."""
 
     @patch("cementic.cli._llama_daemon_runtime_status", return_value="stopped")
-    @patch("cementic.cli.load_worker_statuses")
+    @patch("cementic.status_service.load_worker_statuses")
     @patch("cementic.cli._load_supervisor_state")
-    @patch("cementic.cli.build_supervisor_status")
-    @patch("cementic.cli.list_collections", return_value=[])
+    @patch("cementic.status_service.build_supervisor_status")
+    @patch("cementic.collections.list_collections", return_value=[])
     @patch("cementic.db.get_session_factory")
     @patch("cementic.db.get_engine")
     def test_status_command_health_exception_fallback(
@@ -2347,7 +2343,10 @@ class TestStatusEdgeCases:
             directories=[],
         )
         # check_health raises an exception
-        with patch("cementic.cli.check_health", side_effect=RuntimeError("health check failed")):
+        with patch(
+            "cementic.status_service.check_health",
+            side_effect=RuntimeError("health check failed"),
+        ):
             mock_session = MagicMock()
             mock_session.__enter__.return_value = mock_session
             mock_get_session_factory.return_value = lambda: mock_session
@@ -2364,10 +2363,10 @@ class TestStatusEdgeCases:
             assert "health:" not in result.stdout
             assert "unknown (health check failed)" in result.stdout
 
-    @patch("cementic.cli.list_collections", return_value=[])
+    @patch("cementic.collections.list_collections", return_value=[])
     def test_status_json_output(self, mock_list_collections):
         """Status with --json prints JSON output."""
-        with patch("cementic.cli.load_worker_statuses") as mock_load:
+        with patch("cementic.status_service.load_worker_statuses") as mock_load:
             mock_load.return_value = (
                 WorkerStatus(
                     state="running",
@@ -2394,13 +2393,13 @@ class TestStatusEdgeCases:
                     "directories": ["/docs"],
                     "processes": [],
                 }
-                with patch("cementic.cli.build_supervisor_status") as mock_build:
+                with patch("cementic.status_service.build_supervisor_status") as mock_build:
                     mock_build.return_value = SimpleNamespace(
                         state="2/2 running",
                         collection="research",
                         directories=["/docs"],
                     )
-                    with patch("cementic.cli.check_health") as mock_health:
+                    with patch("cementic.status_service.check_health") as mock_health:
                         mock_health.return_value = SimpleNamespace(
                             db_reachable=True,
                             embedding_provider="llama-cpp",
@@ -2431,11 +2430,11 @@ class TestStatusEdgeCases:
                                 assert parsed["source_watcher"]["current_file"] is None
                                 assert parsed["pipeline_worker"]["current_file"] is None
 
-    @patch("cementic.cli.list_collections", return_value=[])
+    @patch("cementic.collections.list_collections", return_value=[])
     def test_status_json_output_survives_piping_with_long_paths(self, mock_list_collections):
         """A long path must not be hard-wrapped by rich, which would break JSON parsing."""
         long_path = "/a" + "/very-long-directory-segment" * 10
-        with patch("cementic.cli.load_worker_statuses") as mock_load:
+        with patch("cementic.status_service.load_worker_statuses") as mock_load:
             mock_load.return_value = (
                 WorkerStatus(
                     state="running",
@@ -2462,13 +2461,13 @@ class TestStatusEdgeCases:
                     "directories": [long_path],
                     "processes": [],
                 }
-                with patch("cementic.cli.build_supervisor_status") as mock_build:
+                with patch("cementic.status_service.build_supervisor_status") as mock_build:
                     mock_build.return_value = SimpleNamespace(
                         state="2/2 running",
                         collection="research",
                         directories=[long_path],
                     )
-                    with patch("cementic.cli.check_health") as mock_health:
+                    with patch("cementic.status_service.check_health") as mock_health:
                         mock_health.return_value = SimpleNamespace(
                             db_reachable=True,
                             embedding_provider="llama-cpp",
@@ -2522,7 +2521,7 @@ class TestStartEdgeCases:
         assert result.exit_code == 1
         assert "Background cementic processes already running" in result.output
 
-    @patch("cementic.cli.Bootstrapper")
+    @patch("cementic.bootstrap.Bootstrapper")
     @patch("cementic.cli.is_pid_running", return_value=False)
     @patch("cementic.cli._load_supervisor_state")
     def test_start_bootstrap_fails(self, mock_load_state, mock_is_running, mock_boot):
@@ -2669,7 +2668,7 @@ class TestErrorStreamDiscipline:
         # check_health must be mocked or the db-unreachable gate exits first.
         with (
             patch("cementic.collections.collection_exists", return_value=False),
-            patch("cementic.cli.check_health", return_value=_healthy_health()),
+            patch("cementic.status_service.check_health", return_value=_healthy_health()),
         ):
             result = runner.invoke(app, ["status", "-c", "nosuch"])
 
@@ -2758,7 +2757,7 @@ class TestErrorStreamDiscipline:
 
         with (
             patch("cementic.cli._get_supervisor_state_path", return_value=state_path),
-            patch("cementic.cli.Bootstrapper"),
+            patch("cementic.bootstrap.Bootstrapper"),
             patch("cementic.cli._wait_for_worker_startup", return_value=[dead]),
             patch("cementic.cli._terminate_managed"),
         ):
@@ -2772,7 +2771,7 @@ class TestErrorStreamDiscipline:
 class TestFilterCommands:
     """extract / chunk / embed stdin-stdout filters (Move 3)."""
 
-    @patch("cementic.cli.extract_document", return_value="# Title\n\nbody text")
+    @patch("cementic.extract.extract_document", return_value="# Title\n\nbody text")
     def test_extract_outputs_markdown(self, mock_extract):
         result = runner.invoke(app, ["extract", "paper.pdf"])
         assert result.exit_code == 0
@@ -2781,13 +2780,13 @@ class TestFilterCommands:
         # dispatched by content type through the registry
         assert mock_extract.call_args.args[0] == "paper.pdf"
 
-    @patch("cementic.cli.extract_document", side_effect=ValueError("no extractor for '.xyz'"))
+    @patch("cementic.extract.extract_document", side_effect=ValueError("no extractor for '.xyz'"))
     def test_extract_missing_file_exits_1(self, mock_extract):
         result = runner.invoke(app, ["extract", "nope.pdf"])
         assert result.exit_code == 1
         assert "extract failed" in result.output
 
-    @patch("cementic.cli.extract_document", side_effect=FileNotFoundError("no such file"))
+    @patch("cementic.extract.extract_document", side_effect=FileNotFoundError("no such file"))
     def test_extract_error_goes_to_stderr_not_stdout(self, mock_extract):
         # A filter's diagnostics must never land on stdout, or a downstream
         # `| chunk | embed` would embed the error text as document content.
@@ -2813,7 +2812,7 @@ class TestFilterCommands:
     def test_extract_reports_ordinary_os_errors_without_a_traceback(self, error):
         """Only FileNotFoundError was caught, so a directory named `notes.md`,
         an unreadable file, or a symlink loop produced a full traceback."""
-        with patch("cementic.cli.extract_document", side_effect=error):
+        with patch("cementic.extract.extract_document", side_effect=error):
             result = runner.invoke(app, ["extract", "thing.md"])
 
         assert result.exit_code == 1
@@ -2826,8 +2825,8 @@ class TestFilterCommands:
         assert result.stdout.strip() == ""
         assert "chunk failed" in result.stderr
 
-    @patch("cementic.cli.runtime_spec_from_config", return_value=object())
-    @patch("cementic.cli.create_provider", return_value=_FakeEmbedProvider())
+    @patch("cementic.embedding_runtime.runtime_spec_from_config", return_value=object())
+    @patch("cementic.embedding_runtime.create_provider", return_value=_FakeEmbedProvider())
     def test_embed_bad_json_errors_to_stderr(self, mock_create, mock_spec):
         result = runner.invoke(app, ["embed"], input="not json at all\n")
         assert result.exit_code == 1
@@ -2851,7 +2850,7 @@ class TestFilterCommands:
         from cementic.chunk import TokenizerUnavailableError
 
         with patch(
-            "cementic.cli.chunk_text",
+            "cementic.chunk.chunk_text",
             side_effect=TokenizerUnavailableError("could not load the cl100k_base tokenizer"),
         ):
             result = runner.invoke(app, ["chunk"], input="hello world")
@@ -2879,8 +2878,8 @@ class TestFilterCommands:
         flagged_lines = [line for line in flagged_result.output.splitlines() if line.strip()]
         assert len(flagged_lines) > len(default_lines)
 
-    @patch("cementic.cli.runtime_spec_from_config", return_value=object())
-    @patch("cementic.cli.create_provider", return_value=_FakeEmbedProvider())
+    @patch("cementic.embedding_runtime.runtime_spec_from_config", return_value=object())
+    @patch("cementic.embedding_runtime.create_provider", return_value=_FakeEmbedProvider())
     def test_embed_adds_embedding_field(self, mock_create, mock_spec):
         stdin = '{"index": 0, "content": "hi"}\n{"index": 1, "content": "there"}\n'
         result = runner.invoke(app, ["embed"], input=stdin)
@@ -2895,8 +2894,8 @@ class TestFilterCommands:
         assert result.exit_code == 0
         assert result.output.strip() == ""
 
-    @patch("cementic.cli.runtime_spec_from_config", return_value=object())
-    @patch("cementic.cli.create_provider", return_value=_FakeEmbedProvider())
+    @patch("cementic.embedding_runtime.runtime_spec_from_config", return_value=object())
+    @patch("cementic.embedding_runtime.create_provider", return_value=_FakeEmbedProvider())
     def test_embed_error_names_the_real_stdin_line(self, mock_create, mock_spec):
         """Regression: blank lines were dropped before numbering, so the error
         for line 4 was reported as line 2."""
@@ -2905,8 +2904,8 @@ class TestFilterCommands:
         assert result.exit_code == 1
         assert "line 4" in result.stderr
 
-    @patch("cementic.cli.runtime_spec_from_config", return_value=object())
-    @patch("cementic.cli.create_provider", return_value=_FakeEmbedProvider())
+    @patch("cementic.embedding_runtime.runtime_spec_from_config", return_value=object())
+    @patch("cementic.embedding_runtime.create_provider", return_value=_FakeEmbedProvider())
     def test_embed_binary_stdin_is_an_error_not_a_traceback(self, mock_create, mock_spec):
         """Regression: only JSONDecodeError was caught, so binary stdin
         surfaced as a raw UnicodeDecodeError traceback."""
@@ -2946,8 +2945,8 @@ class TestFilterCommands:
         ['{"content": ""}', '{"content": "   \\n\\t  "}'],
         ids=["empty", "whitespace-only"],
     )
-    @patch("cementic.cli.runtime_spec_from_config", return_value=object())
-    @patch("cementic.cli.create_provider", return_value=_FakeEmbedProvider())
+    @patch("cementic.embedding_runtime.runtime_spec_from_config", return_value=object())
+    @patch("cementic.embedding_runtime.create_provider", return_value=_FakeEmbedProvider())
     def test_embed_rejects_content_with_no_text(self, mock_create, mock_spec, record):
         """Regression: {"content": ""} embedded into a plausible-looking vector
         at exit 0 -- the same hole the missing/null fix closed, one layer down.
@@ -2957,7 +2956,7 @@ class TestFilterCommands:
         assert result.stdout.strip() == ""
         assert "no text to embed" in result.stderr
 
-    @patch("cementic.cli.runtime_spec_from_config", return_value=object())
+    @patch("cementic.embedding_runtime.runtime_spec_from_config", return_value=object())
     def test_embed_batches_requests_by_config_batch_size(self, mock_spec):
         """Regression: embed must not send every stdin record in one request.
 
@@ -2966,7 +2965,7 @@ class TestFilterCommands:
         """
         provider = _BatchTrackingEmbedProvider()
         stdin = "".join(json.dumps({"index": i, "content": f"chunk {i}"}) + "\n" for i in range(5))
-        with patch("cementic.cli.create_provider", return_value=provider):
+        with patch("cementic.embedding_runtime.create_provider", return_value=provider):
             with patch("cementic.cli._get_config") as mock_get_config:
                 config = mock_get_config.return_value
                 config.pipeline_worker.batch_size = 2
@@ -3088,7 +3087,7 @@ class TestRefusalsUseStderr:
         searcher = MagicMock()
         searcher.search.return_value = []
         searcher.unsearchable_collections.return_value = ["nosuch"]
-        with patch("cementic.cli.Searcher", return_value=searcher):
+        with patch("cementic.search.Searcher", return_value=searcher):
             result = runner.invoke(app, ["search", "anything", "-c", "nosuch"])
 
         assert result.exit_code == 1
@@ -3121,8 +3120,8 @@ class _RefusingEmbedProvider(_FakeEmbedProvider):
 class TestEmbedReportsRealStdinLines:
     """Every embed error names the same line numbers the user can count to."""
 
-    @patch("cementic.cli.runtime_spec_from_config", return_value=object())
-    @patch("cementic.cli.create_provider", return_value=_RefusingEmbedProvider())
+    @patch("cementic.embedding_runtime.runtime_spec_from_config", return_value=object())
+    @patch("cementic.embedding_runtime.create_provider", return_value=_RefusingEmbedProvider())
     def test_an_unembeddable_record_names_its_stdin_line(self, _provider, _spec):
         """Regression: this branch alone still counted *records*, so a blank line
         in the input shifted it -- the exact mislocation the parse and validation
@@ -3147,7 +3146,7 @@ class TestFifthReviewSection41Leftovers:
         searcher.search.return_value = []
         searcher.unsearchable_collections.return_value = ["persnal"]
         with (
-            patch("cementic.cli.Searcher", return_value=searcher),
+            patch("cementic.search.Searcher", return_value=searcher),
             patch("cementic.cli._known_collection_names", return_value=set()),
         ):
             result = runner.invoke(app, ["search", "q", "-c", "persnal"])
@@ -3162,7 +3161,7 @@ class TestFifthReviewSection41Leftovers:
         searcher.search.return_value = []
         searcher.unsearchable_collections.return_value = ["building"]
         with (
-            patch("cementic.cli.Searcher", return_value=searcher),
+            patch("cementic.search.Searcher", return_value=searcher),
             patch("cementic.cli._known_collection_names", return_value={"building"}),
         ):
             result = runner.invoke(app, ["search", "q", "-c", "building"])
@@ -3177,7 +3176,7 @@ class TestFifthReviewSection41Leftovers:
         searcher.search.return_value = []
         searcher.unsearchable_collections.return_value = ["persnal"]
         with (
-            patch("cementic.cli.Searcher", return_value=searcher),
+            patch("cementic.search.Searcher", return_value=searcher),
             patch("cementic.cli._known_collection_names", return_value=set()),
         ):
             result = runner.invoke(app, ["search", "q", "-c", "persnal"])
