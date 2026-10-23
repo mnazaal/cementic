@@ -592,7 +592,7 @@ class TestChunkCommand:
         )
 
         assert result.exit_code == 0
-        assert json.loads(result.output.splitlines()[0])["index"] == 0
+        assert json.loads(result.output.splitlines()[0])["chunk_index"] == 0
 
 
 def _healthy_health() -> SimpleNamespace:
@@ -2948,7 +2948,7 @@ class TestFilterCommands:
         lines = [line for line in result.output.splitlines() if line.strip()]
         assert lines
         first = json.loads(lines[0])
-        assert first["index"] == 0
+        assert first["chunk_index"] == 0
         assert "hello world" in first["content"]
 
     def test_chunk_without_a_tokenizer_is_one_line(self):
@@ -2990,13 +2990,13 @@ class TestFilterCommands:
     @patch("cementic.embedding_runtime.runtime_spec_from_config", return_value=object())
     @patch("cementic.embedding_runtime.create_provider", return_value=_FakeEmbedProvider())
     def test_embed_adds_embedding_field(self, mock_create, mock_spec):
-        stdin = '{"index": 0, "content": "hi"}\n{"index": 1, "content": "there"}\n'
+        stdin = '{"chunk_index": 0, "content": "hi"}\n{"chunk_index": 1, "content": "there"}\n'
         result = runner.invoke(app, ["embed"], input=stdin)
         assert result.exit_code == 0
         lines = [json.loads(line) for line in result.output.splitlines() if line.strip()]
         assert len(lines) == 2
         assert lines[0]["embedding"] == [0.1, 0.2, 0.3]
-        assert lines[0]["index"] == 0 and lines[0]["content"] == "hi"
+        assert lines[0]["chunk_index"] == 0 and lines[0]["content"] == "hi"
 
     def test_embed_empty_stdin_is_noop(self):
         result = runner.invoke(app, ["embed"], input="")
@@ -3073,7 +3073,9 @@ class TestFilterCommands:
         large inputs; requests must be chunked by pipeline_worker.batch_size.
         """
         provider = _BatchTrackingEmbedProvider()
-        stdin = "".join(json.dumps({"index": i, "content": f"chunk {i}"}) + "\n" for i in range(5))
+        stdin = "".join(
+            json.dumps({"chunk_index": i, "content": f"chunk {i}"}) + "\n" for i in range(5)
+        )
         with patch("cementic.embedding_runtime.create_provider", return_value=provider):
             with patch("cementic.cli._get_config") as mock_get_config:
                 config = mock_get_config.return_value
@@ -3084,7 +3086,7 @@ class TestFilterCommands:
         assert provider.batch_sizes == [2, 2, 1]
         lines = [json.loads(line) for line in result.output.splitlines() if line.strip()]
         assert len(lines) == 5
-        assert [line["index"] for line in lines] == [0, 1, 2, 3, 4]
+        assert [line["chunk_index"] for line in lines] == [0, 1, 2, 3, 4]
 
 
 class TestStopExplainsAnIndexBuild:

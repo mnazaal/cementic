@@ -1177,7 +1177,7 @@ def chunk(
             )
         raise typer.Exit(1)
     for piece in pieces:
-        typer.echo(json.dumps({"index": piece.chunk_index, "content": piece.content}))
+        typer.echo(json.dumps({"chunk_index": piece.chunk_index, "content": piece.content}))
 
 
 @app.command(short_help="Embed chunk JSONL from stdin to JSONL on stdout")
