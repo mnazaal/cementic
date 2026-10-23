@@ -61,6 +61,29 @@ def test_cli_import_does_not_pull_in_the_pdf_stack() -> None:
     assert loaded == "", f"cementic.cli eagerly imported: {loaded}"
 
 
+def test_cli_import_does_not_pull_in_the_database_or_http_layers() -> None:
+    """Importing the CLI must not load SQLAlchemy, requests or tiktoken.
+
+    They cost about 230 ms idle on every invocation, including `--version`,
+    `config path`, `extract` and `chunk`, none of which touch a database. One
+    surviving module-level edge re-imports the whole layer, so the cementic
+    modules that pull it in are named too: a regression then points at the
+    module that reintroduced it. `sqlalchemy`, not `sqlalchemy.orm`, because
+    the cost is in `sqlalchemy/__init__.py`.
+    """
+    probe = (
+        "import sys; import cementic.cli; "
+        "print(','.join(m for m in ('sqlalchemy', 'requests', 'tiktoken', "
+        "'cementic.pipeline_worker', 'cementic.collections', 'cementic.db') "
+        "if m in sys.modules))"
+    )
+    loaded = subprocess.run(
+        [sys.executable, "-c", probe], capture_output=True, text=True, check=True
+    ).stdout.strip()
+
+    assert loaded == "", f"cementic.cli eagerly imported: {loaded}"
+
+
 @patch("cementic.cli._get_config", side_effect=AssertionError("_get_config must not be called"))
 def test_namespace_help_commands_never_load_config(mock_get_config: MagicMock) -> None:
     """Help-only commands should never touch slow external services.
