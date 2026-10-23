@@ -240,3 +240,40 @@ class TestLexicalIndexFacts:
             for call in engine.begin.return_value.__enter__.return_value.execute.call_args_list
         ]
         assert any("DROP INDEX" in statement for statement in dropped), dropped
+
+
+class TestRetrofitLock:
+    """The retrofit pass runs under an advisory lock on PostgreSQL only."""
+
+    @staticmethod
+    def _engine(dialect: str) -> tuple[MagicMock, MagicMock]:
+        engine = MagicMock()
+        engine.dialect.name = dialect
+        conn = engine.begin.return_value.__enter__.return_value
+        return engine, conn
+
+    def test_postgresql_takes_the_advisory_lock_before_any_retrofit(self):
+        from cementic import db
+
+        engine, conn = self._engine("postgresql")
+        order: list[str] = []
+        conn.execute.side_effect = lambda stmt, *a, **k: order.append(f"sql:{stmt}")
+        with (
+            patch.object(db, "_add_missing_columns", lambda c: order.append("add")),
+            patch.object(db, "_drop_retired_indexes", lambda c: order.append("drop")),
+            patch.object(db, "_require_scope_columns_not_null", lambda c: order.append("null")),
+        ):
+            db._retrofit_schema(engine)
+
+        assert order[0] == "sql:SELECT pg_advisory_xact_lock(:key)"
+        assert order[1:] == ["add", "drop", "null"]
+        assert engine.begin.call_count == 1  # one transaction covers every retrofit
+
+    def test_sqlite_issues_no_lock_and_no_transaction(self):
+        from cementic import db
+
+        engine, conn = self._engine("sqlite")
+        db._retrofit_schema(engine)
+
+        engine.begin.assert_not_called()
+        conn.execute.assert_not_called()

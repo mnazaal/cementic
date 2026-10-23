@@ -31,7 +31,7 @@ from cementic.vector_store import (
 )
 
 if TYPE_CHECKING:
-    from sqlalchemy.engine import URL, Engine
+    from sqlalchemy.engine import URL, Connection, Engine
     from sqlalchemy.orm import Session
 
 
@@ -643,9 +643,7 @@ def create_tables(engine: Engine) -> None:
     """Create all tables required by the versioned pipeline schema."""
     ensure_vector_extensions(engine)
     Base.metadata.create_all(engine)
-    _add_missing_columns(engine)
-    _drop_retired_indexes(engine)
-    _require_scope_columns_not_null(engine)
+    _retrofit_schema(engine)
     ensure_lexical_index(engine)
     try:
         with engine.begin() as conn:
@@ -686,22 +684,42 @@ _RETIRED_INDEXES = ("ix_source_documents_collection", "ix_chunk_embeddings_profi
 _SCOPE_COLUMNS = ("collection", "extractor_profile_id", "chunk_profile_id")
 
 
-def _add_missing_columns(engine: Engine) -> None:
+#: Key of the advisory lock that serialises the retrofit pass across processes.
+_RETROFIT_LOCK_KEY = 0x63656D656E746963  # "cementic"
+
+
+def _retrofit_schema(engine: Engine) -> None:
+    """Run the in-place schema retrofits, one process at a time, in one transaction.
+
+    The watcher and the pipeline worker both call `create_tables` at start.
+    `_require_scope_columns_not_null` reads the table (ACCESS SHARE) and then
+    ALTERs it (ACCESS EXCLUSIVE): with two processes each holding the share
+    lock while waiting for the upgrade, PostgreSQL kills one with a deadlock.
+    The transaction-scoped advisory lock, taken first, makes the second process
+    wait for the first to commit; the catalog checks then find nothing left to
+    do. SQLite is only the test backend and has nothing to retrofit.
+    """
+    if engine.dialect.name != "postgresql":
+        return
+    with engine.begin() as conn:
+        conn.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": _RETROFIT_LOCK_KEY})
+        _add_missing_columns(conn)
+        _drop_retired_indexes(conn)
+        _require_scope_columns_not_null(conn)
+
+
+def _add_missing_columns(conn: Connection) -> None:
     """Add `_RETROFIT_COLUMNS` to an existing PostgreSQL schema.
 
     A constant default makes each ADD COLUMN a catalog-only change on
     PostgreSQL 11+, so it does not rewrite the table. ALTER TABLE takes its
-    lock before checking IF NOT EXISTS, so the two workers starting together
-    serialise here rather than racing the way the indexes below can.
-    SQLite is only the test backend, where `create_all` always builds the
-    current schema.
+    lock before checking IF NOT EXISTS; `_retrofit_schema` holds the advisory
+    lock around the call, so two workers starting together do not interleave.
     """
-    if engine.dialect.name != "postgresql":
-        return
     missing = [
         (table, column, definition)
         for table, column, definition in _RETROFIT_COLUMNS
-        if column not in {c["name"] for c in inspect(engine).get_columns(table)}
+        if column not in {c["name"] for c in inspect(conn).get_columns(table)}
     ]
     # Checked through the catalog first: ADD COLUMN IF NOT EXISTS takes an
     # ACCESS EXCLUSIVE lock even when the column is there, so running it on
@@ -709,35 +727,29 @@ def _add_missing_columns(engine: Engine) -> None:
     # searches behind it in turn.
     if not missing:
         return
-    with engine.begin() as conn:
-        for table, column, definition in missing:
-            conn.execute(
-                text(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} {definition}")
-            )
+    for table, column, definition in missing:
+        conn.execute(text(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} {definition}"))
 
 
-def _drop_retired_indexes(engine: Engine) -> None:
+def _drop_retired_indexes(conn: Connection) -> None:
     """Drop `_RETIRED_INDEXES` from an existing PostgreSQL schema.
 
     Looked up in the catalog first for the reason `_add_missing_columns` is:
     DROP INDEX takes an ACCESS EXCLUSIVE lock on the table even for IF EXISTS.
     """
-    if engine.dialect.name != "postgresql":
-        return
     present = {
         index["name"]
         for table in ("source_documents", "chunk_embeddings")
-        for index in inspect(engine).get_indexes(table)
+        for index in inspect(conn).get_indexes(table)
     }
     retired = [name for name in _RETIRED_INDEXES if name in present]
     if not retired:
         return
-    with engine.begin() as conn:
-        for name in retired:
-            conn.execute(text(f"DROP INDEX IF EXISTS {name}"))
+    for name in retired:
+        conn.execute(text(f"DROP INDEX IF EXISTS {name}"))
 
 
-def _require_scope_columns_not_null(engine: Engine) -> None:
+def _require_scope_columns_not_null(conn: Connection) -> None:
     """Make the `chunk_embeddings` scope columns NOT NULL on an existing schema.
 
     Refuses, with the count, while any row holds a NULL in one: such a row
@@ -745,31 +757,28 @@ def _require_scope_columns_not_null(engine: Engine) -> None:
     constrain away. SET NOT NULL scans the table under an ACCESS EXCLUSIVE lock,
     once for all three columns because they share one statement.
     """
-    if engine.dialect.name != "postgresql":
-        return
-    columns = {c["name"]: c for c in inspect(engine).get_columns("chunk_embeddings")}
+    columns = {c["name"]: c for c in inspect(conn).get_columns("chunk_embeddings")}
     nullable = [name for name in _SCOPE_COLUMNS if columns[name]["nullable"]]
     if not nullable:
         return
-    with engine.begin() as conn:
-        null_rows = conn.execute(
-            text(
-                "SELECT count(*) FROM chunk_embeddings WHERE "
-                + " OR ".join(f"{name} IS NULL" for name in nullable)
-            )
-        ).scalar_one()
-        if null_rows:
-            raise RuntimeError(
-                f"chunk_embeddings has {null_rows} rows with a NULL in "
-                f"{', '.join(nullable)}; backfill or delete them before the "
-                "columns can be made NOT NULL"
-            )
-        conn.execute(
-            text(
-                "ALTER TABLE chunk_embeddings "
-                + ", ".join(f"ALTER COLUMN {name} SET NOT NULL" for name in nullable)
-            )
+    null_rows = conn.execute(
+        text(
+            "SELECT count(*) FROM chunk_embeddings WHERE "
+            + " OR ".join(f"{name} IS NULL" for name in nullable)
         )
+    ).scalar_one()
+    if null_rows:
+        raise RuntimeError(
+            f"chunk_embeddings has {null_rows} rows with a NULL in "
+            f"{', '.join(nullable)}; backfill or delete them before the "
+            "columns can be made NOT NULL"
+        )
+    conn.execute(
+        text(
+            "ALTER TABLE chunk_embeddings "
+            + ", ".join(f"ALTER COLUMN {name} SET NOT NULL" for name in nullable)
+        )
+    )
 
 
 def _source_file_hash_index_exists(engine: Engine) -> bool:

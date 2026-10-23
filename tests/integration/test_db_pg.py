@@ -699,3 +699,30 @@ class TestSchemaRetrofitPass:
         with pg_engine.begin() as conn:
             conn.execute(text("DELETE FROM chunk_embeddings"))
         create_tables(pg_engine)
+
+    def test_concurrent_first_start_on_an_old_shape_does_not_deadlock(self, pg_engine):
+        """Regression: the NOT NULL step counted the table (ACCESS SHARE) and then
+        altered it (ACCESS EXCLUSIVE). The watcher and the worker both ran it at
+        the first start after the upgrade, each held the share lock while
+        waiting for the upgrade, and PostgreSQL killed one with a deadlock."""
+        import threading
+
+        self._make_old(pg_engine)
+        outcomes: list[str] = []
+        barrier = threading.Barrier(2)
+
+        def run() -> None:
+            barrier.wait()
+            try:
+                create_tables(pg_engine)
+                outcomes.append("ok")
+            except Exception as error:  # noqa: BLE001 - the failure is the point
+                outcomes.append(f"{type(error).__name__}: {error}")
+
+        threads = [threading.Thread(target=run) for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        assert outcomes == ["ok", "ok"], outcomes
