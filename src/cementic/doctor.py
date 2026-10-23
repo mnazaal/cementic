@@ -14,10 +14,10 @@ from sqlalchemy import text
 from cementic.bootstrap import llama_model_download_allowed
 from cementic.config import (
     Config,
-    config_file_error,
     resolve_config_path,
     resolve_llama_model_path,
 )
+from cementic.config_diagnostics import config_file_error
 from cementic.db import (
     LEXICAL_INDEX_NAME,
     REQUIRED_DB_EXTENSIONS,

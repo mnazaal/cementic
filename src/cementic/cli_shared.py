@@ -20,10 +20,9 @@ from rich.console import Console
 from cementic import render
 from cementic.config import (
     Config,
-    ConfigError,
     get_config,
-    render_config_error,
 )
+from cementic.config_diagnostics import ConfigError, render_config_error
 from cementic.supervisor import (
     SupervisorState,
     is_managed_process_alive,

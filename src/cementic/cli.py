@@ -38,10 +38,10 @@ from cementic.cli_shared import (
 )
 from cementic.config import (
     config_init_target,
-    config_path_error,
     default_config_path,
     resolve_config_path,
 )
+from cementic.config_diagnostics import config_path_error
 from cementic.embedding_text import describe_text_policy
 from cementic.filelock import LockUnavailableError, file_lock
 from cementic.hybrid import scores_explain_order

@@ -10,10 +10,9 @@ from rich.console import Console
 from cementic.bootstrap import Bootstrapper
 from cementic.config import (
     Config,
-    ConfigError,
     get_config,
-    render_config_error,
 )
+from cementic.config_diagnostics import ConfigError, render_config_error
 from cementic.pipeline_worker import PipelineWorker
 from cementic.source_watcher import SourceWatcher
 from cementic.validation import validate_collection_name

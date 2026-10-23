@@ -12,17 +12,19 @@ from pydantic import ValidationError
 from cementic.chunk import TOKENIZER, chunk_text
 from cementic.config import (
     Config,
-    ConfigError,
     DatabaseConfig,
     IndexConfig,
     LlamaCppConfig,
-    config_file_error,
-    config_path_error,
-    format_config_error,
     get_config,
     load_config_file,
     resolve_config_path,
     resolve_llama_model_path,
+)
+from cementic.config_diagnostics import (
+    ConfigError,
+    config_file_error,
+    config_path_error,
+    format_config_error,
 )
 from cementic.embedding_runtime import _TOKEN_RATIO_UPPER_BOUND
 from cementic.embedding_text import format_document_text_for_model
@@ -763,3 +765,32 @@ class TestDaemonCommandValidation:
         """`[]` is a typo, not a way to ask for a server cementic no longer has."""
         with pytest.raises(ValidationError, match="non-empty command list"):
             LlamaCppConfig(daemon_command=[])
+
+
+class TestConfigIsAValueOfItsInputs:
+    """Config() depends on the working directory only through the paths it names."""
+
+    def test_two_working_directories_differ_only_in_path_fields(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        monkeypatch.setenv("CEMENTIC_CONFIG", str(tmp_path / "absent.toml"))
+        monkeypatch.setattr("cementic.config.user_data_dir", lambda *a, **k: str(tmp_path / "d"))
+        first, second = tmp_path / "a", tmp_path / "b"
+        first.mkdir()
+        second.mkdir()
+
+        built = []
+        for cwd in (first, second):
+            monkeypatch.chdir(cwd)
+            built.append(Config(storage={"artifacts_path": "rel"}))
+
+        left, right = (c.model_dump(mode="json") for c in built)
+        differing = {
+            (section, key)
+            for section in left
+            for key in left[section]
+            if left[section][key] != right[section][key]
+        }
+        assert differing == {("storage", "artifacts_path")}
+        assert built[0].storage.artifacts_path == first / "rel"
+        assert built[1].storage.artifacts_path == second / "rel"
