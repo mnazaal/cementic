@@ -176,7 +176,7 @@ def test_status_command_probes_health_and_workers_exactly_once(
     assert mock_workers.call_count == 1
 
 
-@patch("cementic.cli_collection.list_collections", return_value=[])
+@patch("cementic.collections.list_collections", return_value=[])
 @patch("cementic.db.get_session_factory")
 @patch("cementic.db.get_engine")
 def test_collection_list_queries_backend_exactly_once(

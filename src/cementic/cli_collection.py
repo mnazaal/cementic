@@ -16,16 +16,6 @@ from cementic.cli_shared import (
     console,
     err_console,
 )
-from cementic.collections import (
-    delete_collection_records,
-    drop_orphan_vector_tables,
-    list_collection_revisions,
-    list_collections,
-    promote_ready_revision,
-    reindex_collection,
-    remove_artifacts,
-)
-from cementic.db import get_engine, get_session_factory
 
 collection_app = CementicTyper(help="Inspect and manage collections")
 
@@ -48,6 +38,9 @@ def remove_collection(
             raise typer.Abort()
 
     with _reporting_db_errors(f"collection remove '{collection}'"):
+        from cementic.collections import delete_collection_records
+        from cementic.db import get_engine, get_session_factory
+
         engine = get_engine(_get_config().database.url)
         session_factory = get_session_factory(engine)
 
@@ -77,6 +70,8 @@ def remove_collection(
             "warning: background workers are still watching this collection; "
             "the watcher will re-register its files -- run `cementic stop` to stop them"
         )
+    from cementic.collections import drop_orphan_vector_tables, remove_artifacts
+
     try:
         unremoved = remove_artifacts(result.artifact_paths, config=_get_config())
         drop_orphan_vector_tables(engine, result.vector_profile_ids)
@@ -94,6 +89,8 @@ def remove_collection(
 @collection_app.command("list", short_help="List known collections")
 def list_collection_command() -> None:
     """Show known collections."""
+    from cementic.collections import list_collections
+
     with _reporting_db_errors("collection list"):
         with _db_session() as session:
             rows = list_collections(session)
@@ -133,6 +130,8 @@ def promote_collection(
 
     Search switches to the ready revision only after this command succeeds.
     """
+    from cementic.collections import promote_ready_revision
+
     collection = _validated_collection_name(collection)
 
     with _reporting_db_errors("collection promote"):
@@ -258,6 +257,8 @@ def reindex_collection_command(
     It does not re-embed documents. It also creates or repairs the full-text
     index hybrid search uses.
     """
+    from cementic.collections import reindex_collection
+
     collection = _validated_collection_name(collection)
 
     with _reporting_db_errors("collection reindex"):
@@ -306,6 +307,8 @@ def list_collection_revision_command(
     collection: str = typer.Argument(..., help="Collection name to inspect"),
 ) -> None:
     """Show revision history for one collection."""
+    from cementic.collections import list_collection_revisions
+
     collection = _validated_collection_name(collection)
 
     with _reporting_db_errors("collection revisions"):

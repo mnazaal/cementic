@@ -58,7 +58,7 @@ class TestRemoveCollectionCommand:
     """Tests for the remove-collection CLI command."""
 
     def test_remove_nonexistent_collection(self, runner, sqlite_engine):
-        with patch("cementic.cli_collection.get_engine", return_value=sqlite_engine):
+        with patch("cementic.db.get_engine", return_value=sqlite_engine):
             result = runner.invoke(app, ["collection", "remove", "ghost", "--force"])
         assert result.exit_code == 0
         assert "not found" in result.stdout.lower()
@@ -70,7 +70,7 @@ class TestRemoveCollectionCommand:
         sqlite_session.add(doc)
         sqlite_session.commit()
 
-        with patch("cementic.cli_collection.get_engine", return_value=sqlite_engine):
+        with patch("cementic.db.get_engine", return_value=sqlite_engine):
             result = runner.invoke(app, ["collection", "remove", "delme", "--force"])
         assert result.exit_code == 0
 

@@ -1509,7 +1509,7 @@ class TestBackgroundCommands:
 
         outcome = PromotionOutcome(status="promoted", revision=revision)
         with patch(
-            "cementic.cli_collection.promote_ready_revision", return_value=outcome
+            "cementic.collections.promote_ready_revision", return_value=outcome
         ) as mock_promote:
             result = runner.invoke(app, ["collection", "promote", "research"])
 
@@ -1541,7 +1541,7 @@ class TestBackgroundCommands:
             unremoved_artifacts=["/artifacts/old.zst"],
             cleanup_error="DROP TABLE failed: disk error",
         )
-        with patch("cementic.cli_collection.promote_ready_revision", return_value=outcome):
+        with patch("cementic.collections.promote_ready_revision", return_value=outcome):
             result = runner.invoke(app, ["collection", "promote", "research"])
 
         assert result.exit_code == 0
@@ -1562,7 +1562,7 @@ class TestBackgroundCommands:
 
         outcome = ReindexOutcome("reindexed", method="diskann", previous_method="hnsw")
         with patch(
-            "cementic.cli_collection.reindex_collection", return_value=outcome
+            "cementic.collections.reindex_collection", return_value=outcome
         ) as mock_reindex:
             result = runner.invoke(app, ["collection", "reindex", "research"])
 
@@ -1589,7 +1589,7 @@ class TestBackgroundCommands:
 
         outcome = ReindexOutcome("reindexed", method="hnsw", previous_method="hnsw")
         with patch(
-            "cementic.cli_collection.reindex_collection", return_value=outcome
+            "cementic.collections.reindex_collection", return_value=outcome
         ) as mock_reindex:
             result = runner.invoke(app, ["collection", "reindex", "research", "--force"])
 
@@ -1608,7 +1608,7 @@ class TestBackgroundCommands:
         mock_get_session_factory.return_value = lambda: mock_session
 
         with patch(
-            "cementic.cli_collection.reindex_collection", return_value=ReindexOutcome("no_active")
+            "cementic.collections.reindex_collection", return_value=ReindexOutcome("no_active")
         ):
             result = runner.invoke(app, ["collection", "reindex", "research"])
 
@@ -1628,7 +1628,7 @@ class TestBackgroundCommands:
         mock_get_session_factory.return_value = lambda: mock_session
 
         outcome = ReindexOutcome("reindexed", method="hnsw", previous_method="hnsw")
-        with patch("cementic.cli_collection.reindex_collection", return_value=outcome):
+        with patch("cementic.collections.reindex_collection", return_value=outcome):
             result = runner.invoke(app, ["collection", "reindex", "research"])
 
         assert result.exit_code == 0
@@ -1654,7 +1654,7 @@ class TestBackgroundCommands:
         built = ReindexOutcome(
             "reindexed", method="hnsw", previous_method="hnsw", lexical_index="built"
         )
-        with patch("cementic.cli_collection.reindex_collection", return_value=built):
+        with patch("cementic.collections.reindex_collection", return_value=built):
             result = runner.invoke(app, ["collection", "reindex", "research"])
 
         assert result.exit_code == 0
@@ -1663,7 +1663,7 @@ class TestBackgroundCommands:
         already_there = ReindexOutcome(
             "reindexed", method="hnsw", previous_method="hnsw", lexical_index="present"
         )
-        with patch("cementic.cli_collection.reindex_collection", return_value=already_there):
+        with patch("cementic.collections.reindex_collection", return_value=already_there):
             quiet = runner.invoke(app, ["collection", "reindex", "research"])
 
         assert quiet.exit_code == 0
@@ -1690,7 +1690,7 @@ class TestBackgroundCommands:
         mock_get_session_factory.return_value = lambda: mock_session
 
         outcome = PromotionOutcome(status="blocked_by_failures", revision=revision, counts=counts)
-        with patch("cementic.cli_collection.promote_ready_revision", return_value=outcome):
+        with patch("cementic.collections.promote_ready_revision", return_value=outcome):
             result = runner.invoke(app, ["collection", "promote", "research"])
 
         assert result.exit_code == 1
@@ -1712,7 +1712,7 @@ class TestBackgroundCommands:
 
         outcome = PromotionOutcome(status="promoted", revision=revision)
         with patch(
-            "cementic.cli_collection.promote_ready_revision", return_value=outcome
+            "cementic.collections.promote_ready_revision", return_value=outcome
         ) as mock_promote:
             result = runner.invoke(app, ["collection", "promote", "research", "--force"])
 
@@ -1768,7 +1768,7 @@ class TestBackgroundCommands:
         mock_session.__exit__.return_value = False
         mock_get_session_factory.return_value = lambda: mock_session
 
-        with patch("cementic.cli_collection.list_collections", return_value=[summary]) as mock_list:
+        with patch("cementic.collections.list_collections", return_value=[summary]) as mock_list:
             result = runner.invoke(app, ["collection", "list"])
 
         assert result.exit_code == 0
@@ -1805,8 +1805,8 @@ class TestBackgroundCommands:
 class TestCollectionCommands:
     """Test collection management commands."""
 
-    @patch("cementic.cli_collection.get_session_factory")
-    @patch("cementic.cli_collection.get_engine")
+    @patch("cementic.db.get_session_factory")
+    @patch("cementic.db.get_engine")
     def test_collection_remove_not_found(self, mock_get_engine, mock_get_session_factory):
         mock_session = MagicMock()
         mock_session.__enter__.return_value = mock_session
@@ -1814,15 +1814,15 @@ class TestCollectionCommands:
         mock_session.query.return_value.filter_by.return_value.all.return_value = []
         mock_get_session_factory.return_value = lambda: mock_session
 
-        with patch("cementic.cli_collection.delete_collection_records", return_value=None):
+        with patch("cementic.collections.delete_collection_records", return_value=None):
             result = runner.invoke(app, ["collection", "remove", "missing", "--force"])
 
         assert result.exit_code == 0
         assert "collection: missing" in result.output
         assert "status: not found" in result.output
 
-    @patch("cementic.cli_collection.get_session_factory")
-    @patch("cementic.cli_collection.get_engine")
+    @patch("cementic.db.get_session_factory")
+    @patch("cementic.db.get_engine")
     def test_collection_remove_warns_when_workers_still_running(
         self, mock_get_engine, mock_get_session_factory
     ):
@@ -1839,9 +1839,9 @@ class TestCollectionCommands:
 
         def invoke(supervisor_state):
             with (
-                patch("cementic.cli_collection.delete_collection_records", return_value=deletion),
-                patch("cementic.cli_collection.remove_artifacts", return_value=[]),
-                patch("cementic.cli_collection.drop_orphan_vector_tables"),
+                patch("cementic.collections.delete_collection_records", return_value=deletion),
+                patch("cementic.collections.remove_artifacts", return_value=[]),
+                patch("cementic.collections.drop_orphan_vector_tables"),
                 patch(
                     "cementic.cli_collection._load_supervisor_state", return_value=supervisor_state
                 ),
@@ -2035,7 +2035,7 @@ class TestCliHelpers:
 class TestRemovePrompt:
     """Test remove collection without --force (confirm prompt)."""
 
-    @patch("cementic.cli_collection.get_engine")
+    @patch("cementic.db.get_engine")
     def test_remove_without_force_aborts_on_no(self, mock_get_engine):
         """remove_collection aborts when user says no to confirm."""
         result = runner.invoke(app, ["collection", "remove", "mycol"], input="n\n")
@@ -2052,12 +2052,12 @@ class TestCollectionCommandsEdgeCases:
         mock_session = MagicMock()
         mock_session.__enter__.return_value = mock_session
         mock_get_session_factory.return_value = lambda: mock_session
-        with patch("cementic.cli_collection.list_collections", return_value=[]):
+        with patch("cementic.collections.list_collections", return_value=[]):
             result = runner.invoke(app, ["collection", "list"])
         assert result.exit_code == 0
         assert "(none)" in result.output
 
-    @patch("cementic.cli_collection.list_collections", side_effect=ValueError("something broke"))
+    @patch("cementic.collections.list_collections", side_effect=ValueError("something broke"))
     @patch("cementic.db.get_session_factory")
     @patch("cementic.db.get_engine")
     def test_list_generic_error(self, mock_get_engine, mock_get_session_factory, mock_list):
@@ -2082,12 +2082,12 @@ class TestCollectionCommandsEdgeCases:
         mock_session.__enter__.return_value = mock_session
         mock_get_session_factory.return_value = lambda: mock_session
         outcome = PromotionOutcome(status="no_ready")
-        with patch("cementic.cli_collection.promote_ready_revision", return_value=outcome):
+        with patch("cementic.collections.promote_ready_revision", return_value=outcome):
             result = runner.invoke(app, ["collection", "promote", "mycol"])
         assert result.exit_code == 1
         assert "no ready revision" in result.output
 
-    @patch("cementic.cli_collection.promote_ready_revision", side_effect=ValueError("boom"))
+    @patch("cementic.collections.promote_ready_revision", side_effect=ValueError("boom"))
     @patch("cementic.db.get_session_factory")
     @patch("cementic.db.get_engine")
     def test_promote_generic_error(self, mock_get_engine, mock_get_session_factory, mock_promote):
@@ -2110,13 +2110,13 @@ class TestListCollectionRevisionsEdgeCases:
         mock_session = MagicMock()
         mock_session.__enter__.return_value = mock_session
         mock_get_session_factory.return_value = lambda: mock_session
-        with patch("cementic.cli_collection.list_collection_revisions", return_value=[]):
+        with patch("cementic.collections.list_collection_revisions", return_value=[]):
             result = runner.invoke(app, ["collection", "revisions", "mycol"])
         assert result.exit_code == 0
         assert "(none)" in result.output
 
     @patch(
-        "cementic.cli_collection.list_collection_revisions",
+        "cementic.collections.list_collection_revisions",
         side_effect=ValueError("boom"),
     )
     @patch("cementic.db.get_session_factory")
@@ -2734,7 +2734,7 @@ class TestErrorStreamDiscipline:
         mock_get_session_factory.return_value = lambda: mock_session
 
         with patch(
-            "cementic.cli_collection.reindex_collection", return_value=ReindexOutcome("no_active")
+            "cementic.collections.reindex_collection", return_value=ReindexOutcome("no_active")
         ):
             result = runner.invoke(app, ["collection", "reindex", "research"])
 
@@ -3044,7 +3044,7 @@ class TestRefusalsUseStderr:
         with (
             patch("cementic.collections.collection_exists", return_value=True),
             patch(
-                "cementic.cli_collection.promote_ready_revision",
+                "cementic.collections.promote_ready_revision",
                 return_value=PromotionOutcome("no_ready"),
             ),
         ):
@@ -3069,7 +3069,7 @@ class TestRefusalsUseStderr:
         with (
             patch("cementic.collections.collection_exists", return_value=True),
             patch(
-                "cementic.cli_collection.promote_ready_revision",
+                "cementic.collections.promote_ready_revision",
                 return_value=PromotionOutcome("lost_race"),
             ),
         ):
@@ -3213,7 +3213,7 @@ class TestPromoteIncompleteArithmetic:
         mock_get_session_factory.return_value = lambda: mock_session
 
         outcome = PromotionOutcome(status="incomplete", revision=revision, counts=counts)
-        with patch("cementic.cli_collection.promote_ready_revision", return_value=outcome):
+        with patch("cementic.collections.promote_ready_revision", return_value=outcome):
             result = runner.invoke(app, ["collection", "promote", "research"])
 
         assert result.exit_code == 1
