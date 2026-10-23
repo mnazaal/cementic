@@ -6,7 +6,8 @@
 **Entry point: none scheduled.** The 2026-10-22 execution order is finished:
 waves A, R, B, the typo fallback and C passed the user's gate, and 0.3.0 was
 tagged, pushed and installed on 2026-10-23. Wave D is empty because the
-riders failed their rule. Next work comes from the user.
+riders failed their rule. Next, user's call (2026-10-23): daily use on the live corpus toward "Road to
+v1" item 1; no feature work scheduled.
 
 **Phase 2a closed 2026-10-23: stay on v2-moe.** Qwen3 and Harrier pass the
 title rule and fail the phrase rule; see "Retrieval Phase 2" → 2a → "RUN
@@ -834,15 +835,15 @@ change beyond the one split named below.
    `:1134-1168`.
    *Ends when:* the outcome policy is tested as data, the statement count per
    batch is measured, and the pg suite is green.
-2. **`stop` decides as data.** `stop_background` (`cli.py:751-897`) picks one of
+2. **`stop` decides as data.** **DONE, on main since 2026-10-23 (`b4e1bed`).** `stop_background` (`cli.py:751-897`) picks one of
    nine messages inline with `os.kill`. Make the decision a pure function of
    processes, liveness and kill results, returning messages, the next state and
    the exit code.
    *Ends when:* each of the nine branches is a table-driven test.
-3. **Watcher identity choice.** Inside `_register_document`
+3. **Watcher identity choice.** **DONE, on main since 2026-10-23 (`745a2aa`).** Inside `_register_document`
    (`source_watcher.py:865-966`), "which existing row is this file" becomes a
    pure function over the three lookups. *Ends when:* tested without a session.
-4. **Target-revision rule.** The resurrect, supersede or create decision in
+4. **Target-revision rule.** **DONE, on main since 2026-10-23 (`1be44a2`).** The resurrect, supersede or create decision in
    `get_target_revision` (`revisions.py:222-279`) becomes a pure function over
    existing revisions and profile ids. *Ends when:* tested without a session.
 5. **Status document split.** **DONE, on main since 2026-10-23 (`4989219`).** **Pulled forward into the import diet
@@ -856,7 +857,7 @@ change beyond the one split named below.
    no-test-changes rule: `tests/unit/test_json_shapes.py` imports
    `build_status_document` and passes the callables this step drops, so it is
    rewritten to the new signature. The JSON shapes it asserts must not change.
-6. **`Config` as a value.** Move the path defaulting out of `Config.__init__`
+6. **`Config` as a value.** **DONE, on main since 2026-10-23 (`98784e3`).** Move the path defaulting out of `Config.__init__`
    (`config.py:1160-1191`) into an after-validator. Split the diagnostics half
    (`config.py:129-412`) into `config_diagnostics.py`, the one module-graph
    change this phase allows. *Ends when:* two `Config()` built from different
