@@ -1,5 +1,6 @@
 """Integration tests for source watcher thread lifecycle."""
 
+import hashlib
 import os
 import signal
 from pathlib import Path
@@ -10,6 +11,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from watchdog.events import FileMovedEvent
 
+from cementic import source_watcher
 from cementic.config import Config
 from cementic.db import (
     Base,
@@ -171,6 +173,81 @@ class TestConcurrentRegistration:
 
         with session_factory() as session:
             assert session.query(SourceDocument).count() == 1
+
+
+class TestRestartWithoutRehashing:
+    """A start finds unchanged files by (size, mtime) and reads none of them."""
+
+    def _watcher(self, watcher_config, session_factory, root: Path) -> SourceWatcher:
+        sw = SourceWatcher(watcher_config)
+        sw.Session = session_factory
+        sw.collection = "docs"
+        sw._watched_roots = [root.resolve()]
+        return sw
+
+    def test_unchanged_second_start_hashes_nothing(
+        self, watcher_config: Config, watcher_db, temp_dir: Path
+    ) -> None:
+        _engine, session_factory, _db_path = watcher_db
+        doc = temp_dir / "paper.md"
+        doc.write_text("content", encoding="utf-8")
+        sw = self._watcher(watcher_config, session_factory, temp_dir)
+        real = source_watcher._file_sha256
+
+        with patch.object(source_watcher, "_file_sha256", side_effect=real) as hashed:
+            sw._register_document(str(doc))
+            assert hashed.call_count == 1  # first start: the file is new
+            sw._register_document(str(doc))  # second start: nothing changed
+            assert hashed.call_count == 1
+
+        with session_factory() as session:
+            row = session.query(SourceDocument).one()
+            stat = doc.stat()
+            assert (row.size_bytes, row.mtime_ns) == (stat.st_size, stat.st_mtime_ns)
+            assert row.file_hash == real(str(doc))
+
+    def test_changed_file_is_hashed_and_its_hash_replaced(
+        self, watcher_config: Config, watcher_db, temp_dir: Path
+    ) -> None:
+        _engine, session_factory, _db_path = watcher_db
+        doc = temp_dir / "paper.md"
+        doc.write_text("content", encoding="utf-8")
+        sw = self._watcher(watcher_config, session_factory, temp_dir)
+        sw._register_document(str(doc))
+
+        # Same size, later mtime: only the modification time gives it away.
+        doc.write_text("CONTENT", encoding="utf-8")
+        os.utime(doc, ns=(doc.stat().st_atime_ns, doc.stat().st_mtime_ns + 5_000_000_000))
+        with patch.object(
+            source_watcher, "_file_sha256", side_effect=source_watcher._file_sha256
+        ) as hashed:
+            sw._register_document(str(doc))
+
+        assert hashed.call_count == 1
+        with session_factory() as session:
+            row = session.query(SourceDocument).one()
+            assert row.file_hash == hashlib.sha256(b"CONTENT").hexdigest()
+
+    def test_row_without_recorded_stat_is_hashed(
+        self, watcher_config: Config, watcher_db, temp_dir: Path
+    ) -> None:
+        """A row from before the columns carries a hash but no stat to trust."""
+        _engine, session_factory, _db_path = watcher_db
+        doc = temp_dir / "paper.md"
+        doc.write_text("content", encoding="utf-8")
+        sw = self._watcher(watcher_config, session_factory, temp_dir)
+        sw._register_document(str(doc))
+        with session_factory() as session:
+            row = session.query(SourceDocument).one()
+            row.size_bytes = row.mtime_ns = None
+            session.commit()
+
+        with patch.object(
+            source_watcher, "_file_sha256", side_effect=source_watcher._file_sha256
+        ) as hashed:
+            sw._register_document(str(doc))
+
+        assert hashed.call_count == 1
 
 
 class TestOfflineDeletionReconciliation:

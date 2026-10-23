@@ -728,3 +728,23 @@ class TestChooseRegisteredDocument:
         )
         assert how == expect_how
         assert row is rows[expect_row]
+
+
+class TestReusableHash:
+    """`_reusable_hash` decides, from the stored row alone, whether to skip hashing."""
+
+    @pytest.mark.parametrize(
+        ("stored", "expected"),
+        [
+            (("h", 10, 99), "h"),
+            (("h", 11, 99), None),  # size changed
+            (("h", 10, 100), None),  # mtime changed
+            (("h", None, None), None),  # row from before the columns
+            ((None, 10, 99), None),  # deleted row: hash cleared
+            (None, None),  # no row
+        ],
+    )
+    def test_decision(self, stored, expected):
+        from cementic.source_watcher import _reusable_hash
+
+        assert _reusable_hash(stored, 10, 99) == expected

@@ -154,6 +154,31 @@ def _merge_prior_root_document(
     return prior
 
 
+def _file_sha256(file_path: str) -> str:
+    """SHA-256 of a file's bytes, read in 8 KiB blocks."""
+    sha256 = hashlib.sha256()
+    with open(file_path, "rb") as handle:
+        for block in iter(lambda: handle.read(8192), b""):
+            sha256.update(block)
+    return sha256.hexdigest()
+
+
+def _reusable_hash(
+    stored: tuple[str | None, int | None, int | None] | None, size_bytes: int, mtime_ns: int
+) -> str | None:
+    """The stored hash, when it can stand in for hashing the file; else None.
+
+    `stored` is the row's `(file_hash, size_bytes, mtime_ns)`. The file counts as
+    unchanged when its size and modification time both match what was recorded
+    with that hash, the check rsync and make rely on. A NULL anywhere -- no row,
+    a row from before the columns, a deleted one -- means "hash it".
+    """
+    if stored is None:
+        return None
+    file_hash, stored_size, stored_mtime = stored
+    return file_hash if (stored_size, stored_mtime) == (size_bytes, mtime_ns) else None
+
+
 def _choose_registered_document(
     at_path: SourceDocument | None,
     merged: SourceDocument | None,
@@ -932,7 +957,8 @@ class SourceWatcher:
         # Guard against exceedingly large files
         max_size_bytes = 512 * 1024 * 1024  # 512 MiB
         try:
-            file_size = path.stat().st_size
+            stat_result = path.stat()
+            file_size = stat_result.st_size
         except OSError:
             self._logger.error("Cannot stat file: %s", file_path)
             self.state_manager.record_skipped(file_path, "cannot stat")
@@ -946,11 +972,19 @@ class SourceWatcher:
             )
             return
 
-        sha256 = hashlib.sha256()
-        with open(file_path, "rb") as handle:
-            for chunk in iter(lambda: handle.read(8192), b""):
-                sha256.update(chunk)
-        file_hash = sha256.hexdigest()
+        # Stat before the read, so a write landing mid-hash leaves a recorded
+        # mtime older than the file's and the next start hashes it again.
+        mtime_ns = stat_result.st_mtime_ns
+        with self.Session() as session:
+            known = (
+                session.query(SourceDocument)
+                .filter_by(source_path=file_path, collection=self.collection)
+                .first()
+            )
+            stored = (
+                None if known is None else (known.file_hash, known.size_bytes, known.mtime_ns)
+            )
+        file_hash = _reusable_hash(stored, file_size, mtime_ns) or _file_sha256(file_path)
 
         self._publish_current_file(file_path)
         # Read-then-insert is not atomic, and the initial scan runs on the main
@@ -1010,6 +1044,8 @@ class SourceWatcher:
                         document.source_path = file_path
 
                     document.file_hash = file_hash
+                    document.size_bytes = file_size
+                    document.mtime_ns = mtime_ns
                     document.status = "pending"
                     session.commit()
                 break
