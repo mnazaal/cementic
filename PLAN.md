@@ -14,8 +14,8 @@ merged branches are deleted and no extra worktrees remain.
 
 **Phase 2a closed 2026-10-23: stay on v2-moe.** Qwen3 and Harrier pass the
 title rule and fail the phrase rule; see "Retrieval Phase 2" → 2a → "RUN
-2026-10-23". 2b-2e are now judged alone. The noise-floor anomaly (21 refused
-chunks dropped by `score_arm`) is still unchecked.
+2026-10-23". 2b-2e are now judged alone. The noise-floor anomaly is resolved
+as a scoring defect (2a → "Noise-floor anomaly").
 
 **Open from review, accepted.** A file renamed while its extraction is in
 flight fails with FileNotFoundError and stays failed until the next `cementic
@@ -142,11 +142,20 @@ All **live**. Each names the plan section that carries it out.
   existing corpus); per-rider arms (about 3x the harness time, and the riders
   ship together anyway).
 - **Why is the rider arm's control fresh v2-moe, not the stored vectors?**
+  *Reason superseded the same day by the entry below; the choice stands.*
   Agent correction to the interview question, which said "stored". On sample
   `8d3c95f989f5`, fresh v2-moe at 320 beat its own stored vectors on 99 phrase
   queries and lost 9 (p = 2.6e-20), so any freshly embedded arm beats stored on
   re-embedding drift alone. Fresh v2-moe at 320 without riders isolates the
   riders.
+- **Correction: the 99/9 was a scoring defect, not drift.** `score_arm`
+  dropped the 21 chunks fresh v2-moe refused (dot-leader tables of contents,
+  hub vectors that outrank the gold) from the fresh arm only. Scored on the
+  pool every arm embedded, fresh against stored is 20/15, p = 0.50, and every
+  embedded chunk has cosine >= 0.9997 between the two. The fresh control still
+  stands, for a different reason: the riders arm is a fresh embedding of
+  re-chunked text, and the fresh arm is the same pipeline with the riders
+  switched off.
 - **Why does 0.3.0 wait for everything?** User's call: one release after the
   whole execution order, including the rebuild if the riders pass. *Rejected:*
   releasing after the CLI track, which would ship the output-contract changes
@@ -948,13 +957,14 @@ so a prompt mismatch does not explain the phrase loss. Throughput is not
 comparable across the two runs: Gemma ran at 1,246 / 1,025 tok/s under load
 6-9, and v2-moe ran at 838 under load 16-30.
 
-Open anomaly in the noise floor: fresh v2-moe beats its own stored vectors on
-99 phrase queries and trails on 9, yet its recall@1 and MRR are slightly
-lower. Fresh v2-moe refused 21 chunks, and `score_arm` drops refused chunks
-from the pool, which likely explains it: a refused distractor raises the gold
-by one rank, and a refused gold chunk sinks it. Until that is checked, the
-"gain more margin than fresh-versus-stored" rule has no clean floor. The
-Gemma verdict does not depend on it.
+Noise-floor anomaly, **RESOLVED 2026-10-23 (`0d0aae6`): a scoring defect.**
+The 21 chunks fresh v2-moe refused are dot-leader tables of contents, which sit
+in the stored index as hub vectors outranking the gold; `score_arm` dropped
+them from the fresh arm only. `compare-models` now scores every arm of a
+granularity on the rows all arms embedded (3,979 of 4,000 at 320). On that
+pool fresh against stored is 20/15 on phrases, p = 0.50, so the noise floor is
+null. Rescoring the cached arms moves phrase recall@1 by at most 0.003 and
+changes no 2a verdict.
 
 **RUN 2026-10-23 — Qwen3 and Harrier fail; 2a closes on v2-moe.** Same
 sample `8d3c95f989f5`, run in the user's terminal, log
@@ -1024,8 +1034,13 @@ merely to exercise a one-entry registry; no Postgres search extension.
 (de-hyphenation) as pure functions, not wired into the pipeline. Add one
 harness arm that applies all three to the spans of sample `8d3c95f989f5` and
 embeds with v2-moe at 320. 2d moves no vector and is not scored.
-*First:* settle the noise-floor anomaly (21 refused chunks dropped by
-`score_arm`), because the control below is a fresh arm and inherits it.
+*Built 2026-10-23 (`0d0aae6`, `measure_retrieval_quality.py riders`).* What
+the sample's 500 spans give the riders to act on: 6,228 line-break hyphen
+shapes (5,765 joined; about 1 false join in a hand check of 40), 75 of 4,000
+chunks punctuation-dominated (all 21 refused chunks among them), and almost
+nothing for 2c: 27 Markdown heading lines in 9 spans, mostly Python comments,
+because the sample is raw text-layer extraction. The verdict therefore rests
+on 2b and 2e. A diagnostic row with only 2b's chunks removed separates them.
 *Pre-registered rule:* the riders arm, paired against fresh v2-moe at 320
 without riders, must beat it on title or phrase recall@1 by sign test at
 p < 0.01, and must not lose on the other. Pass: Wave D runs. Fail: park 2b, 2c
