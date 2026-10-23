@@ -628,3 +628,74 @@ class TestLexicalScope:
             "a superseded revision's chunk was returned by the lexical arm"
         )
         _cleanup(pg_engine, current.embedding_profile_id)
+
+
+def _schema_shape(engine) -> dict[str, object]:
+    """Columns (name, type, nullability) and index names of the retrofitted tables."""
+    from sqlalchemy import inspect as sa_inspect
+
+    inspector = sa_inspect(engine)
+    return {
+        table: {
+            "columns": sorted(
+                (c["name"], str(c["type"]), c["nullable"]) for c in inspector.get_columns(table)
+            ),
+            "indexes": sorted(i["name"] for i in inspector.get_indexes(table)),
+        }
+        for table in ("source_documents", "chunk_embeddings")
+    }
+
+
+@pytest.mark.pg
+class TestSchemaRetrofitPass:
+    """A database from before the retrofit pass ends up as a fresh one."""
+
+    _SCOPE = ("collection", "extractor_profile_id", "chunk_profile_id")
+
+    def _make_old(self, engine) -> None:
+        with engine.begin() as conn:
+            conn.execute(text("ALTER TABLE source_documents DROP COLUMN size_bytes"))
+            conn.execute(text("ALTER TABLE source_documents DROP COLUMN mtime_ns"))
+            conn.execute(
+                text("CREATE INDEX ix_source_documents_collection ON source_documents (collection)")
+            )
+            conn.execute(
+                text(
+                    "CREATE INDEX ix_chunk_embeddings_profile_status "
+                    "ON chunk_embeddings (embedding_profile_id, status)"
+                )
+            )
+            for column in self._SCOPE:
+                conn.execute(
+                    text(f"ALTER TABLE chunk_embeddings ALTER COLUMN {column} DROP NOT NULL")
+                )
+
+    def test_old_shape_matches_a_fresh_database(self, pg_engine):
+        fresh = _schema_shape(pg_engine)
+        self._make_old(pg_engine)
+        assert _schema_shape(pg_engine) != fresh
+
+        create_tables(pg_engine)
+
+        assert _schema_shape(pg_engine) == fresh
+
+    def test_refuses_with_a_count_while_a_scope_column_is_null(self, pg_engine, pg_session):
+        from tests.integration.pg_helpers import seed_active_vector_collection
+
+        seed_active_vector_collection(
+            pg_session,
+            collection="nulls",
+            source_path="/docs/nulls.pdf",
+            chunks=[("one", [1.0, 0.0, 0.0, 0.0]), ("two", [0.0, 1.0, 0.0, 0.0])],
+        )
+        pg_session.commit()
+        self._make_old(pg_engine)
+        with pg_engine.begin() as conn:
+            conn.execute(text("UPDATE chunk_embeddings SET collection = NULL"))
+
+        with pytest.raises(RuntimeError, match=r"2 rows with a NULL"):
+            create_tables(pg_engine)
+
+        with pg_engine.begin() as conn:
+            conn.execute(text("DELETE FROM chunk_embeddings"))
+        create_tables(pg_engine)

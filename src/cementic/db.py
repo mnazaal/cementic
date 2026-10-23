@@ -7,7 +7,17 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import ForeignKey, Index, Integer, String, Text, create_engine, inspect, text
+from sqlalchemy import (
+    BigInteger,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    create_engine,
+    inspect,
+    text,
+)
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import IntegrityError, OperationalError, ProgrammingError
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship, sessionmaker
@@ -54,6 +64,11 @@ class SourceDocument(Base):
     collection: Mapped[str] = mapped_column(String(100), default="default", nullable=False)
     source_path: Mapped[str] = mapped_column(String, nullable=False)
     file_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    #: `stat()` of the file when `file_hash` was taken. A restart that finds both
+    #: unchanged keeps the hash instead of reading the file again; NULL (a row
+    #: from before the columns, or a deleted one) always means "hash it".
+    size_bytes: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    mtime_ns: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     #: "pending" (present) or "deleted" (removed from a watched directory).
     #: Per-artifact progress/error state lives on ExtractedDocument et al.
     status: Mapped[str] = mapped_column(String(20), default="pending", nullable=False)
@@ -68,7 +83,6 @@ class SourceDocument(Base):
     )
 
     __table_args__ = (
-        Index("ix_source_documents_collection", "collection"),
         Index(
             "ix_source_documents_collection_source",
             "collection",
@@ -300,9 +314,9 @@ class ChunkEmbedding(Base):
     # Safe to denormalise because they never change for a row -- a chunk cannot
     # move collection, and a deleted document's chunks (and these rows, by
     # cascade) are removed outright rather than filtered at claim time.
-    collection: Mapped[str | None] = mapped_column(String(100), nullable=True)
-    extractor_profile_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    chunk_profile_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    collection: Mapped[str] = mapped_column(String(100), nullable=False)
+    extractor_profile_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    chunk_profile_id: Mapped[int] = mapped_column(Integer, nullable=False)
 
     chunk: Mapped[Chunk] = relationship(back_populates="embeddings")
     profile: Mapped[EmbeddingProfile] = relationship(back_populates="embeddings")
@@ -314,7 +328,6 @@ class ChunkEmbedding(Base):
             "embedding_profile_id",
             unique=True,
         ),
-        Index("ix_chunk_embeddings_profile_status", "embedding_profile_id", "status"),
         # Covers the whole claim predicate so it never leaves the index.
         Index(
             "ix_chunk_embeddings_claim",
@@ -631,6 +644,8 @@ def create_tables(engine: Engine) -> None:
     ensure_vector_extensions(engine)
     Base.metadata.create_all(engine)
     _add_missing_columns(engine)
+    _drop_retired_indexes(engine)
+    _require_scope_columns_not_null(engine)
     ensure_lexical_index(engine)
     try:
         with engine.begin() as conn:
@@ -656,7 +671,19 @@ def create_tables(engine: Engine) -> None:
 _RETROFIT_COLUMNS = (
     ("extracted_documents", "attempts", "INTEGER NOT NULL DEFAULT 0"),
     ("chunked_documents", "attempts", "INTEGER NOT NULL DEFAULT 0"),
+    ("source_documents", "size_bytes", "BIGINT"),
+    ("source_documents", "mtime_ns", "BIGINT"),
 )
+
+#: Indexes a wider one covers: `ix_source_documents_collection_source` leads
+#: with `collection`, and `ix_chunk_embeddings_claim` leads with
+#: `(embedding_profile_id, status)`. `create_all` never drops, so a database
+#: from before the removal still carries them, and each is written on every
+#: insert and update for nothing.
+_RETIRED_INDEXES = ("ix_source_documents_collection", "ix_chunk_embeddings_profile_status")
+
+#: Denormalised claim filters that stayed nullable from a deleted migration.
+_SCOPE_COLUMNS = ("collection", "extractor_profile_id", "chunk_profile_id")
 
 
 def _add_missing_columns(engine: Engine) -> None:
@@ -687,6 +714,62 @@ def _add_missing_columns(engine: Engine) -> None:
             conn.execute(
                 text(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} {definition}")
             )
+
+
+def _drop_retired_indexes(engine: Engine) -> None:
+    """Drop `_RETIRED_INDEXES` from an existing PostgreSQL schema.
+
+    Looked up in the catalog first for the reason `_add_missing_columns` is:
+    DROP INDEX takes an ACCESS EXCLUSIVE lock on the table even for IF EXISTS.
+    """
+    if engine.dialect.name != "postgresql":
+        return
+    present = {
+        index["name"]
+        for table in ("source_documents", "chunk_embeddings")
+        for index in inspect(engine).get_indexes(table)
+    }
+    retired = [name for name in _RETIRED_INDEXES if name in present]
+    if not retired:
+        return
+    with engine.begin() as conn:
+        for name in retired:
+            conn.execute(text(f"DROP INDEX IF EXISTS {name}"))
+
+
+def _require_scope_columns_not_null(engine: Engine) -> None:
+    """Make the `chunk_embeddings` scope columns NOT NULL on an existing schema.
+
+    Refuses, with the count, while any row holds a NULL in one: such a row
+    matches no claim and no progress count, so it is data to look at, not to
+    constrain away. SET NOT NULL scans the table under an ACCESS EXCLUSIVE lock,
+    once for all three columns because they share one statement.
+    """
+    if engine.dialect.name != "postgresql":
+        return
+    columns = {c["name"]: c for c in inspect(engine).get_columns("chunk_embeddings")}
+    nullable = [name for name in _SCOPE_COLUMNS if columns[name]["nullable"]]
+    if not nullable:
+        return
+    with engine.begin() as conn:
+        null_rows = conn.execute(
+            text(
+                "SELECT count(*) FROM chunk_embeddings WHERE "
+                + " OR ".join(f"{name} IS NULL" for name in nullable)
+            )
+        ).scalar_one()
+        if null_rows:
+            raise RuntimeError(
+                f"chunk_embeddings has {null_rows} rows with a NULL in "
+                f"{', '.join(nullable)}; backfill or delete them before the "
+                "columns can be made NOT NULL"
+            )
+        conn.execute(
+            text(
+                "ALTER TABLE chunk_embeddings "
+                + ", ".join(f"ALTER COLUMN {name} SET NOT NULL" for name in nullable)
+            )
+        )
 
 
 def _source_file_hash_index_exists(engine: Engine) -> bool:

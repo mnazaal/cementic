@@ -141,6 +141,10 @@ def _seed_shared_vector_table(session) -> int:
                     "chunk_id": chunk_id,
                     "embedding_profile_id": embedding_profile.id,
                     "status": "done",
+                    # The scope columns are NOT NULL, as the pipeline writes them.
+                    "collection": collection,
+                    "extractor_profile_id": extractor.id,
+                    "chunk_profile_id": chunk_profile.id,
                 }
                 for chunk_id in chunk_ids
             ],

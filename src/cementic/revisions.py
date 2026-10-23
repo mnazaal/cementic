@@ -313,7 +313,7 @@ def materialize_pending_embeddings(
 
     Materialising the rows up front moves that anti-join out of the batch loop
     and into one statement per chunking wave, after which the claim is an index
-    scan on ``ix_chunk_embeddings_profile_status`` (5 buffers).
+    scan on ``ix_chunk_embeddings_claim`` (5 buffers).
 
     Idempotent, so callers may run it whenever work might have appeared. The
     ``NOT EXISTS`` is what makes it so; the unique index on
