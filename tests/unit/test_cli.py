@@ -441,6 +441,16 @@ class TestEmbeddingCommands:
         mock_status.assert_called_once_with()
 
 
+    def test_embedding_status_json_is_one_document(self):
+        daemon = {"state": "running", "pid": 123, "recovered": False, "error": None}
+        with patch("cementic.embedding_runtime.llama_daemon_state", return_value=daemon) as mock:
+            result = runner.invoke(app, ["embedding", "status", "--json"])
+
+        assert result.exit_code == 0
+        assert json.loads(result.stdout) == daemon
+        mock.assert_called_once()
+
+
 class TestStopFallsBackToWorkerStateFiles:
     """`cementic stop` must still work when supervisor.json is gone.
 
@@ -2737,6 +2747,68 @@ class TestErrorStreamDiscipline:
         # its presence on stderr pins the stream.
         assert _DB_HINT in result.stderr
         assert result.stdout.strip() == ""
+
+    @patch("cementic.db.get_engine")
+    def test_collection_list_json_failure_keeps_stdout_empty(self, mock_get_engine):
+        from sqlalchemy.exc import OperationalError
+
+        mock_get_engine.side_effect = OperationalError("statement", {}, Exception("down"))
+
+        result = runner.invoke(app, ["collection", "list", "--json"])
+
+        assert result.exit_code == 1
+        assert result.stdout.strip() == ""
+
+    def test_collection_list_json_is_one_object_per_line(self):
+        rows = [
+            SimpleNamespace(
+                name=name,
+                documents=n,
+                active_revision_label="r1",
+                ready_revision_label="r2",
+                building_revision_label=None,
+            )
+            for name, n in (("a", 1), ("b", 2))
+        ]
+        with (
+            patch("cementic.db.get_engine"),
+            patch("cementic.db.get_session_factory"),
+            patch("cementic.collections.list_collections", return_value=rows) as listed,
+        ):
+            result = runner.invoke(app, ["collection", "list", "--json"])
+
+        assert result.exit_code == 0
+        listed.assert_called_once()
+        records = [json.loads(line) for line in result.stdout.splitlines()]
+        assert [r["name"] for r in records] == ["a", "b"]
+        assert records[0]["ready_revision_label"] == "r2"
+        assert records[0]["building_revision_label"] is None
+
+    def test_collection_revisions_json_is_one_object_per_line(self):
+        revision = SimpleNamespace(
+            id=3,
+            status="active",
+            label="rev-3",
+            extractor_profile=SimpleNamespace(name="pymupdf4llm", fingerprint="e" * 64),
+            chunk_profile=SimpleNamespace(fingerprint="c" * 64),
+            embedding_profile=SimpleNamespace(provider="llama-cpp", fingerprint="m" * 64),
+            created_at=None,
+            promoted_at=None,
+        )
+        with (
+            patch("cementic.db.get_engine"),
+            patch("cementic.db.get_session_factory"),
+            patch("cementic.cli_collection._require_known_collection"),
+            patch(
+                "cementic.collections.list_collection_revisions", return_value=[revision]
+            ) as listed,
+        ):
+            result = runner.invoke(app, ["collection", "revisions", "research", "--json"])
+
+        assert result.exit_code == 0
+        listed.assert_called_once()
+        (line,) = result.stdout.splitlines()
+        assert json.loads(line)["embedding_profile"]["fingerprint"] == "m" * 64
 
     def test_config_init_clobber_refusal_is_on_stderr(self) -> None:
         """Regression: this refusal printed with `console` (stdout)."""

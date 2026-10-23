@@ -45,10 +45,14 @@ collection.
 
 ## Machine-readable output
 
-`cementic status --json` and `cementic doctor --json` print one JSON document
-each. `search --json` and `chunk` print JSONL, one object per line. A test
-compares the two shapes below against what the commands build, so a key added
-or renamed without updating this page fails the suite.
+A command that returns a list prints JSONL: one compact JSON object per line,
+nothing at all when the list is empty. A command that returns one object prints
+one indented JSON document. So `search --json`, `chunk`, `collection list --json`
+and `collection revisions --json` print JSONL, while `status --json`,
+`doctor --json` and `embedding status --json` print one document. A failure
+prints nothing on stdout; the message goes to stderr. A test compares the shapes
+below against what the commands build, so a key added or renamed without
+updating this page fails the suite.
 
 `status --json`, with no `-c`:
 
@@ -114,6 +118,41 @@ other keys are specific to the check. `extensions` maps each Postgres extension
 to its own `status` and `message`, and is empty when the database is down. Then
 `database` carries the full driver text in `error`. `ok` is false, and the
 command exits 1, when any check fails.
+
+`collection list --json`, one line per collection:
+
+<!-- json-shape: collection_list -->
+```json
+{
+  "name": "str", "documents": "int", "active_revision_label": "str|null",
+  "ready_revision_label": "str|null", "building_revision_label": "str|null"
+}
+```
+
+`collection revisions NAME --json`, one line per revision, newest first. The
+fingerprints are in full, not truncated to eight characters as in the table:
+
+<!-- json-shape: collection_revisions -->
+```json
+{
+  "id": "int", "status": "str", "label": "str|null",
+  "extractor_profile": {"name": "str", "fingerprint": "str"},
+  "chunk_profile": {"fingerprint": "str"},
+  "embedding_profile": {"provider": "str", "fingerprint": "str"},
+  "created_at": "str|null", "promoted_at": "str|null"
+}
+```
+
+`embedding status --json`, from the pid file or a `/proc` scan, with no health
+probe (`status` and `doctor` own that):
+
+<!-- json-shape: embedding_status -->
+```json
+{"state": "running|stopped|ambiguous", "pid": "int|null", "recovered": "bool", "error": "str|null"}
+```
+
+`recovered` is true when the pid file was missing or stale and the daemon was
+found by scanning. `error` is set only when `state` is `ambiguous`.
 
 ## Limits
 

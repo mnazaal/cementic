@@ -1055,6 +1055,20 @@ def _daemon_pid_alive(config: Config) -> bool:
     return _live_daemon_pid(config) is not None
 
 
+def llama_daemon_state(config: Config) -> dict[str, Any]:
+    """Structured status of the llama.cpp daemon: ``state`` (`running`,
+    `stopped` or `ambiguous`), ``pid``, ``recovered`` and ``error``.
+
+    Like `llama_daemon_status`, performs no health probe.
+    """
+    try:
+        pid, recovered = _live_daemon_pid_with_source(config)
+    except AmbiguousDaemonPidsError as error:
+        return {"state": "ambiguous", "pid": None, "recovered": False, "error": str(error)}
+    state = "stopped" if pid is None else "running"
+    return {"state": state, "pid": pid, "recovered": recovered, "error": None}
+
+
 def llama_daemon_status(config: Config) -> str:
     """Human-readable status of the llama.cpp daemon.
 
@@ -1062,15 +1076,14 @@ def llama_daemon_status(config: Config) -> str:
     it's survivable via `/proc` recovery -- so a recovered daemon is reported
     as such rather than looking indistinguishable from the normal case.
     """
-    try:
-        pid, recovered = _live_daemon_pid_with_source(config)
-    except AmbiguousDaemonPidsError as error:
-        return f"ambiguous: {error}"
-    if pid is None:
+    daemon = llama_daemon_state(config)
+    if daemon["state"] == "ambiguous":
+        return f"ambiguous: {daemon['error']}"
+    if daemon["state"] == "stopped":
         return "stopped"
-    if recovered:
-        return f"running, pid={pid} (recovered: pid file was missing or stale)"
-    return f"running, pid={pid}"
+    if daemon["recovered"]:
+        return f"running, pid={daemon['pid']} (recovered: pid file was missing or stale)"
+    return f"running, pid={daemon['pid']}"
 
 
 def _stop_mismatched_llama_cpp_daemon(config: Config) -> None:

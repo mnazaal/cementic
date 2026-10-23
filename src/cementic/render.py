@@ -355,6 +355,39 @@ def build_status_document(
     return output
 
 
+def collection_record(row: Any) -> dict[str, Any]:
+    """One `collection list --json` line. The ready and building labels stay
+    separate keys, unlike the single string the text view collapses them to."""
+    return {
+        "name": row.name,
+        "documents": row.documents,
+        "active_revision_label": row.active_revision_label,
+        "ready_revision_label": row.ready_revision_label,
+        "building_revision_label": row.building_revision_label,
+    }
+
+
+def revision_record(row: Any) -> dict[str, Any]:
+    """One `collection revisions --json` line, with the full fingerprints the
+    table truncates. Reads the profile relationships, so call it in-session."""
+    return {
+        "id": row.id,
+        "status": row.status,
+        "label": row.label,
+        "extractor_profile": {
+            "name": row.extractor_profile.name,
+            "fingerprint": row.extractor_profile.fingerprint,
+        },
+        "chunk_profile": {"fingerprint": row.chunk_profile.fingerprint},
+        "embedding_profile": {
+            "provider": row.embedding_profile.provider,
+            "fingerprint": row.embedding_profile.fingerprint,
+        },
+        "created_at": row.created_at.isoformat() if row.created_at else None,
+        "promoted_at": row.promoted_at.isoformat() if row.promoted_at else None,
+    }
+
+
 def print_status_document(document: dict[str, Any]) -> bool:
     """Print a status document as JSON. Returns whether it recorded a failure."""
     typer.echo(json.dumps(document, indent=2, default=str))

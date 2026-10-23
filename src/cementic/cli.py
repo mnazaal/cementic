@@ -933,8 +933,15 @@ def stop_embedding_runtime() -> None:
 
 
 @embedding_app.command("status", short_help="Show embedding runtime status")
-def embedding_runtime_status() -> None:
+def embedding_runtime_status(
+    json_output: bool = typer.Option(False, "--json", help="Print one JSON document"),
+) -> None:
     """Show configured embedding runtime service status."""
+    if json_output:
+        from cementic.embedding_runtime import llama_daemon_state
+
+        typer.echo(json.dumps(llama_daemon_state(_get_config()), indent=2))
+        return
     console.print(f"embedding: {_llama_daemon_runtime_status()}")
 
 

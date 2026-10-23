@@ -1,5 +1,7 @@
 """`cementic collection` subcommands: remove, list, promote, reindex, revisions."""
 
+import json
+
 import typer
 
 from cementic import render
@@ -87,13 +89,22 @@ def remove_collection(
 
 
 @collection_app.command("list", short_help="List known collections")
-def list_collection_command() -> None:
+def list_collection_command(
+    json_output: bool = typer.Option(
+        False, "--json", help="Print one JSON object per collection (JSONL)"
+    ),
+) -> None:
     """Show known collections."""
     from cementic.collections import list_collections
 
     with _reporting_db_errors("collection list"):
         with _db_session() as session:
             rows = list_collections(session)
+
+        if json_output:
+            for row in rows:
+                typer.echo(json.dumps(render.collection_record(row)))
+            return
 
         console.print("collections")
         if not rows:
@@ -305,6 +316,9 @@ def reindex_collection_command(
 )
 def list_collection_revision_command(
     collection: str = typer.Argument(..., help="Collection name to inspect"),
+    json_output: bool = typer.Option(
+        False, "--json", help="Print one JSON object per revision (JSONL)"
+    ),
 ) -> None:
     """Show revision history for one collection."""
     from cementic.collections import list_collection_revisions
@@ -315,6 +329,10 @@ def list_collection_revision_command(
         with _db_session() as session:
             _require_known_collection(session, collection)
             rows = list_collection_revisions(session, collection)
+            if json_output:
+                for row in rows:
+                    typer.echo(json.dumps(render.revision_record(row)))
+                return
             console.print(f"{'collection':<11} {collection}")
             console.print("revisions")
             if not rows:
