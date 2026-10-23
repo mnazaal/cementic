@@ -478,3 +478,60 @@ class TestRiderCensus:
         assert census["line-break hyphens"] == 1
         assert census["line-break hyphens joined"] == 1
         assert census["soft hyphens"] == 1
+
+
+class TestRelaxedTsquery:
+    def test_ors_every_conjunction_of_the_required_size(self) -> None:
+        # ceil(0.6 * 4) = 3 of 4 terms
+        query = harness.relaxed_tsquery(["a", "b", "c", "d"], 0.6)
+        assert query is not None
+        assert query.count("|") == 3  # C(4, 3) = 4 conjunctions
+        assert "('a' & 'b' & 'c')" in query
+        assert "('b' & 'c' & 'd')" in query
+
+    def test_a_single_term_is_itself(self) -> None:
+        assert harness.relaxed_tsquery(["a"], 0.6) == "('a')"
+
+    def test_repeated_terms_count_once(self) -> None:
+        assert harness.relaxed_tsquery(["a", "a", "b"], 1.0) == "('a' & 'b')"
+
+    def test_no_terms_is_no_query(self) -> None:
+        assert harness.relaxed_tsquery([], 0.6) is None
+
+    def test_quotes_are_escaped(self) -> None:
+        assert harness.relaxed_tsquery(["o'neil"], 0.6) == "('o''neil')"
+
+
+def fuzzy_record(**overrides) -> "harness.FuzzyRecord":
+    fields = {
+        "query": "q", "gold": "g.pdf", "kind": "phrase-typo",
+        "vector": ["x.pdf", "y.pdf"], "lexical": [], "shipped_lead": "vector",
+        "similarity": [], "word_similarity": [], "relaxed": [],
+    }
+    return harness.FuzzyRecord(**{**fields, **overrides})
+
+
+class TestFuzzyReport:
+    def test_a_trigram_fallback_only_fills_an_empty_arm(self) -> None:
+        empty = fuzzy_record(word_similarity=["g.pdf"])
+        full = fuzzy_record(lexical=["x.pdf"], word_similarity=["g.pdf"])
+        assert harness.fuzzy_lexical(empty, "trigram word_similarity") == ["g.pdf"]
+        assert harness.fuzzy_lexical(full, "trigram word_similarity") == ["x.pdf"]
+
+    def test_the_relaxed_arm_replaces_the_lexical_arm(self) -> None:
+        record = fuzzy_record(lexical=["x.pdf"], relaxed=["g.pdf"])
+        assert harness.fuzzy_lexical(record, "relaxed OR") == ["g.pdf"]
+
+    def test_counts_wins_against_the_shipped_arm(self) -> None:
+        record = fuzzy_record(word_similarity=["g.pdf"])
+        rows = harness.fuzzy_report([record], depth=10)["phrase-typo"]
+        assert rows["shipped"][:3] == (0.0, 0.0, 0.0)
+        assert rows["trigram word_similarity"][1] == 1.0  # gold now in the top 10
+        assert rows["trigram word_similarity"][3:] == (1, 0, 1)
+        assert rows["trigram similarity"][5] == 0  # never fired: ranking unchanged
+
+    def test_formats_every_variant(self) -> None:
+        report = harness.fuzzy_report([fuzzy_record()], depth=10)
+        text = harness.format_fuzzy(report, {"phrase-typo": 1}, 10)
+        for variant in harness.FUZZY_VARIANTS:
+            assert variant in text

@@ -29,6 +29,9 @@ are allowed to move the query set:
     riders    The chunking riders 2b, 2c and 2e applied to the same spans and
               embedded with v2-moe, scored per document against fresh v2-moe.
               Needs `compare-models` to have run; one llama-server, minutes.
+    fuzzy     Two lexical fallbacks for typo'd queries (pg_trgm, a relaxed
+              full-text match) scored against the live database on the phrase
+              sets. Creates the pg_trgm extension; the trigram scan is slow.
 
 Splitting them is the point. A judgment re-derived on every run is not a
 judgment, it is a coin flip with a seed -- so `build`'s output is checked into
@@ -49,6 +52,7 @@ Usage:
     python scripts/measure_retrieval_quality.py ablate
     python scripts/measure_retrieval_quality.py compare-models
     python scripts/measure_retrieval_quality.py riders
+    python scripts/measure_retrieval_quality.py fuzzy
 
 The database is not reachable from an agent sandbox; run these unsandboxed.
 """
@@ -68,6 +72,7 @@ import time
 import urllib.request
 from collections.abc import Iterator
 from dataclasses import asdict, dataclass
+from itertools import combinations
 from pathlib import Path
 
 from sqlalchemy import text
@@ -82,6 +87,7 @@ from cementic.embedding_text import (
 from cementic.hybrid import combine, reciprocal_rank_fusion
 from cementic.search import Searcher, arm_fetch_limit, split_arms
 from cementic.storage import read_extracted_text
+from cementic.vector_store import LEXICAL_CANDIDATE_POOL, vector_table_name
 
 #: Default ranking depth requested from search. Matches
 #: `search.MAX_SEARCH_RESULTS`, so recall@10 and MRR are measured over the
@@ -821,6 +827,130 @@ def reconstruct_span(long_chunks: list[str]) -> str:
     return span
 
 
+#: Fuzzy-matching candidates (PLAN.md "Fuzzy matching"). pg_trgm's defaults for
+#: `similarity_threshold` and `word_similarity_threshold`, and the share of a
+#: query's terms the relaxed full-text match must hit.
+TRIGRAM_SIMILARITY = 0.3
+TRIGRAM_WORD_SIMILARITY = 0.6
+RELAXED_TERM_SHARE = 0.6
+
+#: Sets the fuzzy measurement reads by default: the exact phrases, their
+#: perturbations, and the typo'd set the fallbacks exist for.
+FUZZY_KINDS = ("phrase", "phrase-reordered", "phrase-dropped", "phrase-typo")
+
+#: Candidate lexical arms, in report order. Each is a rule over a record's
+#: stored arms, so adding one is a table row.
+FUZZY_VARIANTS = ("shipped", "trigram similarity", "trigram word_similarity", "relaxed OR")
+
+
+@dataclass(frozen=True)
+class FuzzyRecord:
+    """One query's baseline arms and each candidate lexical arm (document keys)."""
+
+    query: str
+    gold: str
+    kind: str
+    vector: list[str]
+    lexical: list[str]
+    shipped_lead: str
+    similarity: list[str]
+    word_similarity: list[str]
+    relaxed: list[str]
+
+
+def quote_lexeme(lexeme: str) -> str:
+    """A lexeme as a quoted tsquery literal (pure)."""
+    return "'" + lexeme.replace("'", "''") + "'"
+
+
+def relaxed_tsquery(lexemes: list[str], share: float) -> str | None:
+    """A tsquery matching any ``ceil(share * n)`` of the n lexemes (pure).
+
+    An OR of every conjunction of that size, so the GIN index serves it and a
+    row must still hold most of the terms: a bare OR of all terms matches every
+    chunk containing one common word. Lexemes are quoted for a ``::tsquery``
+    cast, which takes them as already stemmed.
+    """
+    terms = list(dict.fromkeys(lexemes))
+    if not terms:
+        return None
+    need = max(1, math.ceil(share * len(terms) - 1e-9))
+    return " | ".join(
+        "(" + " & ".join(quote_lexeme(t) for t in combo) + ")"
+        for combo in combinations(terms, need)
+    )
+
+
+def fuzzy_lexical(record: FuzzyRecord, variant: str) -> list[str]:
+    """The lexical arm a variant would hand to fusion for this query (pure).
+
+    The trigram variants are fallbacks and only replace an empty arm; the
+    relaxed match is the arm itself, for every query.
+    """
+    if variant == "shipped":
+        return record.lexical
+    if variant == "relaxed OR":
+        return record.relaxed
+    fallback = record.similarity if variant == "trigram similarity" else record.word_similarity
+    return record.lexical or fallback
+
+
+def fuzzy_report(
+    records: list[FuzzyRecord], depth: int
+) -> dict[str, dict[str, tuple[float, float, float, int, int, int]]]:
+    """Per kind, per variant: recall@1, recall@10, MRR, better, worse, changed (pure).
+
+    ``better``/``worse`` pair each query's gold rank against the shipped arm's;
+    ``changed`` counts queries whose ranking differs at all, so a candidate that
+    never fires is visible as zero rather than as an equal score.
+    """
+    by_kind: dict[str, list[FuzzyRecord]] = {}
+    for record in records:
+        by_kind.setdefault(record.kind, []).append(record)
+    out: dict[str, dict[str, tuple[float, float, float, int, int, int]]] = {}
+    for kind, group in by_kind.items():
+        base = [
+            fused_ranking(r.vector, r.lexical, r.shipped_lead, depth) for r in group
+        ]
+        rows = {}
+        for variant in FUZZY_VARIANTS:
+            totals = [0.0, 0.0, 0.0]
+            better = worse = changed = 0
+            for record, shipped in zip(group, base, strict=True):
+                ranking = fused_ranking(
+                    record.vector, fuzzy_lexical(record, variant), record.shipped_lead, depth
+                )
+                r1, r10, rr = metrics(ranking, record.gold)
+                totals[0] += r1
+                totals[1] += r10
+                totals[2] += rr
+                a, b = gold_rank(ranking, record.gold), gold_rank(shipped, record.gold)
+                better += a < b
+                worse += a > b
+                changed += ranking != shipped
+            n = len(group)
+            rows[variant] = (totals[0] / n, totals[1] / n, totals[2] / n, better, worse, changed)
+        out[kind] = rows
+    return out
+
+
+def format_fuzzy(report: dict, counts: dict[str, int], depth: int) -> str:
+    """Render `fuzzy_report` (pure)."""
+    lines = []
+    for kind, rows in report.items():
+        lines.append(f"\n{kind}  (n={counts[kind]}, depth={depth})")
+        lines.append(
+            f"  {'lexical arm':<24} {'recall@1':>9} {'recall@10':>10} {'MRR':>7}"
+            f" {'better':>7} {'worse':>6} {'changed':>8}"
+        )
+        for variant, (r1, r10, mrr, better, worse, changed) in rows.items():
+            lines.append(
+                f"  {variant:<24} {r1:>9.3f} {r10:>10.3f} {mrr:>7.3f}"
+                f" {better:>7} {worse:>6} {changed:>8}"
+            )
+    return "\n".join(lines)
+
+
 def rider_verdict(title: tuple[int, int, float], phrase: tuple[int, int, float]) -> bool:
     """The pre-registered rider rule over two (better, worse, p) results (pure).
 
@@ -1189,14 +1319,8 @@ def compare_sample(conn, collection: str, n: int, rng: random.Random) -> dict:
     Returns plain JSON-able data so the sample is written once and every model,
     including one run days later, embeds exactly the same text.
     """
-    revision = conn.execute(
-        text(
-            "select extractor_profile_id, chunk_profile_id, embedding_profile_id "
-            "from pipeline_revisions where collection = :c and status = 'active'"
-        ),
-        {"c": collection},
-    ).one()
-    table = f"embedding_vectors_p{int(revision.embedding_profile_id)}"
+    revision = active_revision(conn, collection)
+    table = vector_table_name(int(revision.embedding_profile_id))
     candidates = conn.execute(
         text(
             "select sd.id, sd.source_path, ed.artifact_path from source_documents sd "
@@ -1534,6 +1658,178 @@ def command_compare_models(args: argparse.Namespace) -> int:
     return 0
 
 
+def active_revision(conn, collection: str):
+    """The collection's active pipeline revision row."""
+    return conn.execute(
+        text(
+            "select extractor_profile_id, chunk_profile_id, embedding_profile_id "
+            "from pipeline_revisions where collection = :c and status = 'active'"
+        ),
+        {"c": collection},
+    ).one()
+
+
+#: Rows the trigram probe scans to extrapolate a full-corpus scan from.
+TRIGRAM_PROBE_ROWS = 20_000
+
+
+def fuzzy_scope(table: str) -> str:
+    """The join and filters that keep a lexical candidate inside the searched rows.
+
+    The same scope as `lexical_sql`: the per-profile vector table's own columns.
+    """
+    return (
+        f"JOIN {table} ev ON ev.chunk_id = c.id "
+        "JOIN source_documents sd ON sd.id = c.document_id "
+        "WHERE ev.collection = :collection "
+        "AND ev.chunk_profile_id = :chunk_profile_id "
+        "AND ev.extractor_profile_id = :extractor_profile_id "
+    )
+
+
+def trigram_arms(conn, table: str, scope: dict, query: str) -> tuple[list[str], list[str]]:
+    """(similarity arm, word_similarity arm) over every chunk, as document keys.
+
+    A sequential scan: no index backs these functions here. `word_similarity`
+    is the one that fits a short query against a long chunk; plain `similarity`
+    divides by the chunk's whole trigram set and so cannot reach its threshold
+    for a 25-character phrase against a 1,500-character chunk. Both are here
+    because the plan named `similarity`.
+    """
+    rows = conn.execute(
+        text(
+            "SELECT sd.source_path AS source_path, c.s AS s, c.w AS w FROM ("
+            # OFFSET 0 keeps the planner from inlining the two scores into the
+            # filter, which would compute each twice per row of a 2.4M-row scan.
+            "  SELECT id, document_id, similarity(content, :q) AS s, "
+            "         word_similarity(:q, content) AS w FROM chunks_v2 OFFSET 0"
+            ") c " + fuzzy_scope(table) +
+            "AND (c.s >= :ts OR c.w >= :tw) ORDER BY c.w DESC LIMIT 300"
+        ),
+        {"q": query, "ts": TRIGRAM_SIMILARITY, "tw": TRIGRAM_WORD_SIMILARITY, **scope},
+    ).fetchall()
+    by_similarity = sorted((r for r in rows if r.s >= TRIGRAM_SIMILARITY), key=lambda r: -r.s)
+    by_word = [r for r in rows if r.w >= TRIGRAM_WORD_SIMILARITY]
+    return (
+        deduplicate([document_key(r.source_path) for r in by_similarity]),
+        deduplicate([document_key(r.source_path) for r in by_word]),
+    )
+
+
+def relaxed_arm(conn, table: str, scope: dict, query: str, limit: int) -> list[str]:
+    """Document keys of chunks holding >= RELAXED_TERM_SHARE of the query's terms."""
+    config = LEXICAL_TEXT_CONFIG
+    lexemes = [
+        r[0]
+        for r in conn.execute(
+            text(f"SELECT lexeme FROM unnest(to_tsvector('{config}', :q))"), {"q": query}
+        )
+    ]
+    tsquery = relaxed_tsquery(lexemes, RELAXED_TERM_SHARE)
+    if tsquery is None:
+        return []
+    rows = conn.execute(
+        text(
+            "SELECT sd.source_path AS source_path FROM ("
+            "  SELECT id, document_id, content FROM chunks_v2 "
+            f"  WHERE to_tsvector('{config}', content) @@ CAST(:tsq AS tsquery) LIMIT :pool"
+            ") c " + fuzzy_scope(table) +
+            f"ORDER BY ts_rank(to_tsvector('{config}', c.content), "
+            "CAST(:orq AS tsquery)) DESC LIMIT :k"
+        ),
+        {
+            "tsq": tsquery,
+            "orq": " | ".join(quote_lexeme(t) for t in lexemes),
+            "pool": LEXICAL_CANDIDATE_POOL,
+            "k": limit,
+            **scope,
+        },
+    ).fetchall()
+    return deduplicate([document_key(r.source_path) for r in rows])
+
+
+def command_fuzzy(args: argparse.Namespace) -> int:
+    payload = json.loads(Path(args.queries).read_text())
+    kinds = args.kinds.split(",")
+    queries = [Query(**q) for q in payload["queries"] if q["kind"] in kinds]
+    collection = payload["collection"]
+    config = get_config()
+    engine = get_engine(config.database.url)
+
+    with engine.begin() as conn:
+        conn.execute(text("CREATE EXTENSION IF NOT EXISTS pg_trgm"))
+    with engine.connect() as conn:
+        revision = active_revision(conn, collection)
+        table = vector_table_name(int(revision.embedding_profile_id))
+        scope = {
+            "collection": collection,
+            "chunk_profile_id": revision.chunk_profile_id,
+            "extractor_profile_id": revision.extractor_profile_id,
+        }
+        chunks = conn.execute(
+            text("SELECT reltuples::bigint FROM pg_class WHERE relname = 'chunks_v2'")
+        ).scalar_one()
+        typo = next((q.query for q in queries if q.kind == "phrase-typo"), queries[0].query)
+        began = time.perf_counter()
+        conn.execute(
+            text(
+                "SELECT max(word_similarity(:q, content)), max(similarity(content, :q)) "
+                "FROM (SELECT content FROM chunks_v2 LIMIT :n) t"
+            ),
+            {"q": typo, "n": TRIGRAM_PROBE_ROWS},
+        )
+        probe = time.perf_counter() - began
+        per_query = probe / TRIGRAM_PROBE_ROWS * chunks
+        print(
+            f"trigram scan: {probe:.2f}s for {TRIGRAM_PROBE_ROWS} of ~{chunks:,} chunks; "
+            f"about {per_query:.0f}s per query on one core (parallel workers divide it), "
+            f"~{per_query * sum(q.kind == 'phrase-typo' for q in queries) / 60:.0f} min "
+            "for the typo'd set",
+            flush=True,
+        )
+        if args.estimate_only:
+            return 0
+
+        searcher = Searcher(config)
+        arm_limit = arm_fetch_limit(PRODUCTION_DEPTH, hybrid=True)
+        records: list[FuzzyRecord] = []
+        began = time.perf_counter()
+        for i, query in enumerate(queries, start=1):
+            vector, lexical = split_arms(
+                searcher.candidates(query.query, top_k=PRODUCTION_DEPTH, collections=[collection])
+            )
+            lexical_docs = [document_key(r["source_path"]) for r in lexical]
+            similarity: list[str] = []
+            word: list[str] = []
+            if not lexical_docs:
+                similarity, word = trigram_arms(conn, table, scope, query.query)
+            records.append(
+                FuzzyRecord(
+                    query=query.query,
+                    gold=query.gold,
+                    kind=query.kind,
+                    vector=[document_key(r["source_path"]) for r in vector],
+                    lexical=lexical_docs,
+                    shipped_lead=(
+                        "lexical" if searcher.lexical_should_lead(query.query) else "vector"
+                    ),
+                    similarity=similarity,
+                    word_similarity=word,
+                    relaxed=relaxed_arm(conn, table, scope, query.query, arm_limit),
+                )
+            )
+            if i % 20 == 0:
+                print(f"  {i}/{len(queries)} ({time.perf_counter() - began:.0f}s)", flush=True)
+
+    out = Path(args.out).expanduser()
+    out.write_text(json.dumps([asdict(r) for r in records]))
+    counts = {k: sum(r.kind == k for r in records) for k in kinds}
+    fired = sum(not r.lexical for r in records)
+    print(f"{fired}/{len(records)} queries had an empty lexical arm; records in {out}")
+    print(format_fuzzy(fuzzy_report(records, PRODUCTION_DEPTH), counts, PRODUCTION_DEPTH))
+    return 0
+
+
 def command_riders(args: argparse.Namespace) -> int:
     """Score the three chunking riders against fresh v2-moe, per document."""
     try:
@@ -1709,6 +2005,17 @@ def main() -> int:
         "--dry-run", action="store_true", help="print the census and cost estimate; embed nothing"
     )
     riders.set_defaults(func=command_riders)
+
+    fuzzy = sub.add_parser("fuzzy", help="score fuzzy lexical fallbacks against the live database")
+    fuzzy.add_argument("-q", "--queries", default="eval/queries.json")
+    fuzzy.add_argument("-o", "--out", default="~/.cache/cementic-waves/fuzzy-records.json")
+    fuzzy.add_argument(
+        "--kinds", default=",".join(FUZZY_KINDS), help="comma-separated query kinds to score"
+    )
+    fuzzy.add_argument(
+        "--estimate-only", action="store_true", help="time a trigram probe scan and stop"
+    )
+    fuzzy.set_defaults(func=command_fuzzy)
 
     args = parser.parse_args()
     return int(args.func(args))
