@@ -7,7 +7,7 @@ from sqlalchemy import text
 
 from cementic.db import ExtractedDocument, SourceDocument
 from cementic.pipeline_worker import _purge_superseded_chunks
-from cementic.search import Searcher
+from cementic.search import Searcher, split_arms
 from cementic.source_watcher import _purge_document_chunks
 from tests.integration.pg_helpers import (
     CURRENT_CONTENT_SQL,
@@ -58,11 +58,17 @@ def test_pg_search_cosine_ranking_and_topic_separation(
         lambda config_json, config=None: FakeSearchEmbeddingClient(),
     )
 
-    results = Searcher(pg_config).search("neural vector search", top_k=2)
+    searcher = Searcher(pg_config)
+    # Both chunks are one document, which a search returns as one row; the
+    # ranking between them is visible on the vector arm's chunk rows.
+    vector_arm, _ = split_arms(searcher.candidates("neural vector search", top_k=2))
+    results = searcher.search("neural vector search", top_k=2)
 
-    assert len(results) == 2
-    assert "neural networks" in results[0]["content"]
-    assert results[0]["score"] > results[1]["score"]
+    assert len(vector_arm) == 2
+    assert "neural networks" in vector_arm[0]["content"]
+    assert vector_arm[0]["score"] > vector_arm[1]["score"]
+    assert len(results) == 1
+    assert "neural networks" in results[0]["content"]  # the best chunk represents it
 
     cleanup_pg_tables(pg_session)
 

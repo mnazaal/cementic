@@ -29,7 +29,7 @@ from cementic.db import (
     PipelineRevision,
     SourceDocument,
 )
-from cementic.search import Searcher
+from cementic.search import Searcher, split_arms
 from cementic.vector_store import (
     create_table_sql,
     knn_sql,
@@ -241,8 +241,13 @@ def test_search_returns_a_full_page_through_the_ann_path(
         lambda config_json, config=None: _FixedClient(),
     )
 
-    results = Searcher(pg_config).search("anything", top_k=TOP_K, collections=["crowd"])
+    searcher = Searcher(pg_config)
+    # The seed is one document of many chunks, and a search returns one row per
+    # document, so the full page is checked on the vector arm's chunk rows.
+    vector_arm, _ = split_arms(searcher.candidates("anything", top_k=TOP_K, collections=["crowd"]))
+    results = searcher.search("anything", top_k=TOP_K, collections=["crowd"])
 
-    assert len(results) == TOP_K
-    assert {result["collection"] for result in results} == {"crowd"}
+    assert len(vector_arm) >= TOP_K
+    assert {row["collection"] for row in vector_arm} == {"crowd"}
+    assert [result["collection"] for result in results] == ["crowd"]
     cleanup_pg_tables(pg_session)
