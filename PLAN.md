@@ -3,14 +3,11 @@
 <!-- session-handoff:begin (2026-10-23) -->
 ## Where the work stands
 
-**Entry point: "Execution order (2026-10-22)" → "Waves (2026-10-23)" → Wave A
-and Wave R, run concurrently.** Each member starts on its own `claude/` branch
-from main. Everything marked DONE in the execution order is on main.
-
-**State on main (`eae6f16`).** The audit fixes (`claude/audit-fixes`) and the
-import diet (`claude/import-diet`, `1b5d7f6`..`eae6f16`) are both
-fast-forwarded, each after the user's full gate including integration-pg. The
-merged branches are deleted and no extra worktrees remain.
+**Entry point: "Execution order (2026-10-22)" → "Waves (2026-10-23)" → Wave
+B.** Wave A and Wave R passed the user's gate on 2026-10-23 (`claude/wave-a`,
+fast-forwarded to main once the user runs it); Wave D is empty because the
+riders failed their rule. Wave B is on `claude/wave-b`, rebased onto
+`claude/wave-a`, pending review and its gate.
 
 **Phase 2a closed 2026-10-23: stay on v2-moe.** Qwen3 and Harrier pass the
 title rule and fail the phrase rule; see "Retrieval Phase 2" → 2a → "RUN
@@ -171,6 +168,23 @@ All **live**. Each names the plan section that carries it out.
   behaviour. One `check.sh` per wave catches a pg regression inside the wave
   that caused it. *Rejected:* one gate at the end, which would mean bisecting
   across all waves.
+
+### 2026-10-23 — decisions from the Wave A gate
+
+All **live**.
+
+- **Why does extraction isolation ship on a missed wall-clock rule?** User's
+  call. The 200-PDF ratio was 1.0535 against a pre-registered 1.05; the
+  rule's own fallback (one long-lived child) was already in. The overhead is
+  ~4.5 ms per document, against seconds of embedding per document in a real
+  run, and a colder pass measured 1.019. *Rejected:* best of four repeats (the
+  bar already sat between two runs); isolation off by default (gives up the
+  memory limit and timeout on untrusted PDFs that the rule was pricing).
+  *Recorded as a miss*, not a pass ("Extraction isolation").
+- **Why no full fuzzy run?** The trigram arm is an unindexed scan at ~879 s
+  per query, unshippable whatever its recall, and the run would take ~14.6 h.
+  Agent-decided: measure relaxed OR alone, and keep trigram open only as an
+  indexed candidate ("Fuzzy matching").
 
 ## Design principles
 
@@ -376,10 +390,9 @@ Phase 2". The scoring runs go to the user's terminal.
 **Wave C — after Wave B's gate, alone.** "Functional core" 7, public names. It
 renames across every module, so it runs when nothing else is in flight.
 
-**Wave D — the rebuild, if the riders pass.** Wire the riders, rebuild in the
-user's terminal, and record "Schema retrofits and efficiency" 3 (the claim
-`EXPLAIN`) at about 90%. If they fail, the riders are parked with the verdict
-and Wave D is empty.
+**Wave D — the rebuild, if the riders pass. EMPTY (2026-10-23):** the riders
+failed their rule ("Rider measurement"), so there is no rebuild, and "Schema
+retrofits and efficiency" 3 waits for the next one.
 
 **Then "Release 0.3.0".**
 
@@ -772,6 +785,12 @@ corpus (`source_watcher.py:897-901`). Compare `(size_bytes, mtime_ns)` first,
 and hash only on change.
 *Ends when:* a test counts zero hashes on an unchanged second start, and the
 `papers` watcher restart time is recorded here, before and after.
+**DONE 2026-10-23 (Wave A).** `systemctl --user restart cementic@papers` to
+"scan complete": 683 s on the old code, 219 s on the second start of the new
+one (the first, 630 s, fills the new stat columns and hashes once). Item 1's
+`EXPLAIN`: the embed claim uses `ix_chunk_embeddings_claim`, the move lookup
+`ix_source_documents_collection_file_hash`. Logs:
+`~/.cache/cementic-waves/watcher_restart_*.log`, `explain_indexes.log`.
 
 **3. Measure the extract and chunk claims.** They order by id over outer-joined
 `IS DISTINCT FROM` predicates (`pipeline_worker.py:641-669, 807-835`), which
@@ -857,6 +876,13 @@ restarted on death instead of one process per document.
 child is stamped failed while the next document proceeds.
 *Anti-scope:* no seccomp or namespace sandbox; command extractors are
 unchanged.
+**DONE 2026-10-23 (Wave A), wall-clock rule missed and accepted.** One
+long-lived child (one process per document measured 4.6x). On 200 PDFs: 200 of
+200 byte-identical; isolated 19.0 s against 18.1 s in-process, ratio 1.0535
+against the 1.05 bar. An earlier pass over 161 of the same PDFs, with a colder
+cache, measured 1.019. The cost is a fixed ~4.5 ms per document of IPC, so the
+ratio rises as extraction gets faster. Accepted by the user (decision log,
+2026-10-23 gate). Log: `~/.cache/cementic-waves/isolation_measure.log`.
 
 ### Retrieval
 
@@ -1046,6 +1072,22 @@ without riders, must beat it on title or phrase recall@1 by sign test at
 p < 0.01, and must not lose on the other. Pass: Wave D runs. Fail: park 2b, 2c
 and 2e with the numbers, and Wave D is empty.
 *Ends when:* the verdict and its table are recorded here.
+**RUN 2026-10-23: FAIL — 2b, 2c and 2e PARKED, Wave D empty.** Riders against
+the fresh control on recall@1: title 11 better / 10 worse (p = 1), phrase
+16 / 21 (p = 0.51). Embedding: 3,955 chunks, 1,331,920 tokens in 1,377 s.
+
+| Arm (sample `8d3c95f989f5`) | title R@1 | title R@10 | phrase R@1 | phrase R@10 |
+|---|---|---|---|---|
+| stored@320 | 0.850 | 0.974 | 0.299 | 0.545 |
+| control: fresh v2-moe@320 | 0.848 | 0.974 | 0.299 | 0.545 |
+| control without 2b chunks | 0.846 | 0.970 | 0.291 | 0.539 |
+| riders (2b+2c+2e) | 0.850 | 0.966 | 0.289 | 0.535 |
+
+Dropping 2b's 75 chunks alone moves phrase rankings on 148 queries (141 better
+at any rank, 7 worse) yet lowers recall@1, so the ranks it improves are below
+the top. *Revisit when:* a rebuild is authorized for another reason; the
+riders are free to ride it, since they did not hurt. Log:
+`~/.cache/cementic-waves/rider-arm.log`.
 *Anti-scope:* no per-rider attribution and no new chunk size; 2b's re-derived
 `chunk_size` rides along only if the rebuild runs.
 
@@ -1072,7 +1114,15 @@ model change moves 0.233).
 
 *Ends when:* one of the three is chosen with a measured recall@10 on
 `phrase-typo` to justify it, or the item is closed as "not worth it" with the
-0.233 recorded as the accepted floor. ~~**Do not start this before Phase 1 step 2**~~ — moot since 2026-09-24:
+0.233 recorded as the accepted floor.
+**Trigram without an index: not viable (2026-10-23).** A probe of 20,000
+chunks took 7.65 s, so `similarity`/`word_similarity` over the ~2.3M chunks is
+about 879 s per query on one core, and the full measurement about 14.6 h. Not
+run. The relaxed-OR candidate needs no scan and is measured alone in Wave B's
+gate (`fuzzy --no-trigram`). The trigram candidate stays open only as an
+indexed one. *Revisit when:* relaxed OR fails on `phrase-typo` and a GIN
+trigram index on `chunks_v2.content` is costed (build time and size).
+~~**Do not start this before Phase 1 step 2**~~ — moot since 2026-09-24:
 step 2 is closed and nothing is about to be deleted, so this item is no
 longer blocked, only unscheduled.
 
