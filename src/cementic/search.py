@@ -119,6 +119,9 @@ def arm_fetch_limit(top_k: int, *, hybrid: bool) -> int:
 class SearchResult(TypedDict):
     """Type for search results."""
 
+    #: `source_documents.id`: stable across a query, unlike a chunk id, because a
+    #: result stands for a document and path and document are one-to-one.
+    document_id: int
     collection: str
     source_path: str
     content: str
@@ -255,9 +258,10 @@ def split_arms(
     return vector_arm, lexical_arm
 
 
-def _document_key(result: SearchResult) -> tuple[str, str]:
-    """A result's document: the same path in two collections is two documents."""
-    return (result["collection"], result["source_path"])
+def _document_key(result: SearchResult) -> int:
+    """A result's document. The id, not the path: the same path in two
+    collections is two documents, and the id already says so."""
+    return result["document_id"]
 
 
 def merge_arms(
@@ -279,7 +283,7 @@ def merge_arms(
     the wrong passage, a score that is not the match, and an out-of-order
     score column that `scores_explain_order` then hid (2026-10-22 audit).
     """
-    by_document: dict[tuple[str, str], SearchResult] = {}
+    by_document: dict[int, SearchResult] = {}
     for result in vector_arm + lexical_arm:
         by_document.setdefault(_document_key(result), result)
     ordering = combine(
@@ -445,6 +449,7 @@ class Searcher:
                     score, score_kind = _score_from_distance(distance_metric, distance)
                     combined.append(
                         SearchResult(
+                            document_id=row.document_id,
                             collection=row.collection,
                             source_path=row.source_path,
                             content=row.content,
@@ -484,6 +489,7 @@ class Searcher:
         )
         return [
             SearchResult(
+                document_id=row.document_id,
                 collection=row.collection,
                 source_path=row.source_path,
                 content=row.content,

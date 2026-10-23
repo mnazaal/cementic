@@ -119,6 +119,19 @@ to its own `status` and `message`, and is empty when the database is down. Then
 `database` carries the full driver text in `error`. `ok` is false, and the
 command exits 1, when any check fails.
 
+`search --json`, one line per result, best first:
+
+<!-- json-shape: search -->
+```json
+{
+  "document_id": "int", "collection": "str", "source_path": "str", "content": "str",
+  "score": "float", "distance": "float|null", "score_kind": "str", "rank": "int"
+}
+```
+
+`document_id` is the stable id of the document the result stands for. `distance`
+is null for a result only the full-text arm found. `rank` is the 1-based position.
+
 `collection list --json`, one line per collection:
 
 <!-- json-shape: collection_list -->

@@ -1,5 +1,6 @@
 """Tests for revision-aware search functionality."""
 
+import zlib
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -189,6 +190,7 @@ class TestSearcher:
         revision_query = self.RevisionQuery([building_revision])
 
         row = SimpleNamespace(
+            document_id=10,
             collection="papers",
             source_path="/tmp/papers.pdf",
             content="partial chunk text",
@@ -288,6 +290,7 @@ class TestSearcher:
         revision_query = self.RevisionQuery([active_revision])
 
         row = SimpleNamespace(
+            document_id=11,
             collection="default",
             source_path="/tmp/test.pdf",
             content="chunk text",
@@ -313,6 +316,7 @@ class TestSearcher:
         results = searcher.search("hello")
 
         assert results[0]["source_path"] == "/tmp/test.pdf"
+        assert results[0]["document_id"] == 11
         assert results[0]["score"] == 0.95
         assert results[0]["distance"] == 0.05
         assert results[0]["score_kind"] == "cosine_similarity"
@@ -320,6 +324,7 @@ class TestSearcher:
 
     def test_search_result_type(self):
         result = SearchResult(
+            document_id=7,
             collection="default",
             source_path="/test.pdf",
             content="test content",
@@ -666,9 +671,18 @@ class TestArmFetchLimit:
 
 
 def _row(
-    path: str, score: float, *, kind: str = "cosine_similarity", collection: str = "c"
+    path: str,
+    score: float,
+    *,
+    kind: str = "cosine_similarity",
+    collection: str = "c",
+    document_id: int | None = None,
 ) -> SearchResult:
+    # Default id: one per (collection, path), as the database assigns them.
+    if document_id is None:
+        document_id = zlib.crc32(f"{collection}\0{path}".encode())
     return SearchResult(
+        document_id=document_id,
         collection=collection,
         source_path=path,
         content=f"{path} @ {score}",
@@ -720,6 +734,19 @@ class TestMergeArmsKeepsEachDocumentsBestChunk:
         merged = merge_arms(vector, lexical, lead="vector", top_k=10)
 
         assert sorted(r["collection"] for r in merged) == ["home", "work"]
+
+    def test_documents_are_told_apart_by_id_not_by_path(self):
+        """Same path with different ids stays two; different paths with one id merge."""
+        vector = [
+            _row("A", 0.9, document_id=1),
+            _row("A", 0.8, document_id=2),
+            _row("renamed", 0.7, document_id=1),
+        ]
+        lexical = [_row("elsewhere", 0.5, kind="lexical_rank", document_id=2)]
+
+        merged = merge_arms(vector, lexical, lead="vector", top_k=10)
+
+        assert [(r["document_id"], r["score"]) for r in merged] == [(1, 0.9), (2, 0.8)]
 
     def test_top_k_cuts_documents_not_chunks(self):
         vector = [_row(p, 1.0 - i / 10) for i, p in enumerate("AABBCC")]

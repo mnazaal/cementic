@@ -68,6 +68,47 @@ def test_pg_search_cosine_ranking_and_topic_separation(
 
 
 @pytest.mark.pg
+@pytest.mark.parametrize("hybrid", [False, True])
+def test_pg_search_results_carry_the_document_id(
+    pg_engine, pg_session, pg_config, monkeypatch: pytest.MonkeyPatch, hybrid: bool
+) -> None:
+    """Both arms project `source_documents.id`, so a result names its document."""
+    cleanup_pg_tables(pg_session)
+    seed_active_vector_collection(
+        pg_session,
+        collection="ids",
+        source_path="/docs/ids.pdf",
+        chunks=[
+            ("neural networks and semantic vectors", [1.0, 0.0, 0.0, 0.0]),
+            ("cell biology and proteins", [0.0, 1.0, 0.0, 0.0]),
+        ],
+    )
+    pg_session.commit()
+    document_id = pg_session.execute(
+        text("SELECT id FROM source_documents WHERE collection = 'ids'")
+    ).scalar_one()
+    monkeypatch.setattr(
+        "cementic.search._create_embedding_provider",
+        lambda config_json, config=None: FakeSearchEmbeddingClient(),
+    )
+    pg_config.search.hybrid = hybrid
+
+    searcher = Searcher(pg_config)
+    # The candidate pool is where each arm's SQL surfaces: assert on it so a
+    # lexical row is covered even when fusion would show the vector row.
+    pool = searcher.candidates("proteins", top_k=2)
+    results = searcher.search("proteins", top_k=2)
+
+    assert pool and results
+    assert {row["document_id"] for row in pool} == {document_id}
+    assert [row["document_id"] for row in results] == [document_id]
+    if hybrid:
+        assert any(row["score_kind"] == "lexical_rank" for row in pool)
+
+    cleanup_pg_tables(pg_session)
+
+
+@pytest.mark.pg
 def test_pg_search_collection_filter_isolates_results(
     pg_engine, pg_session, pg_config, monkeypatch: pytest.MonkeyPatch
 ) -> None:

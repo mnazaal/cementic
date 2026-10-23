@@ -15,6 +15,7 @@ from cementic.embedding_runtime import (
     llama_daemon_status,
 )
 from cementic.render import build_status_document, collection_record, revision_record
+from cementic.search import SearchResult
 from cementic.status_service import FileProgress, PipelineStatus, StatusData, WorkerStatus
 
 OPERATIONS = Path(__file__).resolve().parents[2] / "docs" / "operations.md"
@@ -175,3 +176,7 @@ def test_embedding_status_state_matches_the_documented_shape_and_the_string() ->
     ):
         assert llama_daemon_state(Config())["state"] == "ambiguous"
         assert llama_daemon_status(Config()).startswith("ambiguous: found multiple processes")
+
+
+def test_search_result_fields_match_the_documented_shape() -> None:
+    assert set(SearchResult.__annotations__) == set(_documented("search"))

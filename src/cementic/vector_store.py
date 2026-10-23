@@ -113,15 +113,15 @@ def knn_sql(profile_id: int, *, distance_operator: str) -> str:
     """The filtered KNN query, with every filter on the vector table itself.
 
     The joins that remain are projections -- the chunk's text and the document's
-    path -- reached by primary key, which a nested loop can satisfy while
+    id and path -- reached by primary key, which a nested loop can satisfy while
     preserving the index scan's ordering. It is the *filters* that had to move:
     while they sat on joined tables the planner drove from ``chunked_documents``
     and probed this table by primary key, reading every row.
     """
     table = vector_table_name(profile_id)
     return (
-        "SELECT sd.collection AS collection, sd.source_path AS source_path, "
-        "c.content AS content, "
+        "SELECT sd.id AS document_id, sd.collection AS collection, "
+        "sd.source_path AS source_path, c.content AS content, "
         f"ev.embedding {distance_operator} (:query)::vector AS distance "
         f"FROM {table} ev "
         "JOIN chunks_v2 c ON c.id = ev.chunk_id "
@@ -169,8 +169,8 @@ def lexical_sql(profile_id: int, *, text_config: str) -> str:
         f"plainto_tsquery('{text_config}', :query))"
     )
     return (
-        "SELECT sd.collection AS collection, sd.source_path AS source_path, "
-        f"c.content AS content, {rank} AS rank "
+        "SELECT sd.id AS document_id, sd.collection AS collection, "
+        f"sd.source_path AS source_path, c.content AS content, {rank} AS rank "
         "FROM ("
         "  SELECT id, document_id, content FROM chunks_v2 "
         f"  WHERE to_tsvector('{text_config}', content) "
