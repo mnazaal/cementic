@@ -10,6 +10,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable
 
+#: Accepted values for ``hnsw.iterative_scan``. Anything else is refused before
+#: it reaches the server, where an invalid value aborts the whole query.
+HNSW_ITERATIVE_SCAN_MODES = ("off", "relaxed_order", "strict_order")
+
 _DISTANCE_TO_OPCLASS = {
     "cosine": "vector_cosine_ops",
     "l2": "vector_l2_ops",

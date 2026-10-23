@@ -13,6 +13,8 @@ from collections.abc import Sequence
 from sqlalchemy import text
 from sqlalchemy.engine import Connection, Engine
 
+from cementic.index_strategies import HNSW_ITERATIVE_SCAN_MODES
+
 _MAX_EMBEDDING_DIM = 8192
 
 
@@ -187,10 +189,6 @@ def lexical_sql(profile_id: int, *, text_config: str) -> str:
 
 #: pgvector release that introduced ``hnsw.iterative_scan``.
 _ITERATIVE_SCAN_SINCE = (0, 8, 0)
-
-#: Accepted values for ``hnsw.iterative_scan``. Anything else is refused before
-#: it reaches the server, where an invalid value aborts the whole query.
-HNSW_ITERATIVE_SCAN_MODES = ("off", "relaxed_order", "strict_order")
 
 
 def parse_extension_version(raw: str | None) -> tuple[int, ...] | None:

@@ -6,7 +6,7 @@ import re
 import sys
 import tomllib
 from pathlib import Path
-from typing import Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from platformdirs import user_config_dir, user_data_dir
 from pydantic import (
@@ -24,10 +24,13 @@ from pydantic_settings import (
     SettingsError,
 )
 from rich.markup import escape
-from sqlalchemy.engine import URL, make_url
 
-from cementic.index_strategies import supported_index_methods
-from cementic.vector_store import HNSW_ITERATIVE_SCAN_MODES
+from cementic.index_strategies import HNSW_ITERATIVE_SCAN_MODES, supported_index_methods
+
+if TYPE_CHECKING:
+    # SQLAlchemy is imported inside the functions that build a URL, so loading
+    # the config does not load the database layer.
+    from sqlalchemy.engine import URL
 
 #: Directory names the watcher skips by default. Pointing `cementic start` at a
 #: project directory otherwise indexes every README and note inside dependency,
@@ -512,6 +515,8 @@ class DatabaseConfig(_SectionSettings):
         """
         if value is None or not value.get_secret_value():
             return value
+        from sqlalchemy.engine import make_url
+
         try:
             make_url(value.get_secret_value())
         except Exception as error:
@@ -521,12 +526,14 @@ class DatabaseConfig(_SectionSettings):
         return value
 
     @property
-    def url(self) -> URL:
+    def url(self) -> "URL":
         """SQLAlchemy database URL (password redacted in repr).
 
         A ``CEMENTIC_DB_URL`` override takes precedence over the discrete
         host/port/name/user/password fields.
         """
+        from sqlalchemy.engine import URL, make_url
+
         if self.url_override is not None and self.url_override.get_secret_value():
             return make_url(self.url_override.get_secret_value())
         return URL.create(
