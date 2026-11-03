@@ -140,9 +140,10 @@ def promote_collection(
         help="Promote even if the ready revision built with failed documents or chunks",
     ),
 ) -> None:
-    """Make a ready revision searchable.
+    """Make a ready revision active.
 
-    Search switches to the ready revision only after this command succeeds.
+    A new collection is searchable while building; promotion keeps the ready
+    revision selected when a replacement starts building.
     """
     from cementic.collections import promote_ready_revision
 

@@ -356,21 +356,26 @@ def materialize_pending_embeddings(
             ~already_present,
         )
     )
-    result = session.execute(
-        insert(ChunkEmbedding).from_select(
-            [
-                "chunk_id",
-                "embedding_profile_id",
-                "status",
-                "created_at",
-                "updated_at",
-                "collection",
-                "extractor_profile_id",
-                "chunk_profile_id",
-            ],
-            candidates,
-        )
+    statement = insert(ChunkEmbedding).from_select(
+        [
+            "chunk_id",
+            "embedding_profile_id",
+            "status",
+            "created_at",
+            "updated_at",
+            "collection",
+            "extractor_profile_id",
+            "chunk_profile_id",
+        ],
+        candidates,
     )
+    if session.get_bind().dialect.name == "postgresql":
+        # psycopg3 reports rowcount=-1 for INSERT ... SELECT. Count the
+        # RETURNING rows on the server rather than streaming potentially
+        # millions of inserted IDs through Python.
+        inserted = statement.returning(ChunkEmbedding.id).cte("inserted")
+        return int(session.scalar(select(func.count()).select_from(inserted)) or 0)
+    result = session.execute(statement)
     return cast(int, getattr(result, "rowcount", 0)) or 0
 
 

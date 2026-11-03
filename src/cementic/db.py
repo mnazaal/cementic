@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 # mypy: disable-error-code=import-untyped
+import atexit
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
@@ -37,6 +38,16 @@ if TYPE_CHECKING:
 
 _ENGINE_CACHE: dict[str, Engine] = {}
 REQUIRED_DB_EXTENSIONS = ("vector", "vectorscale")
+
+
+def _dispose_cached_engines() -> None:
+    """Close idle pooled connections before interpreter teardown."""
+    for engine in _ENGINE_CACHE.values():
+        engine.dispose()
+    _ENGINE_CACHE.clear()
+
+
+atexit.register(_dispose_cached_engines)
 
 
 def _url_cache_key(database_url: str | URL) -> str:
@@ -396,14 +407,19 @@ class SearchActivity(Base):
 
 def get_engine(database_url: str | URL) -> Engine:
     """Create database engine."""
+    url = make_url(database_url)
+    if url.drivername == "postgresql+psycopg2":
+        raise ValueError("psycopg2 URLs are no longer supported; use postgresql+psycopg://")
+    if url.drivername == "postgresql":
+        database_url = url.set(drivername="postgresql+psycopg")
     cache_key = _url_cache_key(database_url)
     engine = _ENGINE_CACHE.get(cache_key)
     if engine is None:
         connect_args: dict[str, object] = {"connect_timeout": 5}
-        # Parsed, not prefix-matched. `gssencmode` is a psycopg2 connect arg, so
-        # the question is which driver this URL resolves to -- and
-        # `postgresql+psycopg2://`, which a user setting CEMENTIC_DB_URL may
-        # well write, does not start with `postgresql://`. It got no
+        # Parsed, not prefix-matched. `gssencmode` is a libpq connect arg, so
+        # the question is which backend this URL resolves to -- and
+        # an explicit `postgresql+psycopg://` URL does not start with
+        # `postgresql://`. It would get no
         # `gssencmode` and the connection hung on the GSSAPI probe the option
         # exists to skip.
         if make_url(database_url).get_backend_name() == "postgresql":

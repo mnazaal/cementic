@@ -2,9 +2,9 @@
 
 ## Revisions
 
-A collection has one search-visible **active revision**. Changing extraction,
-chunking, or embedding settings builds a replacement in the background. Search
-continues against the active revision until you promote the ready replacement:
+Search prefers a collection's **active revision** while a replacement builds.
+Without an active revision, search can use a building or ready revision and
+return partial results. Promote a ready revision to make it active:
 
 ```bash
 cementic status
@@ -12,8 +12,7 @@ cementic collection promote research
 ```
 
 Promotion refuses a revision with failed documents or chunks unless you pass
-`--force`. A new collection has no active revision yet; search can return its
-partial results while it builds.
+`--force`.
 
 ## Routine commands
 
@@ -21,7 +20,7 @@ partial results while it builds.
 | --- | --- |
 | `cementic status` | Check indexing progress, worker state, and recent errors. |
 | `cementic doctor` | Read-only checks for configuration, Postgres, embeddings, and index health. |
-| `cementic collection promote NAME` | Make a ready revision searchable. |
+| `cementic collection promote NAME` | Make a ready revision active. |
 | `cementic collection reindex NAME` | Rebuild vector and full-text indexes after index-setting changes. It does not re-embed documents. |
 | `cementic stop` | Stop the watcher and pipeline worker; Postgres remains running. |
 

@@ -260,11 +260,15 @@ class DatabaseConfig(_SectionSettings):
         from sqlalchemy.engine import make_url
 
         try:
-            make_url(value.get_secret_value())
+            url = make_url(value.get_secret_value())
         except Exception as error:
             # str(error) is safe: SQLAlchemy reports the failure without echoing
             # the URL, which would carry the password.
             raise ValueError(f"is not a valid SQLAlchemy URL ({error})") from None
+        if url.drivername == "postgresql+psycopg2":
+            raise ValueError(
+                "psycopg2 URLs are no longer supported; use postgresql+psycopg://"
+            )
         return value
 
     @property
@@ -277,9 +281,12 @@ class DatabaseConfig(_SectionSettings):
         from sqlalchemy.engine import URL, make_url
 
         if self.url_override is not None and self.url_override.get_secret_value():
-            return make_url(self.url_override.get_secret_value())
+            url = make_url(self.url_override.get_secret_value())
+            if url.drivername == "postgresql":
+                return url.set(drivername="postgresql+psycopg")
+            return url
         return URL.create(
-            "postgresql",
+            "postgresql+psycopg",
             username=self.user,
             password=self.password.get_secret_value(),
             host=self.host,

@@ -182,7 +182,7 @@ class TestDatabaseConfig:
         config = DatabaseConfig(
             host="testhost", port=5433, name="testdb", user="testuser", password="testpass"
         )
-        expected_url = "postgresql://testuser:testpass@testhost:5433/testdb"
+        expected_url = "postgresql+psycopg://testuser:testpass@testhost:5433/testdb"
         assert config.url.render_as_string(hide_password=False) == expected_url
 
     def test_environment_override(self):

@@ -59,6 +59,10 @@ volume is first created, so it does not change an existing database.
 
 To use your own Postgres, set `CEMENTIC_DB_URL` or the individual
 `CEMENTIC_DB_*` values. The database must provide both required extensions.
+cementic uses psycopg3 for the default URL and plain `postgresql://` URLs.
+If an existing config explicitly uses `postgresql+psycopg2://`, change its
+scheme to `postgresql+psycopg://`; cementic rejects the old scheme with a
+config error rather than changing an explicit driver silently.
 
 ## First collection
 
