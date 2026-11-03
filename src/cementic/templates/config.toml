@@ -13,8 +13,8 @@ port = 5432
 name = "cementic"
 user = "cementic"
 password = "cementic" # Override outside local development.
-# url_override = "postgresql://user:password@host:5432/database"
-# `url_override` wins over the settings above.
+# url_override = "postgresql+psycopg://user:password@host:5432/database"
+# `url_override` wins over the settings above. Plain postgresql:// also uses psycopg3.
 
 [pipeline]
 embedding_provider = "llama-cpp"

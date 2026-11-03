@@ -1,5 +1,8 @@
 """PostgreSQL integration tests for db.py: vector extensions and ANN indexes."""
 
+import os
+import subprocess
+import sys
 from typing import NamedTuple
 
 import pytest
@@ -93,6 +96,30 @@ def _create_minimal_pipeline(session, *, embedding_dim: int = 4) -> "_MinimalPip
         extractor_profile_id=ext_prof.id,
         chunk_profile_id=chunk_prof.id,
     )
+
+
+def test_cached_engine_closes_pooled_connection_at_process_exit(pg_config) -> None:
+    """A short-lived CLI must not leave psycopg connections open at shutdown."""
+    env = {
+        **os.environ,
+        "CEMENTIC_DB_URL": pg_config.database.url.render_as_string(hide_password=False),
+        "PYTHONWARNINGS": "always",
+    }
+    code = """\
+from sqlalchemy import text
+from cementic.config import Config
+from cementic.db import get_engine
+engine = get_engine(Config().database.url)
+with engine.connect() as conn:
+    assert conn.execute(text('SELECT 1')).scalar_one() == 1
+print('SELECT_ONE_OK')
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", code], env=env, capture_output=True, text=True, timeout=15
+    )
+    assert result.returncode == 0
+    assert "SELECT_ONE_OK" in result.stdout
+    assert "was deleted while still open" not in result.stderr
 
 
 @pytest.mark.pg

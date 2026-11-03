@@ -52,9 +52,9 @@ uv run cementic collection promote research
 uv run cementic stop
 ```
 
-A collection has one search-visible **active revision**. Changing the extractor,
-chunking, or model builds a replacement revision in the background. Search keeps
-using the active revision until you promote the ready replacement.
+Search prefers the **active revision** while a replacement builds. A new
+collection without an active revision can return partial results from its
+building or ready revision. Promote a ready revision to make it active.
 
 `cementic start` runs one background session at a time. Pass multiple directories
 to one command to index them into one collection. Stop the current session before
@@ -74,7 +74,7 @@ indexing another collection.
 
 ```text
 cementic start DIRECTORY... -c COLLECTION   # watch and index
-cementic search QUERY -c COLLECTION         # search active revision
+cementic search QUERY -c COLLECTION         # search active, or first in-flight revision
 cementic run watcher|worker                  # one foreground process, for a service manager
 cementic status                              # progress and health
 cementic doctor                              # diagnose local setup

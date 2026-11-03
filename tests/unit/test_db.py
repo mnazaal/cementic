@@ -32,6 +32,18 @@ def test_get_engine_is_pure(mock_create_engine):
     assert not mock_engine.connect.called
 
 
+def test_plain_postgres_engine_uses_psycopg3() -> None:
+    engine = get_engine("postgresql://user:pass@localhost:5432/driver_test")
+    assert engine.dialect.driver == "psycopg"
+    engine.dispose()
+
+
+def test_legacy_psycopg2_engine_url_fails_without_echoing_credentials() -> None:
+    with pytest.raises(ValueError, match="postgresql\\+psycopg://") as raised:
+        get_engine("postgresql+psycopg2://user:secret@localhost:5432/cementic")
+    assert "secret" not in str(raised.value)
+
+
 @patch("cementic.db.Base.metadata.create_all")
 @patch("cementic.db.ensure_vector_extensions")
 def test_create_tables_calls_extension_setup(mock_ensure_extensions, mock_create_all):
@@ -192,7 +204,7 @@ class TestEnsureLexicalIndex:
         """The regression this guard exists to prevent.
 
         Built with `create_engine` rather than `get_engine` because the latter
-        always passes psycopg2's `connect_timeout`, which sqlite's driver
+        always passes libpq's `connect_timeout`, which sqlite's driver
         refuses -- the mismatch PLAN.md records under "deliberately not done".
         """
         engine = create_engine("sqlite://")

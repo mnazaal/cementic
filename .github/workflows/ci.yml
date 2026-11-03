@@ -63,6 +63,43 @@ jobs:
       - name: SQLite-backed integration tests
         run: uv run pytest tests/integration -m "not pg"
 
+  installed-wheel:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
+        with:
+          python-version: "3.13"
+      # Do not sync the lockfile here: this job checks what a fresh CLI install
+      # resolves, including newer SQLAlchemy releases.
+      - name: Build and install an unlocked wheel
+        run: |
+          uv build
+          uv venv .smoke-venv
+          uv pip install --python .smoke-venv/bin/python dist/cementic-*.whl
+      - name: Smoke-test the installed CLI and default driver
+        run: |
+          .smoke-venv/bin/python - <<'PY'
+          import os
+          import subprocess
+          from cementic.config import DatabaseConfig
+          from cementic.db import get_engine
+          from sqlalchemy import __version__ as sqlalchemy_version
+
+          print(f"Installed SQLAlchemy: {sqlalchemy_version}")
+          for url in (DatabaseConfig().url, "postgresql://u:p@127.0.0.1:1/test"):
+              engine = get_engine(url)
+              assert engine.dialect.driver == "psycopg", engine.dialect.driver
+              engine.dispose()
+          env = {**os.environ, "CEMENTIC_DB_URL": "postgresql://u:p@127.0.0.1:1/test"}
+          result = subprocess.run(
+              [".smoke-venv/bin/cementic", "collection", "list"],
+              env=env, capture_output=True, text=True, timeout=15,
+          )
+          assert result.returncode == 1, (result.returncode, result.stderr)
+          assert "database not reachable" in result.stderr, result.stderr
+          PY
+
   integration-pg:
     runs-on: ubuntu-latest
     steps:
@@ -81,4 +118,26 @@ jobs:
         # The pg_engine fixture builds and brings up compose.yml's
         # pgvector+vectorscale image itself (first build compiles the
         # extension from source, so this job is slower than the others).
-        run: uv run pytest tests/integration -m pg
+        run: |
+          uv run pytest tests/integration -m pg --junitxml=pg-locked.xml
+          python - <<'PY'
+          from xml.etree import ElementTree
+          suites = list(ElementTree.parse('pg-locked.xml').getroot().iter('testsuite'))
+          assert sum(int(s.get('tests', '0')) for s in suites) > 0
+          assert sum(int(s.get('skipped', '0')) for s in suites) == 0, 'PostgreSQL tests skipped'
+          PY
+
+      - name: Install latest supported SQLAlchemy without changing the lockfile
+        run: uv pip install --python .venv/bin/python --upgrade 'sqlalchemy>=2.1'
+
+      - name: PostgreSQL-backed integration tests with newer SQLAlchemy
+        # Reuse the already-built container; --no-sync preserves the newer
+        # package instead of restoring the locked version before pytest starts.
+        run: |
+          uv run --no-sync pytest tests/integration -m pg --junitxml=pg-newer.xml
+          python - <<'PY'
+          from xml.etree import ElementTree
+          suites = list(ElementTree.parse('pg-newer.xml').getroot().iter('testsuite'))
+          assert sum(int(s.get('tests', '0')) for s in suites) > 0
+          assert sum(int(s.get('skipped', '0')) for s in suites) == 0, 'PostgreSQL tests skipped'
+          PY

@@ -2644,7 +2644,7 @@ class TestHelpFlags:
             (["start"], "Only one background indexing session can run at a time."),
             (["doctor"], "This command changes nothing."),
             (["search"], "A new collection can return partial results while it builds."),
-            (["collection", "promote"], "only after this command succeeds."),
+            (["collection", "promote"], "A new collection is searchable while building"),
             (["collection", "reindex"], "It does not re-embed documents."),
             (["embedding", "start"], "cold-start cost."),
             (["config", "init"], "complete annotated reference for settings and defaults."),
@@ -2700,6 +2700,19 @@ class TestErrorStreamDiscipline:
         assert result.exit_code == 1
         assert result.stdout.strip() == ""
         assert "config error" in result.stderr
+
+    def test_legacy_driver_url_reports_migration_without_leaking_password(self, monkeypatch):
+        monkeypatch.setenv(
+            "CEMENTIC_DB_URL", "postgresql+psycopg2://user:password-canary@localhost/db"
+        )
+        monkeypatch.setattr("cementic.cli_shared._config", None)
+
+        result = runner.invoke(app, ["collection", "list"])
+
+        assert result.exit_code == 1
+        assert result.stdout.strip() == ""
+        assert "postgresql+psycopg://" in result.stderr
+        assert "password-canary" not in result.stderr
 
     @patch("cementic.db.get_session_factory")
     @patch("cementic.db.get_engine")

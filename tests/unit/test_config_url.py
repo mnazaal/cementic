@@ -1,8 +1,11 @@
 """Tests for DatabaseConfig URL security."""
 
+import pytest
+from pydantic import ValidationError
 from sqlalchemy.engine import URL
 
 from cementic.config import Config, DatabaseConfig
+from cementic.config_diagnostics import format_config_error
 
 
 class TestDatabaseUrlSecurity:
@@ -56,8 +59,25 @@ class TestDatabaseUrlSecurity:
         assert "%2F" in full  # / encoded
 
 
+def test_default_database_url_selects_psycopg3() -> None:
+    url = DatabaseConfig(host="localhost").url
+    assert url.drivername == "postgresql+psycopg"
+
+
 class TestDatabaseUrlOverride:
     """A full URL override wins over the discrete host/port/... fields."""
+
+    def test_plain_postgres_override_selects_psycopg3(self) -> None:
+        cfg = DatabaseConfig(url_override="postgresql://user:pw@localhost:5432/db")
+        assert cfg.url.drivername == "postgresql+psycopg"
+        assert cfg.url.password == "pw"
+
+    def test_legacy_psycopg2_url_is_an_actionable_redacted_config_error(self) -> None:
+        with pytest.raises(ValidationError) as raised:
+            DatabaseConfig(url_override="postgresql+psycopg2://user:secret@host/db")
+        message = format_config_error(raised.value, None)
+        assert "postgresql+psycopg://" in message
+        assert "secret" not in message
 
     def test_url_override_takes_precedence(self) -> None:
         cfg = DatabaseConfig(

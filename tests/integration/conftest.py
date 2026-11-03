@@ -64,7 +64,7 @@ def _require_isolated_test_database() -> None:
 
 
 #: What `db.py`'s `get_engine` passes, for the same reason: on a Kerberos host
-#: psycopg2's GSSAPI probe can fail or hang before authentication is attempted,
+#: libpq's GSSAPI probe can fail or hang before authentication is attempted,
 #: and every fixture here then errors at setup with "Server not found in
 #: Kerberos database" -- 62 tests erroring at once, which reads as a mass
 #: regression rather than a connection option. The application engine was given

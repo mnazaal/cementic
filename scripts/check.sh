@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
-# Run every gate CI runs, in one command.
+# Run the lockfile, lint, type, unit and integration gates locally.
 #
 # Exists because "I ran the tests" meant different things locally and in CI:
 # `pytest tests/unit` plus the non-pg integration job is green while the `pg`
-# job is red, and that combination reached main. The jobs mirror .github/
-# workflows/ci.yml -- keep them in step.
+# job is red, and that combination reached main. CI additionally installs a
+# fresh wheel with unlocked dependencies and repeats the pg suite against
+# newer SQLAlchemy; those release gates are not reproduced by this script.
 #
 # The pg job needs a reachable PostgreSQL. When there is none it is reported as
 # SKIPPED rather than passed, because a silently absent check is what this
@@ -46,8 +47,9 @@ except Exception:
 PY
 }
 
-# CI's first step on every job; a version bump that skips `uv lock` fails all
-# of CI while every local gate stays green -- which is how v0.2.0 shipped red.
+# CI's locked jobs check this; the installed-wheel job deliberately resolves
+# without the lock. A version bump that skips `uv lock` otherwise reaches local
+# tests but fails the locked jobs -- which is how v0.2.0 shipped red.
 run lockfile          uv lock --check
 run ruff              uv run --extra dev ruff check src/ tests/
 run mypy              uv run --extra dev mypy src/
@@ -70,4 +72,4 @@ if ((${#skipped[@]})); then
     echo "passed, but did not run: ${skipped[*]} — not a full check"
     exit 2
 fi
-echo "all checks passed"
+echo "local checks passed (CI also tests an unlocked wheel and newer SQLAlchemy)"

@@ -320,7 +320,7 @@ def promote_ready_revision(
         # *different* revision: each promote locks only its own row, so neither
         # blocks, and under READ COMMITTED neither sees the other's pending
         # activation. Losing that race is an ordinary outcome, not a database
-        # fault -- reporting it as one dumped the raw psycopg2 unique-violation,
+        # fault -- reporting it as one dumped the raw database unique-violation,
         # SQL and parameters included, at the user.
         session.rollback()
         if not _is_one_active_violation(error):
