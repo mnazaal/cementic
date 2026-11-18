@@ -30,6 +30,7 @@ from cementic.pipeline_worker import (
     _pipeline_worker_lock_key,
     _purge_superseded_chunks,
     _try_acquire_pipeline_worker_lock,
+    compute_revision_counts,
     embed_submit_size,
     is_retryable_embed_error,
     plan_embed_outcome,
@@ -2070,3 +2071,212 @@ class TestEmbedWriteBackStatementCount:
             rows = session.query(ChunkEmbedding).order_by(ChunkEmbedding.chunk_id).all()
         assert [row.status for row in rows] == ["done", "failed"] * 16
         assert write_back == 2
+
+
+class TestEveryPurgeReopensTheWork:
+    """The invariant `purge_all_chunks` documents, checked at each door that empties a chunking.
+
+    ``_step_chunk`` re-claims a *done* chunking only when its
+    ``source_content_hash`` differs from the extraction's, so emptying a chunking
+    without invalidating it strands the document: it owns no chunks, is counted
+    as chunked, and `revision_is_complete` still returns True. `purge_all_chunks`
+    states the rule; three neighbours applied it and two did not (2026-11-17
+    audit, both scenarios executed).
+
+    Each test drives the real write-back, not the helper, because the helper
+    being right is what the audit already knew and the doors are where it broke.
+    """
+
+    @staticmethod
+    def _worker(temp_dir: Path, session_factory):
+        config = Config()
+        config.pipeline_worker.log_file = temp_dir / "worker.log"
+        config.pipeline_worker.state_path = temp_dir / "worker.json"
+        config.pipeline.chunk_size = 64
+        config.pipeline.chunk_overlap = 16
+        worker = PipelineWorker(config)
+        worker.Session = session_factory
+        worker.collection = "revert"
+        return worker
+
+    @staticmethod
+    def _seed(session_factory, *, chunks: int = 2):
+        """An indexed document: extraction and chunking done at content hash A."""
+        with session_factory() as session:
+            source = SourceDocument(
+                collection="revert", source_path="/papers/a.pdf", file_hash="file-A"
+            )
+            extractor = ExtractorProfile(name="x", fingerprint="x", config_json="{}")
+            chunk_profile = ChunkProfile(fingerprint="c", config_json="{}")
+            embedding_profile = EmbeddingProfile(
+                fingerprint="e", provider="test", model_identifier="test",
+                embedding_dim=2, distance_metric="cosine", config_json="{}",
+            )
+            session.add_all([source, extractor, chunk_profile, embedding_profile])
+            session.flush()
+            revision = PipelineRevision(
+                collection="revert",
+                extractor_profile_id=extractor.id,
+                chunk_profile_id=chunk_profile.id,
+                embedding_profile_id=embedding_profile.id,
+                status="building",
+            )
+            session.add(revision)
+            session.flush()
+            extracted = ExtractedDocument(
+                document_id=source.id, extractor_profile_id=extractor.id,
+                source_file_hash="file-A", content_hash="A", status="done",
+                artifact_path="/artifacts/a.md",
+            )
+            session.add(extracted)
+            session.flush()
+            chunked = ChunkedDocument(
+                extracted_document_id=extracted.id, chunk_profile_id=chunk_profile.id,
+                source_content_hash="A", status="done", total_chunks=chunks,
+            )
+            session.add(chunked)
+            session.flush()
+            for index in range(chunks):
+                session.add(
+                    Chunk(document_id=source.id, chunked_document_id=chunked.id,
+                          chunk_index=index, content=f"text from A, chunk {index}")
+                )
+            session.commit()
+            return revision.id, extracted.id, chunked.id, source.id
+
+    def test_a_re_extension_that_reverts_does_not_strand_the_document(self, temp_dir: Path) -> None:
+        engine = create_engine("sqlite:///:memory:")
+        Base.metadata.create_all(engine)
+        session_factory = sessionmaker(bind=engine, expire_on_commit=False)
+        revision_id, extracted_id, chunked_id, _ = self._seed(session_factory)
+        worker = self._worker(temp_dir, session_factory)
+
+        # The file changes to B, then reverts to A before chunking ever ran.
+        worker._write_back_extraction(
+            extracted_id, "file-B", Path("/artifacts/b.md"), "B", "done", None
+        )
+        worker._write_back_extraction(
+            extracted_id, "file-A", Path("/artifacts/a.md"), "A", "done", None
+        )
+
+        with session_factory() as session:
+            chunked = session.get(ChunkedDocument, chunked_id)
+            revision = session.get(PipelineRevision, revision_id)
+            # The purge emptied the chunks, so the chunking must stop claiming to
+            # be done -- NULL is what re-opens the claim.
+            assert session.query(Chunk).count() == 0
+            assert chunked.source_content_hash is None
+            counts = compute_revision_counts(session, "revert", revision)
+            assert counts.chunked_done == 0, "an empty chunking must not count as chunked"
+            assert revision_is_complete(counts) is False
+
+        # And the work actually re-opens, rather than merely being uncounted.
+        with patch(
+            "cementic.pipeline_worker.read_extracted_text", return_value="text from A " * 40
+        ):
+            assert worker._step_chunk(revision_id) is True
+        with session_factory() as session:
+            chunked = session.get(ChunkedDocument, chunked_id)
+            assert chunked.status == "done"
+            assert chunked.source_content_hash == "A"
+            assert session.query(Chunk).count() > 0
+
+    def test_a_failed_extraction_write_back_stops_serving_the_old_text(
+        self, temp_dir: Path
+    ) -> None:
+        engine = create_engine("sqlite:///:memory:")
+        Base.metadata.create_all(engine)
+        session_factory = sessionmaker(bind=engine, expire_on_commit=False)
+        revision_id, extracted_id, chunked_id, _ = self._seed(session_factory)
+        worker = self._worker(temp_dir, session_factory)
+        with session_factory() as session:
+            session.get(SourceDocument, 1).file_hash = "file-B"
+            session.get(ExtractedDocument, extracted_id).status = "pending"
+            session.commit()
+
+        with (
+            patch("cementic.pipeline_worker.extract_document", return_value="text from B"),
+            patch("cementic.pipeline_worker.write_extracted_text", return_value="B"),
+            patch(
+                "cementic.pipeline_worker._purge_superseded_chunks",
+                side_effect=RuntimeError("deadlock detected"),
+            ),
+            patch.object(worker.state_manager, "update"),
+        ):
+            assert worker._step_extract(revision_id) is True
+
+        with session_factory() as session:
+            extracted = session.get(ExtractedDocument, extracted_id)
+            chunked = session.get(ChunkedDocument, chunked_id)
+            assert extracted.status == "failed"
+            # Content is unknown now, so it must not name the old text.
+            assert extracted.content_hash is None
+            assert session.query(Chunk).count() == 0, "the superseded text is still served"
+            assert chunked.source_content_hash is None
+
+    def test_a_failed_chunk_write_back_leaves_a_settleable_revision(self, temp_dir: Path) -> None:
+        engine = create_engine("sqlite:///:memory:")
+        Base.metadata.create_all(engine)
+        session_factory = sessionmaker(bind=engine, expire_on_commit=False)
+        revision_id, extracted_id, chunked_id, _ = self._seed(session_factory)
+        worker = self._worker(temp_dir, session_factory)
+        # The text changed to B and extraction already wrote it back; the
+        # chunking is still the one built from A, so the chunk step claims it.
+        with session_factory() as session:
+            session.get(ExtractedDocument, extracted_id).content_hash = "B"
+            session.commit()
+
+        with (
+            patch("cementic.pipeline_worker.read_extracted_text", return_value="text from B " * 40),
+            patch.object(
+                PipelineWorker, "_write_back_chunks", side_effect=RuntimeError("NUL byte")
+            ),
+            patch.object(worker.state_manager, "update"),
+        ):
+            assert worker._step_chunk(revision_id) is True
+
+        with session_factory() as session:
+            chunked = session.get(ChunkedDocument, chunked_id)
+            revision = session.get(PipelineRevision, revision_id)
+            assert chunked.status == "failed"
+            assert session.query(Chunk).count() == 0, "chunks of a failed chunking are still served"
+            counts = compute_revision_counts(session, "revert", revision)
+            assert counts.done_embeddings == counts.total_chunks, (
+                "a done/failed embedding count that cannot equal total_chunks wedges the revision"
+            )
+            assert revision_is_complete(counts) is True
+
+    def test_no_door_leaves_a_counted_chunking_with_no_chunks(self, temp_dir: Path) -> None:
+        """The invariant as `chunked_scope` counts it, not as the row reads.
+
+        A chunking is counted as chunked only while its hash matches the
+        extraction's; that is the state the property is about, and the one
+        `doctor` warns on (`total_chunks > 0` aside, which keeps a legitimately
+        empty document out of it).
+        """
+        engine = create_engine("sqlite:///:memory:")
+        Base.metadata.create_all(engine)
+        session_factory = sessionmaker(bind=engine, expire_on_commit=False)
+        revision_id, extracted_id, chunked_id, _ = self._seed(session_factory)
+        worker = self._worker(temp_dir, session_factory)
+
+        worker._write_back_extraction(
+            extracted_id, "file-B", Path("/artifacts/b.md"), "B", "done", None
+        )
+        worker._write_back_extraction(
+            extracted_id, "file-A", Path("/artifacts/a.md"), "A", "done", None
+        )
+
+        with session_factory() as session:
+            stranded = (
+                session.query(ChunkedDocument)
+                .join(
+                    ExtractedDocument,
+                    ChunkedDocument.extracted_document_id == ExtractedDocument.id,
+                )
+                .filter(ChunkedDocument.status == "done")
+                .filter(ChunkedDocument.source_content_hash == ExtractedDocument.content_hash)
+                .filter(~ChunkedDocument.chunks.any())
+                .count()
+            )
+        assert stranded == 0

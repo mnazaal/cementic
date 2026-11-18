@@ -307,6 +307,19 @@ def _purge_superseded_chunks(
     ``ON DELETE CASCADE`` on ``chunks_v2``. The visible consequence is that a
     document whose re-extraction succeeded but whose re-chunking has not run
     yet returns nothing rather than its previous contents.
+
+    The emptied chunkings must be invalidated in the same transaction, for the
+    reason ``purge_all_chunks`` spells out: ``_step_chunk`` re-claims a *done*
+    chunking only when its hash differs from the extraction's, so a file that
+    goes A -> B -> A before chunking matches its own stale hash, is never
+    revisited, owns no chunks for good, and still counts as chunked -- so
+    ``revision_is_complete`` returns True over an unsearchable document
+    (2026-11-17 audit, executed). Clearing the hash re-opens the claim and drops
+    the row out of ``chunked_done`` until it is genuinely re-chunked.
+
+    A *failed* chunking keeps its hash: ``chunked_scope`` counts failures by
+    hash equality, so clearing it would make the row count as neither done nor
+    failed and wedge the revision instead of settling it.
     """
     stale_chunked_ids = select(ChunkedDocument.id).where(
         ChunkedDocument.extracted_document_id == extracted_document_id,
@@ -317,6 +330,12 @@ def _purge_superseded_chunks(
     )
     session.query(Chunk).filter(Chunk.chunked_document_id.in_(stale_chunked_ids)).delete(
         synchronize_session=False
+    )
+    session.query(ChunkedDocument).filter(
+        ChunkedDocument.id.in_(stale_chunked_ids),
+        ChunkedDocument.status != "failed",
+    ).update(
+        {ChunkedDocument.source_content_hash: None}, synchronize_session=False
     )
 
 
@@ -809,6 +828,16 @@ class PipelineWorker:
         failed here was re-claimed every pass -- re-running the expensive stage
         each time -- while counted by neither ``done`` nor ``failed``, so the
         revision could never settle.
+
+        It also invalidates what the artifact superseded, because the purge that
+        was supposed to do that lived in the transaction that just rolled back
+        (2026-11-17 audit, both scenarios executed). For an extraction the
+        content hash is cleared and its chunks are purged: the row must stop
+        naming text it cannot vouch for, or the previous version keeps being
+        served. For a chunking its chunks are removed: otherwise they count as
+        embeddings under a chunking ``total_chunks`` no longer counts, so
+        ``done + failed == total_chunks`` is unreachable and the revision never
+        settles.
         """
         self._logger.exception("%s write-back failed; marking the artifact failed", stage)
         with self.Session() as session:
@@ -819,6 +848,13 @@ class PipelineWorker:
             artifact.status = "failed"
             artifact.error_message = str(error)
             artifact.attempts = 0
+            if model is ExtractedDocument:
+                artifact.content_hash = None
+                purge_all_chunks(session, artifact_id)
+            elif model is ChunkedDocument:
+                session.query(Chunk).filter_by(chunked_document_id=artifact_id).delete(
+                    synchronize_session=False
+                )
             session.commit()
 
     def _step_chunk(self, revision_id: int) -> bool:
