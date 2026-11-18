@@ -187,18 +187,33 @@ PERTURBED_KINDS = ("phrase-reordered", "phrase-dropped", "phrase-typo")
 #: in minutes.
 DEFAULT_ARMS_CACHE = "~/.cache/cementic-lead-arms.json"
 
-#: Rank-1 policies `ablate` scores, in the order printed. Every one fuses the
-#: same two arm lists; they differ only in who owns position one.
+#: Rank-1 policies `ablate` scores, in the order printed. The first group fuses
+#: the same two arm lists and differs only in who owns position one; the second
+#: group is one arm alone, which is the baseline any fusion has to beat.
 #:
 #:   shipped  `Searcher.lexical_should_lead`, recorded per query by `arms`.
 #:   none     plain reciprocal rank fusion, nobody routed -- the configuration
 #:            Phase 1 step 2 proposes deleting `lead` down to.
 #:   vector   the vector arm always leads.
 #:   lexical  the lexical arm always leads.
+#:   vector_only   the vector arm alone: plain pgvector top-k, no fusion.
+#:   lexical_only  the full-text arm alone: Postgres ranking, no vectors.
 #:   oracle   whichever of vector-lead and lexical-lead ranks gold higher, per
 #:            query. Not a system: the ceiling any rank-1 routing rule over these
 #:            two arms can reach, and so the most that tuning `lead` could buy.
-POLICIES = ("shipped", "none", "vector", "lexical", "oracle")
+#:
+#: The single-arm rows were added 2026-11-17: every policy was a fusion, so the
+#: project's central claim -- hybrid beats vector-only -- had no row that could
+#: test it, and `paired`/`sign_test` were never applied across the boundary.
+POLICIES = (
+    "shipped",
+    "none",
+    "vector",
+    "lexical",
+    "vector_only",
+    "lexical_only",
+    "oracle",
+)
 
 #: Where `compare-models` keeps its sample, per-model vectors and server logs.
 #: Outside the repo for the same reason as the arms cache, and so a run that
@@ -559,7 +574,9 @@ def policy_ranking(record: ArmRecord, policy: str, depth: int) -> list[str]:
     """The ranking one rank-1 policy produces for one query (pure).
 
     ``oracle`` reads the gold label, which is what makes it a ceiling and not a
-    system. On a tie it keeps vector-lead, the shipped default.
+    system. On a tie it keeps vector-lead, the shipped default. The single-arm
+    policies bypass fusion entirely: they are the baseline the fused rows are
+    compared against.
     """
     if policy == "oracle":
         options = [
@@ -567,6 +584,9 @@ def policy_ranking(record: ArmRecord, policy: str, depth: int) -> list[str]:
             for lead in ("vector", "lexical")
         ]
         return min(options, key=lambda ranking: gold_rank(ranking, record.gold))
+    single_arm = {"vector_only": record.vector, "lexical_only": record.lexical}
+    if policy in single_arm:
+        return deduplicate(single_arm[policy])[:depth]
     leads: dict[str, str | None] = {
         "shipped": record.shipped_lead,
         "none": None,
@@ -619,7 +639,7 @@ def format_ablation(
     """Render one set's ablation (pure)."""
     lines = [
         f"\n{kind}  (n={n}, depth={depth})",
-        f"  {'policy':<8} {'recall@1':>9} {'recall@10':>10} {'MRR':>7} "
+        f"  {'policy':<14} {'recall@1':>9} {'recall@10':>10} {'MRR':>7} "
         f"{'better':>7} {'worse':>6}",
     ]
     for policy, (r1, r10, mrr, better, worse) in rows.items():
@@ -647,23 +667,29 @@ def format_for(spec: ModelSpec, text: str, *, query: bool) -> str:
     return (spec.query_prefix if query else spec.document_prefix) + text
 
 
+#: Rank of a query an arm cannot have answered: the gold document is in no
+#: pool row, or the query itself was refused. A large integer rather than
+#: ``len(pool) + 1`` because that is a real position and was read as one -- a
+#: one-document pool turned every absent gold into a top-10 hit, so a query no
+#: arm answered scored positive recall (2026-11-13 audit).
+UNRANKED = 10**6
+
+
 def gold_rank_and_margin(
     similarities: list[float], pool_documents: list[int], gold: int
 ) -> tuple[int, float]:
     """Rank of the gold document by its best chunk, and its margin (pure).
 
     A document is represented by its best chunk, as search collapses chunks to
-    documents. Rank 1 is best; a gold document with no chunk in the pool ranks
-    after every document that has one. The margin is gold's best similarity
-    minus the best other document's -- it separates two models that both rank
-    gold first, where recall cannot.
+    documents. Rank 1 is best. A gold document with no chunk in the pool is
+    ``UNRANKED``, not "one past the last document": see that constant.
     """
     best: dict[int, float] = {}
     for similarity, document in zip(similarities, pool_documents, strict=True):
         if similarity > best.get(document, -math.inf):
             best[document] = similarity
     if gold not in best:
-        return len(best) + 1, -math.inf
+        return UNRANKED, -math.inf
     mine = best.pop(gold)
     rank = 1 + sum(1 for other in best.values() if other > mine)
     margin = mine - max(best.values()) if best else 0.0
@@ -683,13 +709,18 @@ def sign_test(better: int, worse: int) -> float:
 
 
 def summarise(ranks: list[int], margins: list[float]) -> dict[str, float]:
-    """recall@1, recall@10, MRR and mean finite margin over one arm (pure)."""
+    """recall@1, recall@10, MRR and mean finite margin over one arm (pure).
+
+    An ``UNRANKED`` query counts toward the denominator and earns nothing: a
+    miss is a miss, and the size of the pool must not turn it into a hit.
+    """
     n = len(ranks)
+    ranked = [rank for rank in ranks if rank < UNRANKED]
     finite = [m for m in margins if math.isfinite(m)]
     return {
-        "recall@1": sum(r == 1 for r in ranks) / n,
-        "recall@10": sum(r <= 10 for r in ranks) / n,
-        "MRR": sum(1 / r for r in ranks) / n,
+        "recall@1": sum(r == 1 for r in ranked) / n,
+        "recall@10": sum(r <= 10 for r in ranked) / n,
+        "MRR": sum(1 / r for r in ranked) / n,
         "margin": sum(finite) / len(finite) if finite else float("nan"),
     }
 
@@ -720,7 +751,13 @@ def shared_pool(pools: list[list]) -> list[int]:
     model refused a chunk. Scoring each arm on its own surviving rows lets a
     refusal delete a distractor from one arm and not from the control; every
     arm has to be scored on the rows they all have.
+
+    No pools at all shares no rows. A baseline-only comparison passes one arm,
+    and an empty list here used to raise IndexError out of `compare-models`
+    (2026-11-13 audit).
     """
+    if not pools:
+        return []
     return [i for i in range(len(pools[0])) if all(pool[i] is not None for pool in pools)]
 
 
@@ -857,7 +894,13 @@ FUZZY_KINDS = ("phrase", "phrase-reordered", "phrase-dropped", "phrase-typo")
 
 #: Candidate lexical arms, in report order. Each is a rule over a record's
 #: stored arms, so adding one is a table row.
-FUZZY_VARIANTS = ("shipped", "trigram similarity", "trigram word_similarity", "relaxed OR")
+FUZZY_VARIANTS = (
+    "shipped",
+    "trigram similarity",
+    "trigram word_similarity",
+    "relaxed OR",
+    "relaxed OR (fallback)",
+)
 
 
 @dataclass(frozen=True)
@@ -879,12 +922,19 @@ def fuzzy_lexical(record: FuzzyRecord, variant: str) -> list[str]:
     """The lexical arm a variant would hand to fusion for this query (pure).
 
     The trigram variants are fallbacks and only replace an empty arm; the
-    relaxed match is the arm itself, for every query.
+    relaxed match is the arm itself, for every query. ``relaxed OR (fallback)``
+    is the rule that actually shipped (`search._typo_fallback`): the relaxed
+    match, but only where the exact arm came back empty. ``shipped`` is the
+    exact arm alone, which is the control every row is paired against -- so its
+    own ``changed`` column is 0 by construction, and the shipped rule's fire
+    count is the new row's ``changed`` (2026-11-17 audit).
     """
     if variant == "shipped":
         return record.lexical
     if variant == "relaxed OR":
         return record.relaxed
+    if variant == "relaxed OR (fallback)":
+        return record.lexical or record.relaxed
     fallback = record.similarity if variant == "trigram similarity" else record.word_similarity
     return record.lexical or fallback
 
@@ -896,7 +946,10 @@ def fuzzy_report(
 
     ``better``/``worse`` pair each query's gold rank against the shipped arm's;
     ``changed`` counts queries whose ranking differs at all, so a candidate that
-    never fires is visible as zero rather than as an equal score.
+    never fires is visible as zero rather than as an equal score. The
+    ``shipped`` row is the baseline itself, so its ``changed`` is 0 by
+    construction; ``relaxed OR (fallback)``'s ``changed`` is how many queries the
+    shipped fallback fires on.
     """
     by_kind: dict[str, list[FuzzyRecord]] = {}
     for record in records:
@@ -1557,7 +1610,7 @@ def score_arm(
     ranks, margins = [], []
     for vector, gold in zip(queries, query_docs, strict=True):
         if vector is None:
-            ranks.append(len(set(documents)) + 1)
+            ranks.append(UNRANKED)
             margins.append(-math.inf)
             continue
         q = np.asarray(vector, dtype=np.float32)

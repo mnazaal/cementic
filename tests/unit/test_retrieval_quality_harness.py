@@ -240,8 +240,38 @@ class TestPolicyRanking:
         with pytest.raises(ValueError, match="unknown policy"):
             harness.policy_ranking(record(["v"], ["l"]), "coin", 10)
 
+    def test_vector_only_is_the_vector_arm_alone(self) -> None:
+        """The strongest fair baseline: no fusion, no routing."""
+        rec = record(["a.pdf", "b.pdf"], ["z.pdf"])
+        assert harness.policy_ranking(rec, "vector_only", 10) == ["a.pdf", "b.pdf"]
+
+    def test_lexical_only_is_the_lexical_arm_alone(self) -> None:
+        rec = record(["a.pdf", "b.pdf"], ["z.pdf"])
+        assert harness.policy_ranking(rec, "lexical_only", 10) == ["z.pdf"]
+
+    def test_a_single_arm_policy_still_cuts_to_depth(self) -> None:
+        rec = record(["a.pdf", "b.pdf", "c.pdf"], ["z.pdf"])
+        assert harness.policy_ranking(rec, "vector_only", 2) == ["a.pdf", "b.pdf"]
+
+    def test_a_single_arm_policy_collapses_a_document_to_its_best_chunk(self) -> None:
+        rec = record(["a.pdf", "a.pdf", "b.pdf"], ["z.pdf"])
+        assert harness.policy_ranking(rec, "vector_only", 10) == ["a.pdf", "b.pdf"]
+
 
 class TestAblation:
+    def test_every_policy_is_scored_for_every_set(self) -> None:
+        rows = harness.ablation([record(["v", "g"], ["g", "v"])], 10)
+        assert set(rows["phrase"]) == set(harness.POLICIES)
+        assert {"vector_only", "lexical_only"} <= set(rows["phrase"])
+
+    def test_a_single_arm_policy_can_lose_to_fusion(self) -> None:
+        """The baseline has to be able to win or lose in the table, or the
+        column proves nothing."""
+        rec = record(["x.pdf", "g.pdf"], ["g.pdf"], gold="g.pdf")
+        rows = harness.ablation([rec], 10)
+        assert rows["phrase"]["vector_only"][1] == 1.0
+        assert rows["phrase"]["vector_only"][3:] == (0, 0)
+
     def test_shipped_is_neither_better_nor_worse_than_itself(self) -> None:
         rows = harness.ablation([record(["v", "g"], ["g", "v"])], 10)
         assert rows["phrase"]["shipped"][3:] == (0, 0)
@@ -315,9 +345,15 @@ class TestGoldRankAndMargin:
         assert rank == 2
         assert margin == pytest.approx(-0.45)
 
-    def test_a_gold_document_absent_from_the_pool_ranks_last(self) -> None:
+    def test_a_gold_document_absent_from_the_pool_is_unranked(self) -> None:
+        """Absence is not a position.
+
+        A short pool used to hand every absent gold the rank after the last
+        document, so a one-document pool scored positive recall@10 for a query
+        the arm never answered (2026-11-13 audit).
+        """
         rank, margin = harness.gold_rank_and_margin([0.9, 0.5], [1, 2], gold=3)
-        assert rank == 3
+        assert rank == harness.UNRANKED
         assert margin == float("-inf")
 
 
@@ -348,10 +384,34 @@ class TestSummariseAndPaired:
         better, worse, _ = harness.paired([1, 3, 2], [2, 3, 1])
         assert (better, worse) == (1, 1)
 
+    def test_an_unranked_gold_earns_nothing(self) -> None:
+        m = harness.summarise([1, harness.UNRANKED], [0.1, float("-inf")])
+        assert m["recall@1"] == pytest.approx(0.5)
+        assert m["recall@10"] == pytest.approx(0.5)
+        assert m["MRR"] == pytest.approx(0.5)
+
+    def test_a_short_pool_cannot_rescue_a_missing_gold(self) -> None:
+        """Pool size must not decide whether an absent gold counts."""
+        np = pytest.importorskip("numpy")
+        ranks, margins = harness.score_arm(np, [[1.0, 0.0]], [7], [[1.0, 0.0]], [1])
+        assert ranks == [harness.UNRANKED]
+        assert harness.summarise(ranks, margins)["recall@10"] == 0.0
+
+    def test_a_refused_query_earns_nothing(self) -> None:
+        np = pytest.importorskip("numpy")
+        ranks, margins = harness.score_arm(np, [None], [7], [[1.0, 0.0]], [7])
+        assert ranks == [harness.UNRANKED]
+        assert harness.summarise(ranks, margins)["MRR"] == 0.0
+
 
 class TestSharedPool:
     def test_keeps_rows_every_pool_has(self) -> None:
         assert harness.shared_pool([[[1], None, [1], [1]], [[1], [1], None, [1]]]) == [0, 3]
+
+    def test_no_arms_shares_no_rows(self) -> None:
+        """A baseline-only comparison asks for one arm's rows and raised
+        IndexError instead of answering (2026-11-13 audit)."""
+        assert harness.shared_pool([]) == []
 
     def test_score_arm_scores_the_rows_it_is_given(self) -> None:
         np = pytest.importorskip("numpy")
@@ -360,7 +420,7 @@ class TestSharedPool:
         own = harness.score_arm(np, [[0.0, 1.0]], [2], pool, docs)
         forced = harness.score_arm(np, [[0.0, 1.0]], [2], pool, docs, keep=[0])
         assert own[0] == [1]
-        assert forced[0] == [2]  # gold has no row in the pool: ranks after the others
+        assert forced[0] == [harness.UNRANKED]  # gold has no row in the pool
 
 
 class TestPunctuationDominated:
@@ -525,6 +585,16 @@ class TestFuzzyReport:
         variants = ("shipped", "relaxed OR")
         report = harness.fuzzy_report([fuzzy_record()], depth=10, variants=variants)
         assert set(report["phrase-typo"]) == set(variants)
+
+    def test_the_fallback_only_variant_reports_where_the_shipped_rule_fires(self) -> None:
+        """`shipped` is the pre-fallback arm, so its `changed` is 0 by
+        construction and the conditional rule's own fire count was
+        unreportable by this table (2026-11-17 audit)."""
+        fired = fuzzy_record(lexical=[], relaxed=["g.pdf"])
+        unchanged = fuzzy_record(lexical=["x.pdf"], relaxed=["x.pdf"])
+        rows = harness.fuzzy_report([fired, unchanged], depth=10)["phrase-typo"]
+        assert rows["shipped"][5] == 0
+        assert rows["relaxed OR (fallback)"][5] == 1
 
     def test_formats_every_variant(self) -> None:
         report = harness.fuzzy_report([fuzzy_record()], depth=10)
