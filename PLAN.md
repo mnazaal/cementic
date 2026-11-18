@@ -1,48 +1,36 @@
 # cementic — architecture & design
 
-<!-- session-handoff:begin (2026-11-13) -->
+<!-- session-handoff:begin (2026-11-17) -->
 ## Where the work stands
 
-**Entry point:** read **Execution order — engineering audit follow-up** below,
-then confirm the next implementation scope with the user. First proposed slice:
-write failing edit-and-revert and extraction-write-back regression tests against
-the real worker boundary, using isolated SQLite; do not start with a refactor.
+**Entry point:** **Execution order — open items** below; Wave A owns the first
+slice and A1 is its first step. Last action: the 2026-11-17 audit read and re-ran
+the 11-13 findings on a green baseline. Nothing is repaired.
 
-**State after this handoff commit:** `pi/audit-handoff`, documentation-only,
-not merged or pushed. Audit baseline: `main` at `ad9bf86bc39a`. No application
-fixes, production database writes, model downloads, rebuilds, or service changes
-were made.
-The user requested comprehensive notes so a fresh session can pick up the
-items; that is not authorization to execute the repairs or change live services.
+**State:** branch `pi/audit-handoff`, documentation-only so far, not merged or
+pushed. Baseline `main` @ `ad9bf86`; application code unchanged. No production
+database writes, model downloads, rebuilds or service changes. Executing a wave
+needs the user's go-ahead for that slice, not a standing grant.
 
-**Corrections to the old handoff:** "none scheduled" is no longer the current
-entry point; the October execution order is marked closed below. The old
-sandbox-specific claims about failing tests, blocked git operations, and live
-worker health were not carried forward as current facts. This audit's non-PG
-suite passed without the old tokenizer override. Live corpus/service health was
-not checked. Historical model/rebuild decisions and accepted residual risks
-remain constraints, not newly verified conclusions.
+**Corrected by this audit:** the 11-13 framing still holds for its items, with
+three changes. Its two headline pipeline findings were graded source-traced in
+the lane reports and are now executed (B1, B2). One lane's claim that config
+cross-field validation was sound is refuted by check (C3). The 392 stranded
+chunkings chased on 2026-11-17 are deleted sources, not loss. The PG suite runs
+here (77 passed), so "deselected" is no longer a limit.
 
-**Evidence and limits:** the follow-up section records the baseline and every
-open item with its evidence grade, regression scenario, and completion gate.
-`notes/review-codebase.html` is the full report but is gitignored; the tracked
-plan is self-contained if it is absent. Runnable probes, logs, and lane reports
-are retained under `~/.cache/cementic-audit/`; none depends on `/tmp`.
-All six audit/review subagents completed; harness records show no active async
-capacity in use. Parent checks ran in the foreground. No session-bound jobs
-were left running by this audit; existing user services were not inspected.
+**Evidence and limits:** the baseline table, per-item grades and artifact paths
+are in the order section. Nothing was verified against the live corpus beyond
+read-only queries, and no retrieval number was re-measured — no embedding daemon
+was started.
 
-**Resume checks:** from this checkout, inspect the branch, diff and import path
-before trusting the baseline or selecting tests.
+**Resume checks:**
 ```bash
 git branch --show-current
 git log -1 --oneline
 git status --short
 .venv/bin/python -c 'import cementic; print(cementic.__file__)'
 ```
-The handoff commit should contain only `PLAN.md`; the import should resolve to
-this checkout. Agents may write only `pi/*` (or `worktree-pi*`) branches; the
-hook rejected `agent/audit-handoff`. Do not bypass the hook or update `main`.
 <!-- session-handoff:end -->
 
 ## Decision log
@@ -175,6 +163,33 @@ All **live**.
   Agent-decided: measure relaxed OR alone, and keep trigram open only as an
   indexed candidate ("Fuzzy matching").
 
+### 2026-11-17 — decisions from the second audit
+
+All **live**. Each names the section of "Execution order — open items" that
+carries it out.
+
+- **Why repair the retrieval evidence before the data-integrity defect?** The
+  retrieval work is hours and decides whether the Phase-2 rebuild (2.3M vectors,
+  ~108 h) is worth running at all; the pipeline repair is a day and gates nothing
+  behind it, and a rebuild spent on a ranking rule whose evidence is circular
+  would have to be run twice. *Rejected:* corruption-first, on the argument that
+  silent content loss outranks a weak measurement — true in the abstract, but two
+  of that defect's three doors are already fixed and the third is detected by a
+  regression nobody has written, while the measurement error is unbounded and
+  currently trusted. *Revisit when:* a live document is found stranded by B1;
+  then stop and repair (predict: the `doctor` predicate would not see it).
+- **Why does one order replace the 11-13 order instead of sitting beside it?**
+  Two live orders give no single answer to "what next", and the 11-13 one
+  carried items this audit refuted or upgraded. Its technical detail is preserved
+  under the closed record rather than deleted, because those failure scenarios
+  are Wave B's test specification. *Rejected:* appending a dated second order,
+  which is how a plan stops answering anything.
+- **Why is the 392-document observation closed as not-a-defect?** Every one is a
+  source the user deleted: the file is gone from disk, the source row says
+  `deleted`, and no deleted source owns a chunk. The corpus is clean and
+  `doctor` is right to exclude them. *Rejected:* widening `doctor`'s predicate to
+  catch them — it would report correct deletions as damage forever.
+
 ## Design principles
 
 - **Functional core, imperative shell.** Pure functions (extraction, chunking,
@@ -300,349 +315,285 @@ is the contract for the *text* extraction family, not a universal law; per-type
 backend choice is what raises text-extraction quality (e.g. docling/marker) where
 it matters.
 
-## Execution order — engineering audit follow-up
+## Execution order — open items
 
-**OPEN, 2026-11-13; this is the single current follow-up order.** The user asked
-for a comprehensive engineering audit and then notes for a fresh session.
-The sequence below is a recommendation, not approval for implementation,
-production repairs, service restarts, model changes, or re-embedding.
-All findings remain **unrepaired / pending verification**. Source locations are
-at `ad9bf86bc39a`; follow the named symbols when line numbers move. Unqualified
-production-module references are under `src/cementic/`; regression modules
+**OPEN, 2026-11-17; the single live order.** It replaces the 2026-11-13 follow-up
+order, whose technical detail is preserved below in "Closed execution record".
+One live order, because two of them answered "what next" twice.
+
+**Scope.** Nothing here is repaired. The 2026-11-17 audit re-ran the 11-13
+findings on a green baseline, confirmed six of them, refuted two, and added
+seven. Two waves come first, in this order: **A** decides whether the retrieval
+numbers mean anything — hours, and it gates a 108 h rebuild — then **B** stops
+the pipeline losing content — a day, and it gates nothing behind it.
+
+**Grades.** **executed** — the code was called on an isolated input (SQLite, a
+scratch `*_test` database, injected exceptions, CliRunner, mocked dependencies:
+stated per item). **source-traced** — the failure path was read and not run.
+Neither means repaired, reviewed after repair, or reproduced against the live
+corpus. Unqualified module references are under `src/cementic/`; test modules
 named without a directory are under `tests/unit/`.
 
-### Audit baseline and evidence to preserve
+**Baseline, 2026-11-17, this checkout** (`pi/audit-handoff` @ `bf1297f`; app code
+= `main` @ `ad9bf86`), environment Python 3.13.14:
 
-Five independent read-only review lanes covered pipeline integrity,
-CLI/config/docs, security/runtime, functional design/dependencies, and
-retrieval/efficiency. The parent checked cited source and ran isolated probes;
-a separate final reviewer checked the report against evidence and found no
-blocking factual corrections, without rerunning checks.
-
-**Grades:** **executed** means the current code was called on isolated inputs;
-SQLite, injected exceptions, and service mocks are stated explicitly.
-**Source-traced** means the failure path was inspected but its complete scenario
-was not run. Neither grade means repaired, reviewed after repair, or reproduced
-against the live corpus.
-
-The baseline checks establish the starting point, not correctness of all flows.
-
-| Check | Recorded outcome |
+| Check | Outcome |
 | --- | --- |
-| `uv lock --check --offline` | Passed |
-| `.venv/bin/ruff check src/ tests/` | Passed |
-| `.venv/bin/mypy src/` | Passed, strict configuration |
-| Non-PG unit/integration tests passed | 1488 |
-| PostgreSQL tests deselected | 77 |
-| Pytest-reported duration, seconds | 98.10 |
+| `uv lock --check`, `ruff check src/ tests/`, `mypy src/` | clean |
+| non-PG suite | 1488 passed, 134 s |
+| PG suite (`-m pg`) | 77 passed, 86 s — Postgres 18.3 was reachable, so the tests the 11-13 audit had to deselect ran |
+| branch coverage | 90% (`extract_child.py` 0%, `render.py` 74%, `db.py` 78%) |
+| live corpus, read-only | 24,533 documents, 2,423,430 chunks, 26 GB, one active revision |
 
-The environment was the existing checkout-local Python 3.13.14 environment,
-not a fresh install. PostgreSQL interleavings, real llama.cpp/model-vector
-behavior, descendant-process timeouts, minimum-Python compatibility, a fresh
-wheel installation, corpus-scale plans/throughput, and current vulnerability
-advisories were not verified in this audit. Older PG logs in the cache are not
-this audit's evidence.
+Artifacts: `~/.cache/cementic-audit-2026-11-17/` — `probe_edit_revert.py`,
+`tests-nopg.log`, `tests-pg.log`, `coverage.log`, `doctor.json`, `status.json`.
+Source references are at `ad9bf86`; follow the named symbols when lines move.
 
-**Artifact inventory, retained:** `notes/review-codebase.html` is the ignored
-full report. Under `~/.cache/cementic-audit/`, keep `probe_data_integrity.py`,
-`probe_contracts.py`, `probe-data.log`, `probe-contracts.log`, `collection.log`,
-`tests.log`, `ruff.log`, `mypy.log`, `lock.log`, `cli-timing.log`, and the five
-`reviewer-{pipeline,interface,security,design,retrieval}.md` reports.
-`review-codebase-before.html` preserves the previous audit. The raw subagent
-transcripts/temporary workflow files are not needed: their final findings were
-copied into the retained reports. The final evidence-check verdict is recorded
-above. Cache files can disappear or be overwritten; this tracked section keeps
-the failure scenarios and limits needed to reconstruct tests without them.
+### Wave A — repair the retrieval evidence before reading it
 
-The two probe scripts are **observational**, not regression tests: exit zero
-means the observations completed, including wrong application behavior. Run
-from the repository root with its `.venv/bin/python`; both use temporary files,
-isolated SQLite or mocks, and no real database/model. Convert the relevant
-scenario into assertions that fail on the audited baseline before fixing it.
+A1-A3 are hours of work and they decide whether the Phase-2 rebuild (2.3M
+vectors, ~108 h) is worth running at all. The rule already in force stands: fix
+the scoring controls first, and do not change ranking or candidate generation
+while measuring.
 
-### Repair chunk validity before other worker changes
+**A1. Repair the harness's scoring controls.** `scripts/measure_retrieval_quality.py`.
+- **A1a — a missing gold earns recall credit.** `gold_rank_and_margin:650-671`
+  returns `len(best)+1` when gold is absent, so a short pool still lands inside
+  `recall@10` and `summarise:685-695` counts it. A one-document pool without gold
+  scored positive recall@10 and reciprocal rank (executed, 11-13 audit).
+  **Ends when** missing gold and refused queries score zero through `score_arm:1543`
+  and `summarise`, not only in the isolated helpers, with a regression test.
+- **A1b — `shared_pool([])` raises `IndexError`** (`:716-726`) when only the
+  baseline model is requested, so a baseline-only CLI run cannot finish
+  (helper executed, CLI path `:1580-1583,1618` source-traced). **Ends when** that
+  run completes without long-arm scoring or new embedding work.
+- **A1c — the `fuzzy` table cannot report the shipped rule.** `fuzzy_lexical:878-890`
+  returns `record.relaxed` for every query while `search._typo_fallback:552-558`
+  fires only on an empty arm, and `fuzzy_report:892-925` sets
+  `changed = ranking != shipped`, which is structurally 0 for the shipped row
+  (executed). The 0.233→0.650 belongs to an unconditional-relaxed policy that is
+  not in the code path. **Ends when** the table reports the conditional rule's
+  fire count and `changed` per kind, with the historical numbers relabelled.
 
-- **Edit-and-revert loses chunks while reporting completion — executed.**
-  `_purge_superseded_chunks`, `_write_back_extraction`, and `_step_chunk`
-  (`pipeline_worker.py:293–320,751–785,830–857`). Seed indexed text A; write
-  successful extraction B, then A, before chunking B. The chunking still says
-  `done` with hash A, but owns zero chunks, so the claim skips it and
-  `revision_is_complete` returns true. `probe-data.log` records that exact
-  sequence. **Next:** invalidate affected chunking metadata in the same
-  transaction as chunk deletion; compare the existing `purge_all_chunks`
-  invariant. **Ends when:** a lifecycle regression restores A's chunks and
-  completion cannot silently accept the stranded state; cover normal changed,
-  unchanged, failed, and NULL-hash re-extractions too.
-- **Write-back fallback preserves stale content — executed with an injected
-  exception.** `_step_extract` / `_fail_artifact`
-  (`pipeline_worker.py:730–746,788–822`). Seed indexed A, change source to B,
-  fail extraction write-back: the row becomes terminal/hash-current for B,
-  retains A's content hash and chunk, and is not reclaimed next pass. Actual
-  stale-vector search was not exercised. **Next:** decide which DB failures
-  retry rather than becoming document failures; terminal extraction failure
-  must invalidate stale content transactionally. **Ends when:** the same
-  already-indexed scenario cannot serve A indefinitely or strand work, with
-  a PostgreSQL vector-cascade check before clearing the production claim.
+**A2. Score the strongest fair baseline.** `POLICIES:201` and `policy_ranking:558-578`
+are all two-arm fusions, so plain vector top-k and full-text-only never exist as
+ranked lists and `paired:697`/`sign_test:673` never compare shipped against them.
+Add `vector_only` and `lexical_only` from the cached arms and print `paired`
+against shipped (source-traced; ~10 lines). **Ends when** `ablate` prints shipped
+vs vector-only vs lexical-only with (better, worse, p) over the same queries, and
+a test pins that each policy's ranking is a single arm's order.
 
-**Anti-scope:** unify the validity rule, not a new state-machine framework;
-keep claim/work/write-back boundaries. No production cleanup SQL, watcher
-restart, or bulk re-embedding is authorized by these notes.
+**A3. Build query sets the lexical arm cannot already match.** `is_known_item:1011-1020`
+requires gold to be an exact `plainto_tsquery` match and the match set to be ≤5
+documents (`MAX_MATCHING_DOCUMENTS=5`, `:144`), using the predicate the lexical
+arm itself uses (`vector_store.py:165-178`). So the 60 rare-token and 60 phrase
+queries are answerable by construction, and 0.047→1.000 is a ceiling, not a rate.
+Add kinds whose gold is *not* an exact FTS match: case/hyphen-joined identifiers
+(`InstantNGP` → `instant ngp`), a paraphrase of a title, and single-word typos.
+**Anti-scope:** no `pg_trgm` without a GIN index — a full trigram scan is ~879 s
+per query over 2.3M chunks (costed 2026-10-23). **Ends when** `build` emits the
+kinds with a builder test on a scratch database and `score` reports shipped vs
+vector-only paired on them.
 
-### Align model identity, runtime identity, and location
+**A4. Decide the single-word typo path from A3's number.** With share 0.6,
+`relaxed_tsquery:110-135` returns the input unchanged at one lexeme and a
+conjunction at two, so only ≥3-lexeme queries relax; there is no edit-distance
+path in `src/` (executed: `(["kalmna"],0.6) == 'kalmna'`). A one- or two-word
+typo is unmeasured today. **Anti-scope:** do not change exact-query or phrase
+behaviour; the 0.233→0.650 for 3+ word phrases stands. **Ends when** a measured
+recall exists on the A3 typo set and the decision is recorded — extend the
+fallback, or document the limit as accepted.
 
-- **Replacement bytes reuse the old daemon identity — executed with a mocked
-  model-list response.** `llama_cpp_runtime_fingerprint` and
-  `get_llama_cpp_runtime_client` (`embedding_runtime.py:132–174,695–700`),
-  versus `_model_identity` (`profiles.py:175–203`). Replace temporary GGUF
-  bytes at the same path: the profile fingerprint changes, the daemon alias
-  does not, and the old alias is reused without bootstrap. Actual mixed-model
-  vectors were not generated. **Next:** compute content identity in the I/O
-  shell and carry it explicitly through the pure runtime fingerprint and
-  stored-profile replay contract. **Ends when:** a changed model cannot be
-  accepted under the previous alias, and indexing/search agree on identity
-  through both fresh and stored specs. Check the compatibility/restart impact
-  before deploying any alias/profile change; no automatic corpus rebuild.
-- **Relocating identical bytes leaves a dead launch path — executed.**
-  `get_or_create_embedding_profile` (`profiles.py:352–370`) writes runtime
-  JSON only on insertion; search replays it (`search.py:459–460,714–724`).
-  Move same-basename identical bytes to another directory and update config:
-  the profile is reused, but the stored path no longer exists. **Next:**
-  separate immutable vector identity from a locator verified against the
-  selected digest and text policy. **Ends when:** search can resolve the
-  relocated model without a new vector identity, and rejects a different
-  file offered under the same path/name. Do not blindly replace a stored
-  profile's locator from unverified current config.
+**A5. Settle `combine`'s tie promise.** `hybrid.py:78-81` says ties are left to
+the caller; the `sorted` over a vector-first dict resolves them toward the vector
+arm (executed: `combine(v, l, lead="lexical")` = `[200, 100, 101, 201, …]`, so
+lexical rank 2 loses position 3 on an exact `1/62` tie). Implement the promise
+with a test, or correct the docstring — decided against A2's paired ablation for
+lexical-lead queries, not by preference. **Ends when** code and docstring agree.
 
-Keep canary comparison distinct: it detects served-vector drift, not proof that
-an accepted alias loaded the on-disk bytes named by a new profile. Do not add
-build strings to profile identity or remove existing canary protections.
+### Wave B — stop the pipeline losing content
 
-### Close credential-bearing URL disclosure
+One shared defect: the invariant `purge_all_chunks` states at
+`revisions.py:407-421` — *emptying a chunking must invalidate it, or the work
+never re-opens* — is applied by the paths that call it and skipped by two
+neighbours. Fix it as one helper mirroring that invariant, not as a state machine.
 
-**Executed with a synthetic sentinel, no connection or real credentials.**
-`Bootstrapper._ensure_postgres_ready` (`bootstrap.py:119`) interpolates a
-SQLAlchemy URL accepted through `config.py:279–282`. Authority passwords are
-masked, but query-password values remain visible. Related diagnostic rendering
-is at `doctor.py:144`; `runner.py` prints bootstrap errors into terminal/logs.
+**B1. Edit-and-revert strands a document while the revision reports complete.**
+`_purge_superseded_chunks:293-320`, `_write_back_extraction:751-785`,
+`_step_chunk:824-875`. **Executed 2026-11-17** through the real functions: seed
+indexed A, write back B, then A before chunking — the chunking stays `done` with
+hash A, owns 0 chunks, `_step_chunk` returns False, `revision_is_complete` returns
+True (probe log retained). Same class found live on 2026-09-07 (2 of 23,064
+papers); `purge_all_chunks` is the fixed sibling. **Ends when** a lifecycle
+regression restores A's chunks and completion cannot accept the stranded state,
+covering changed, unchanged, failed and NULL-hash re-extractions.
 
-**Next:** sanitize displayed endpoints without credential-bearing query values,
-then enumerate URL-bearing config, doctor, bootstrap, and runner output paths.
-**Ends when:** authority- and query-password sentinels are absent from stdout,
-stderr, structured diagnostics and logs, including driver failures. Do not
-print or search actual credential values to prove redaction. The audit found a
-disclosure mechanism, not an established real incident; rotate credentials if
-an actual prior disclosure is found, since deleting text alone is insufficient.
+**B2. A failed extraction write-back keeps serving the superseded text.**
+`_step_extract:738-748` and `_fail_artifact:788-822` with the scopes at
+`revisions.py:105-135`. The purge sits in the transaction that rolled back, so
+after an injected failure the row goes terminal and hash-current while the old
+content hash, old chunking and old chunks stay live; `chunked_done + chunked_failed
+== extracted_done` is satisfied as `0 == 0` and the revision still completes
+(state executed; reachability and search-visibility source-traced). **Ends when**
+an injected write-back failure on an already-indexed document serves none of the
+old chunks and does not complete, with a PG cascade check before any production
+claim.
 
-### Prove deferred cleanup safe under profile reuse
+**B3. A chunking write-back failure wedges the revision.** `:958-966` with
+`revisions.py:156-183`: `_fail_artifact(ChunkedDocument)` drops `total_chunks` to
+0 while `done_embeddings` stays 2, so `done + failed == total_chunks` is
+unreachable, the row is never re-claimed, and no `last_error` reaches `status`
+because `_fail_artifact` does not re-raise (state and predicate executed).
+**Ends when** the revision either completes or reports the failure, and `status`
+names it.
 
-**Source-traced; PostgreSQL interleaving unexecuted.**
-`delete_collection_records` / `drop_orphan_vector_tables`
-(`collections.py:183–196,224–234`), pruning (`revisions.py:691–745`), and
-`drop_vector_table` (`vector_store.py:332–335`). Droppability is computed
-before commit, but the later table drop is unconditional. Another collection
-can create/use the same retained embedding profile between those operations,
-then lose its vector table while work rows remain `done`.
+**B4. Check the rule at every door, once.** One regression module walking every
+`Chunk` delete site — `pipeline_worker.py:318,1003`, `revisions.py:437,801`,
+`source_watcher.py:358`, `collections.py:168` — asserting each leaves no `done`
+chunking owning zero chunks. **Anti-scope:** no production SQL, no re-embedding,
+no watcher restart, no state-machine layer; do not promote a SQLite observation
+to a production claim.
 
-**First check:** in an explicitly isolated PostgreSQL database, retain deletion's
-cleanup result; create and populate another collection with that profile; run
-the old cleanup and assert live vectors survive. Cover pruning/promotion too.
-**Candidate repair:** serialize reuse and drop under the same per-profile
-rule and recheck references inside it; a recheck alone retains a race.
-**Ends when:** controlled interleaving and concurrent regression tests preserve
-referenced tables/vectors, while true orphans are still removed. Do not promote
-a source-only race analysis to a production reproduction or write a broad lock
-framework before establishing the smallest shared boundary.
+**B5. A revision can reach `ready` before the initial scan finishes.**
+`revision_is_complete:271-291` counts documents the watcher has registered so
+far, and the watcher registers them one at a time with no scan-complete marker,
+so draining the first N looks like finishing. Promotion re-checks and refuses and
+the all-zero case is refused outright, so this misleads rather than corrupts.
+Source-traced; carried unexecuted from the 2026-08-24 review. **Ends when** the
+counts distinguish a finished scan from a drained prefix — a scan-complete
+marker, not a timeout — with a regression that starts a scan and asserts no
+`ready` transition happens mid-scan.
 
-### Make diagnostic, extraction, and recovery contracts consistent
+### Wave C — make the operational surface truthful
 
-- **Doctor reports failure but `ok=true` — executed with mocked healthy
-  dependencies and a failing active-profile query.**
-  `doctor.py:166–177,263–273` sets extension success before that query and
-  does not clear it on inspection failure. **Ends when:** report verdict and
-  CLI exit fail for required failed checks, without treating intentional
-  warnings as failures.
-- **JSON status changes failure semantics — executed through CliRunner.**
-  `cli.py:621–625,654–676`, `render.py:414–417`: an identical health exception
-  exits nonzero in human mode but succeeds in JSON mode because only top-level
-  `error` is checked. **Ends when:** both modes fail consistently while JSON
-  retains its parseable partial report and nested health error.
-- **Command backend cross-field validation is incomplete — executed.**
-  `ExtractionConfig(backends={"epub":"command"})` is accepted
-  (`config.py:655–689`), then `_extraction_commands_check`
-  (`doctor.py:367–379`) raises `KeyError`. The template has the reverse gap:
-  commands/version entries without `epub="command"`
-  (`templates/config.toml:76–82`, dispatch in `extract.py`). **Ends when:**
-  every selected command backend requires both tables; incomplete combinations
-  fail at config load with a useful error; the template-derived example
-  actually dispatches through the command extractor.
-- **Digest cache can become a correctness dependency — partly executed.**
-  `model_digest.py:44–49,87–95`: invalid UTF-8 cache bytes raised
-  `UnicodeDecodeError`; lock/directory failures escaping the no-cache fallback
-  are source-traced only. **Ends when:** corrupted/unwritable cache cases hash
-  a readable model without caching, while genuine model-read failures remain
-  distinguishable. No generic recovery framework.
-- **Non-object state JSON crashes recovery — executed.**
-  `state.py:74,121–125`: `null`, `[]`, and a scalar raise `AttributeError`
-  at `.items()`. **Ends when:** unusable root shapes return default state and
-  do not reach PID signaling; normal atomic save/load remains unchanged.
+- **C1 — `collection remove <typo> --force` exits 0.** `cli_collection.py:50-55`
+  prints `status: not found` and returns; every sibling exits 1 through
+  `require_known_collection` (`cli_shared.py:180-196`). **Executed** against a
+  seeded scratch database. **Ends when** the not-found branch exits 1 and a CLI
+  test pins it.
+- **C2 — `status --json` exits 0 where text `status` exits 1.** `cli.py:629-665`
+  vs `:692-704`, failure signal at `render.py:414-417`; the human branch's own
+  comment explains why exit 0 is wrong and the JSON branch never got the rule.
+  **Executed:** human 1, JSON 0 with `health.error` set. **Ends when** both modes
+  fail consistently and JSON keeps its parseable partial report.
+- **C3 — `cementic doctor` crashes on a config it accepted.**
+  `ExtractionConfig(backends={"epub": "command"})` loads, then `doctor.py:256` →
+  `_extraction_commands_check` raises `KeyError: 'epub'` outside any `try`,
+  printing a traceback (**executed**). The template has the reverse gap
+  (`templates/config.toml`, dispatch in `extract.py`). **Ends when** every
+  selected command backend requires both tables at load with a useful error, and
+  the template-derived example dispatches through the command extractor.
+- **C4 — query-string passwords are not masked.** `bootstrap.py:119` and
+  `doctor.py:143` render `?password=` and `?sslpassword=` verbatim (authority
+  passwords mask); `runner.py` puts bootstrap errors into the log (**executed**
+  with synthetic sentinels). Use sentinels only — never a real credential.
+  **Ends when** both sentinel classes are absent from stdout, stderr, structured
+  diagnostics and logs, driver failures included.
+- **C5 — `status` and `doctor` contradict each other about the daemon.** Live
+  2026-11-17 14:11-14:15: `doctor` failed the daemon ("running but not answering
+  embeddings", exit 1) and four minutes later `status` reported
+  `embedding_healthy: true` beside `llama_daemon: stopped`, with a worker
+  `ReadTimeout … read timeout=120.0` and 32 chunks in `processing` (**executed**,
+  read-only). **Ends when** the two readouts cannot disagree without saying why.
+- **C6 — deferred cleanup can drop a live vector table.** Droppability is
+  computed before commit but the drop is unconditional (`collections.py:183-196,224-234`,
+  pruning `revisions.py:691-745`, `vector_store.py:332-335`). **Source-traced;
+  unexecuted.** First check: isolated PG, retain deletion's cleanup result,
+  create and populate another collection on that profile, run the old cleanup,
+  assert its vectors survive. **Ends when** an interleaving test preserves
+  referenced tables and true orphans still go — no broad lock framework first.
+- **C7 — the lexical arm can be starved or over-saturated.** `vector_store.py:165-178`
+  takes a global unordered `LIMIT` before the scope filter
+  (`lexical_candidate_pool=2000`), so another collection or an old revision can
+  fill the pool; `probe_documents`/`lexical_should_lead`
+  (`search.py:142-145,645-670`) can saturate on one long document and read "rare"
+  when it is not (**source-traced**). **Anti-scope:** raising the cap postpones
+  starvation, and naively moving the filters can lose GIN access. **Ends when**
+  scope retains the intended match with paired recall and
+  `EXPLAIN (ANALYZE, BUFFERS)` evidence.
 
-Use focused existing modules `test_doctor.py`, `test_cli.py`, `test_config.py`,
-`test_extractors.py`, `test_model_digest.py`, and `test_state.py` for regressions;
-share failure predicates between verdict and exit, not new presentation layers.
+### Wave D — contracts, docs, packaging, tests
 
-### Repair measurement tools before new retrieval verdicts
+- **D1 — the generated config is not the complete reference.**
+  `templates/config.toml` omits `extraction.timeout_seconds`,
+  `extraction.memory_limit_mb` and `search.lexical_candidate_pool`, while
+  `docs/configuration.md:12-13` and `cli.py:155` call it the source of truth
+  (verified field-by-field 2026-11-17; two lanes independently). **Ends when** a
+  test parses the template and asserts every `Config` field appears, counting
+  commented entries, red first on exactly those three.
+- **D2 — the pooling formula has no oracle.** `embedding_runtime.py:582`; the
+  tests at `test_embedding_runtime.py:1647,1664` assert only `is not None` and
+  `‖v‖ = 1`, which first-piece, mean and max-pool all satisfy. **Ends when** one
+  assertion pins the pooled value for known inputs.
+- **D3 — model and runtime identity.** The daemon alias hashes the model *path*,
+  not its bytes (`embedding_runtime.py:160-174`; `model_content_digest` is used
+  only at `profiles.py:195`), so replacing a GGUF in place reuses the old daemon
+  while the profile claims the new bytes; the canary witnesses the server, not
+  the digested file (`canary.py:174-206`). Both source-traced and independently
+  re-found 2026-11-17. **Ends when** a changed model cannot be accepted under the
+  previous alias and a relocated identical model still resolves.
+- **D4 — `stop` takes no lock while `start` does** (`cli.py:797-880` vs `:452`);
+  the `clear` path can delete a concurrent `start`'s state files, leaving live
+  workers only visible to `ps`. Source-traced. **Ends when** an interleaving test
+  cannot lose a live session's records.
+- **D5 — extraction isolation is crash containment only.** The child inherits the
+  worker's environment including `CEMENTIC_DB_URL` (`extract.py:529-545`, no
+  `env=`), and the timeout kills one PID rather than a process group
+  (`:532-545,654-658`). Source-traced, sentinel-probe executed for the
+  environment. **Ends when** the child gets a minimal environment and a dedicated
+  process group, with cleanup tests.
+- **D6 — carried unchanged and unverified from 2026-11-13:** digest-cache
+  correctness (`model_digest.py:82-92`), non-object state JSON
+  (`state.py:74,121-125`), the index capability registry split
+  (`index_strategies.py:54-89`), the duplicate file hasher
+  (`source_watcher.py:157-163`), the context-fit probe's identity and
+  tail-detection (`scripts/measure_chunk_context_fit.py:62-80,110-127`), "a
+  failure prints nothing on stdout" (`docs/operations.md:48-54`), file-limit
+  equality as truncation proof (`render.py:371-374`, `status_service.py:593-595`),
+  the external-server promise (`docs/configuration.md:72-76`), `docs/setup.md:27`
+  ("the repository is private") against README's public URL, "about 2 GB"
+  assigned to two different budgets in README and setup, and 3.12 exercised only
+  by the unit job.
+- **D7 — dependency and CI hygiene.** No unused or undeclared runtime dependency
+  was found (re-verified 2026-11-17); dev tools in an extra mean a bare
+  `uv sync` removes ruff/mypy/pytest; CI never runs `config init` or
+  `init postgres` from the wheel. Keep the pinned extractor versions and the
+  typer/click caps and their stated reasons.
 
-- **Absent gold/refused query gets retrieval credit — executed through pure
-  metric composition.** `scripts/measure_retrieval_quality.py:665–666,
-  690–692,1559–1562`: missing gold is a finite rank after the pool, so
-  `summarise` awards credit. A one-document pool without gold produced positive
-  recall@10 and reciprocal rank. **Ends when:** missing gold and refused
-  queries get zero retrieval credit through `score_arm` and `summarise`, not
-  just individually tested helpers. Re-score cached comparisons before
-  relying on their numbers; historical verdict changes are unknown, not
-  established. Do not reopen model migration on the synthetic probe alone.
-- **Baseline-only comparison has no long pool — helper executed, accepted
-  CLI path source-traced.** `scripts/measure_retrieval_quality.py:724,
-  1580–1583,1618`: `shared_pool([])` raises `IndexError` when only the accepted
-  baseline model is requested. **Ends when:** a cached baseline-only CLI case
-  completes without long-arm scoring or new embedding work.
-- **Context-fit probe can label another model's output as current config —
-  source-traced.** `scripts/measure_chunk_context_fit.py:62–80` trusts the
-  first served alias. **Ends when:** a mismatched served fingerprint is
-  rejected before token/embedding probes; identity, text policy, and context
-  budget refer to the same runtime.
-- **Vector inequality does not prove the tail was read — source-traced.**
-  The context-fit script (`:110–127`) uses exact equality to detect ignored
-  tails, while `canary.py:17–24` records output noise. **Ends when:** repeated
-  identical-input controls separate tail effects from noise and ambiguous
-  cases are inconclusive; a mock that ignores tails but adds small noise
-  cannot receive an intact-tail verdict. No model runs until the instrument
-  passes these synthetic controls.
+### Checked on 2026-11-17 and not a defect
 
-### Test lexical sampling against both scope and cost
+Recorded so nobody re-runs them:
 
-- **Global lexical cap can starve in-scope matches — source-traced, known
-  cost/recall trade-off.** `lexical_sql` (`vector_store.py:169–179`) limits
-  global chunks before profile/collection filtering, so other collections or
-  old revisions can fill the pool. **First check:** populate more than a pool
-  of out-of-scope matches plus a known in-scope hit in isolated PostgreSQL.
-  **Ends when:** the selected scope retains the intended match under the
-  revised contract, with paired recall and `EXPLAIN (ANALYZE, BUFFERS)` evidence.
-  Raising the cap merely postpones starvation; naively moving filters can
-  lose GIN access. The historical pool-size comparison does not settle this
-  constructed cross-scope case.
-- **Saturated chunk sample falsely implies document rarity — helper executed,
-  full ranking consequence source-traced.** `probe_documents` /
-  `lexical_should_lead` (`search.py:142–145,645–670`), also the known-item
-  gate in `scripts/measure_retrieval_quality.py:1019–1020`. One long document
-  can fill the cap while further matching documents remain unseen.
-  **Ends when:** saturation means unknown/not rare unless bounded at document
-  level, and saturated samples cannot construct misleading gold judgments.
-  Test both a long document followed by other matches and an unsaturated truly
-  rare term; corpus prevalence is unmeasured.
+- **The live corpus's 392 done-chunkings-owning-zero-chunks is correct.** All 392
+  are sources the user deleted (`status='deleted'`; zero of the files exist;
+  `deleted sources that still own chunks: 0`). `doctor`'s predicate
+  (`doctor.py:690-700`) excludes them by design and reports `ok`. The adjacent
+  gap is D1-adjacent rather than a corpus defect: that predicate would not catch
+  a *live* stranding of B1's shape, and B1's regression is what closes it.
+- **DiskANN `num_neighbors > search_list_size` is not a config-validation defect.**
+  pgvectorscale accepted both orders on a scratch database (executed).
+- **`config` cross-field validation is not sound.** The `epub=command`
+  combination loads and then crashes `doctor` (C3); a 2026-11-17 lane reported
+  this area clear and the check refuted it.
+- **Doctor's `ok` gate holds.** No path sets `ok=true` with one of the eight
+  required checks failed (read against `doctor.py:263-272`).
 
-Do not change ranking or candidate generation while measuring a model arm.
-Fix scoring controls first; preserve exact-query and typo behavior unless a
-measured, explicit trade-off is accepted.
+### Closure rules
 
-### Finish process and user-facing contracts
-
-- **Custom-command descendants can outlive timeout — source-traced only.**
-  `_command_extractor` and `command_version` (`extract.py:291–295,341–342`)
-  use `subprocess.run` timeouts that kill only the direct wrapper. **Ends when:**
-  dedicated-group timeout handling ends wrapper and descendants for both
-  extraction and version commands, with temporary-process tests guaranteeing
-  cleanup. Do not treat PDF memory limits or eventual service-cgroup cleanup
-  as a standalone CLI process-tree boundary.
-- **External-server promise exceeds the implemented contract — source-traced.**
-  `docs/configuration.md:72–76` suggests disabling autostart is sufficient;
-  bootstrap/doctor still require local model/binary state, and runtime
-  resolution requires cementic's exact alias. **Ends when:** docs describe the
-  supported externally supervised llama.cpp contract and a fake-server check
-  exercises it. Remote-only support is a separate user decision, not scope
-  for this repair.
-- **Failure need not leave stdout empty — source-traced.**
-  `docs/operations.md:48–54` conflicts with partial search/embed streams
-  (`cli.py:1058–1067,1281–1319`) and intentionally failing JSON diagnostics.
-  **Ends when:** docs/tests distinguish diagnostic objects, partial JSONL,
-  and exit status; reject unknown search scopes before emitting when practical.
-- **Exact file-limit equality is not proof of truncation — source-traced.**
-  `render.py:371–374`, `status_service.py:593–595`. **Ends when:** fetch one
-  extra row then trim, with below-limit/exact-limit/over-limit regressions.
-- **Generated config reference omits supported controls — source-traced.**
-  Add annotated `search.lexical_candidate_pool`, `extraction.timeout_seconds`,
-  and `extraction.memory_limit_mb` to `templates/config.toml`. **Ends when:**
-  a model/template field check confirms discoverability without a second guide.
-
-### Keep structural and dependency changes bounded
-
-These are maintenance notes, not reasons to delay correctness or add features.
-
-- **Split index capability registry — source-traced extension risk.**
-  `index_strategies.py:54–89` keeps builders and dimension limits separately;
-  absent metadata means unbounded. Co-locate builder and capability, with
-  completeness/unknown-method tests. **Ends when:** a newly registered bounded
-  method cannot silently bypass its dimension guard; no plugin framework.
-- **Duplicate file hasher — source-traced, low priority.**
-  `source_watcher.py:157–163` duplicates `hashing.py:15–21`. Consolidate when
-  touching hashing, preserving read-error behavior and existing test seams.
-  **Ends when:** one implementation covers empty/multiblock/error cases;
-  no speed claim without measurement.
-- **Standing docs:** this handoff marks October's order closed, not deleted.
-  `TODO.md` still proposes building the removed llama-cpp Python binding.
-  **Ends when:** stale runtime instructions are corrected to the external
-  binary contract. A broad PLAN/history compaction is separate scope.
-- **Dependency minimality:** no unused direct runtime dependency was
-  established. `pymupdf-layout` still pulls ONNX Runtime, NumPy, NetworkX,
-  and PyYAML (`uv.lock:848–856`). Optional raw-only installation is a product
-  choice, not an already-decided fix. Keep justified application compatibility
-  and extractor-version bounds. Consider moving dev tools from an extra to a
-  dev group only as a small maintenance change, with scripts/CI verified.
-- **Efficiency:** shared vector/index metadata is reprobed per collection
-  (`search.py:436–438,472–494`), but its latency impact is unmeasured. Benchmark
-  a multi-collection path before hoisting it. CLI startup samples measure
-  help/version only (`cli-timing.log`), not search/indexing throughput. The
-  old full-corpus rehash and per-row embed-write-back findings are not a
-  current performance verdict.
-
-**Keep / anti-scope:** retain pure formatting, ranking, validation, DDL builders,
-outcome plans, lazy heavy imports, and the functional-core/imperative-shell
-split. Local mutation at an I/O boundary is not itself a defect. No effect
-framework, speculative provider/plugin system, broad module split, dependency
-swap, new command, or re-embedding simply to make code look more functional.
-
-### Verification and closure rules for the follow-up
-
-After the user selects a slice, write a failing lifecycle/public-boundary
-regression first, implement the smallest correction, and obtain a separate
-reader's review of the changed code before clearing the finding. Update the
-item's evidence and remaining risks in place; do not add a second live order.
-A probe log showing the wrong behavior is not a passing regression.
-
-The non-PG gate below repeats the baseline without starting PostgreSQL. The
-previous run took about two minutes; cap numeric-library threads and record
-full output and the real exit status under `~/.cache/cementic-audit/`.
-```bash
-OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1 \
-  .venv/bin/python -m pytest tests/unit tests/integration -m 'not pg' -q
-.venv/bin/ruff check src/ tests/
-.venv/bin/mypy src/
-uv lock --check --offline
-```
-PostgreSQL fixtures can create/drop the dedicated test database and start
-containers. Inspect isolation and obtain authorization before the PG gate or
-full `scripts/check.sh`; do not point destructive tests at the live corpus.
-Worker/runtime repairs additionally need an approved tiny-corpus supervised
-CLI→daemon→index→promote→search smoke run. Unit-green and SQLite observations
-alone do not clear production lifecycle claims. Do not deploy/restart a live
-service or change persisted profile identity under an active import.
-
+Write the failing regression first, then the smallest correction, then have a
+reader who did not write it check the change; a probe log showing wrong
+behaviour is not a passing regression. Update the item in place with its grade;
+do not add a second order. PG fixtures may create and drop `*_test` databases —
+never point them at the live corpus. Worker and runtime repairs additionally need
+an approved tiny-corpus supervised CLI→daemon→index→promote→search run before any
+production claim. Do not restart the live service, change persisted profile
+identity under an active import, or re-embed without authorization.
 ## Closed execution record (2026-10-22)
 
 **CLOSED as an execution schedule; historical outcomes and explicitly parked
 risks remain below.** The former handoff recorded completion of the October
-waves and release. It is not a second live plan; follow the engineering audit
-order above for new work. This record merged the October audit, CLI-surface
+waves and release. It is not a second live plan; follow "Execution order — open
+items" above for new work. This record merged the October audit, CLI-surface
 work, and retrieval Phase 2. Its line numbers refer to `73b5d4c`, not current
 source. The audit note has since been rewritten; the old local report is
 preserved at `~/.cache/cementic-audit/review-codebase-before.html`.
@@ -1641,7 +1592,7 @@ text of every record is `git show 73b5d4c:PLAN.md`.
   `doctor --restamp` front door, and canaries for collections that never index
   again.
 
-## Design decisions and open items
+## Design decisions (with their residuals)
 
 ### Decided — the CLI surface after the `llm` audit (2026-09-10)
 
@@ -2049,13 +2000,14 @@ principle but not here: filenames containing `[` (would break
 `source_watcher.py`), and paths over about 2,600 bytes (btree limit on
 `ix_source_documents_collection_source`).
 
-Still live:
+Still live, and carried into the live order:
 
-- **A revision can reach `ready` mid-initial-scan** (`revision_is_complete`):
-  the watcher registers documents one at a time with no scan-complete marker,
-  so a drain of the first N looks complete. Promotion re-checks and refuses, so
-  this misleads rather than corrupts. The all-zero case is refused outright;
-  what remains is the first-N drain of a scan already under way.
+- **B5 — a revision can reach `ready` mid-initial-scan** (`revision_is_complete`,
+  `pipeline_worker.py:271-291`): the watcher registers documents one at a time
+  with no scan-complete marker, so a drain of the first N looks complete.
+  Promotion re-checks and refuses, so this misleads rather than corrupts, and
+  the all-zero case is refused outright. **Ends when** the counts distinguish a
+  finished scan from a drained prefix — a scan-complete marker, not a timeout.
 
 ## Road to v1
 

@@ -13,6 +13,10 @@ up/down itself when a container engine is available.
 Design rationale and the pluggable seams (embedding provider, extractor, ANN
 index, versioned revisions) are documented in [PLAN.md](PLAN.md).
 
+Repairs and audit items are ordered in PLAN.md's "Execution order — open
+items"; this file lists new capability, so only one document says what to do
+next.
+
 ## Near term
 
 - Add more document-type extractors (`.docx`, `.pptx`, `.html`, `.epub`) — one
@@ -20,10 +24,12 @@ index, versioned revisions) are documented in [PLAN.md](PLAN.md).
 - Add a direct ingestion command: `cementic add <path> -c <collection>`.
 - Add optional Markdown mirrors for extracted artifacts, alongside the existing
   compressed pipeline artifacts.
-- Enrich search results with document id and optional artifact path. A result
-  today carries seven fields: collection, source_path, content, score, distance,
-  score_kind and rank. Specified as step 6 of PLAN.md's "Execution order — CLI
-  surface audit", including why `chunk_id` is deliberately not among them.
+- **Enrich search results with an optional artifact path.** The document id
+  half shipped in 0.3.0: a result now carries eight fields (document_id,
+  collection, source_path, content, score, distance, score_kind, rank), pinned
+  by `test_json_shapes.py` against `docs/operations.md`. Why `chunk_id` is
+  deliberately absent is in PLAN.md, "Decided — the CLI surface after the `llm`
+  audit".
 
 - Pre-filter over-budget chunks against the model's own tokenizer, not just
   the cheap tiktoken estimate. `count_model_tokens` learned upstream
@@ -174,9 +180,11 @@ missing pipeline-failure-to-status connection
   this today. It becomes real again the moment a model swap is back on.
 - Evaluate lighter embedding providers if llama.cpp memory use is too high on
   small machines.
-- **Build llama-cpp-python with Vulkan** so the iGPU works under
-  `daemon_autostart` instead of an externally-run `llama-server`. Less pressing
-  than it looked: the external server needs no code change, was documented in
+- **Run a Vulkan-built `llama-server` as `daemon_command`** so the iGPU works
+  under `daemon_autostart`. Not llama-cpp-python: cementic declares and imports
+  no Python binding on purpose (`pyproject.toml`, dependencies), so the work is a
+  build of the C++ server plus `daemon_command` pointing at it — supported
+  already, no code change. Less pressing than it looked: the external server needs no code change, was documented in
   README's "Running embeddings on a GPU" until `6df8ab9` removed it (read it
   with `git show 6df8ab9^:README.md`), and is now supervised by the systemd
   units, so the practical gap this would close is small. Blocked on `glslc`,
