@@ -3,14 +3,15 @@
 <!-- session-handoff:begin (2026-11-17) -->
 ## Where the work stands
 
-**Entry point:** **Execution order — open items** below; Wave A owns the first
-slice and A1 is its first step. Last action: the 2026-11-17 audit read and re-ran
-the 11-13 findings on a green baseline. Nothing is repaired.
+**Entry point:** **Execution order — open items** below; **A3 is next** (A1, A2
+and B1-B4 are done and verified). The live corpus is untouched and clean; the
+repairs change worker behaviour, so the next `cementic start` is what applies
+them.
 
-**State:** branch `pi/audit-handoff`, documentation-only so far, not merged or
-pushed. Baseline `main` @ `ad9bf86`; application code unchanged. No production
-database writes, model downloads, rebuilds or service changes. Executing a wave
-needs the user's go-ahead for that slice, not a standing grant.
+**State:** branch `pi/audit-handoff`, not merged or pushed. Baseline `main` @
+`ad9bf86`. Commits so far: the order replacement, the harness repair, and the
+pipeline invalidation repair. No production database writes, model downloads,
+rebuilds or service changes.
 
 **Corrected by this audit:** the 11-13 framing still holds for its items, with
 three changes. Its two headline pipeline findings were graded source-traced in
@@ -190,6 +191,15 @@ carries it out.
   `doctor` is right to exclude them. *Rejected:* widening `doctor`'s predicate to
   catch them — it would report correct deletions as damage forever.
 
+- **Why did Wave B run before A3, when the order puts A first?** A3's end
+  condition is a scored number and needs the embedding server, which that
+  afternoon was failing its own embed probe and timing out a batch; B needed
+  SQLite and an injected exception. The order encodes value, not what can be
+  executed in the hour, and recording the swap is what keeps the document and
+  the branch from disagreeing. *Rejected:* writing A3's builder and calling the
+  item done without its measurement — a builder with no number is the shape of
+  defect A1 exists to catch. A3 is next for that reason alone.
+
 ## Design principles
 
 - **Functional core, imperative shell.** Pure functions (extraction, chunking,
@@ -321,11 +331,13 @@ it matters.
 order, whose technical detail is preserved below in "Closed execution record".
 One live order, because two of them answered "what next" twice.
 
-**Scope.** Nothing here is repaired. The 2026-11-17 audit re-ran the 11-13
-findings on a green baseline, confirmed six of them, refuted two, and added
-seven. Two waves come first, in this order: **A** decides whether the retrieval
-numbers mean anything — hours, and it gates a 108 h rebuild — then **B** stops
-the pipeline losing content — a day, and it gates nothing behind it.
+**Status.** Wave A's measurement controls and all of Wave B are repaired and
+verified (A1, A2, B1-B4). Everything else below is unrepaired. The 2026-11-17
+audit re-ran the 11-13 findings on a green baseline, confirmed six of them,
+refuted two, and added seven. Two waves came first: **A** decides whether the
+retrieval numbers mean anything — hours, and it gates a 108 h rebuild — and
+**B** stops the pipeline losing content. B ran first on the day, for the reason
+in the decision log; nothing about its priority changed.
 
 **Grades.** **executed** — the code was called on an isolated input (SQLite, a
 scratch `*_test` database, injected exceptions, CliRunner, mocked dependencies:
@@ -356,6 +368,10 @@ A1-A3 are hours of work and they decide whether the Phase-2 rebuild (2.3M
 vectors, ~108 h) is worth running at all. The rule already in force stands: fix
 the scoring controls first, and do not change ranking or candidate generation
 while measuring.
+**A1 and A2 are done; A3-A5 are not, and Wave B ran before them** (2026-11-17):
+A3's end condition needs the embedding server, which was failing its own probe
+while B needed nothing but SQLite and an injected exception. See the decision
+log entry for the day; A3 is next on the list for that reason alone.
 
 **A1. Repair the harness's scoring controls.** `scripts/measure_retrieval_quality.py`.
 **DONE 2026-11-17.** `UNRANKED` replaces "one past the pool" for an absent gold
@@ -437,44 +453,56 @@ lexical-lead queries, not by preference. **Ends when** code and docstring agree.
 
 One shared defect: the invariant `purge_all_chunks` states at
 `revisions.py:407-421` — *emptying a chunking must invalidate it, or the work
-never re-opens* — is applied by the paths that call it and skipped by two
-neighbours. Fix it as one helper mirroring that invariant, not as a state machine.
+never re-opens* — was applied by the paths that call it and skipped by two
+neighbours. Fixed at the doors, not with a new layer: the helper was already
+right.
+**B1-B4 DONE 2026-11-17.** Four regressions in
+`TestEveryPurgeReopensTheWork` (`tests/unit/test_pipeline_worker.py`), each red
+against the unpatched source (checked by stashing the source change and
+re-running) and green after. Non-PG suite 1503 passed, PG suite 77 passed,
+ruff and mypy clean.
 
 **B1. Edit-and-revert strands a document while the revision reports complete.**
 `_purge_superseded_chunks:293-320`, `_write_back_extraction:751-785`,
 `_step_chunk:824-875`. **Executed 2026-11-17** through the real functions: seed
-indexed A, write back B, then A before chunking — the chunking stays `done` with
-hash A, owns 0 chunks, `_step_chunk` returns False, `revision_is_complete` returns
-True (probe log retained). Same class found live on 2026-09-07 (2 of 23,064
-papers); `purge_all_chunks` is the fixed sibling. **Ends when** a lifecycle
-regression restores A's chunks and completion cannot accept the stranded state,
-covering changed, unchanged, failed and NULL-hash re-extractions.
+indexed A, write back B, then A before chunking — the chunking stayed `done`
+with hash A, owned 0 chunks, `_step_chunk` returned False, `revision_is_complete`
+returned True. Same class found live on 2026-09-07 (2 of 23,064 papers).
+**Fixed:** the purge now clears `source_content_hash` on the chunkings whose
+chunks it deleted, in the same transaction, so the claim re-opens and the row
+leaves `chunked_done` until it is genuinely re-chunked. A *failed* chunking keeps
+its hash — `chunked_scope` counts failures by hash equality, so clearing it would
+convert a settleable revision into a wedged one.
 
 **B2. A failed extraction write-back keeps serving the superseded text.**
 `_step_extract:738-748` and `_fail_artifact:788-822` with the scopes at
-`revisions.py:105-135`. The purge sits in the transaction that rolled back, so
-after an injected failure the row goes terminal and hash-current while the old
-content hash, old chunking and old chunks stay live; `chunked_done + chunked_failed
-== extracted_done` is satisfied as `0 == 0` and the revision still completes
-(state executed; reachability and search-visibility source-traced). **Ends when**
-an injected write-back failure on an already-indexed document serves none of the
-old chunks and does not complete, with a PG cascade check before any production
-claim.
+`revisions.py:105-135`. **Fixed:** `_fail_artifact` now clears `content_hash` and
+calls `purge_all_chunks` for an extraction, in the same session that stamps it
+failed — the row stops naming text it cannot vouch for, and the previous version
+stops being served. `revision_is_complete` may still return True with a reported
+failure, which is the designed outcome; `promote` refuses it without `--force`.
+
+**B2b. OPEN — which database failures retry instead of becoming document
+failures.** B2 makes the failure honest, not rare: a deadlock or statement
+timeout still turns one document terminal for the run, where a retry would have
+succeeded. **Unbuilt because it changes what a document failure means** and needs
+its own per-exception-class tests (serialization vs data vs connectivity). **Ends
+when** the classification exists with tests for each class and `status`
+distinguishes retried from failed; no generic back-off framework.
 
 **B3. A chunking write-back failure wedges the revision.** `:958-966` with
-`revisions.py:156-183`: `_fail_artifact(ChunkedDocument)` drops `total_chunks` to
-0 while `done_embeddings` stays 2, so `done + failed == total_chunks` is
-unreachable, the row is never re-claimed, and no `last_error` reaches `status`
-because `_fail_artifact` does not re-raise (state and predicate executed).
-**Ends when** the revision either completes or reports the failure, and `status`
-names it.
+`revisions.py:156-183`: `_fail_artifact(ChunkedDocument)` dropped `total_chunks`
+to 0 while `done_embeddings` stayed 2, so `done + failed == total_chunks` was
+unreachable and the row was never re-claimed. **Fixed:** the chunking's chunks go
+with it, so both sides settle to 0 and the failure is reported as
+`chunked_failed`; `requeue_interrupted_artifacts` re-opens it on the next
+`cementic start`.
 
-**B4. Check the rule at every door, once.** One regression module walking every
-`Chunk` delete site — `pipeline_worker.py:318,1003`, `revisions.py:437,801`,
-`source_watcher.py:358`, `collections.py:168` — asserting each leaves no `done`
-chunking owning zero chunks. **Anti-scope:** no production SQL, no re-embedding,
-no watcher restart, no state-machine layer; do not promote a SQLite observation
-to a production claim.
+**B4. Check the rule at every door, once.** Done as
+`test_no_door_leaves_a_counted_chunking_with_no_chunks`: the property asserted is
+the one `chunked_scope` counts (done *and* hash-matched *and* empty), not "no
+done row owns no chunks", which a legitimately empty document fails. **Anti-scope
+held:** no production SQL was run, no re-embedding, no watcher restart.
 
 **B5. A revision can reach `ready` before the initial scan finishes.**
 `revision_is_complete:271-291` counts documents the watcher has registered so
