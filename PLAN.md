@@ -346,7 +346,8 @@ named without a directory are under `tests/unit/`.
 | live corpus, read-only | 24,533 documents, 2,423,430 chunks, 26 GB, one active revision |
 
 Artifacts: `~/.cache/cementic-audit-2026-11-17/` — `probe_edit_revert.py`,
-`tests-nopg.log`, `tests-pg.log`, `coverage.log`, `doctor.json`, `status.json`.
+`tests-nopg.log`, `tests-pg.log`, `coverage.log`, `doctor.json`, `status.json`,
+`ablate-with-baselines.log`, `tests-nopg-after-a1a2.log`.
 Source references are at `ad9bf86`; follow the named symbols when lines move.
 
 ### Wave A — repair the retrieval evidence before reading it
@@ -357,43 +358,64 @@ the scoring controls first, and do not change ranking or candidate generation
 while measuring.
 
 **A1. Repair the harness's scoring controls.** `scripts/measure_retrieval_quality.py`.
-- **A1a — a missing gold earns recall credit.** `gold_rank_and_margin:650-671`
-  returns `len(best)+1` when gold is absent, so a short pool still lands inside
-  `recall@10` and `summarise:685-695` counts it. A one-document pool without gold
-  scored positive recall@10 and reciprocal rank (executed, 11-13 audit).
-  **Ends when** missing gold and refused queries score zero through `score_arm:1543`
-  and `summarise`, not only in the isolated helpers, with a regression test.
-- **A1b — `shared_pool([])` raises `IndexError`** (`:716-726`) when only the
-  baseline model is requested, so a baseline-only CLI run cannot finish
-  (helper executed, CLI path `:1580-1583,1618` source-traced). **Ends when** that
-  run completes without long-arm scoring or new embedding work.
-- **A1c — the `fuzzy` table cannot report the shipped rule.** `fuzzy_lexical:878-890`
-  returns `record.relaxed` for every query while `search._typo_fallback:552-558`
-  fires only on an empty arm, and `fuzzy_report:892-925` sets
-  `changed = ranking != shipped`, which is structurally 0 for the shipped row
-  (executed). The 0.233→0.650 belongs to an unconditional-relaxed policy that is
-  not in the code path. **Ends when** the table reports the conditional rule's
-  fire count and `changed` per kind, with the historical numbers relabelled.
+**DONE 2026-11-17.** `UNRANKED` replaces "one past the pool" for an absent gold
+and for a refused query, `summarise` credits nothing for it, `shared_pool([])`
+returns no rows, and `relaxed OR (fallback)` reports the shipped rule's fire
+count. Seven regressions in `tests/unit/test_retrieval_quality_harness.py`, six
+of them red on the previous code; two existing assertions that pinned the credit
+(`gold_rank_and_margin` "ranks last", `score_arm` "ranks after the others") were
+rewritten to the new contract deliberately.
+Historical numbers scored through the old credit path are unknown, not wrong:
+re-score the cached comparisons before relying on them.
+The three defects it closed, so a later reader can tell what changed: an
+absent gold took the rank after the pool (`gold_rank_and_margin`), a refused
+query did the same (`score_arm`), and the `fuzzy` table's `changed` column was
+structurally 0 for the row it called `shipped` because that row is the control
+(`fuzzy_lexical`).
 
-**A2. Score the strongest fair baseline.** `POLICIES:201` and `policy_ranking:558-578`
-are all two-arm fusions, so plain vector top-k and full-text-only never exist as
-ranked lists and `paired:697`/`sign_test:673` never compare shipped against them.
-Add `vector_only` and `lexical_only` from the cached arms and print `paired`
-against shipped (source-traced; ~10 lines). **Ends when** `ablate` prints shipped
-vs vector-only vs lexical-only with (better, worse, p) over the same queries, and
-a test pins that each policy's ranking is a single arm's order.
+**A2. Score the strongest fair baseline.** **DONE 2026-11-17.** `POLICIES` now
+carries `vector_only` (the vector arm alone, deduplicated and cut to depth) and
+`lexical_only`, with four regressions pinning that each is one arm's order and
+that a single-arm row can win or lose. First paired result, `ablate` over the
+cached arms at `~/.cache/cementic-lead-arms.json` — **cached 2026-09-23, i.e.
+pre-fallback, so the rows describe that snapshot, not HEAD**; they are all scored
+on the same cached arms, which is what the pairing needs:
+
+| set (n=60) | shipped r@1 / r@10 | vector_only | lexical_only | shipped vs vector_only | shipped vs lexical_only |
+| --- | --- | --- | --- | --- | --- |
+| rare-token | 0.633 / 0.983 | 0.017 / 0.083 | 0.650 / 0.983 | 56 better, 1 worse, p=8e-16 | 0 better, 19 worse, p=4e-06 |
+| title | 0.783 / 0.867 | 0.783 / 0.883 | 0.050 / 0.083 | 0 better, 3 worse, p=0.25 (tie) | 48 better, 0 worse, p=7e-15 |
+| phrase | 0.117 / 1.000 | 0.117 / 0.250 | 0.967 / 1.000 | 50 better, 0 worse, p=2e-15 | 0 better, 53 worse, p=2e-16 |
+
+What it settles and what it does not. **Hybrid beats plain vector top-k by a
+wide, significant margin on both lexical-favourable sets** — the project's
+central claim survives the comparison it never had. It does **not** survive as a
+claim about routing: on the phrase set the lexical arm *alone* takes rank 1 on
+0.967 against the shipped rule's 0.117, losing 53 of 60 queries to a rule that
+hands rank 1 to the vector arm. Two readings the data cannot separate, and A3 is
+what separates them: either `lexical_should_lead` is wrong for multi-word
+queries a person would type verbatim, or the phrase set is lexical-favourable by
+construction and the shipped rule is right for real queries. `shipped` gave rank
+1 to the lexical arm on 59 of 360 queries.
 
 **A3. Build query sets the lexical arm cannot already match.** `is_known_item:1011-1020`
 requires gold to be an exact `plainto_tsquery` match and the match set to be ≤5
 documents (`MAX_MATCHING_DOCUMENTS=5`, `:144`), using the predicate the lexical
 arm itself uses (`vector_store.py:165-178`). So the 60 rare-token and 60 phrase
 queries are answerable by construction, and 0.047→1.000 is a ceiling, not a rate.
+A2 sharpened the stakes: the phrase set is also where the shipped routing rule
+loses rank 1 to the bare lexical arm, so this set decides whether that is a
+routing defect or an artefact of how the queries were drawn.
 Add kinds whose gold is *not* an exact FTS match: case/hyphen-joined identifiers
-(`InstantNGP` → `instant ngp`), a paraphrase of a title, and single-word typos.
+(`InstantNGP` → `instant ngp`), a paraphrase of a title, a single-word typo, and
+a multi-word verbatim phrase whose tokens the text configuration *cannot* match
+(hyphenated or unicode-mangled), which separates A2's two readings directly.
+**Store them in a new file, not in `eval/queries.json`**: the checked-in set is
+the control for every historical number.
 **Anti-scope:** no `pg_trgm` without a GIN index — a full trigram scan is ~879 s
 per query over 2.3M chunks (costed 2026-10-23). **Ends when** `build` emits the
 kinds with a builder test on a scratch database and `score` reports shipped vs
-vector-only paired on them.
+`vector_only`/`lexical_only` paired on them.
 
 **A4. Decide the single-word typo path from A3's number.** With share 0.6,
 `relaxed_tsquery:110-135` returns the input unchanged at one lexeme and a
