@@ -20,10 +20,9 @@ cross-field validation was sound is refuted by check (C3). The 392 stranded
 chunkings chased on 2026-11-17 are deleted sources, not loss. The PG suite runs
 here (77 passed), so "deselected" is no longer a limit.
 
-**Evidence and limits:** the baseline table, per-item grades and artifact paths
-are in the order section. **`AUDIT.md` is the defect-by-defect account**: what
-is wrong, where, how to reproduce it, the smallest fix, and the test that
-proves it — self-contained, and deleted when its last item closes. Nothing was verified against the live corpus beyond
+**Evidence and limits:** the baseline table, per-item grades, reproduce
+snippets, fixes and proof conditions are all in the order section; PLAN.md is
+the single source of truth for what to fix and how to prove it. Nothing was verified against the live corpus beyond
 read-only queries, and no retrieval number was re-measured — no embedding daemon
 was started.
 
@@ -557,26 +556,38 @@ marker, not a timeout — with a regression that starts a scan and asserts no
 - **C1 — `collection remove <typo> --force` exits 0.** `cli_collection.py:50-55`
   prints `status: not found` and returns; every sibling exits 1 through
   `require_known_collection` (`cli_shared.py:162-175`). **Executed** against a
-  seeded scratch database. **Ends when** the not-found branch exits 1 and a CLI
-  test pins it.
+  seeded scratch database: `remove no-such --force` → exit 0,
+  `promote no-such` → exit 1. **Fix:** `raise typer.Exit(1)` in the not-found
+  branch. **Ends when** that branch exits 1 and a CLI test pins it.
 - **C2 — `status --json` exits 0 where text `status` exits 1.** `cli.py:629-656`
   vs `:668-681`, failure signal at `render.py:414-417`; the human branch's own
   comment explains why exit 0 is wrong and the JSON branch never got the rule.
-  **Executed:** human 1, JSON 0 with `health.error` set. **Ends when** both modes
-  fail consistently and JSON keeps its parseable partial report.
+  **Executed:** human 1, JSON 0 with `health.error` set — reproduce with
+  `patch("cementic.status_service.check_health", side_effect=RuntimeError)`
+  through `typer.testing.CliRunner` on `app`. **Fix:** share one failure predicate
+  between the two modes' exit decisions, keep the JSON body parseable with
+  `health.error` intact. **Ends when** both modes fail consistently.
 - **C3 — `cementic doctor` crashes on a config it accepted.**
   `ExtractionConfig(backends={"epub": "command"})` loads, then `doctor.py:256` →
   `_extraction_commands_check` raises `KeyError: 'epub'` outside any `try`,
-  printing a traceback (**executed**). The template has the reverse gap
-  (`templates/config.toml`, dispatch in `extract.py`). **Ends when** every
-  selected command backend requires both tables at load with a useful error, and
-  the template-derived example dispatches through the command extractor.
+  printing a traceback (**executed**). Reproduce:
+  `printf '[extraction]\nbackends = { epub = "command" }\n' > bad.toml` then
+  `CEMENTIC_CONFIG=bad.toml cementic doctor` → traceback, exit 1. The template has
+  the reverse gap (`templates/config.toml`, dispatch in `extract.py`). **Fix:**
+  require both tables (`commands`, `command_versions`) at config load whenever a
+  backend is `"command"`, naming the file type; fix the template example so it
+  dispatches. **Ends when** that config raises at load and the template-derived
+  example reaches the command extractor.
 - **C4 — query-string passwords are not masked.** `bootstrap.py:119` and
   `doctor.py:143` render `?password=` and `?sslpassword=` verbatim (authority
   passwords mask); `runner.py` puts bootstrap errors into the log (**executed**
-  with synthetic sentinels). Use sentinels only — never a real credential.
-  **Ends when** both sentinel classes are absent from stdout, stderr, structured
-  diagnostics and logs, driver failures included.
+  with synthetic sentinels). Reproduce:
+  `make_url("postgresql+psycopg://u:A@h/d?password=B&sslpassword=C").render_as_string(hide_password=True)`
+  keeps `B` and `C`. **Fix:** sanitize every site that renders a URL —
+  `bootstrap.py:119`, `doctor.py:143`, `runner.py`, config diagnostics — dropping
+  or masking credential-bearing query values. Use sentinels only; never print a
+  real credential to prove it. **Ends when** both sentinel classes are absent
+  from stdout, stderr, JSON and logs, driver failures included.
 - **C5 — `status` and `doctor` contradict each other about the daemon.** Live
   2026-11-17 14:11-14:15: `doctor` failed the daemon ("running but not answering
   embeddings", exit 1) and four minutes later `status` reported
@@ -593,7 +604,9 @@ marker, not a timeout — with a regression that starts a scan and asserts no
   pruning `revisions.py:691-745`, `vector_store.py:332-335`). **Source-traced;
   unexecuted.** First check: isolated PG, retain deletion's cleanup result,
   create and populate another collection on that profile, run the old cleanup,
-  assert its vectors survive. **Ends when** an interleaving test preserves
+  assert its vectors survive. **Fix (candidate, not decided):** serialize reuse
+  and drop under one per-profile lock and recheck references inside it — a
+  recheck alone keeps the race. **Ends when** an interleaving test preserves
   referenced tables and true orphans still go — no broad lock framework first.
 - **C7 — the lexical arm can be starved or over-saturated.** `vector_store.py:165-178`
   takes a global unordered `LIMIT` before the scope filter
@@ -638,7 +651,12 @@ marker, not a timeout — with a regression that starts a scan and asserts no
   **Executed 2026-11-18** with the daemon stubbed healthy: `ok=True`,
   `checks["extensions"]["(inspection)"]["status"] == "fail"`, and no top-level
   check carries the failure — so neither the exit code nor a consumer scanning
-  top-level statuses can see it. This reproduces the 2026-11-13 finding that a
+  top-level statuses can see it. Reproduce with
+  `patch.object(doctor, "_daemon_state", return_value=(True, True, None))`,
+  `patch.object(doctor, "_active_extractor_profiles", side_effect=RuntimeError)`,
+  `patch.object(doctor, "_embedding_server_check", return_value={"status": "ok"})`,
+  then `collect_doctor_report(Config())` → `ok=True`. This reproduces the
+  2026-11-13 finding that a
   2026-11-17 lane reported as fixed; the lane's *read* lost to the execution.
   **Ends when** the verdict and the exit code both fail for a required failed
   check, counting nested statuses, while intentional warnings still pass.
@@ -654,19 +672,24 @@ marker, not a timeout — with a regression that starts a scan and asserts no
   commented entries, red first on exactly those three.
 - **D2 — the pooling formula has no oracle.** `embedding_runtime.py:582`; the
   tests at `test_embedding_runtime.py:1647,1664` assert only `is not None` and
-  `‖v‖ = 1`, which first-piece, mean and max-pool all satisfy. **Ends when** one
-  assertion pins the pooled value for known inputs.
+  `‖v‖ = 1`, which first-piece, mean and max-pool all satisfy. **Fix:** one
+  assertion on the value — inputs `[[3,0],[0,4]]` pool to `[0.6, 0.8]`.
+  **Ends when** that assertion pins the pooled value for known inputs.
 - **D3 — model and runtime identity.** The daemon alias hashes the model *path*,
   not its bytes (`embedding_runtime.py:160-174`; `model_content_digest` is used
   only at `profiles.py:195`), so replacing a GGUF in place reuses the old daemon
   while the profile claims the new bytes; the canary witnesses the server, not
   the digested file (`canary.py:174-206`). Both source-traced and independently
-  re-found 2026-11-17. **Ends when** a changed model cannot be accepted under the
-  previous alias and a relocated identical model still resolves.
+  re-found 2026-11-17. **Fix:** carry the content digest into the runtime
+  fingerprint payload so the alias moves with the bytes; keep profile identity as
+  is, then re-check the relocation case. **Ends when** a changed model cannot be
+  accepted under the previous alias and a relocated identical model still
+  resolves.
 - **D4 — `stop` takes no lock while `start` does** (`cli.py:797-880` vs `:450`);
   the `clear` path can delete a concurrent `start`'s state files, leaving live
-  workers only visible to `ps`. Source-traced. **Ends when** an interleaving test
-  cannot lose a live session's records.
+  workers only visible to `ps`. Source-traced. **Fix:** take the same lock
+  (`:450`) for the whole read/signal/clear sequence. **Ends when** an interleaving
+  test cannot lose a live session's records.
 - **D5 — extraction isolation is crash containment only.** The child inherits the
   worker's environment including `CEMENTIC_DB_URL` (`extract.py:527-544`, no
   `env=`), and the timeout kills one PID rather than a process group
@@ -712,8 +735,11 @@ marker, not a timeout — with a regression that starts a scan and asserts no
   `vector_store.py:160-178` orders by rank with no secondary key; ties are routine for
   short chunks and single-term queries, and fusion is rank-based, so an arbitrary
   tie order becomes the final order and dedup keeps whichever tied chunk came
-  first — which becomes the shown `content`. Source-traced. **Must land after the
-  A-wave measurements**, because it changes ranking.
+  first — which becomes the shown `content`. Source-traced. **Settle first:**
+  `SELECT count(*), count(DISTINCT rank)` on a few `plainto_tsquery` matches — a
+  ratio well below 1 confirms the ties. **Fix:** add a deterministic secondary
+  key (document id, then chunk index) so the order is at least reproducible.
+  **Must land after the A-wave measurements**, because it changes ranking.
 - **D11 — extraction limits and the direct-file path.** The isolated extractor
   allows 3600 s per document (`extract.py:247`), so a hostile file stalls the
   single child for an hour rather than hanging forever; the command extractor
@@ -766,6 +792,41 @@ Recorded so nobody re-runs them:
   said it did, on a lane's reading of `doctor.py:263-272`. The check refuted it:
   a required check failing *nested* one level deeper leaves `ok=True` and the
   exit code 0.
+- **No `shell=True` in extraction.** All three `subprocess` calls take argv
+  lists, and `{path}` is substituted per element, so no word-splitting or quoting
+  injection.
+- **No 3.13-only syntax under the 3.12 floor.** No `typing.TypeIs`, no PEP 696
+  `TypeVar` defaults, no `Path.full_match` — so `requires-python >=3.12` matches
+  the syntax used.
+- **The file lock behaves.** Contention blocks, a SIGKILLed holder releases
+  immediately, and fds are non-inheritable, so a stale lock cannot wedge and a
+  daemon's children cannot pin one.
+- **`config show` masks both secret fields**, and the CLI prints no URL or
+  password for an invalid `CEMENTIC_DB_URL` (the *query-string* hole is C4, a
+  different site).
+- **The PG CI job cannot silently skip.** It asserts `skipped == 0` from the
+  junit XML and auto-marks tests by fixture, so a pg test that loses its marker
+  fails the job rather than quietly not running.
+
+### Not yet verified, and the grades that depend on it
+
+Why some items stop at `source-traced`, and why B1-B3 are not yet a production
+claim. Each is a limit on the evidence above, not a finding:
+
+1. **PostgreSQL-semantics anything.** The three pipeline repairs were proven on
+   SQLite, which enforces no foreign keys — that is D8. Run the `-m pg` suite and
+   add the cascade tests before applying the repairs to a live corpus.
+2. **No retrieval number was re-measured.** Neither audit pass started the
+   embedding server; A2's table comes from arms cached 2026-09-23, so it
+   describes that snapshot, not `HEAD`.
+3. **The live corpus was read, never written.** Queries only: 24,533 documents,
+   2,423,430 chunks, 26 GB, one active revision, all embeddings `done`.
+4. **Corpus-scale throughput, multi-collection latency, and the ANN recall in
+   D9 were not measured.**
+5. **A fresh-install path was not exercised** (no wheel build + install +
+   `init postgres` from the wheel; CI does not run that either — D7).
+6. **No service was started or restarted, and no production database row was
+   written.**
 
 ### Closure rules
 
