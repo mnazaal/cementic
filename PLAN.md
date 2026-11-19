@@ -344,7 +344,10 @@ refuted two, and added seven; a 2026-11-18 second pass swept the six lane
 reports against this list and found **fifteen findings that had never been
 entered** — they are C8-C10 and D8-D13 — plus one a lane had cleared and
 re-execution restored (C11). It also corrects two claims this document made
-itself: the stranded-chunkings predicate and B4's walk. Two waves came first: **A** decides whether the retrieval
+itself: the stranded-chunkings predicate and B4's walk. A fresh-eyes review of
+the repairs found four more, three in the repairs themselves (A1's `changed`
+column, a vacuous SQLite assertion in B3, the ablation's column drift), all
+fixed with tests before this was written. Two waves came first: **A** decides whether the retrieval
 numbers mean anything — hours, and it gates a 108 h rebuild — and **B** stops the
 pipeline losing content. B ran first on the day, for the reason in the decision
 log; nothing about its priority changed.
@@ -386,10 +389,11 @@ log entry for the day; A3 is next on the list for that reason alone.
 **A1. Repair the harness's scoring controls.** `scripts/measure_retrieval_quality.py`.
 **DONE 2026-11-18.** `UNRANKED` replaces "one past the pool" for an absent gold
 and for a refused query, `summarise` credits nothing for it, `shared_pool([])`
-returns no rows, and `relaxed OR (fallback)` reports the shipped rule's fire
-count. Seven failures on the previous code, five of them new tests and two
-rewritten assertions that had pinned the credit (`gold_rank_and_margin` "ranks
-last", `score_arm` "ranks after the others").
+returns no rows, `score_arm` scores rows it has none of as `UNRANKED` instead of
+raising in numpy, and the `fuzzy` table gained a `fired` column. Seven failures
+on the previous code, five of them new tests and two rewritten assertions that
+had pinned the credit (`gold_rank_and_margin` "ranks last", `score_arm` "ranks
+after the others").
 Historical numbers scored through the old credit path are unknown, not wrong:
 re-score the cached comparisons before relying on them.
 The three defects it closed, so a later reader can tell what changed: an
@@ -397,6 +401,14 @@ absent gold took the rank after the pool (`gold_rank_and_margin`), a refused
 query did the same (`score_arm`), and the `fuzzy` table's `changed` column was
 structurally 0 for the row it called `shipped` because that row is the control
 (`fuzzy_lexical`).
+**The first version of this fix repeated the same defect it was closing**, caught
+by the fresh-eyes review the same day: `changed` counts queries whose *ranking*
+moved, and a typo query's relaxed lexemes usually hit documents the vector arm
+already ranked — so the row read "fires on 0 queries" while the rule fired
+constantly. `fired` now counts the arm changing, `changed` stays as the visible
+relocation, and a test pins the fires-but-does-not-move case. The same review
+found the ablation's rendered columns drifting right of their headings (header
+widened, rows not), fixed with an alignment test.
 
 **A2. Score the strongest fair baseline.** **DONE 2026-11-18.** `POLICIES` now
 carries `vector_only` (the vector arm alone, deduplicated and cut to depth) and
@@ -484,7 +496,11 @@ returned True. Same class found live on 2026-09-07 (2 of 23,064 papers).
 chunks it deleted, in the same transaction, so the claim re-opens and the row
 leaves `chunked_done` until it is genuinely re-chunked. A *failed* chunking keeps
 its hash — `chunked_scope` counts failures by hash equality, so clearing it would
-convert a settleable revision into a wedged one.
+convert a settleable revision into a wedged one. The review measured that claim
+per state on 2026-11-18: it holds when the failed chunking's hash **matches** its
+extraction (the state `_fail_artifact` creates, where clearing drops `chunked_failed`
+to 0 and completion becomes unreachable), and is inert when the hash is stale,
+where the row is uncounted either way.
 
 **B2. A failed extraction write-back keeps serving the superseded text.**
 `_step_extract:738-748` and `_fail_artifact:788-822` with the scopes at
@@ -508,7 +524,10 @@ to 0 while `done_embeddings` stayed 2, so `done + failed == total_chunks` was
 unreachable and the row was never re-claimed. **Fixed:** the chunking's chunks go
 with it, so both sides settle to 0 and the failure is reported as
 `chunked_failed`; `requeue_interrupted_artifacts` re-opens it on the next
-`cementic start`.
+`cementic start`. The SQLite regression proves the chunk delete and the
+settleability; it cannot prove that the removed chunks took their embeddings and
+vectors, because SQLite enforces no foreign keys — that is D8, and the review
+caught the first version of this test asserting `0 == 0` as though it were proof.
 
 **B4. Check the rule at every door, once.** **PARTLY DONE 2026-11-18:** the
 property test `test_no_door_leaves_a_counted_chunking_with_no_chunks` covers the
