@@ -178,7 +178,11 @@ carries it out.
   of that defect's three doors are already fixed and the third is detected by a
   regression nobody has written, while the measurement error is unbounded and
   currently trusted. *Revisit when:* a live document is found stranded by B1;
-  then stop and repair (predict: the `doctor` predicate would not see it).
+  then stop and repair. *Corrected 2026-11-18:* doctor's predicate would in fact
+  **see** it — seeded, its own SQL counts 1 for a live source stranded that way
+  and 0 for a deleted one, so the safety net covers B1's shape while the source
+  is live. What it does not cover is a *deleted* source (by design) and a
+  stranding with a NULL or mismatched hash.
 - **Why does one order replace the 11-13 order instead of sitting beside it?**
   Two live orders give no single answer to "what next", and the 11-13 one
   carried items this audit refuted or upgraded. Its technical detail is preserved
@@ -327,17 +331,23 @@ it matters.
 
 ## Execution order — open items
 
-**OPEN, 2026-11-17; the single live order.** It replaces the 2026-11-13 follow-up
-order, whose technical detail is preserved below in "Closed execution record".
-One live order, because two of them answered "what next" twice.
+**OPEN, 2026-11-17; the single live order.** Audit ran 2026-11-17; the first two
+slices landed 2026-11-18 (`dc4960e`..`351041f`), which is what `git log` will
+show against any date here. It replaces the 2026-11-13 follow-up order, whose
+technical detail is preserved below in "Closed execution record". One live
+order, because two of them answered "what next" twice.
 
 **Status.** Wave A's measurement controls and all of Wave B are repaired and
 verified (A1, A2, B1-B4). Everything else below is unrepaired. The 2026-11-17
 audit re-ran the 11-13 findings on a green baseline, confirmed six of them,
-refuted two, and added seven. Two waves came first: **A** decides whether the
-retrieval numbers mean anything — hours, and it gates a 108 h rebuild — and
-**B** stops the pipeline losing content. B ran first on the day, for the reason
-in the decision log; nothing about its priority changed.
+refuted two, and added seven; a 2026-11-18 second pass swept the six lane
+reports against this list and found **fifteen findings that had never been
+entered** — they are C8-C10 and D8-D13 — plus one a lane had cleared and
+re-execution restored (C11). It also corrects two claims this document made
+itself: the stranded-chunkings predicate and B4's walk. Two waves came first: **A** decides whether the retrieval
+numbers mean anything — hours, and it gates a 108 h rebuild — and **B** stops the
+pipeline losing content. B ran first on the day, for the reason in the decision
+log; nothing about its priority changed.
 
 **Grades.** **executed** — the code was called on an isolated input (SQLite, a
 scratch `*_test` database, injected exceptions, CliRunner, mocked dependencies:
@@ -368,19 +378,18 @@ A1-A3 are hours of work and they decide whether the Phase-2 rebuild (2.3M
 vectors, ~108 h) is worth running at all. The rule already in force stands: fix
 the scoring controls first, and do not change ranking or candidate generation
 while measuring.
-**A1 and A2 are done; A3-A5 are not, and Wave B ran before them** (2026-11-17):
+**A1 and A2 are done; A3-A5 are not, and Wave B ran before them** (2026-11-18):
 A3's end condition needs the embedding server, which was failing its own probe
 while B needed nothing but SQLite and an injected exception. See the decision
 log entry for the day; A3 is next on the list for that reason alone.
 
 **A1. Repair the harness's scoring controls.** `scripts/measure_retrieval_quality.py`.
-**DONE 2026-11-17.** `UNRANKED` replaces "one past the pool" for an absent gold
+**DONE 2026-11-18.** `UNRANKED` replaces "one past the pool" for an absent gold
 and for a refused query, `summarise` credits nothing for it, `shared_pool([])`
 returns no rows, and `relaxed OR (fallback)` reports the shipped rule's fire
-count. Seven regressions in `tests/unit/test_retrieval_quality_harness.py`, six
-of them red on the previous code; two existing assertions that pinned the credit
-(`gold_rank_and_margin` "ranks last", `score_arm` "ranks after the others") were
-rewritten to the new contract deliberately.
+count. Seven failures on the previous code, five of them new tests and two
+rewritten assertions that had pinned the credit (`gold_rank_and_margin` "ranks
+last", `score_arm` "ranks after the others").
 Historical numbers scored through the old credit path are unknown, not wrong:
 re-score the cached comparisons before relying on them.
 The three defects it closed, so a later reader can tell what changed: an
@@ -389,7 +398,7 @@ query did the same (`score_arm`), and the `fuzzy` table's `changed` column was
 structurally 0 for the row it called `shipped` because that row is the control
 (`fuzzy_lexical`).
 
-**A2. Score the strongest fair baseline.** **DONE 2026-11-17.** `POLICIES` now
+**A2. Score the strongest fair baseline.** **DONE 2026-11-18.** `POLICIES` now
 carries `vector_only` (the vector arm alone, deduplicated and cut to depth) and
 `lexical_only`, with four regressions pinning that each is one arm's order and
 that a single-arm row can win or lose. First paired result, `ablate` over the
@@ -445,9 +454,12 @@ fallback, or document the limit as accepted.
 **A5. Settle `combine`'s tie promise.** `hybrid.py:78-81` says ties are left to
 the caller; the `sorted` over a vector-first dict resolves them toward the vector
 arm (executed: `combine(v, l, lead="lexical")` = `[200, 100, 101, 201, …]`, so
-lexical rank 2 loses position 3 on an exact `1/62` tie). Implement the promise
-with a test, or correct the docstring — decided against A2's paired ablation for
-lexical-lead queries, not by preference. **Ends when** code and docstring agree.
+lexical rank 2 loses position 3 on an exact `1/62` tie). Nothing pins it either
+way: `test_hybrid.py:41-52` asserts `1/(RRF_K+1) == 1/(RRF_K+1)`, a tautology
+that says the test file has read the problem and not tested it. Implement the
+promise with a test, or correct the docstring — decided against A2's paired
+ablation for lexical-lead queries, not by preference. **Ends when** code and
+docstring agree and a test pins the tie order.
 
 ### Wave B — stop the pipeline losing content
 
@@ -456,7 +468,7 @@ One shared defect: the invariant `purge_all_chunks` states at
 never re-opens* — was applied by the paths that call it and skipped by two
 neighbours. Fixed at the doors, not with a new layer: the helper was already
 right.
-**B1-B4 DONE 2026-11-17.** Four regressions in
+**B1-B4 DONE 2026-11-18** (except B4's walk, see below). Four regressions in
 `TestEveryPurgeReopensTheWork` (`tests/unit/test_pipeline_worker.py`), each red
 against the unpatched source (checked by stashing the source change and
 re-running) and green after. Non-PG suite 1503 passed, PG suite 77 passed,
@@ -498,11 +510,15 @@ with it, so both sides settle to 0 and the failure is reported as
 `chunked_failed`; `requeue_interrupted_artifacts` re-opens it on the next
 `cementic start`.
 
-**B4. Check the rule at every door, once.** Done as
-`test_no_door_leaves_a_counted_chunking_with_no_chunks`: the property asserted is
-the one `chunked_scope` counts (done *and* hash-matched *and* empty), not "no
-done row owns no chunks", which a legitimately empty document fails. **Anti-scope
-held:** no production SQL was run, no re-embedding, no watcher restart.
+**B4. Check the rule at every door, once.** **PARTLY DONE 2026-11-18:** the
+property test `test_no_door_leaves_a_counted_chunking_with_no_chunks` covers the
+superseded purge, and it asserts what `chunked_scope` counts (done *and*
+hash-matched *and* empty) rather than "no done row owns no chunks", which a
+legitimately empty document fails. The other four delete sites
+(`revisions.py:437,801`, `source_watcher.py:358`, `collections.py:168`) were
+*read* on 2026-11-17 and each invalidates its chunking; none is walked by a test.
+**Ends when** the walk is a test rather than a reading — no production SQL, no
+re-embedding, no watcher restart.
 
 **B5. A revision can reach `ready` before the initial scan finishes.**
 `revision_is_complete:271-291` counts documents the watcher has registered so
@@ -544,7 +560,12 @@ marker, not a timeout — with a regression that starts a scan and asserts no
   embeddings", exit 1) and four minutes later `status` reported
   `embedding_healthy: true` beside `llama_daemon: stopped`, with a worker
   `ReadTimeout … read timeout=120.0` and 32 chunks in `processing` (**executed**,
-  read-only). **Ends when** the two readouts cannot disagree without saying why.
+  read-only). Re-checked 2026-11-19 at a fully idle, healthy corpus (pending 0,
+  100.0% embedded, no worker error): `embedding_healthy: true` beside
+  `llama_daemon: stopped` **still**, which makes it a steady-state reporting
+  defect rather than an artefact of the timeout. **Ends when** the two readouts
+  cannot disagree without saying why — most likely one field per question: whether
+  something answers, and whether it is the one cementic manages.
 - **C6 — deferred cleanup can drop a live vector table.** Droppability is
   computed before commit but the drop is unconditional (`collections.py:183-196,224-234`,
   pruning `revisions.py:691-745`, `vector_store.py:332-335`). **Source-traced;
@@ -561,6 +582,41 @@ marker, not a timeout — with a regression that starts a scan and asserts no
   starvation, and naively moving the filters can lose GIN access. **Ends when**
   scope retains the intended match with paired recall and
   `EXPLAIN (ANALYZE, BUFFERS)` evidence.
+
+- **C8 — `embedding status` cannot say "not ok".** `cli.py:957-966` exits 0 for
+  `stopped` and `ambiguous`, while `doctor` calls the same state `fail` and exits
+  1 (`doctor.py:225-233`). Consistent with "status is a query", but a script has
+  no way to ask whether the runtime is usable. Source-traced. **Ends when** there
+  is an exit-code answer to that question — a flag on the existing command, not a
+  new one.
+- **C9 — the service story is half-documented and half-wired.** `stop`
+  deliberately leaves the embedding daemon running (`cli.py:784-800`) but the
+  operations table names only watcher, worker and Postgres
+  (`docs/operations.md:25`); `packaging/systemd/cementic@.service:82-84`
+  hardcodes `127.0.0.1:11555`, so its wedge check probes nothing whenever
+  `daemon_port` differs (the unit's own comment at `:36` admits it, the docs do
+  not); and `docs/setup.md:99` says the unit needs
+  `llama_cpp.daemon_autostart = true` while the unit header (`:62`) says to set it
+  *false* when the server runs under its own unit. Source-traced. **Ends when**
+  the docs name what is left running and the unit reads the configured port.
+- **C10 — a config error prescribes a remedy that cannot load.**
+  `config.py:918-930`: `CEMENTIC_LLAMA_N_CTX=8` exits 1 with "Use chunk_size <= 0,
+  or raise n_ctx", but `chunk_size` is `ge=1` (`:450-455`), so the suggested
+  value is rejected. Executed. **Ends when** the message names an achievable
+  value.
+
+- **C11 — `doctor` reports `ok` while a required check failed.** When the
+  extension inspection throws *after* `extension_ok` was computed —
+  `_active_extractor_profiles(conn)` at `doctor.py:170-177` — the `except` branch
+  replaces `checks["extensions"]` with a `(inspection)` failure while
+  `extension_ok` stays `True`, and the verdict at `:263-272` never sees it.
+  **Executed 2026-11-18** with the daemon stubbed healthy: `ok=True`,
+  `checks["extensions"]["(inspection)"]["status"] == "fail"`, and no top-level
+  check carries the failure — so neither the exit code nor a consumer scanning
+  top-level statuses can see it. This reproduces the 2026-11-13 finding that a
+  2026-11-17 lane reported as fixed; the lane's *read* lost to the execution.
+  **Ends when** the verdict and the exit code both fail for a required failed
+  check, counting nested statuses, while intentional warnings still pass.
 
 ### Wave D — contracts, docs, packaging, tests
 
@@ -609,6 +665,59 @@ marker, not a timeout — with a regression that starts a scan and asserts no
   `uv sync` removes ruff/mypy/pytest; CI never runs `config init` or
   `init postgres` from the wheel. Keep the pinned extractor versions and the
   typer/click caps and their stated reasons.
+- **D8 — a chunk-delete path needs its own PostgreSQL cascade test.**
+  `tests/integration/test_revisions_pg.py:601-611` states the reason: SQLite
+  enforces no foreign keys unless `PRAGMA foreign_keys=ON` is issued and nothing
+  issues it, so the 1503-test non-PG suite cannot see a missing explicit purge.
+  One cascade is checked against a real database — the watcher's — and the three
+  paths B1-B3 changed have no such test. That is the residual B2 named and the
+  only check I would run before the next `cementic start` applies the repair.
+  **Ends when** each path that deletes `Chunk` rows asserts on PostgreSQL that
+  embeddings and vector rows went with them.
+- **D9 — index maintenance and recall are unmeasured.** No `VACUUM`, `REINDEX` or
+  `ANALYZE` anywhere in `src/`; HNSW tombstones left by churn are never measured
+  for recall (`db.py:855-913` builds once, `collections.py:400-420` rebuilds only
+  on method change or `--force`); and DiskANN has no filter-aware scan —
+  `query_tuning_statements:250-262` sets only `query_rescore` where HNSW gained
+  `iterative_scan`, so a selective collection filter on a shared vector table can
+  return short lists. Source-traced. **Ends when** a churned index is measured
+  against a freshly built one, and the DiskANN shortfall is either measured or
+  refused.
+- **D10 — the lexical arm's order is arbitrary where `ts_rank` ties.**
+  `vector_store.py:178` orders by rank with no secondary key; ties are routine for
+  short chunks and single-term queries, and fusion is rank-based, so an arbitrary
+  tie order becomes the final order and dedup keeps whichever tied chunk came
+  first — which becomes the shown `content`. Source-traced. **Must land after the
+  A-wave measurements**, because it changes ranking.
+- **D11 — extraction limits and the direct-file path.** The isolated extractor
+  allows 3600 s per document (`extract.py:247`), so a hostile file stalls the
+  single child for an hour rather than hanging forever; the command extractor
+  buffers all of stdout in-process with no rlimit (`:291-293`), and
+  `_plaintext_extractor:263-268` reads a whole file with the 512 MiB cap living
+  only in the watcher. Source-traced. **Ends when** the cap and the rlimit apply
+  wherever a document is read, not only where the watcher read it.
+- **D12 — the measurement tools are outside every gate.**
+  `scripts/measure_retrieval_quality.py` is 86 KB, and `scripts/check.sh` and CI
+  lint and type only `src/` and `tests/` (`ruff check src/ tests/`, `mypy src/`),
+  so `ruff` and `mypy` never see the file that produces every retrieval verdict —
+  I linted it by hand this session. Its usage lines also say
+  `python scripts/…` where `CONTRIBUTING.md` routes everything through `uv run`.
+  **Ends when** `scripts/` is in both gates and the usage lines match the
+  convention; expect real findings on first run.
+- **D13 — five small contracts, each with its evidence.** `__version__`
+  (`src/cementic/__init__.py:3`) has zero importers while the CLI reads
+  `importlib.metadata` (`cli.py:371`) and nothing ties tag to `pyproject` to
+  `__init__`; `pyproject.toml:8-12` omits the 3.13 classifier the CI matrix runs;
+  search's `score` mixes cosine similarity with `ts_rank` and is hidden whenever
+  the order cannot explain it (`cli.py:1082`), so no `fused_score` field closes
+  what `scores_explain_order` documented; `prune_collection_history` records
+  artifact paths in `session.info` (`revisions.py:636-656`), which survives the
+  `lost_race` rollback (`collections.py:328`), so a second promote in one session
+  could unlink live artifacts — latent, because the CLI opens one session per
+  invocation; and `EmbeddingProvider` (`embedding_provider.py:14-107`) has exactly
+  one concrete implementation, with the duplicate CLI edge-case classes
+  (`test_cli.py:2090,2179,2341`) as the standing deletion candidates. All
+  source-traced. **Ends when** each is fixed or explicitly accepted.
 
 ### Checked on 2026-11-17 and not a defect
 
@@ -617,16 +726,21 @@ Recorded so nobody re-runs them:
 - **The live corpus's 392 done-chunkings-owning-zero-chunks is correct.** All 392
   are sources the user deleted (`status='deleted'`; zero of the files exist;
   `deleted sources that still own chunks: 0`). `doctor`'s predicate
-  (`doctor.py:690-700`) excludes them by design and reports `ok`. The adjacent
-  gap is D1-adjacent rather than a corpus defect: that predicate would not catch
-  a *live* stranding of B1's shape, and B1's regression is what closes it.
+  (`doctor.py:690-700`) excludes them by design and reports `ok`.
+  **Corrected 2026-11-18: the predicate does catch a live-source stranding of
+  B1's shape** — run against that seeded state its own SQL returns 1, and 0 for
+  the deleted twin. An earlier line here claimed the opposite; the check refuted
+  it. What it cannot see is a stranding whose hash no longer matches the
+  extraction, which is the state the *old* failure-path bug left and B2/B3 close.
 - **DiskANN `num_neighbors > search_list_size` is not a config-validation defect.**
   pgvectorscale accepted both orders on a scratch database (executed).
 - **`config` cross-field validation is not sound.** The `epub=command`
   combination loads and then crashes `doctor` (C3); a 2026-11-17 lane reported
   this area clear and the check refuted it.
-- **Doctor's `ok` gate holds.** No path sets `ok=true` with one of the eight
-  required checks failed (read against `doctor.py:263-272`).
+- **Doctor's `ok` gate does not hold — C11.** An earlier note in this section
+  said it did, on a lane's reading of `doctor.py:263-272`. The check refuted it:
+  a required check failing *nested* one level deeper leaves `ok=True` and the
+  exit code 0.
 
 ### Closure rules
 
@@ -638,6 +752,14 @@ never point them at the live corpus. Worker and runtime repairs additionally nee
 an approved tiny-corpus supervised CLI→daemon→index→promote→search run before any
 production claim. Do not restart the live service, change persisted profile
 identity under an active import, or re-embed without authorization.
+
+**A "checked and clear" verdict carries the same grade as a finding.** All three
+corrections the 2026-11-18 second pass made came from one error: a lane's *read*
+was accepted as clearing an item the 2026-11-13 audit had *executed*. Clearing a
+recorded finding therefore needs the same instrument that raised it — re-run it,
+or keep it open. `checked, not reproduced` is a result; `checked, looks fine` is
+not.
+
 ## Closed execution record (2026-10-22)
 
 **CLOSED as an execution schedule; historical outcomes and explicitly parked
@@ -2050,14 +2172,9 @@ principle but not here: filenames containing `[` (would break
 `source_watcher.py`), and paths over about 2,600 bytes (btree limit on
 `ix_source_documents_collection_source`).
 
-Still live, and carried into the live order:
-
-- **B5 — a revision can reach `ready` mid-initial-scan** (`revision_is_complete`,
-  `pipeline_worker.py:271-291`): the watcher registers documents one at a time
-  with no scan-complete marker, so a drain of the first N looks complete.
-  Promotion re-checks and refuses, so this misleads rather than corrupts, and
-  the all-zero case is refused outright. **Ends when** the counts distinguish a
-  finished scan from a drained prefix — a scan-complete marker, not a timeout.
+Still live, carried into the live order: the mid-scan `ready` transition is B5
+there. The three corpus-shaped items above were checked and are not present at
+this corpus.
 
 ## Road to v1
 
