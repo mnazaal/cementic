@@ -373,6 +373,16 @@ class TestGoldRankAndMargin:
         assert margin == float("-inf")
 
 
+class TestOneSpellingOfWorst:
+    def test_gold_rank_and_score_arm_agree_on_absent(self) -> None:
+        """A miss must not be able to compare as a win against another arm's."""
+        assert harness.gold_rank(["a.pdf"], "gone.pdf") == harness.UNRANKED
+        assert not harness.gold_rank(["a.pdf"], "gone.pdf") < harness.UNRANKED
+        assert harness.summarise([harness.gold_rank(["a.pdf"], "gone.pdf")], [0.0])[
+            "recall@10"
+        ] == 0.0
+
+
 class TestSignTest:
     def test_reproduces_the_v1_5_runs_recorded_p_value(self) -> None:
         # PLAN.md: 133 better, 245 worse, "exact sign test p = 8.9e-09".

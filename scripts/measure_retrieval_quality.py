@@ -563,11 +563,17 @@ def fused_ranking(
 
 
 def gold_rank(ranking: list[str], gold: str) -> float:
-    """1-based position of `gold`, or infinity when absent (pure)."""
+    """1-based position of `gold`, or `UNRANKED` when absent (pure).
+
+    The same marker `summarise` uses, not ``inf``. Two absence markers are two
+    chances to compare one against the other: with ``inf`` here, a caller that
+    mixed this with `score_arm`'s ranks would find ``UNRANKED < inf`` and score a
+    miss as a win (2026-11-18 review). "Worst" must have one spelling.
+    """
     try:
         return float(ranking.index(gold) + 1)
     except ValueError:
-        return float("inf")
+        return float(UNRANKED)
 
 
 def policy_ranking(record: ArmRecord, policy: str, depth: int) -> list[str]:
