@@ -644,7 +644,7 @@ def format_ablation(
     ]
     for policy, (r1, r10, mrr, better, worse) in rows.items():
         lines.append(
-            f"  {policy:<8} {r1:>9.3f} {r10:>10.3f} {mrr:>7.3f} {better:>7} {worse:>6}"
+            f"  {policy:<14} {r1:>9.3f} {r10:>10.3f} {mrr:>7.3f} {better:>7} {worse:>6}"
         )
     return "\n".join(lines)
 
@@ -715,6 +715,8 @@ def summarise(ranks: list[int], margins: list[float]) -> dict[str, float]:
     miss is a miss, and the size of the pool must not turn it into a hit.
     """
     n = len(ranks)
+    if n == 0:
+        return {"recall@1": 0.0, "recall@10": 0.0, "MRR": 0.0, "margin": float("nan")}
     ranked = [rank for rank in ranks if rank < UNRANKED]
     finite = [m for m in margins if math.isfinite(m)]
     return {
@@ -941,20 +943,24 @@ def fuzzy_lexical(record: FuzzyRecord, variant: str) -> list[str]:
 
 def fuzzy_report(
     records: list[FuzzyRecord], depth: int, variants: tuple[str, ...] = FUZZY_VARIANTS
-) -> dict[str, dict[str, tuple[float, float, float, int, int, int]]]:
-    """Per kind, per variant: recall@1, recall@10, MRR, better, worse, changed (pure).
+) -> dict[str, dict[str, tuple[float, float, float, int, int, int, int]]]:
+    """Per kind, per variant: recall@1, recall@10, MRR, better, worse, changed, fired (pure).
 
-    ``better``/``worse`` pair each query's gold rank against the shipped arm's;
-    ``changed`` counts queries whose ranking differs at all, so a candidate that
-    never fires is visible as zero rather than as an equal score. The
-    ``shipped`` row is the baseline itself, so its ``changed`` is 0 by
-    construction; ``relaxed OR (fallback)``'s ``changed`` is how many queries the
-    shipped fallback fires on.
+    ``better``/``worse`` pair each query's gold rank against the shipped arm's.
+    ``changed`` counts queries whose depth-cut ranking differs at all; ``fired``
+    counts queries where this variant handed fusion a different arm.
+
+    The two are not the same, and reporting only the first is how this table
+    lied about the shipped rule (2026-11-18 review): a typo query's relaxed
+    lexemes mostly hit documents the vector arm already ranked, so the rule
+    fires and the ranking does not move. ``shipped`` is the baseline itself, so
+    its ``changed`` is 0 by construction; ``relaxed OR (fallback)``'s ``fired``
+    is how many queries the shipped fallback actually fires on.
     """
     by_kind: dict[str, list[FuzzyRecord]] = {}
     for record in records:
         by_kind.setdefault(record.kind, []).append(record)
-    out: dict[str, dict[str, tuple[float, float, float, int, int, int]]] = {}
+    out: dict[str, dict[str, tuple[float, float, float, int, int, int, int]]] = {}
     for kind, group in by_kind.items():
         base = [
             fused_ranking(r.vector, r.lexical, r.shipped_lead, depth) for r in group
@@ -962,11 +968,10 @@ def fuzzy_report(
         rows = {}
         for variant in variants:
             totals = [0.0, 0.0, 0.0]
-            better = worse = changed = 0
+            better = worse = changed = fired = 0
             for record, shipped in zip(group, base, strict=True):
-                ranking = fused_ranking(
-                    record.vector, fuzzy_lexical(record, variant), record.shipped_lead, depth
-                )
+                arm = fuzzy_lexical(record, variant)
+                ranking = fused_ranking(record.vector, arm, record.shipped_lead, depth)
                 r1, r10, rr = metrics(ranking, record.gold)
                 totals[0] += r1
                 totals[1] += r10
@@ -975,8 +980,11 @@ def fuzzy_report(
                 better += a < b
                 worse += a > b
                 changed += ranking != shipped
+                fired += arm != record.lexical
             n = len(group)
-            rows[variant] = (totals[0] / n, totals[1] / n, totals[2] / n, better, worse, changed)
+            rows[variant] = (
+                totals[0] / n, totals[1] / n, totals[2] / n, better, worse, changed, fired
+            )
         out[kind] = rows
     return out
 
@@ -988,12 +996,12 @@ def format_fuzzy(report: dict, counts: dict[str, int], depth: int) -> str:
         lines.append(f"\n{kind}  (n={counts[kind]}, depth={depth})")
         lines.append(
             f"  {'lexical arm':<24} {'recall@1':>9} {'recall@10':>10} {'MRR':>7}"
-            f" {'better':>7} {'worse':>6} {'changed':>8}"
+            f" {'better':>7} {'worse':>6} {'changed':>8} {'fired':>6}"
         )
-        for variant, (r1, r10, mrr, better, worse, changed) in rows.items():
+        for variant, (r1, r10, mrr, better, worse, changed, fired) in rows.items():
             lines.append(
                 f"  {variant:<24} {r1:>9.3f} {r10:>10.3f} {mrr:>7.3f}"
-                f" {better:>7} {worse:>6} {changed:>8}"
+                f" {better:>7} {worse:>6} {changed:>8} {fired:>6}"
             )
     return "\n".join(lines)
 
@@ -1604,6 +1612,12 @@ def score_arm(
     """
     if keep is None:
         keep = [i for i, v in enumerate(pool) if v is not None]
+    if not keep:
+        # No row that every compared arm embedded: nothing is retrievable, which
+        # is the honest answer. An empty matrix used to raise
+        # numpy.AxisError out of the comparison (2026-11-18 review), and
+        # `shared_pool` returns [] legitimately when one arm refused every row.
+        return [UNRANKED] * len(queries), [-math.inf] * len(queries)
     matrix = np.array([pool[i] for i in keep], dtype=np.float32)
     matrix /= np.linalg.norm(matrix, axis=1, keepdims=True)
     documents = [pool_docs[i] for i in keep]

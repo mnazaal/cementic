@@ -2241,9 +2241,12 @@ class TestEveryPurgeReopensTheWork:
             assert chunked.status == "failed"
             assert session.query(Chunk).count() == 0, "chunks of a failed chunking are still served"
             counts = compute_revision_counts(session, "revert", revision)
-            assert counts.done_embeddings == counts.total_chunks, (
-                "a done/failed embedding count that cannot equal total_chunks wedges the revision"
-            )
+            # Both sides are zero here because the fixture seeds no embedding
+            # rows: on SQLite the equality is 0 == 0 and proves nothing. The
+            # half that matters -- that the removed chunks took their
+            # embeddings and vectors with them, via chunks_v2's ON DELETE
+            # CASCADE -- is a PostgreSQL fact and lives in D8 of the plan.
+            assert counts.total_chunks == 0
             assert revision_is_complete(counts) is True
 
     def test_no_door_leaves_a_counted_chunking_with_no_chunks(self, temp_dir: Path) -> None:

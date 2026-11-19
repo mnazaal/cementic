@@ -317,9 +317,13 @@ def _purge_superseded_chunks(
     (2026-11-17 audit, executed). Clearing the hash re-opens the claim and drops
     the row out of ``chunked_done`` until it is genuinely re-chunked.
 
-    A *failed* chunking keeps its hash: ``chunked_scope`` counts failures by
-    hash equality, so clearing it would make the row count as neither done nor
-    failed and wedge the revision instead of settling it.
+    A *failed* chunking keeps its hash, and that exemption is load-bearing in
+    exactly one case: ``chunked_scope`` counts failures by hash equality, so when
+    the failed chunking's hash matches its extraction's (the state
+    ``_fail_artifact`` creates) clearing it would make the row count as neither
+    done nor failed, and the revision could never settle. With a *stale* hash the
+    row is uncounted either way, so there the exemption is inert -- measured
+    2026-11-18 by running both branches against each state.
     """
     stale_chunked_ids = select(ChunkedDocument.id).where(
         ChunkedDocument.extracted_document_id == extracted_document_id,

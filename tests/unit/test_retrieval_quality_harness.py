@@ -333,6 +333,22 @@ class TestFormatFor:
         assert harness.format_for(spec, "x", query=False) == "title: none | text: x"
 
 
+class TestFormatAblation:
+    def test_the_policy_column_lines_up_with_its_header(self) -> None:
+        """A nine-character policy name must not push the numbers right.
+
+        `vector_only` is longer than the `{policy:<8}` field the rows used to
+        format with, so every numeric column drifted away from its heading
+        (2026-11-18 review).
+        """
+        rows = {"vector_only": (0.5, 1.0, 0.7, 0, 0)}
+        text = harness.format_ablation("rare-token", rows, n=1, depth=10)
+        header, row = text.splitlines()[2], text.splitlines()[3]
+        assert len(row) == len(header), (header, row)
+        # The right edge of a right-aligned field is where the columns meet.
+        assert row.index("0.500") + 5 == header.index("recall@1") + 8
+
+
 class TestGoldRankAndMargin:
     def test_a_document_is_ranked_by_its_best_chunk(self) -> None:
         # Doc 2 owns the single best chunk; doc 1 has more good chunks.
@@ -396,6 +412,18 @@ class TestSummariseAndPaired:
         ranks, margins = harness.score_arm(np, [[1.0, 0.0]], [7], [[1.0, 0.0]], [1])
         assert ranks == [harness.UNRANKED]
         assert harness.summarise(ranks, margins)["recall@10"] == 0.0
+
+    def test_no_shared_rows_scores_every_query_unranked(self) -> None:
+        """`shared_pool` may legitimately return [] (one arm refused every row),
+        and the scorer then died in numpy rather than answering (2026-11-18)."""
+        np = pytest.importorskip("numpy")
+        ranks, margins = harness.score_arm(np, [[1.0, 0.0]], [7], [], [], keep=[])
+        assert ranks == [harness.UNRANKED]
+        assert harness.summarise(ranks, margins)["recall@10"] == 0.0
+
+    def test_summarising_nothing_is_not_a_division(self) -> None:
+        m = harness.summarise([], [])
+        assert m["recall@10"] == 0.0 and m["MRR"] == 0.0
 
     def test_a_refused_query_earns_nothing(self) -> None:
         np = pytest.importorskip("numpy")
@@ -578,7 +606,7 @@ class TestFuzzyReport:
         rows = harness.fuzzy_report([record], depth=10)["phrase-typo"]
         assert rows["shipped"][:3] == (0.0, 0.0, 0.0)
         assert rows["trigram word_similarity"][1] == 1.0  # gold now in the top 10
-        assert rows["trigram word_similarity"][3:] == (1, 0, 1)
+        assert rows["trigram word_similarity"][3:6] == (1, 0, 1)
         assert rows["trigram similarity"][5] == 0  # never fired: ranking unchanged
 
     def test_reports_only_the_variants_asked_for(self) -> None:
@@ -595,6 +623,19 @@ class TestFuzzyReport:
         rows = harness.fuzzy_report([fired, unchanged], depth=10)["phrase-typo"]
         assert rows["shipped"][5] == 0
         assert rows["relaxed OR (fallback)"][5] == 1
+
+    def test_the_fallback_row_counts_a_fire_the_ranking_does_not_show(self) -> None:
+        """A fire is not a visible move.
+
+        The relaxed arm usually finds documents the vector arm already ranked, so
+        `changed` reads 0 for a query the rule fired on -- which is most of them.
+        The fire count is its own column (2026-11-18 review).
+        """
+        rec = fuzzy_record(lexical=[], relaxed=["x.pdf", "y.pdf"])
+        rows = harness.fuzzy_report([rec], depth=10)["phrase-typo"]
+        r1, r10, mrr, better, worse, changed, fired = rows["relaxed OR (fallback)"]
+        assert changed == 0, "the ranking did not move"
+        assert fired == 1, "the arm did"
 
     def test_formats_every_variant(self) -> None:
         report = harness.fuzzy_report([fuzzy_record()], depth=10)
