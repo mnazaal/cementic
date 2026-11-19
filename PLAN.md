@@ -437,7 +437,7 @@ queries a person would type verbatim, or the phrase set is lexical-favourable by
 construction and the shipped rule is right for real queries. `shipped` gave rank
 1 to the lexical arm on 59 of 360 queries.
 
-**A3. Build query sets the lexical arm cannot already match.** `is_known_item:1011-1020`
+**A3. Build query sets the lexical arm cannot already match.** `is_known_item:1078-1089`
 requires gold to be an exact `plainto_tsquery` match and the match set to be ≤5
 documents (`MAX_MATCHING_DOCUMENTS=5`, `:144`), using the predicate the lexical
 arm itself uses (`vector_store.py:165-178`). So the 60 rare-token and 60 phrase
@@ -465,11 +465,11 @@ behaviour; the 0.233→0.650 for 3+ word phrases stands. **Ends when** a measure
 recall exists on the A3 typo set and the decision is recorded — extend the
 fallback, or document the limit as accepted.
 
-**A5. Settle `combine`'s tie promise.** `hybrid.py:78-81` says ties are left to
+**A5. Settle `combine`'s tie promise.** `hybrid.py:74-83` says ties are left to
 the caller; the `sorted` over a vector-first dict resolves them toward the vector
 arm (executed: `combine(v, l, lead="lexical")` = `[200, 100, 101, 201, …]`, so
 lexical rank 2 loses position 3 on an exact `1/62` tie). Nothing pins it either
-way: `test_hybrid.py:41-52` asserts `1/(RRF_K+1) == 1/(RRF_K+1)`, a tautology
+way: `tests/unit/test_hybrid.py:50` asserts `1/(RRF_K+1) == 1/(RRF_K+1)`, a tautology
 that says the test file has read the problem and not tested it. Implement the
 promise with a test, or correct the docstring — decided against A2's paired
 ablation for lexical-lead queries, not by preference. **Ends when** code and
@@ -489,8 +489,8 @@ re-running) and green after. Non-PG suite 1503 passed, PG suite 77 passed,
 ruff and mypy clean.
 
 **B1. Edit-and-revert strands a document while the revision reports complete.**
-`_purge_superseded_chunks:293-320`, `_write_back_extraction:751-785`,
-`_step_chunk:824-875`. **Executed 2026-11-17** through the real functions: seed
+`_purge_superseded_chunks:293-345`, `_write_back_extraction:774-810`,
+`_step_chunk:864-1009`. **Executed 2026-11-17** through the real functions: seed
 indexed A, write back B, then A before chunking — the chunking stayed `done`
 with hash A, owned 0 chunks, `_step_chunk` returned False, `revision_is_complete`
 returned True. Same class found live on 2026-09-07 (2 of 23,064 papers).
@@ -505,7 +505,8 @@ to 0 and completion becomes unreachable), and is inert when the hash is stale,
 where the row is uncounted either way.
 
 **B2. A failed extraction write-back keeps serving the superseded text.**
-`_step_extract:738-748` and `_fail_artifact:788-822` with the scopes at
+`_step_extract:668-773` (the failure branch at `:762-771`) and
+`_fail_artifact:811-863` with the scopes at
 `revisions.py:105-135`. **Fixed:** `_fail_artifact` now clears `content_hash` and
 calls `purge_all_chunks` for an extraction, in the same session that stamps it
 failed — the row stops naming text it cannot vouch for, and the previous version
@@ -520,7 +521,7 @@ its own per-exception-class tests (serialization vs data vs connectivity). **End
 when** the classification exists with tests for each class and `status`
 distinguishes retried from failed; no generic back-off framework.
 
-**B3. A chunking write-back failure wedges the revision.** `:958-966` with
+**B3. A chunking write-back failure wedges the revision.** `:998-1007` with
 `revisions.py:156-183`: `_fail_artifact(ChunkedDocument)` dropped `total_chunks`
 to 0 while `done_embeddings` stayed 2, so `done + failed == total_chunks` was
 unreachable and the row was never re-claimed. **Fixed:** the chunking's chunks go
@@ -555,11 +556,11 @@ marker, not a timeout — with a regression that starts a scan and asserts no
 
 - **C1 — `collection remove <typo> --force` exits 0.** `cli_collection.py:50-55`
   prints `status: not found` and returns; every sibling exits 1 through
-  `require_known_collection` (`cli_shared.py:180-196`). **Executed** against a
+  `require_known_collection` (`cli_shared.py:162-175`). **Executed** against a
   seeded scratch database. **Ends when** the not-found branch exits 1 and a CLI
   test pins it.
-- **C2 — `status --json` exits 0 where text `status` exits 1.** `cli.py:629-665`
-  vs `:692-704`, failure signal at `render.py:414-417`; the human branch's own
+- **C2 — `status --json` exits 0 where text `status` exits 1.** `cli.py:629-656`
+  vs `:668-681`, failure signal at `render.py:414-417`; the human branch's own
   comment explains why exit 0 is wrong and the JSON branch never got the rule.
   **Executed:** human 1, JSON 0 with `health.error` set. **Ends when** both modes
   fail consistently and JSON keeps its parseable partial report.
@@ -604,9 +605,9 @@ marker, not a timeout — with a regression that starts a scan and asserts no
   scope retains the intended match with paired recall and
   `EXPLAIN (ANALYZE, BUFFERS)` evidence.
 
-- **C8 — `embedding status` cannot say "not ok".** `cli.py:957-966` exits 0 for
+- **C8 — `embedding status` cannot say "not ok".** `cli.py:975-983` exits 0 for
   `stopped` and `ambiguous`, while `doctor` calls the same state `fail` and exits
-  1 (`doctor.py:225-233`). Consistent with "status is a query", but a script has
+  1 (`doctor.py:226-244`). Consistent with "status is a query", but a script has
   no way to ask whether the runtime is usable. Source-traced. **Ends when** there
   is an exit-code answer to that question — a flag on the existing command, not a
   new one.
@@ -620,11 +621,14 @@ marker, not a timeout — with a regression that starts a scan and asserts no
   `llama_cpp.daemon_autostart = true` while the unit header (`:62`) says to set it
   *false* when the server runs under its own unit. Source-traced. **Ends when**
   the docs name what is left running and the unit reads the configured port.
-- **C10 — a config error prescribes a remedy that cannot load.**
-  `config.py:918-930`: `CEMENTIC_LLAMA_N_CTX=8` exits 1 with "Use chunk_size <= 0,
-  or raise n_ctx", but `chunk_size` is `ge=1` (`:450-455`), so the suggested
-  value is rejected. Executed. **Ends when** the message names an achievable
-  value.
+- **C10 — a config error emits an unachievable value alongside a valid one.**
+  `config.py:916-930`: `CEMENTIC_LLAMA_N_CTX=8` exits 1 with "Use chunk_size <=
+  0, or raise n_ctx", where the 0 is `n_ctx - TASK_PREFIX_TOKEN_ALLOWANCE`
+  (`8 - 8`). "raise n_ctx" is the valid half; the `chunk_size <=` half is
+  unachievable (`ge=1`, `:450-455`) and only appears when
+  `n_ctx <= TASK_PREFIX_TOKEN_ALLOWANCE`. Executed. **Ends when** the message
+  suppresses the impossible branch at `n_ctx = 8` and keeps it at a realistic
+  one.
 
 - **C11 — `doctor` reports `ok` while a required check failed.** When the
   extension inspection throws *after* `extension_ok` was computed —
@@ -659,12 +663,12 @@ marker, not a timeout — with a regression that starts a scan and asserts no
   the digested file (`canary.py:174-206`). Both source-traced and independently
   re-found 2026-11-17. **Ends when** a changed model cannot be accepted under the
   previous alias and a relocated identical model still resolves.
-- **D4 — `stop` takes no lock while `start` does** (`cli.py:797-880` vs `:452`);
+- **D4 — `stop` takes no lock while `start` does** (`cli.py:797-880` vs `:450`);
   the `clear` path can delete a concurrent `start`'s state files, leaving live
   workers only visible to `ps`. Source-traced. **Ends when** an interleaving test
   cannot lose a live session's records.
 - **D5 — extraction isolation is crash containment only.** The child inherits the
-  worker's environment including `CEMENTIC_DB_URL` (`extract.py:529-545`, no
+  worker's environment including `CEMENTIC_DB_URL` (`extract.py:527-544`, no
   `env=`), and the timeout kills one PID rather than a process group
   (`:532-545,654-658`). Source-traced, sentinel-probe executed for the
   environment. **Ends when** the child gets a minimal environment and a dedicated
@@ -697,7 +701,7 @@ marker, not a timeout — with a regression that starts a scan and asserts no
   embeddings and vector rows went with them.
 - **D9 — index maintenance and recall are unmeasured.** No `VACUUM`, `REINDEX` or
   `ANALYZE` anywhere in `src/`; HNSW tombstones left by churn are never measured
-  for recall (`db.py:855-913` builds once, `collections.py:400-420` rebuilds only
+  for recall (`db.py:840-901` builds once, `collections.py:400-420` rebuilds only
   on method change or `--force`); and DiskANN has no filter-aware scan —
   `query_tuning_statements:250-262` sets only `query_rescore` where HNSW gained
   `iterative_scan`, so a selective collection filter on a shared vector table can
@@ -705,7 +709,7 @@ marker, not a timeout — with a regression that starts a scan and asserts no
   against a freshly built one, and the DiskANN shortfall is either measured or
   refused.
 - **D10 — the lexical arm's order is arbitrary where `ts_rank` ties.**
-  `vector_store.py:178` orders by rank with no secondary key; ties are routine for
+  `vector_store.py:160-178` orders by rank with no secondary key; ties are routine for
   short chunks and single-term queries, and fusion is rank-based, so an arbitrary
   tie order becomes the final order and dedup keeps whichever tied chunk came
   first — which becomes the shown `content`. Source-traced. **Must land after the
@@ -735,9 +739,9 @@ marker, not a timeout — with a regression that starts a scan and asserts no
   artifact paths in `session.info` (`revisions.py:636-656`), which survives the
   `lost_race` rollback (`collections.py:328`), so a second promote in one session
   could unlink live artifacts — latent, because the CLI opens one session per
-  invocation; and `EmbeddingProvider` (`embedding_provider.py:14-107`) has exactly
+  invocation; and `EmbeddingProvider` (`embedding_provider.py:14-102`) has exactly
   one concrete implementation, with the duplicate CLI edge-case classes
-  (`test_cli.py:2090,2179,2341`) as the standing deletion candidates. All
+  (`tests/unit/test_cli.py:2090,2179,2341`) as the standing deletion candidates. All
   source-traced. **Ends when** each is fixed or explicitly accepted.
 
 ### Checked on 2026-11-17 and not a defect

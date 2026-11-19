@@ -35,7 +35,7 @@ Four consequences this report keeps referring to:
 
 - **A revision is "complete" when the counts add up**: every document extracted,
   every extraction chunked, every chunk embedded. The equalities are in
-  `revision_is_complete` (`pipeline_worker.py:271-291`).
+  `revision_is_complete` (`pipeline_worker.py:271-287`).
 - **The `*_scope` predicates** (`revisions.py:95-183`) are the single definition
   of *what counts*: the worker, `cementic status` and `promote` all use them.
   `chunked_scope` requires `ChunkedDocument.source_content_hash ==
@@ -103,7 +103,7 @@ Each has a regression that was **red against the unpatched source** — proved b
 stashing the source change and re-running — and green after.
 
 **F1 · Edit-and-revert stranded a document while the revision reported complete.**
-`_purge_superseded_chunks` (`pipeline_worker.py:293-334`) deleted chunks without
+`_purge_superseded_chunks` (`pipeline_worker.py:293-345`) deleted chunks without
 invalidating the chunking: after A→B→A between chunk passes, the chunking stayed
 `done` with hash A, owned 0 chunks, `_step_chunk` refused it, and
 `revision_is_complete` returned True. **Fixed** by NULLing the hash of exactly the
@@ -112,7 +112,7 @@ keeps its hash — see §5 open item on that exemption. Test:
 `TestEveryPurgeReopensTheWork::test_a_re_extension_that_reverts_does_not_strand_the_document`.
 
 **F2 · A failed extraction write-back kept serving the superseded text.**
-`_fail_artifact` (`pipeline_worker.py:788-843`) stamped the row terminal without
+`_fail_artifact` (`pipeline_worker.py:811-863`) stamped the row terminal without
 purging, because the purge lived in the transaction that had just rolled back: the
 old content hash, old chunking and old chunks stayed live and searchable, and
 `chunked_done + chunked_failed == extracted_done` was satisfied as `0 == 0`.
@@ -167,30 +167,30 @@ next reader should expect this class of mistake in this file.)
 
 | # | Severity | What | Where | Grade |
 | --- | --- | --- | --- | --- |
-| O1 | high | A deadlock turns one document terminal where a retry would have worked | `pipeline_worker.py:738-748` | executed (state) |
-| O2 | high | A revision can reach `ready` before the initial scan finishes | `pipeline_worker.py:271-291` | source-traced |
+| O1 | high | A deadlock turns one document terminal where a retry would have worked | `pipeline_worker.py:762-771` | executed (state) |
+| O2 | high | A revision can reach `ready` before the initial scan finishes | `pipeline_worker.py:271-287` | source-traced |
 | O3 | high | Doctor reports `ok` while a required check failed | `doctor.py:170-177,263-272` | executed |
 | O4 | high | `collection remove <typo> --force` exits 0 | `cli_collection.py:50-55` | executed |
-| O5 | high | `status --json` exits 0 where text `status` exits 1 | `cli.py:629-665` vs `692-704` | executed |
+| O5 | high | `status --json` exits 0 where text `status` exits 1 | `cli.py:629-656` vs `668-684` | executed |
 | O6 | high | `cementic doctor` crashes on a config it accepted | `doctor.py:256`, `config.py:655-689` | executed |
 | O6b | low | The documented external-server contract exceeds what is implemented | `docs/configuration.md:72-76` | source-traced |
-| O7 | high | The rare-token/phrase eval sets are answerable by construction | `measure_retrieval_quality.py:1011-1020` | source-traced |
+| O7 | high | The rare-token/phrase eval sets are answerable by construction | `measure_retrieval_quality.py:1078-1089` | source-traced |
 | O8 | high | Model bytes are not part of daemon identity | `embedding_runtime.py:160-174` | source-traced |
 | O9 | med | Deferred cleanup can drop a live vector table | `collections.py:183-196,224-234` | source-traced |
 | O9b | note | The failed-chunking hash exemption is deliberate — do not "fix" it | `pipeline_worker.py:322-340` | executed |
 | O10 | med | Query-string passwords are not masked | `bootstrap.py:119`, `doctor.py:143` | executed |
-| O11 | med | Extractors inherit the worker's database URL | `extract.py:529-545` | executed |
+| O11 | med | Extractors inherit the worker's database URL | `extract.py:527-544` | executed |
 | O12 | med | The shipped routing rule loses rank 1 to the bare lexical arm | `search.py:642-676` | executed (F5 table) |
 | O13 | med | The typo fallback cannot fire for a 1–2 word query | `search.py:110-135` | executed |
-| O14 | med | `combine` resolves RRF ties toward the vector arm, against its docstring | `hybrid.py:78-95` | executed |
+| O14 | med | `combine` resolves RRF ties toward the vector arm, against its docstring | `hybrid.py:74-116` | executed |
 | O15 | med | The lexical candidate pool can be starved or over-saturated | `vector_store.py:165-178` | source-traced |
 | O16 | med | `ts_rank` ties resolve arbitrarily, and fusion is rank-based | `vector_store.py:178` | source-traced |
-| O17 | med | `stop` takes no lock; `start` does | `cli.py:797-880` vs `:452` | source-traced |
-| O18 | med | `embedding status` exits 0 for states `doctor` fails | `cli.py:957-966` | source-traced |
-| O19 | med | A config error prescribes a value the config rejects | `config.py:918-930` | executed |
+| O17 | med | `stop` takes no lock; `start` does | `cli.py:797-880` vs `:450` | source-traced |
+| O18 | med | `embedding status` exits 0 for states `doctor` fails | `cli.py:975-983` | source-traced |
+| O19 | low | A config error emits an unachievable value alongside a valid one | `config.py:916-930` | executed |
 | O20 | high | No chunk-delete path has a PostgreSQL cascade test | `test_revisions_pg.py:601-611` | source-traced |
-| O20b | med | The invalidation invariant is tested at one door of six | `pipeline_worker.py:318,1003` etc. | executed |
-| O21 | low | Index maintenance and recall are unmeasured | `db.py:855-913` | source-traced |
+| O20b | med | The invalidation invariant is tested at one door of six | `pipeline_worker.py:335,1043` etc. | executed |
+| O21 | low | Index maintenance and recall are unmeasured | `db.py:840-901` | source-traced |
 | O22 | low | Extraction limits: 1 h timeout, unbounded stdout, whole-file reads | `extract.py:247,263-268,291-293` | source-traced |
 | O23 | low | The generated config is not the complete reference | `templates/config.toml` | executed |
 | O24 | low | The pooled-vector formula has no oracle | `embedding_runtime.py:582` | source-traced |
@@ -276,7 +276,7 @@ and vectors went with them. It is the only check I would run before the next
 `cementic start` applies these repairs to the live corpus.
 
 **Fix.** For each path that deletes `Chunk` rows
-(`pipeline_worker.py:318,1003`, `revisions.py:437,801`,
+(`pipeline_worker.py:335,1043`, `revisions.py:437,801`,
 `source_watcher.py:358`, `collections.py:168`), a `-m pg` test asserting
 `chunk_embeddings` and the per-profile vector rows are gone. Copy the shape of
 `test_deleting_a_document_takes_its_embedding_rows_with_it`.
@@ -291,7 +291,7 @@ Fix: parameterise one test over the six sites, or a helper per site that takes
 the door as an argument. **Proves it.** Deleting the invalidation from any one
 door turns a test red.
 
-### O-adjacent — the failed-chunking hash exemption (documentation only)
+### O9b — the failed-chunking hash exemption (documentation only)
 
 `_purge_superseded_chunks` deliberately leaves a *failed* chunking's hash alone.
 Measured per state on 2026-11-18: load-bearing when the hash **matches** the
@@ -334,7 +334,7 @@ asserting `ok is True`.
 
 `cli_collection.py:50-55` prints `status: not found` and returns. Every sibling
 (`promote`, `reindex`, `revisions`, `status`) exits 1 via
-`require_known_collection` (`cli_shared.py:180-196`). Reproduce against any
+`require_known_collection` (`cli_shared.py:162-175`). Reproduce against any
 seeded database:
 
 ```bash
@@ -347,7 +347,7 @@ pinning the exit code for that branch (none exists today).
 
 ### O5 — `status --json` exits 0 where text `status` exits 1 (executed)
 
-The human path exits 1 when the health probe raised (`cli.py:692-704`, with a
+The human path exits 1 when the health probe raised (`cli.py:668-681`, with a
 comment explaining exactly why). The JSON path only fails when the *data load*
 failed (`render.py:414-417`), never when `health is None` or `db_reachable` is
 false. Reproduce:
@@ -399,22 +399,26 @@ message when they diverge. **Proves it.** A test pinning both fields for
 
 ### O18 — `embedding status` cannot say "not ok" (source-traced)
 
-`cli.py:957-966` exits 0 for `stopped` and `ambiguous`, while `doctor.py:225-233`
+`cli.py:975-983` exits 0 for `stopped` and `ambiguous`, while `doctor.py:226-244`
 calls the same state `fail` and exits 1. A script has no exit-code way to ask
 "is my embedding runtime usable?".
 
 **Fix.** A flag on the existing command that makes the exit code follow the
 state. **Not** a new command.
 
-### O19 — A config error prescribes a value the config rejects (executed)
+### O19 — A config error emits an unachievable value alongside a valid one (executed)
 
 `CEMENTIC_LLAMA_N_CTX=8 cementic config show` exits 1 with *"Use chunk_size <=
-0, or raise n_ctx"*, but `chunk_size` is `ge=1` (`config.py:450-455`). The
-message is caught at load, names both fields, and is unusable.
+0, or raise n_ctx"*. The second half is correct; the first is arithmetic fallout:
+the message computes `n_ctx - TASK_PREFIX_TOKEN_ALLOWANCE` (`config.py:916-930`),
+which is `8 - 8 = 0`, and `chunk_size` is `ge=1` (`config.py:450-455`), so no
+value satisfies it. Only degenerate when `n_ctx <= TASK_PREFIX_TOKEN_ALLOWANCE`;
+the remedy is otherwise right.
 
-**Fix.** Name an achievable value (`chunk_size >= 1`, or state that no valid
-`chunk_size` fits and `n_ctx` must rise). **Proves it.** A test asserting the
-message's suggested value loads.
+**Fix.** When `n_ctx <= TASK_PREFIX_TOKEN_ALLOWANCE`, emit only *"raise n_ctx"*
+and suppress the impossible `chunk_size <=` branch. **Proves it.** A test
+asserting the message omits the impossible branch at `n_ctx = 8` and includes it
+at a realistic `n_ctx`.
 
 ### O26 — The service story is half-documented and half-wired (source-traced)
 
@@ -437,7 +441,7 @@ sentence to the bundled-server case.
 
 ### O7 — The evaluation sets are answerable by construction (source-traced)
 
-`is_known_item` (`measure_retrieval_quality.py:1011-1020`) requires the gold
+`is_known_item` (`measure_retrieval_quality.py:1078-1089`) requires the gold
 document to be an exact `plainto_tsquery` match **and** the match set to be ≤5
 documents (`MAX_MATCHING_DOCUMENTS = 5`). The lexical arm matches with the same
 predicate (`vector_store.py:165-178`). So 120 of the 360 checked-in queries
@@ -491,7 +495,7 @@ accepted. **Anti-scope:** do not change exact-query or phrase behaviour.
 
 ### O14 — `combine` resolves RRF ties toward the vector arm, against its docstring (executed)
 
-`hybrid.py:78-81` says ties are left to the caller; the `sorted` over a
+`hybrid.py:74-83` says ties are left to the caller; the `sorted` over a
 vector-first dict silently picks one:
 
 ```python
@@ -499,7 +503,7 @@ combine([100,101,102], [200,201,202], lead="lexical")
 # [200, 100, 101, 201, 102, 202]  -- lexical #2 loses position 3 on an exact 1/62 tie
 ```
 
-Nothing pins the tie either way: `test_hybrid.py:41-52` asserts
+Nothing pins the tie either way: `tests/unit/test_hybrid.py:50` asserts
 `1/(RRF_K+1) == 1/(RRF_K+1)`, a tautology.
 
 **Fix.** Either implement the promise (an explicit tie order, with a test) or
@@ -522,7 +526,7 @@ filters can lose GIN index access (`EXPLAIN (ANALYZE, BUFFERS)` decides).
 
 ### O16 — `ts_rank` ties resolve arbitrarily, and fusion is rank-based (source-traced)
 
-`vector_store.py:178` orders by rank with no secondary key. Ties are routine for
+`vector_store.py:160-178` orders by rank with no secondary key. Ties are routine for
 short chunks and single-term queries; fused scores are positions, so an arbitrary
 tie order becomes the final order, and dedup keeps whichever tied chunk came
 first — which becomes the shown `content`.
@@ -536,7 +540,7 @@ the O7/O12 measurement.
 ### O21 — Index maintenance and recall are unmeasured (source-traced)
 
 No `VACUUM`, `REINDEX` or `ANALYZE` anywhere in `src/`. The HNSW index is built
-once (`db.py:855-913`) and rebuilt only on a method change or `--force`
+once (`db.py:840-901`) and rebuilt only on a method change or `--force`
 (rebuild path in `collections.py`), so tombstones left by deletion and content
 supersession accumulate unmeasured. DiskANN has no filter-aware scan:
 `query_tuning_statements` (in `vector_store.py`) sets only `query_rescore` where
@@ -594,7 +598,7 @@ synthetic values only; a real credential must never be printed to prove redactio
 ### O11 — Extractors inherit the worker's environment (executed)
 
 The isolated extraction child is spawned with `Popen` and no `env=`
-(`extract.py:529-545`), so it inherits `CEMENTIC_DB_URL` and
+(`extract.py:527-544`), so it inherits `CEMENTIC_DB_URL` and
 `CEMENTIC_DB_PASSWORD` — the very credentials the module's own comment
 (`:616-635`) says the worker holds. Confirmed: a sentinel in the parent's
 environment is visible to a child spawned the same way. Isolation buys crash and
@@ -608,7 +612,7 @@ kills one PID (`:532-545,654-658`), so a parser's own descendants survive.
 ### O17 — `stop` takes no lock while `start` does (source-traced)
 
 `cli.py:797-880` reads supervisor state, signals, then writes `clear` — with no
-`file_lock`, while `start` correctly takes one (`cli.py:452`). If a concurrent
+`file_lock`, while `start` correctly takes one (`cli.py:450`). If a concurrent
 `start` saves its records between the read and the clear, the clear deletes a
 live session's state file and worker state files, leaving running workers visible
 only to `ps`.
@@ -689,8 +693,8 @@ findings on the first run.
    (`collections.py:328`), so a second promote in one session could unlink
    artifacts that are still referenced. Latent: the CLI opens one session per
    invocation.
-5. `EmbeddingProvider` (`embedding_provider.py:14-107`) has exactly one concrete
-   implementation, and `test_cli.py:2090,2179,2341` are duplicate edge-case
+5. `EmbeddingProvider` (`embedding_provider.py:14-102`) has exactly one concrete
+   implementation, and `tests/unit/test_cli.py:2090,2179,2341` are duplicate edge-case
    classes. Both are deletion candidates, not defects. (66 `MagicMock()` sites in
    `test_cli.py` also mean an internal refactor is punished without a behaviour
    change — the coupling is the cost, not the line count.)
@@ -704,7 +708,7 @@ findings on the first run.
   place.
 - Both `scripts/measure_*.py` docstrings say `python scripts/…` (see O27).
 
-### O6-adjacent — the external-server promise (source-traced)
+### O6b — the external-server promise (source-traced)
 
 `docs/configuration.md:72-76` suggests disabling autostart is enough to use an
 externally supervised `llama-server`; bootstrap and doctor still require local
