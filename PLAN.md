@@ -21,7 +21,9 @@ chunkings chased on 2026-11-17 are deleted sources, not loss. The PG suite runs
 here (77 passed), so "deselected" is no longer a limit.
 
 **Evidence and limits:** the baseline table, per-item grades and artifact paths
-are in the order section. Nothing was verified against the live corpus beyond
+are in the order section. **`AUDIT.md` is the defect-by-defect account**: what
+is wrong, where, how to reproduce it, the smallest fix, and the test that
+proves it — self-contained, and deleted when its last item closes. Nothing was verified against the live corpus beyond
 read-only queries, and no retrieval number was re-measured — no embedding daemon
 was started.
 
