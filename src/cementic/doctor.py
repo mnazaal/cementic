@@ -245,7 +245,7 @@ def collect_doctor_report(config: Config) -> dict[str, Any]:
             conn.execute(text("SELECT 1"))
             database_ok = True
             checks["database"] = {"status": "ok", "reachable": True}
-            failing_probe = "the canary lookup"
+            failing_probe = "the extension inspection"
             # A failure past this point is about inspecting extensions, not
             # about the database: it used to fall into the handler below, which
             # reported an unreachable database (plus the init-postgres hint) for
@@ -261,12 +261,14 @@ def collect_doctor_report(config: Config) -> dict[str, Any]:
                         + redact_text(str(extension_error), config.database.url),
                     }
                 }
+            failing_probe = "the extractor profile read"
             try:
                 active_extractor_profiles = _active_extractor_profiles(conn)
             except Exception as profile_error:
                 conn.rollback()
-                lines = str(profile_error).strip().splitlines()
+                lines = redact_text(str(profile_error), config.database.url).strip().splitlines()
                 extractor_profiles_error = lines[0] if lines else type(profile_error).__name__
+            failing_probe = "the canary lookup"
             active_canaries = _active_embedding_canaries(conn)
             failing_probe = "the stranded-chunking count"
             stranded_chunkings = _stranded_chunkings(conn)

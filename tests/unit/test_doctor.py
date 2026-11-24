@@ -167,6 +167,26 @@ class TestExtensionFailureIsNotADatabaseFailure:
         assert report["ok"] is False
 
     @patch("cementic.doctor._daemon_state", return_value=(True, True, None))
+    @patch("cementic.doctor._extension_check", return_value={"status": "ok", "message": "ok"})
+    @patch("cementic.doctor._active_extractor_profiles", side_effect=RuntimeError("read"))
+    @patch("cementic.doctor.get_engine")
+    def test_a_dropped_connection_names_the_probe_in_flight(
+        self, mock_get_engine, mock_profiles, mock_ext, mock_daemon, tmp_path
+    ) -> None:
+        """The profile read fails and its rollback raises (the connection
+        dropped), which lands in the outer handler. The message named the
+        canary lookup, which had not run yet."""
+        conn = MagicMock()
+        conn.rollback.side_effect = RuntimeError("server closed the connection")
+        mock_get_engine.return_value.connect.return_value.__enter__.return_value = conn
+
+        report = collect_doctor_report(_config_with_model_path(tmp_path, exists=True))
+
+        message = report["checks"]["database"]["message"]
+        assert "the extractor profile read" in message
+        assert "canary" not in message
+
+    @patch("cementic.doctor._daemon_state", return_value=(True, True, None))
     @patch("cementic.doctor._extension_check", return_value={"status": "warning", "message": "w"})
     @patch("cementic.doctor.get_engine")
     def test_warnings_alone_leave_the_report_ok(
