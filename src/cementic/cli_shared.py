@@ -10,7 +10,7 @@ modules import them from here instead, which has no dependency on either.
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 
 import typer
 from pydantic import ValidationError
@@ -171,6 +171,11 @@ def require_known_collection(session: Any, collection: str) -> None:
 
     if collection_exists(session, collection):
         return
+    exit_unknown_collection(collection)
+
+
+def exit_unknown_collection(collection: str) -> NoReturn:
+    """Report an unknown collection on stderr and exit 1."""
     err_console.print(f"collection: {collection}")
     err_console.print("status: unknown collection (check `cementic collection list`)")
     raise typer.Exit(1)

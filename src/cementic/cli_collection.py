@@ -11,6 +11,7 @@ from cementic.cli_shared import (
     console,
     db_session,
     err_console,
+    exit_unknown_collection,
     is_managed_proc_alive,
     read_supervisor_state,
     reporting_db_errors,
@@ -49,9 +50,7 @@ def remove_collection(
         with session_factory() as session:
             result = delete_collection_records(session, collection)
             if result is None:
-                console.print(f"collection: {collection}")
-                console.print("status: not found")
-                return
+                exit_unknown_collection(collection)
 
     # The rows are committed by here, so the collection *is* deleted. Leftover
     # artifacts/vector tables are reported as a warning rather than turning a

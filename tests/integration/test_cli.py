@@ -60,8 +60,10 @@ class TestRemoveCollectionCommand:
     def test_remove_nonexistent_collection(self, runner, sqlite_engine):
         with patch("cementic.db.get_engine", return_value=sqlite_engine):
             result = runner.invoke(app, ["collection", "remove", "ghost", "--force"])
-        assert result.exit_code == 0
-        assert "not found" in result.stdout.lower()
+        # Same contract as `promote`/`revisions` on an unknown name (C1).
+        assert result.exit_code == 1
+        assert "unknown collection" in result.stderr
+        assert result.stdout == ""
 
     def test_remove_existing_collection(self, runner, sqlite_engine, sqlite_session):
         doc = SourceDocument(source_path="/tmp/test.pdf", collection="delme")

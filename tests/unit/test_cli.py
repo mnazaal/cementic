@@ -1862,9 +1862,13 @@ class TestCollectionCommands:
         with patch("cementic.collections.delete_collection_records", return_value=None):
             result = runner.invoke(app, ["collection", "remove", "missing", "--force"])
 
-        assert result.exit_code == 0
-        assert "collection: missing" in result.output
-        assert "status: not found" in result.output
+        # A typo'd name fails like every sibling command (`promote`, `revisions`,
+        # `status`): exit 1, message on stderr, nothing on stdout. Exit 0 here
+        # let `remove <typo> --force` read as a successful delete in a script.
+        assert result.exit_code == 1
+        assert "collection: missing" in result.stderr
+        assert "unknown collection" in result.stderr
+        assert result.stdout == ""
 
     @patch("cementic.db.get_session_factory")
     @patch("cementic.db.get_engine")
