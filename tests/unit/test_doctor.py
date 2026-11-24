@@ -195,6 +195,26 @@ class TestMissingPipelineTablesIsNotADatabaseFailure:
         assert report["checks"]["stranded_chunkings"]["status"] == "warning"
         assert "never indexed anything" in report["checks"]["stranded_chunkings"]["message"]
 
+    @patch("cementic.doctor._daemon_state", return_value=(True, True, None))
+    @patch("cementic.doctor._extension_check", return_value={"status": "ok", "message": "ok"})
+    def test_a_database_with_no_cementic_tables_passes(
+        self, mock_ext, mock_daemon, tmp_path
+    ) -> None:
+        """The state README and docs/setup.md run `doctor` in: `init postgres`
+        done, `start` not yet, so no table exists. Every probe, not only the
+        stranded-chunkings one, must read that as "nothing indexed yet".
+        `_active_extractor_profiles` did not, and once the verdict counted
+        nested failures (C11) this fresh install failed `doctor`. A real empty
+        database rather than a mock, so a new unguarded probe trips it too."""
+        engine = create_engine(f"sqlite:///{tmp_path / 'empty.db'}")
+
+        with patch("cementic.doctor.get_engine", return_value=engine):
+            report = collect_doctor_report(_config_with_model_path(tmp_path, exists=True))
+
+        assert "(inspection)" not in report["checks"]["extensions"]
+        assert report["checks"]["database"]["status"] == "ok"
+        assert report["ok"] is True, report["checks"]
+
 
 class TestDaemonCheck:
     """A busy daemon must not be reported as broken.

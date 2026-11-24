@@ -555,14 +555,25 @@ def _extractor_profile_check(
 
 
 def _active_extractor_profiles(conn: Any) -> list[tuple[str, dict[str, Any]]]:
-    """(collection, extractor payload) for every collection's active revision."""
-    rows = conn.execute(
-        text(
-            "SELECT r.collection, p.config_json FROM pipeline_revisions r "
-            "JOIN extractor_profiles p ON p.id = r.extractor_profile_id "
-            "WHERE r.status = 'active' ORDER BY r.collection"
-        )
-    ).fetchall()
+    """(collection, extractor payload) for every collection's active revision.
+
+    Guarded like `_active_embedding_canaries`: a fresh install has no
+    `pipeline_revisions` until `cementic start` creates it, and that is the
+    state the setup docs run `doctor` in. Unguarded, the raise landed in the
+    extension check's handler as "could not inspect extensions", and failed
+    the verdict once it counted nested failures (C11).
+    """
+    try:
+        rows = conn.execute(
+            text(
+                "SELECT r.collection, p.config_json FROM pipeline_revisions r "
+                "JOIN extractor_profiles p ON p.id = r.extractor_profile_id "
+                "WHERE r.status = 'active' ORDER BY r.collection"
+            )
+        ).fetchall()
+    except Exception:
+        conn.rollback()
+        return []
     return [(str(collection), json.loads(payload)) for collection, payload in rows]
 
 
