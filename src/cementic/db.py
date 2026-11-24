@@ -390,6 +390,26 @@ class PipelineRevision(Base):
     )
 
 
+class CollectionScan(Base):
+    """Whether the watcher's initial scan of a collection has finished.
+
+    The watcher registers documents one at a time, so a count of what it has
+    registered so far cannot tell a finished scan from a drained prefix. The
+    watcher writes this row when a scan starts (``completed_at`` NULL) and
+    stamps ``completed_at`` when every root has been walked and reconciled; a
+    stopped or crashed scan leaves it open. No row means no watcher has
+    recorded a scan -- every database from before this table existed -- and the
+    worker treats that as complete rather than waiting on a marker that
+    nothing will write until the next watcher start.
+    """
+
+    __tablename__ = "collection_scans"
+
+    collection: Mapped[str] = mapped_column(String(100), primary_key=True)
+    started_at: Mapped[datetime] = mapped_column(default=utc_now, nullable=False)
+    completed_at: Mapped[datetime | None] = mapped_column(nullable=True)
+
+
 class SearchActivity(Base):
     """Single-row lease recording when an interactive search last ran.
 

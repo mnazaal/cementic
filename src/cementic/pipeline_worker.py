@@ -23,6 +23,7 @@ from cementic.db import (
     Chunk,
     ChunkedDocument,
     ChunkEmbedding,
+    CollectionScan,
     ExtractedDocument,
     PipelineRevision,
     SearchActivity,
@@ -131,6 +132,8 @@ class PipelineCounts:
     extracted_failed: int = 0
     chunked_failed: int = 0
     failed_embeddings: int = 0
+    #: The watcher is still walking the tree, so ``documents`` is a prefix.
+    scan_in_progress: bool = False
 
 
 #: HTTP statuses that describe the server's condition rather than the request:
@@ -271,6 +274,10 @@ def is_retryable_embed_error(error: BaseException) -> bool:
 
 def revision_is_complete(counts: PipelineCounts) -> bool:
     """Return True when every pipeline stage has finished for all documents."""
+    if counts.scan_in_progress:
+        # The counts cover the files registered so far; draining them is not
+        # finishing, and the rest of the tree is still to be registered.
+        return False
     if counts.documents == 0:
         # All-zero counts satisfy every equality below, so without this a
         # revision reaches `ready` before the watcher has registered its first
@@ -401,7 +408,13 @@ def compute_revision_counts(
         .filter(*embedding_conditions, ChunkEmbedding.status == "failed")
         .count()
     )
+    open_scan = (
+        session.query(CollectionScan)
+        .filter(CollectionScan.collection == collection, CollectionScan.completed_at.is_(None))
+        .count()
+    )
     return PipelineCounts(
+        scan_in_progress=open_scan > 0,
         documents=documents,
         extracted_done=extracted_done,
         extracted_failed=extracted_failed,

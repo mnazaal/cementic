@@ -2381,3 +2381,102 @@ class TestEveryPurgeReopensTheWork:
             if door == "prune_history":
                 # The prune must not have emptied the kept revision's chunking.
                 assert session.query(Chunk).filter_by(chunked_document_id=chunked_id).count() == 2
+
+
+class TestNoReadyTransitionMidScan:
+    """B5: draining the documents registered so far is not finishing the scan.
+
+    `revision_is_complete` counts what the watcher has registered, and the
+    watcher registers one file at a time, so a worker that drains the first N
+    files saw "everything extracted" and marked the revision ready while the
+    scan was still walking the tree.
+    """
+
+    @staticmethod
+    def _setup(temp_dir: Path):
+        from cementic.source_watcher import SourceWatcher
+
+        engine = create_engine("sqlite:///:memory:")
+        Base.metadata.create_all(engine)
+        session_factory = sessionmaker(bind=engine, expire_on_commit=False)
+        # chunks=0: one fully extracted and chunked document, so by the counts
+        # alone this revision is complete.
+        revision_id, _, _, _ = TestEveryPurgeReopensTheWork._seed(session_factory, chunks=0)
+        worker = TestEveryPurgeReopensTheWork._worker(temp_dir, session_factory)
+        config = Config()
+        config.source_watcher.state_path = temp_dir / "watcher.json"
+        config.source_watcher.log_file = temp_dir / "watcher.log"
+        watcher = SourceWatcher(config)
+        watcher.Session = session_factory
+        watcher.collection = "revert"
+        return session_factory, revision_id, worker, watcher
+
+    @staticmethod
+    def _status(session_factory, revision_id: int) -> str:
+        with session_factory() as session:
+            return session.get(PipelineRevision, revision_id).status
+
+    def test_the_worker_does_not_mark_ready_while_the_scan_runs(self, temp_dir: Path) -> None:
+        session_factory, revision_id, worker, watcher = self._setup(temp_dir)
+        root = temp_dir / "papers"
+        root.mkdir()
+        seen: list[str] = []
+
+        def mid_scan(directory: Path) -> None:
+            # The worker has drained the documents registered so far and polls.
+            with patch("cementic.pipeline_worker.ensure_revision_ann_index"):
+                worker._mark_revision_ready_if_complete(revision_id)
+            seen.append(self._status(session_factory, revision_id))
+
+        with (
+            patch("cementic.source_watcher.Observer"),
+            patch.object(watcher, "_scan_existing", side_effect=mid_scan),
+            patch.object(watcher, "_reconcile_deletions"),
+        ):
+            watcher._start_watcher([str(root)])
+
+        assert seen == ["building"], "ready was reached before the scan finished"
+        # Once the scan has finished, the same poll may mark it ready.
+        with patch("cementic.pipeline_worker.ensure_revision_ann_index"):
+            worker._mark_revision_ready_if_complete(revision_id)
+        assert self._status(session_factory, revision_id) == "ready"
+
+    def test_an_interrupted_scan_never_counts_as_finished(self, temp_dir: Path) -> None:
+        session_factory, revision_id, worker, watcher = self._setup(temp_dir)
+        root = temp_dir / "papers"
+        root.mkdir()
+
+        def stopped(directory: Path) -> None:
+            watcher._shutdown_event.set()
+
+        with (
+            patch("cementic.source_watcher.Observer"),
+            patch.object(watcher, "_scan_existing", side_effect=stopped),
+            patch.object(watcher, "_reconcile_deletions"),
+        ):
+            watcher._start_watcher([str(root)])
+        with patch("cementic.pipeline_worker.ensure_revision_ann_index"):
+            worker._mark_revision_ready_if_complete(revision_id)
+        assert self._status(session_factory, revision_id) == "building"
+
+    def test_a_database_with_no_scan_record_is_not_held_back(self, temp_dir: Path) -> None:
+        """An existing database has no marker row; that must not wedge it.
+
+        No row means no watcher has recorded a scan, which is every database
+        from before the marker existed: the old behaviour stands until the next
+        watcher start writes one.
+        """
+        session_factory, revision_id, worker, _ = self._setup(temp_dir)
+        with patch("cementic.pipeline_worker.ensure_revision_ann_index"):
+            worker._mark_revision_ready_if_complete(revision_id)
+        assert self._status(session_factory, revision_id) == "ready"
+
+    def test_counts_report_an_open_scan_and_completion_refuses_it(self, temp_dir: Path) -> None:
+        from dataclasses import replace
+
+        session_factory, revision_id, _, watcher = self._setup(temp_dir)
+        with session_factory() as session:
+            revision = session.get(PipelineRevision, revision_id)
+            counts = compute_revision_counts(session, "revert", revision)
+        assert revision_is_complete(counts) is True
+        assert revision_is_complete(replace(counts, scan_in_progress=True)) is False

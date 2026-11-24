@@ -24,11 +24,13 @@ from cementic.config import Config, get_config
 from cementic.db import (
     Chunk,
     ChunkedDocument,
+    CollectionScan,
     ExtractedDocument,
     SourceDocument,
     create_tables,
     get_engine,
     get_session_factory,
+    utc_now,
 )
 from cementic.extract import supported_extensions
 from cementic.redact import redact_text
@@ -682,6 +684,9 @@ class SourceWatcher:
         # after start(). Double-seeing a file during the overlap is handled by
         # _register_document's retry, not by idempotence: the insert races the
         # unique index on (collection, source_path).
+        # Recorded before the observer starts, so no document can be registered
+        # while the marker still says the previous scan finished.
+        self._record_scan(finished=False)
         observer.start()
         self.watcher = observer
         for root in self._watched_roots:
@@ -690,6 +695,24 @@ class SourceWatcher:
             self._scan_existing(root)
         if not self._shutdown_event.is_set():
             self._reconcile_deletions()
+        if not self._shutdown_event.is_set():
+            # Left open on a stop: a half-walked tree is not a finished scan.
+            self._record_scan(finished=True)
+
+    def _record_scan(self, *, finished: bool) -> None:
+        """Write the collection's scan marker (see `CollectionScan`)."""
+        with self.Session() as session:
+            row = session.get(CollectionScan, self.collection)
+            now = utc_now()
+            if finished:
+                if row is not None:
+                    row.completed_at = now
+            elif row is None:
+                session.add(CollectionScan(collection=self.collection, started_at=now))
+            else:
+                row.started_at = now
+                row.completed_at = None
+            session.commit()
 
     def _reconcile_deletions(self) -> None:
         """Retire documents that no longer name a file of their own.

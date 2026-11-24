@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 from cementic.config import Config
 from cementic.db import (
     Chunk,
+    CollectionScan,
     ExtractedDocument,
     PipelineRevision,
     SourceDocument,
@@ -171,6 +172,9 @@ def delete_collection_records(session: Session, collection: str) -> DeleteCollec
         .delete(synchronize_session=False)
     )
     session.query(PipelineRevision).filter_by(collection=collection).delete(
+        synchronize_session=False
+    )
+    session.query(CollectionScan).filter_by(collection=collection).delete(
         synchronize_session=False
     )
     deleted_docs = (
