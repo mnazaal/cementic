@@ -113,6 +113,9 @@ def _config_for(temp_dir: Path) -> Config:
     config.pipeline_worker.state_path = temp_dir / "pipeline_worker.json"
     config.source_watcher.log_file = temp_dir / "source_watcher.log"
     config.pipeline_worker.log_file = temp_dir / "pipeline_worker.log"
+    # Profile creation hashes the model, so the file must exist.
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    (temp_dir / "fake-model.gguf").write_bytes(b"fake-model")
     config.llama_cpp.model_path = str(temp_dir / "fake-model.gguf")
     config.llama_cpp.embedding_dim = len(FakeEmbeddingClient.TERMS)
     config.pipeline.embedding_provider = "llama-cpp"

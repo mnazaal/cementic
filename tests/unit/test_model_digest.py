@@ -139,14 +139,42 @@ class TestFingerprintNeverRaises:
         with patch("cementic.model_digest.sha256_file", side_effect=PermissionError("denied")):
             assert model_digest.model_content_digest(str(model_file)) is None
 
-    def test_uncreatable_data_dir_falls_back(self, tmp_path: Path) -> None:
+    def test_uncreatable_data_dir_does_not_change_the_digest(self, tmp_path: Path) -> None:
+        """A cache-lock failure is not the model's fault: same digest, no cache."""
         model_file = tmp_path / "embed.gguf"
         model_file.write_bytes(b"payload")
+        expected = model_digest.sha256_file(model_file)
 
         with patch(
             "cementic.model_digest.file_lock", side_effect=FileNotFoundError("no data dir")
         ):
-            assert model_digest.model_content_digest(str(model_file)) is None
+            assert model_digest.model_content_digest(str(model_file)) == expected
+
+    def test_read_only_data_dir_gives_the_same_digest_and_alias(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cementic.embedding_runtime import llama_cpp_runtime_fingerprint
+
+        model_file = tmp_path / "embed.gguf"
+        model_file.write_bytes(b"payload")
+        kwargs = dict(model_path=str(model_file), n_ctx=512, n_batch=512, n_gpu_layers=0)
+        writable = llama_cpp_runtime_fingerprint(**kwargs)
+
+        read_only = tmp_path / "ro"
+        read_only.mkdir()
+        read_only.chmod(0o500)
+        try:
+            monkeypatch.setattr(
+                model_digest, "cementic_data_dir", lambda *, ensure_exists=False: read_only / "d"
+            )
+            if os.access(read_only, os.W_OK):
+                pytest.skip("running as a user that ignores directory permissions")
+            assert llama_cpp_runtime_fingerprint(**kwargs) == writable
+            assert model_digest.model_content_digest(str(model_file)) == model_digest.sha256_file(
+                model_file
+            )
+        finally:
+            read_only.chmod(0o700)
 
     def test_runtime_fingerprint_survives_both(self, tmp_path: Path) -> None:
         from cementic.embedding_runtime import llama_cpp_runtime_fingerprint

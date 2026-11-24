@@ -1,5 +1,6 @@
 """Tests for profile fingerprinting and resolution helpers."""
 
+import pytest
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -207,10 +208,12 @@ class TestBuildChunkProfilePayload:
 class TestBuildEmbeddingProfilePayload:
     """Tests for build_embedding_profile_payload."""
 
-    def test_llama_cpp_provider(self) -> None:
+    def test_llama_cpp_provider(self, tmp_path) -> None:
+        model = tmp_path / "test.gguf"
+        model.write_bytes(b"weights")
         config = Config()
         config.pipeline.embedding_provider = "llama-cpp"
-        config.llama_cpp.model_path = "/models/test.gguf"
+        config.llama_cpp.model_path = str(model)
         config.llama_cpp.embedding_dim = 384
         config.llama_cpp.n_ctx = 512
         config.llama_cpp.n_gpu_layers = 0
@@ -366,10 +369,12 @@ class TestVerboseExcludedFromEmbeddingProfile:
     vector spaces. (Since 2026-10-22 it is out of the runtime alias too.)
     """
 
-    def test_toggling_verbose_does_not_change_the_fingerprint(self) -> None:
+    def test_toggling_verbose_does_not_change_the_fingerprint(self, tmp_path) -> None:
+        model = tmp_path / "test.gguf"
+        model.write_bytes(b"weights")
         config = Config()
         config.pipeline.embedding_provider = "llama-cpp"
-        config.llama_cpp.model_path = "/models/test.gguf"
+        config.llama_cpp.model_path = str(model)
         config.llama_cpp.verbose = False
         payload_off = build_embedding_profile_payload(config)
 
@@ -421,24 +426,30 @@ class TestTextPolicyIsPartOfEmbeddingIdentity:
     text_format_version exists to prevent.
     """
 
-    def _payload_for(self, model_path: str) -> dict:
+    @pytest.fixture(autouse=True)
+    def _models(self, tmp_path) -> None:
+        self.dir = tmp_path
+        for name in ("nomic-embed-text-v2-moe.Q8_0.gguf", "renamed.gguf"):
+            (tmp_path / name).write_bytes(b"weights")
+
+    def _payload_for(self, model_name: str) -> dict:
         config = Config()
-        config.llama_cpp.model_path = model_path
+        config.llama_cpp.model_path = str(self.dir / model_name)
         return build_embedding_profile_payload(config)
 
     def test_policy_is_recorded(self):
-        payload = self._payload_for("models/nomic-embed-text-v2-moe.Q8_0.gguf")
+        payload = self._payload_for("nomic-embed-text-v2-moe.Q8_0.gguf")
 
         assert payload["text_policy"] == "nomic-task-prefix"
 
     def test_a_renamed_model_records_a_different_policy(self):
-        payload = self._payload_for("models/renamed.gguf")
+        payload = self._payload_for("renamed.gguf")
 
         assert payload["text_policy"] == "plain"
 
     def test_a_rename_forks_the_profile_instead_of_sharing_its_table(self):
-        prefixed = self._payload_for("models/nomic-embed-text-v2-moe.Q8_0.gguf")
-        renamed = self._payload_for("models/renamed.gguf")
+        prefixed = self._payload_for("nomic-embed-text-v2-moe.Q8_0.gguf")
+        renamed = self._payload_for("renamed.gguf")
 
         assert _fingerprint(prefixed) != _fingerprint(renamed)
 

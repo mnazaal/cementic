@@ -172,6 +172,10 @@ def build_chunk_profile_payload(config: Config) -> dict[str, object]:
     }
 
 
+class EmbeddingModelUnreadableError(RuntimeError):
+    """The embedding model file cannot be read, so it has no content identity."""
+
+
 def _model_identity(spec: EmbeddingRuntimeSpec) -> tuple[str, str]:
     """(display label, content-identity digest) for one runtime spec's model.
 
@@ -194,12 +198,14 @@ def _model_identity(spec: EmbeddingRuntimeSpec) -> tuple[str, str]:
     resolved = resolve_llama_model_path(spec.model_identifier)
     digest = model_content_digest(spec.model_identifier)
     if digest is None:
-        # Not downloaded yet, or a test/fixture path that never exists.
-        # Falling back to the resolved path keeps profile construction from
-        # crashing; production never reaches this branch because the daemon
-        # serving this model must already be running by the time a profile
-        # is resolved for real indexing or search.
-        digest = f"unreadable:{resolved}"
+        # A placeholder identity here would be persisted: it forks the profile
+        # fingerprint, so the next revision supersedes the one building and
+        # re-embeds the collection. Only the daemon alias may fall back.
+        raise EmbeddingModelUnreadableError(
+            f"Cannot read the embedding model at {resolved}; refusing to "
+            "create or select an embedding profile without its content digest. "
+            "Fix the file's path or permissions and retry."
+        )
     return resolved.name, digest
 
 

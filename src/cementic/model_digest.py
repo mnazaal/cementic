@@ -62,6 +62,15 @@ def _save_cache(path: Path, cache: dict[str, str]) -> None:
         _logger.debug("Could not write model digest cache to %s", path, exc_info=True)
 
 
+def _hash_model(resolved: Path) -> str | None:
+    """Hash the model itself; None when its bytes cannot be read."""
+    try:
+        return sha256_file(resolved)
+    except OSError:
+        _logger.debug("Could not read model %s", resolved, exc_info=True)
+        return None
+
+
 def model_content_digest(model_path: str) -> str | None:
     """SHA-256 hex digest of the resolved model file, or None if unreadable.
 
@@ -69,12 +78,17 @@ def model_content_digest(model_path: str) -> str | None:
     (``resolve_llama_model_path``), so the digest always describes the file
     that will actually be served.
 
-    Returns None -- never raises -- when the file does not exist, cannot be
-    stat'd, cannot be read or hashed, or the cache lock cannot be taken, so
-    profile construction never crashes on a model that has not been downloaded
-    yet (e.g. `cementic config show` before `start`). The real indexing/search
-    call sites only reach here once the embedding daemon is already serving the
-    model, so the file is always present there.
+    Returns None -- never raises -- only when the *model* cannot be stat'd or
+    read (missing, not downloaded yet, permission denied). A failure of the
+    digest cache (lock cannot be taken, file unwritable, e.g. a read-only data
+    directory) never changes the answer: the file is hashed without the cache,
+    which is slower but identical, because the cache is never a source of
+    truth.
+
+    A None result must not be turned into a persisted identity. The daemon
+    alias (``embedding_runtime.llama_cpp_runtime_fingerprint``) substitutes a
+    placeholder so ``doctor``/``status`` keep working; profile construction
+    (``profiles._model_identity``) refuses instead.
     """
     resolved = resolve_llama_model_path(model_path)
     try:
@@ -91,12 +105,13 @@ def model_content_digest(model_path: str) -> str | None:
             cached = cache.get(key)
             if cached is not None:
                 return cached
-            digest = sha256_file(resolved)
-            cache[key] = digest
-            _save_cache(cache_file, cache)
+            digest = _hash_model(resolved)
+            if digest is not None:
+                cache[key] = digest
+                _save_cache(cache_file, cache)
             return digest
     except OSError:
-        # Unreadable model (stat worked, read did not) or an uncreatable data
-        # directory for the lock: callers fall back as for a missing file.
-        _logger.debug("Could not digest %s", resolved, exc_info=True)
-        return None
+        # The cache lock (or its directory) is unavailable: not the model's
+        # fault, so the digest must not change -- hash without the cache.
+        _logger.debug("Digest cache unavailable for %s", resolved, exc_info=True)
+        return _hash_model(resolved)

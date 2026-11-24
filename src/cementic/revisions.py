@@ -239,9 +239,11 @@ def get_target_revision(
     provider: EmbeddingProvider | None = None,
 ) -> PipelineRevision:
     """Return the revision matching current config, creating it if needed."""
+    # Embedding profile first: it raises when the model is unreadable, and no
+    # profile row should be written before that refusal.
+    embedding_profile = get_or_create_embedding_profile(session, config, provider)
     extractor_profile = get_or_create_extractor_profile(session, config)
     chunk_profile = get_or_create_chunk_profile(session, config)
-    embedding_profile = get_or_create_embedding_profile(session, config, provider)
     if provider is not None:
         # Lazy and once per profile: profiles built before canaries existed --
         # including the one behind the live corpus -- gain one here rather than
