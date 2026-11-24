@@ -49,8 +49,10 @@ A command that returns a list prints JSONL: one compact JSON object per line,
 nothing at all when the list is empty. A command that returns one object prints
 one indented JSON document. So `search --json`, `chunk`, `collection list --json`
 and `collection revisions --json` print JSONL, while `status --json`,
-`doctor --json` and `embedding status --json` print one document. A failure
-prints nothing on stdout; the message goes to stderr. A test compares the shapes
+`doctor --json` and `embedding status --json` print one document. A failing command
+sends its error message to stderr. `status` and `doctor` still print their report
+on stdout before exiting 1, and a streaming command (`search --json`, `embed`)
+that fails midway has already printed the records before the failure. A test compares the shapes
 below against what the commands build, so a key added or renamed without
 updating this page fails the suite.
 

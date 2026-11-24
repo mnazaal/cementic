@@ -115,6 +115,8 @@ class StateManager:
         # state file as "nothing recorded" rather than an error.
         try:
             data = json.loads(self.state_path.read_text(encoding="utf-8"))
+            if not isinstance(data, dict):
+                return WorkerState()
             return WorkerState.from_dict(data)
         except (ValueError, OSError, KeyError, TypeError):
             return WorkerState()

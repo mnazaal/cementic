@@ -32,7 +32,7 @@ uv run cementic search "vector database design" -c research
 ```
 
 The first command that needs embeddings downloads the default model when it is
-missing. It is about 2 GB. Start the embedding service in advance if you prefer
+missing. It is about 0.5 GB. Start the embedding service in advance if you prefer
 not to wait for the first search:
 
 ```bash

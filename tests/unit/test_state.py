@@ -295,6 +295,16 @@ class TestStateManager:
         assert isinstance(state, WorkerState)
         assert state.daemon_state == DaemonState.STOPPED
 
+    @pytest.mark.parametrize("payload", ["[]", "null", "3", '"x"'])
+    def test_load_valid_json_that_is_not_an_object(self, temp_dir, payload):
+        """Valid JSON of another type is an unusable file, not a crash."""
+        state_path = temp_dir / "state.json"
+        state_path.write_text(payload)
+
+        state = StateManager(state_path).load()
+
+        assert state.daemon_state == DaemonState.STOPPED
+
     def test_load_legacy_json_string_daemon_state(self, temp_dir):
         """Loading old JSON with string daemon_state should return enum type."""
         state_path = temp_dir / "state.json"

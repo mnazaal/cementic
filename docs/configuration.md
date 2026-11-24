@@ -70,8 +70,12 @@ the same index method.
 ## Choose an embedding runtime
 
 cementic starts `llama-server` on demand by default. Point the generated config
-at a GPU-capable build when you have one, or disable autostart to use an
-externally managed OpenAI-compatible embedding server.
+at a GPU-capable build when you have one, or set `llama_cpp.daemon_command` to
+launch your own server build. cementic accepts a server only when its
+`/v1/models` id equals the runtime alias cementic computes, so a server started
+by other means must be launched with that alias (`--alias`); no command prints
+the alias yet. Disabling autostart alone does not make an arbitrary
+OpenAI-compatible server usable.
 
 Auto-download only writes a missing model below cementic's user-data directory.
 If you configure another location, place the model file there before running
