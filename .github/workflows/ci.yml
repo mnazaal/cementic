@@ -35,7 +35,7 @@ jobs:
           python-version: ${{ matrix.python-version }}
 
       - name: Install dependencies
-        run: uv sync --locked --extra dev
+        run: uv sync --locked
 
       - name: Lint
         run: uv run ruff check src/ tests/ scripts/
@@ -58,7 +58,7 @@ jobs:
           python-version: "3.13"
 
       - name: Install dependencies
-        run: uv sync --locked --extra dev
+        run: uv sync --locked
 
       - name: SQLite-backed integration tests
         run: uv run pytest tests/integration -m "not pg"
@@ -100,6 +100,20 @@ jobs:
           assert "database not reachable" in result.stderr, result.stderr
           PY
 
+      # The unit tests import from src/, so nothing else exercises the packaged
+      # files: `config init` reads the bundled default config and `init
+      # postgres` copies templates/postgres/ (including the force-included
+      # .env) out of the wheel. Neither command touches a database.
+      - name: Smoke-test config init and init postgres from the wheel
+        run: |
+          scratch="$(mktemp -d)"
+          .smoke-venv/bin/cementic --help
+          CEMENTIC_CONFIG="$scratch/config/cementic.toml" .smoke-venv/bin/cementic config init
+          test -s "$scratch/config/cementic.toml"
+          .smoke-venv/bin/cementic init postgres "$scratch/pg"
+          test -f "$scratch/pg/compose.yml"
+          test -f "$scratch/pg/.env"
+
   integration-pg:
     runs-on: ubuntu-latest
     steps:
@@ -112,7 +126,7 @@ jobs:
           python-version: "3.13"
 
       - name: Install dependencies
-        run: uv sync --locked --extra dev
+        run: uv sync --locked
 
       - name: PostgreSQL-backed integration tests
         # The pg_engine fixture builds and brings up compose.yml's

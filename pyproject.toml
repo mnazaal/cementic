@@ -72,7 +72,10 @@ dependencies = [
     # source build on any platform without a prebuilt wheel.
 ]
 
-[project.optional-dependencies]
+[dependency-groups]
+# A group, not an extra: `uv sync` and `uv run` install the `dev` group by
+# default, so a bare `uv sync` keeps ruff/mypy/pytest. In an extra it uninstalled
+# them. Groups are not published in the wheel metadata.
 dev = [
     "pytest>=8.0",
     "pytest-cov>=6.0",

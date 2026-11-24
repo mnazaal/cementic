@@ -14,10 +14,11 @@
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
-# `--extra dev` on every `uv run`: ruff, mypy and pytest live in that extra, so
-# a plain `uv run` in a fresh checkout syncs an environment without them. The
-# tools then resolve from whatever is on PATH, or not at all, and the pg probe
-# fails to import its conftest and reports PostgreSQL as missing (2026-10-22).
+# ruff, mypy and pytest live in the `dev` dependency group, which `uv run` and
+# `uv sync` install by default. They used to sit in an extra, which a plain
+# `uv run` did not install and a bare `uv sync` removed; the pg probe then
+# failed to import its conftest and reported PostgreSQL as missing (2026-10-22).
+# Do not pass `--no-dev` here.
 
 log_dir="${TMPDIR:-/tmp}/cementic-check.$$"
 mkdir -p "$log_dir"
@@ -37,7 +38,7 @@ run() {
 }
 
 postgres_reachable() {
-    uv run --extra dev python - <<'PY'
+    uv run python - <<'PY'
 import sys
 try:
     from tests.integration.conftest import _server_reachable
@@ -51,13 +52,13 @@ PY
 # without the lock. A version bump that skips `uv lock` otherwise reaches local
 # tests but fails the locked jobs -- which is how v0.2.0 shipped red.
 run lockfile          uv lock --check
-run ruff              uv run --extra dev ruff check src/ tests/ scripts/
-run mypy              uv run --extra dev mypy src/ scripts/
-run unit              uv run --extra dev pytest tests/unit -q
-run integration       uv run --extra dev pytest tests/integration -m "not pg" -q
+run ruff              uv run ruff check src/ tests/ scripts/
+run mypy              uv run mypy src/ scripts/
+run unit              uv run pytest tests/unit -q
+run integration       uv run pytest tests/integration -m "not pg" -q
 
 if postgres_reachable; then
-    run integration-pg uv run --extra dev pytest tests/integration -m pg -q
+    run integration-pg uv run pytest tests/integration -m pg -q
 else
     printf '%-28s%s\n' "integration-pg" "SKIPPED (no PostgreSQL reachable)"
     skipped+=("integration-pg")

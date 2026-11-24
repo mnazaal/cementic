@@ -3,7 +3,7 @@
 ## Development setup
 
 ```bash
-uv sync --extra dev
+uv sync
 ```
 
 Use the generated local Postgres setup from the [README](README.md) for
@@ -15,7 +15,7 @@ PostgreSQL-backed integration tests.
 ./scripts/check.sh
 ```
 
-The script runs project tools through `uv run --extra dev`, so it works in a
+The script runs project tools through `uv run`, which installs the `dev` dependency group, so it works in a
 fresh checkout without activating `.venv` or syncing first. It checks the lockfile, Ruff, mypy, unit tests, and
 non-PostgreSQL integration tests. It also runs PostgreSQL integration tests when a suitable database is
 reachable. A missing PostgreSQL gate is reported as skipped, not passed.
