@@ -95,7 +95,9 @@ can survive logout and reboot.
 For long indexing jobs, use the user systemd unit
 [`packaging/systemd/cementic@.service`](../packaging/systemd/cementic@.service).
 One instance per collection runs the watcher, the pipeline worker and an
-embedding-server health check, and restarts all three together. It needs
-`llama_cpp.daemon_autostart = true` and a checkout with a built `.venv`; the
-install steps are in the unit's header. Do not run it alongside `cementic start`;
+embedding-server health check, and restarts all three together. It needs a
+checkout with a built `.venv` and the default `llama_cpp.daemon_autostart = true`
+(the worker spawns the server and the unit restarts it); set it false only if
+the server runs under its own unit. The health check reads `llama_cpp.daemon_port`
+from the config. The install steps are in the unit's header. Do not run it alongside `cementic start`;
 each collection permits only one worker.

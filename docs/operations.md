@@ -22,7 +22,7 @@ Promotion refuses a revision with failed documents or chunks unless you pass
 | `cementic doctor` | Read-only checks for configuration, Postgres, embeddings, and index health. |
 | `cementic collection promote NAME` | Make a ready revision active. |
 | `cementic collection reindex NAME` | Rebuild vector and full-text indexes after index-setting changes. It does not re-embed documents. |
-| `cementic stop` | Stop the watcher and pipeline worker; Postgres remains running. |
+| `cementic stop` | Stop the watcher and pipeline worker. The embedding daemon (llama-server) and Postgres keep running; stop the daemon with `cementic embedding stop`. |
 
 A failed document does not stop the rest of a build. The next `cementic start`
 retries it. One exception is a document the worker died on three times in a row,

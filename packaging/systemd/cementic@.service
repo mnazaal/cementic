@@ -1,7 +1,8 @@
 # cementic indexing for one collection: source watcher, pipeline worker and an
 # embedding wedge check, in one unit. Needs llama_cpp.daemon_autostart = true in
-# the cementic config: the worker spawns the embedding server, and the unit
-# restarts it by restarting itself.
+# the cementic config (the default): the worker spawns the embedding server, and
+# the unit restarts it by restarting itself. Set it false only when the server
+# runs under its own unit; the wedge check below then cannot restart that server.
 #
 # Install (one instance per collection; %i is the collection name):
 #
@@ -32,8 +33,10 @@
 # first curl is why an idle machine is left alone: the server is on demand, so a
 # closed port means no embedding work, not a wedge. /embedding is llama.cpp's
 # native endpoint and takes no model id, so nothing here goes stale when the
-# embedding fingerprint changes. The port below is the default; change it if
-# llama_cpp.port is not 11555.
+# embedding fingerprint changes. The port is read from the effective config
+# (`cementic config show`, key llama_cpp.daemon_port) when the unit starts, so
+# it follows the config file and CEMENTIC_LLAMA_DAEMON_PORT; the host is assumed
+# to be 127.0.0.1. `$$` is systemd's escape for a literal `$`.
 #
 # /bin/bash, not /bin/sh: dash has no `wait -n`.
 #
@@ -78,9 +81,11 @@ EnvironmentFile=%h/.config/cementic/%i.dirs.env
 ExecStart=/bin/bash -c '\
   "$CEMENTIC_CHECKOUT/.venv/bin/cementic" run watcher --collection %i -- $CEMENTIC_DIRS & \
   "$CEMENTIC_CHECKOUT/.venv/bin/cementic" run worker --collection %i & \
+  PORT=$$("$CEMENTIC_CHECKOUT/.venv/bin/cementic" config show | grep daemon_port | tr -dc 0-9); \
+  test -n "$$PORT" || exit 1; \
   while sleep 300; do \
-    curl -sf -m 5 -o /dev/null http://127.0.0.1:11555/health || continue; \
-    curl -sf -m 90 -o /dev/null -X POST http://127.0.0.1:11555/embedding \
+    curl -sf -m 5 -o /dev/null http://127.0.0.1:$$PORT/health || continue; \
+    curl -sf -m 90 -o /dev/null -X POST http://127.0.0.1:$$PORT/embedding \
       -H "Content-Type: application/json" -d "{\\"content\\":\\"ping\\"}" || break; \
   done & \
   wait -n'
