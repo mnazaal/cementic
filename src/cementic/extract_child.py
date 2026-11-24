@@ -17,6 +17,7 @@ import os
 import resource
 import signal
 import sys
+from types import SimpleNamespace
 
 
 def _tie_to_parent(parent_pid: int) -> None:
@@ -47,13 +48,17 @@ def main(argv: list[str]) -> int:
     reply = os.fdopen(os.dup(1), "w", encoding="utf-8")
     os.dup2(2, 1)
     # Limit before the heavy imports, so the parser runs under it.
-    from cementic.config import Config, ExtractionConfig
+    from cementic.config import ExtractionConfig
 
     extraction = ExtractionConfig.model_validate_json(extraction_json)
     if extraction.memory_limit_mb:
         limit = extraction.memory_limit_mb * 1024 * 1024
         resource.setrlimit(resource.RLIMIT_AS, (limit, limit))
-    config = Config(extraction=extraction)
+    # Not `Config(...)`: that loads every other section from the cwd's
+    # `cementic.toml` and the user config dir, which this child must not read
+    # (the allow-list dropped CEMENTIC_CONFIG, so it could load a different file
+    # than the parent and die on it). Extractors read only `config.extraction`.
+    config = SimpleNamespace(extraction=extraction)
     for line in sys.stdin.buffer:
         request = json.loads(line)
         try:

@@ -251,6 +251,19 @@ def test_the_child_does_not_inherit_the_workers_secrets(monkeypatch):
     assert "PATH" in names  # what a parser needs still arrives
 
 
+def test_the_child_reads_no_config_file(monkeypatch, tmp_path):
+    """The allow-list drops CEMENTIC_CONFIG, so a stale `cementic.toml` in the cwd
+    must not be what the child loads (it would fail every PDF on `extra_forbidden`)."""
+    valid = tmp_path / "valid.toml"
+    valid.write_text("[extraction]\nuse_ocr = false\n")
+    (tmp_path / "cementic.toml").write_text("[database]\nno_such_field = 1\n")
+    monkeypatch.setenv("CEMENTIC_CONFIG", str(valid))
+    monkeypatch.chdir(tmp_path)
+    config = use_extractor(monkeypatch, "dies_on_a")
+
+    assert extract_document("/x/b.pdf", config) == "extracted fine"
+
+
 def test_a_timeout_kills_the_childs_whole_process_group(monkeypatch, tmp_path):
     config = use_extractor(monkeypatch, "spawn_grandchild_then_hang")
     config.extraction.timeout_seconds = 2
