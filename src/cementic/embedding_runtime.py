@@ -24,6 +24,7 @@ from cementic.embedding_text import (
     format_query_text_for_model,
 )
 from cementic.filelock import file_lock
+from cementic.model_digest import model_content_digest
 from cementic.supervisor import (
     find_pids_by_cmdline,
     is_managed_process_alive,
@@ -139,7 +140,8 @@ def llama_cpp_runtime_fingerprint(
     """Return a stable fingerprint for one llama.cpp runtime config.
 
     Only fields that change what the server loads belong here -- they become the
-    served model's alias, so a difference forces a daemon restart.
+    served model's alias, so a difference forces a daemon restart. The model is
+    identified by content digest, not path (see ``cementic.model_digest``).
 
     ``verbose`` is deliberately excluded (2026-10-22). It only sets the log
     level, and two processes whose configs differ only in it -- a shell with
@@ -159,7 +161,14 @@ def llama_cpp_runtime_fingerprint(
     """
     payload = json.dumps(
         {
-            "model_path": str(resolve_llama_model_path(model_path)),
+            # The model's bytes, not its path: a GGUF replaced in place must move
+            # the alias (else the old daemon is accepted while the profile claims
+            # the new bytes), and the same bytes at a new path must not. The
+            # digest is cached by (path, size, mtime), so only the first call
+            # after a change pays the hash. A file that cannot be read falls
+            # back to its resolved path so building a fingerprint never raises.
+            "model_digest": model_content_digest(model_path)
+            or f"unreadable:{resolve_llama_model_path(model_path)}",
             "n_ctx": n_ctx,
             # The batch size caps how many tokens the server will embed per
             # input, so it changes what the daemon does. It also has to be in

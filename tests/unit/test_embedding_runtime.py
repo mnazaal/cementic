@@ -1502,10 +1502,31 @@ class TestRuntimeFingerprintIsPathSpellingIndependent:
 
         assert relative == absolute
 
+    def test_model_replaced_in_place_gets_a_new_alias(self, tmp_path) -> None:
+        """Same path, new bytes: the old daemon must not be accepted (D3)."""
+        model = tmp_path / "m.gguf"
+        kwargs = {"model_path": str(model), "n_ctx": 512, "n_batch": 512, "n_gpu_layers": 0}
+        model.write_bytes(b"weights-v1")
+        before = llama_cpp_runtime_fingerprint(**kwargs)
+        model.write_bytes(b"weights-v2-longer")
+        assert llama_cpp_runtime_fingerprint(**kwargs) != before
+
+    def test_relocated_identical_model_keeps_its_alias(self, tmp_path) -> None:
+        (tmp_path / "a").mkdir()
+        (tmp_path / "b").mkdir()
+        (tmp_path / "a" / "m.gguf").write_bytes(b"same-bytes")
+        (tmp_path / "b" / "other-name.gguf").write_bytes(b"same-bytes")
+        kwargs = {"n_ctx": 512, "n_batch": 512, "n_gpu_layers": 0}
+        assert llama_cpp_runtime_fingerprint(
+            model_path=str(tmp_path / "a" / "m.gguf"), **kwargs
+        ) == llama_cpp_runtime_fingerprint(
+            model_path=str(tmp_path / "b" / "other-name.gguf"), **kwargs
+        )
+
     def test_genuinely_different_models_still_differ(self, tmp_path, monkeypatch) -> None:
         for name in ("a.gguf", "b.gguf"):
             (tmp_path / "models").mkdir(exist_ok=True)
-            (tmp_path / "models" / name).write_bytes(b"gguf")
+            (tmp_path / "models" / name).write_bytes(name.encode())
         monkeypatch.chdir(tmp_path)
 
         kwargs = {"n_ctx": 512, "n_batch": 512, "n_gpu_layers": 0}
