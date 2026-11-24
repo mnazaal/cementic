@@ -13,7 +13,9 @@ them.
 **State:** branch `pi/audit-handoff`, not merged or pushed. Baseline `main` @
 `ad9bf86`. *Corrected 2026-11-24:* later work is on `claude/audit-wave-c`,
 stacked on `pi/audit-handoff` (the commit hook confines agent commits to
-`claude/*`), holding C1-C3, C10, C11, D1, D2 and A5's measurement. Commits so far: the order replacement, the harness repair, and the
+`claude/*`), holding C1-C3, C10, C11, D1, D2 and A5's measurement.
+*Corrected 2026-11-25:* everything since is on `claude/audit-integration`,
+stacked on `claude/audit-wave-c`; see **Lane outcomes, 2026-11-25** below. Commits so far: the order replacement, the harness repair, and the
 pipeline invalidation repair. No production database writes, model downloads,
 rebuilds or service changes.
 
@@ -248,6 +250,40 @@ PostgreSQL, or the daemon plus the live corpus.
   reviewed lane branches are rebased in order onto `claude/audit-integration`,
   and the user runs one gate and one `--ff-only` merge.
 
+### 2026-11-25 — decisions made inside the lanes (agent-decided)
+
+Each was taken to close an item's end condition, and an independent review
+read each one. None was put to the user, because each had a default the
+user would most likely have accepted.
+
+- **`--check` gates on doctor's whole embedding runtime** (model, daemon,
+  server binary), not the daemon alone. A missing model therefore fails
+  `--check` even while a daemon serves; doctor fails it too.
+- **The command extractor keeps the worker's environment minus
+  `CEMENTIC_DB_*`**, because operators' wrapper scripts may need the rest. The
+  PDF child gets an allow-list.
+- **No `PR_SET_DUMPABLE`.** The environment scrub stops accidental leaks, not a
+  compromised parser running as the same user; the docs say so.
+- **SQLSTATE class 53 (out of resources) backs off** rather than failing the
+  document. Transient errors (40001, 40P01, 57014, 55P03) are retried for up to
+  3 claims, reusing `MAX_INTERRUPTED_CLAIMS`.
+- **The B5 marker is its own table**, not a column. A column on
+  `pipeline_revisions` would miss revisions created after the watcher stamped
+  it. The marker gates only the worker's building→ready step.
+- **The vector-table drop is bounded (5 s `lock_timeout`), and every cleanup
+  sweeps.** An unbounded drop held the profile lock and queued readers behind
+  it. A bounded drop without a sweep orphaned tables, which the round-2 repair
+  did until review caught it.
+- **Profile identity refuses an existing model it cannot read.** A
+  missing model keeps the old `unreadable:<path>` placeholder. Persisting a
+  placeholder for a model that exists would fork the profile and re-embed. The
+  first version of this refusal also refused missing models and broke six PG
+  tests; it was narrowed.
+- **`fused_score` not added and `EmbeddingProvider` kept** (D13), both
+  recommended by the lane with evidence: the first would change the documented
+  search JSON shape for a display nicety, and the second has three test fakes
+  and seven annotated modules.
+
 ## Design principles
 
 - **Functional core, imperative shell.** Pure functions (extraction, chunking,
@@ -383,10 +419,13 @@ order, because two of them answered "what next" twice.
 
 **Status.** Wave A's measurement controls and all of Wave B are repaired and
 verified (A1, A2, B1-B4). On 2026-11-24, C1, C2, C3, C10, C11, D1 and D2 were
-repaired on `claude/audit-wave-c` and reviewed by an independent pass. One
-follow-up fix (`24afe1e`, under C11) is pending review. A5 was measured but not
-decided (see the decision log for why these ran before A3). Everything else
-below is unrepaired. The 2026-11-17
+repaired on `claude/audit-wave-c` and reviewed by an independent pass; the
+follow-up `24afe1e` was reviewed too (its one finding fixed in `b93402e`).
+A5 was measured but not decided. On 2026-11-24/25 parallel agent lanes
+repaired C4-C6, C8, C9, the C11 residual, B2b, B4, B5, D3-D5, D7, D8, D11,
+D12 and parts of D6 and D13 on `claude/audit-integration`; see **Lane
+outcomes, 2026-11-25**. Still open: Wave A from A3 on (deferred by the user),
+C7, D9, D10, and the D6/D13 remainders listed there. The 2026-11-17
 audit re-ran the 11-13 findings on a green baseline, confirmed six of them,
 refuted two, and added seven; a 2026-11-18 second pass swept the six lane
 reports against this list and found **fifteen findings that had never been
@@ -422,6 +461,73 @@ Artifacts: `~/.cache/cementic-audit-2026-11-17/` — `probe_edit_revert.py`,
 `tests-nopg.log`, `tests-pg.log`, `coverage.log`, `doctor.json`, `status.json`,
 `ablate-with-baselines.log`, `tests-nopg-after-a1a2.log`.
 Source references are at `ad9bf86`; follow the named symbols when lines move.
+
+### Lane outcomes, 2026-11-25
+
+Branch `claude/audit-integration` @ `3dce0b3` (44 commits on `16c15b1`). Every
+item was written test-first in its own lane and reviewed by a pass that did not
+write it. Each review's findings were repaired and the repairs reviewed again,
+three rounds in all. Gate at `3dce0b3`, run by the agent: ruff and mypy clean
+(`src/`, `scripts/`); unit 1591 passed; integration non-pg 99 passed; pg 92
+passed, none skipped. Persisted identity is unchanged for a readable model:
+the extractor, chunk, embedding and embedding-runtime profile fingerprints for
+the real config match `main` (`ad9bf86`); executed, digest cache redirected to
+a scratch dir. So deploying re-extracts, re-chunks and re-embeds nothing.
+
+| Item | Outcome | Commits |
+| --- | --- | --- |
+| C4 | DB-URL and driver-error credentials masked at every rendering site, worker logs included | `b9e3174` `74bc23f` `a2be649` |
+| C5 | `status` adds `daemon_managed`; "healthy" no longer contradicts "stopped" | `4f4234d` `09a42a2` |
+| C8 | `embedding status --check` exits 1 when doctor fails model, daemon or binary | `c8fc810` `15a1cb8` |
+| C11 residual | doctor names the probe that failed after `SELECT 1` | `ceb5466` `61f6454` `baabb5d` |
+| C6 | per-profile advisory lock plus recheck; drop bounded by `lock_timeout`; every cleanup sweeps unreferenced vector tables; doctor warns on orphans | `8fd39d1` `393d802` `a269f17` |
+| C9 | systemd unit reads the configured port before backgrounding; docs name what `stop` leaves | `8dd020a` `3f23c5b` |
+| B4 | the four other delete paths are walked by a test | `b7822d7` |
+| B5 | `collection_scans` marker holds the building→ready transition mid-scan; promote ignores it; a missing table reads as no scan | `67558ef` `9ce294e` |
+| B2b | write-back errors classified by SQLSTATE; transient ones retried (3 claims), connectivity and class-53 errors back off; `status` shows `retried` | `9c02715` `9ce294e` |
+| D3 | daemon alias follows the model's bytes; cache failures never change a digest; an existing unreadable model is refused for profile identity | `c48f9f5` `a421ab8` `8ec3ea3` `34ec64b` `5246869` `3dce0b3` |
+| D4 | `stop` holds `start.lock`, and says so while waiting | `5ed4aed` `0c19096` |
+| D5 | extraction child: allow-listed env, own session, group kill; reads no config file | `0b02c75` `c53129f` `b3a54af` `7088905` |
+| D7 | dev tools in a dependency group; wheel CI job runs `config init` and `init postgres` | `22d7612` |
+| D8 | 8 PostgreSQL cascade tests, one per chunk-delete path | `e6e889b` |
+| D11 | 512 MiB cap at every read; command extractor under `RLIMIT_AS`/`RLIMIT_FSIZE`, minus `CEMENTIC_DB_*` | `889215f` `0c19096` `5e4fa5d` |
+| D12 | `scripts/` in ruff and mypy; the measurement scripts are AST-identical apart from annotations | `169cfdb` |
+| D6 (part) | non-object state file, three doc claims fixed | `a1cded9` |
+| D13 (part) | one version source, 3.13 classifier, promote drains deferred cleanup on any failure | `e3235d0` `597daa9` `cea4bf3` |
+
+**Still open from D6 and D13** (verified, not fixed): `source_watcher` keeps
+its own file hasher; `len(files) == limit` reports truncation at exactly `limit`
+files (`render.py`); the digest cache keeps a stale digest for a same-size
+replacement with restored mtime, and is never pruned; README and
+`docs/setup.md` disagree on whether the repository is private;
+`scripts/measure_chunk_context_fit.py` probably calls a llama-cpp-python route
+(`/extras/tokenize/count`) that llama-server lacks (unrun, no daemon); 3.12 runs
+only the unit job in CI.
+
+**Deploy consequences** (all executed or read in review):
+- Every running daemon's alias changes once, so the next start restarts it.
+  Stop and start the whole service together, so that an old worker and a new
+  daemon do not keep restarting each other.
+- The next start runs `CREATE TABLE collection_scans`; nothing else changes
+  in the schema.
+- The first `collection promote` or `collection remove` after deploy drops
+  every vector table already orphaned in the live database. Run `doctor` first
+  to see them listed under `orphan_vector_tables`.
+- `extraction.memory_limit_mb` (default 8192) now also caps `command`
+  extractors' address space. A JVM run with a large `-Xmx` needs a higher
+  value or 0.
+- The PG sandbox exclusion `uv run --extra dev pytest -m pg *` stops matching,
+  because the `dev` extra is gone; the replacement is `uv run pytest -m pg *`.
+
+**Accepted residuals:** `redact_text` leaves `password=a&b=X` (read as two
+keys) and a bare `token=`/`Bearer` value, and backtracks quadratically on a
+very long run of quotes or `)` after a key. The extraction child can still read
+`/proc/<ppid>/environ` as the same user (no `PR_SET_DUMPABLE`). Statement
+timeouts are retried at full cost up to the cap. A model path that is already gone when
+identity is computed (a dangling symlink, or the gap in a delete-then-write
+replacement) still reads as "not downloaded" and gets the `unreadable:`
+placeholder, as on `main`; refusing it would break the fixture-driven PG
+tests that rely on a missing model.
 
 ### Wave A — repair the retrieval evidence before reading it
 
