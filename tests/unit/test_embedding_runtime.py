@@ -1669,6 +1669,17 @@ class TestOverBudgetChunksAreSplitNotDropped:
         assert pooled is not None
         assert round(sum(v * v for v in pooled) ** 0.5, 6) == 1.0
 
+    def test_the_pooled_vector_is_the_normalised_mean_of_the_pieces(self) -> None:
+        """D2: the value, not just the norm. Inputs chosen so the candidate
+        formulas disagree: mean then normalise gives (2, 1)/sqrt(5); max-pool
+        gives (3, 2)/sqrt(13); first piece gives (1, 0); normalise-then-mean
+        gives about (0.851, 0.526). Hand-computed, not read off the code."""
+        client = self._client()
+        with patch.object(client, "_split_to_fit", return_value=["a", "b"]):
+            with patch.object(client, "_embed_inputs", return_value=[[3.0, 0.0], [1.0, 2.0]]):
+                pooled = client._embed_by_splitting("anything")
+        assert pooled == pytest.approx([2 / 5**0.5, 1 / 5**0.5])
+
     def test_a_piece_that_cannot_embed_yields_none(self) -> None:
         """Failure here leaves the chunk terminal, which is where it already
         was -- it must not raise out of a batch of healthy chunks."""
