@@ -31,6 +31,12 @@ from cementic.db import (
     SourceDocument,
 )
 from cementic.pipeline_worker import PipelineCounts
+from cementic.revisions import (
+    _defer_artifact_removal,
+    _defer_vector_table_drops,
+    drain_pending_artifact_removals,
+    drain_pending_vector_table_drops,
+)
 
 
 def _counts(*, extracted_failed: int = 0, chunked_failed: int = 0, failed_embeddings: int = 0):
@@ -632,6 +638,32 @@ class TestPromoteReadyRevision:
         assert outcome.status == "lost_race"
         assert session.rollback.called
         mock_promote.assert_called_once_with(session, "c1", revision)
+
+    @patch("cementic.collections.compute_revision_counts", return_value=_counts())
+    @patch("cementic.collections.promote_revision")
+    def test_a_lost_race_discards_the_deferred_cleanup_it_queued(
+        self, mock_promote: MagicMock, _mock_counts: MagicMock, _config: Config
+    ) -> None:
+        """Regression: ``session.info`` survives ``rollback()``, so artifact paths
+        and vector tables queued by the rolled-back promote stayed pending, and a
+        second promote in the same session would have deleted live files."""
+        session = MagicMock()
+        session.info = {}
+        revision = MagicMock(spec=PipelineRevision)
+        session.query().filter_by().order_by().first.return_value = revision
+
+        def _queue_cleanup(*_args: object) -> None:
+            _defer_artifact_removal(session, ["/artifacts/live.bin"])
+            _defer_vector_table_drops(session, [7])
+
+        mock_promote.side_effect = _queue_cleanup
+        session.commit.side_effect = IntegrityError(
+            "stmt", {}, Exception('violates unique constraint "uq_pipeline_revisions_one_active"')
+        )
+
+        assert promote_ready_revision(session, "c1", config=_config).status == "lost_race"
+        assert drain_pending_artifact_removals(session) == []
+        assert drain_pending_vector_table_drops(session) == []
 
     @patch("cementic.collections.compute_revision_counts", return_value=_counts())
     @patch("cementic.collections.promote_revision")

@@ -324,6 +324,11 @@ def promote_ready_revision(
         # fault -- reporting it as one dumped the raw database unique-violation,
         # SQL and parameters included, at the user.
         session.rollback()
+        # ``session.info`` outlives a rollback. What the rolled-back promote
+        # queued names rows that still exist, so left pending a later promote
+        # on this session would unlink their artifacts.
+        drain_pending_artifact_removals(session)
+        drain_pending_vector_table_drops(session)
         if not _is_one_active_violation(error):
             raise
         return PromotionOutcome("lost_race", revision=revision, counts=counts)
