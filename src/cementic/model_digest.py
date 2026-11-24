@@ -70,10 +70,11 @@ def model_content_digest(model_path: str) -> str | None:
     that will actually be served.
 
     Returns None -- never raises -- when the file does not exist, cannot be
-    stat'd, cannot be read or hashed, or the cache lock cannot be taken, so profile construction never
-    crashes on a model that has not been downloaded yet (e.g. `cementic config show` before `start`). The
-    real indexing/search call sites only reach here once the embedding daemon
-    is already serving the model, so the file is always present there.
+    stat'd, cannot be read or hashed, or the cache lock cannot be taken, so
+    profile construction never crashes on a model that has not been downloaded
+    yet (e.g. `cementic config show` before `start`). The real indexing/search
+    call sites only reach here once the embedding daemon is already serving the
+    model, so the file is always present there.
     """
     resolved = resolve_llama_model_path(model_path)
     try:
