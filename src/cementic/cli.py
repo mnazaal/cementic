@@ -810,6 +810,17 @@ def stop_background(
     Postgres is not managed by cementic; stop it with your container engine
     (e.g. `docker compose down` or `podman compose down`).
     """
+    # The lock `start` holds from its liveness check to its supervisor record.
+    # Without it, a stop landing in that window reads no record, finds nothing
+    # or only stale state, and clears the state files of workers `start` has
+    # just spawned. Waiting (no timeout) is right: a start holds the lock for
+    # seconds, and a SIGKILLed holder releases it with its descriptor.
+    with file_lock(_get_start_lock_path()):
+        _stop_background_locked(force)
+
+
+def _stop_background_locked(force: bool) -> None:
+    """The body of `cementic stop`, run while holding the start lock."""
     state = read_supervisor_state()
     processes = supervisor_processes(state)
 

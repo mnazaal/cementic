@@ -227,6 +227,34 @@ def test_stop_does_not_wait_when_no_processes_exist(mock_state: MagicMock) -> No
     assert mock_state.call_count == 1
 
 
+def test_stop_waits_for_a_start_in_progress_before_reading_state() -> None:
+    """`start` spawns workers and only then records them. A `stop` that read the
+    records in that window saw nothing, took the stale-state path and could
+    clear the files of the workers just spawned (D4). `stop` must hold the
+    start lock for its whole read/signal/clear sequence."""
+    import threading
+    import time
+
+    from cementic.cli import _get_start_lock_path
+    from cementic.filelock import file_lock
+
+    events: list[str] = []
+
+    def read_state() -> dict[str, list[object]]:
+        events.append("stop-read-state")
+        return {"processes": []}
+
+    with patch("cementic.cli.read_supervisor_state", side_effect=read_state):
+        with file_lock(_get_start_lock_path(), timeout=0):  # a start mid-spawn
+            stopper = threading.Thread(target=lambda: runner.invoke(app, ["stop"]))
+            stopper.start()
+            time.sleep(0.5)
+            events.append("start-recorded-its-state")
+        stopper.join(timeout=10)
+
+    assert events == ["start-recorded-its-state", "stop-read-state"]
+
+
 def test_search_top_k_cap_matches_the_searcher_limit() -> None:
     """`cli` inlines the cap so it need not import `search` to build the option.
 
