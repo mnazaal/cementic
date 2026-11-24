@@ -529,3 +529,27 @@ def test_an_extractor_profile_name_fits_its_column() -> None:
 
     assert len(name) <= EXTRACTOR_PROFILE_NAME_LENGTH
     assert name.startswith("docx=command,epub=command")
+
+
+def test_a_missing_model_keeps_the_placeholder_identity(tmp_path) -> None:
+    """A model that does not exist yet (before its first download, or a test
+    fixture path) keeps the identity it had before the digest fallback work.
+    Only a file that exists and cannot be read is refused."""
+    from cementic.embedding_runtime import EmbeddingRuntimeSpec
+    from cementic.profiles import _model_identity
+
+    missing = tmp_path / "not-downloaded.gguf"
+    spec = EmbeddingRuntimeSpec(
+        provider="llama-cpp",
+        model_identifier=str(missing),
+        embedding_dim=4,
+        distance_metric="cosine",
+        n_ctx=512,
+        n_gpu_layers=0,
+        verbose=False,
+    )
+
+    label, digest = _model_identity(spec)
+
+    assert label == "not-downloaded.gguf"
+    assert digest == f"unreadable:{missing}"

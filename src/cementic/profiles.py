@@ -197,10 +197,17 @@ def _model_identity(spec: EmbeddingRuntimeSpec) -> tuple[str, str]:
 
     resolved = resolve_llama_model_path(spec.model_identifier)
     digest = model_content_digest(spec.model_identifier)
+    if digest is None and not resolved.exists():
+        # Not downloaded yet, or a test/fixture path that never exists:
+        # unchanged from before the digest fallback work. Production never
+        # reaches this branch, because the daemon serving this model is
+        # running before a profile is resolved for real indexing or search.
+        return resolved.name, f"unreadable:{resolved}"
     if digest is None:
-        # A placeholder identity here would be persisted: it forks the profile
-        # fingerprint, so the next revision supersedes the one building and
-        # re-embeds the collection. Only the daemon alias may fall back.
+        # The file exists and cannot be read. A placeholder identity here would
+        # be persisted: it forks the profile fingerprint, so the next revision
+        # supersedes the one building and re-embeds the collection. Only the
+        # daemon alias may fall back.
         raise EmbeddingModelUnreadableError(
             f"Cannot read the embedding model at {resolved}; refusing to "
             "create or select an embedding profile without its content digest. "
