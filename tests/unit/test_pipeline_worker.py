@@ -2283,3 +2283,101 @@ class TestEveryPurgeReopensTheWork:
                 .count()
             )
         assert stranded == 0
+
+    @pytest.mark.parametrize(
+        "door", ["purge_all_chunks", "prune_history", "watcher_purge", "delete_collection"]
+    )
+    def test_every_other_delete_site_keeps_the_counted_rule(
+        self, temp_dir: Path, door: str
+    ) -> None:
+        """B4's walk: the four delete sites besides the superseded purge.
+
+        Each door runs for real against the seeded document, then the property is
+        read with `chunked_scope` itself (so it counts exactly what status and
+        completion count): no chunking that counts toward a revision may own zero
+        chunks. SQLite enforces no foreign keys, so this asserts on what is
+        counted, never on cascades (D8 covers those on PostgreSQL).
+        """
+        from sqlalchemy import select
+
+        from cementic.collections import delete_collection_records
+        from cementic.revisions import (
+            chunked_scope,
+            prune_collection_history,
+            purge_all_chunks,
+        )
+        from cementic.source_watcher import _purge_document_chunks
+
+        engine = create_engine("sqlite:///:memory:")
+        Base.metadata.create_all(engine)
+        session_factory = sessionmaker(bind=engine, expire_on_commit=False)
+        revision_id, extracted_id, chunked_id, source_id = self._seed(session_factory)
+
+        with session_factory() as session:
+            active = session.get(PipelineRevision, revision_id)
+            extractor_id = active.extractor_profile_id
+            embedding_id = active.embedding_profile_id
+            if door == "prune_history":
+                # A second chunk profile built for a revision that is now
+                # superseded: its chunking and chunks are what the prune removes.
+                old_profile = ChunkProfile(fingerprint="old", config_json="{}")
+                session.add(old_profile)
+                session.flush()
+                session.add(
+                    PipelineRevision(
+                        collection="revert",
+                        extractor_profile_id=extractor_id,
+                        chunk_profile_id=old_profile.id,
+                        embedding_profile_id=embedding_id,
+                        status="superseded",
+                    )
+                )
+                old_chunked = ChunkedDocument(
+                    extracted_document_id=extracted_id, chunk_profile_id=old_profile.id,
+                    source_content_hash="A", status="done", total_chunks=1,
+                )
+                session.add(old_chunked)
+                session.flush()
+                session.add(
+                    Chunk(document_id=source_id, chunked_document_id=old_chunked.id,
+                          chunk_index=0, content="old profile")
+                )
+                active.status = "active"
+            session.commit()
+            profile_ids = {
+                row.chunk_profile_id for row in session.query(PipelineRevision).all()
+            }
+
+        with session_factory() as session:
+            if door == "purge_all_chunks":
+                purge_all_chunks(session, extracted_id)
+            elif door == "prune_history":
+                prune_collection_history(session, "revert")
+            elif door == "watcher_purge":
+                _purge_document_chunks(session, [source_id])
+            else:
+                delete_collection_records(session, "revert")
+            session.commit()
+
+        with session_factory() as session:
+            for profile_id in profile_ids:
+                revision = PipelineRevision(
+                    collection="revert", extractor_profile_id=extractor_id,
+                    chunk_profile_id=profile_id, embedding_profile_id=embedding_id,
+                )
+                stranded = (
+                    session.query(ChunkedDocument)
+                    .join(
+                        ExtractedDocument,
+                        ChunkedDocument.extracted_document_id == ExtractedDocument.id,
+                    )
+                    .join(SourceDocument, ExtractedDocument.document_id == SourceDocument.id)
+                    .filter(*chunked_scope(revision))
+                    .filter(~select(Chunk.id).where(
+                        Chunk.chunked_document_id == ChunkedDocument.id).exists())
+                    .count()
+                )
+                assert stranded == 0, f"{door}: a counted chunking owns no chunks"
+            if door == "prune_history":
+                # The prune must not have emptied the kept revision's chunking.
+                assert session.query(Chunk).filter_by(chunked_document_id=chunked_id).count() == 2
