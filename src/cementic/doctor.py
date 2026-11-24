@@ -895,7 +895,7 @@ def _orphan_vector_tables(conn: Any) -> list[int] | None:
 def _orphan_vector_tables_check(profile_ids: list[int] | None) -> dict[str, Any]:
     """Warn about vector tables left behind by a cleanup that timed out or never ran.
 
-    The next promote, prune or `collection remove` sweeps them; the warning says
+    The next promote or `collection remove` sweeps them; the warning says
     so rather than leaving full-size tables unexplained.
     """
     if profile_ids is None:
@@ -907,7 +907,7 @@ def _orphan_vector_tables_check(profile_ids: list[int] | None) -> dict[str, Any]
         "orphans": len(profile_ids),
         "profile_ids": profile_ids,
         "message": f"{len(profile_ids)} vector table(s) have no revision (profiles "
-        f"{', '.join(map(str, profile_ids))}); the next promote, prune or "
+        f"{', '.join(map(str, profile_ids))}); the next promote or "
         "`collection remove` drops them",
     }
 

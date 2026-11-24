@@ -405,7 +405,7 @@ def drop_vector_table_if_unreferenced(engine: Engine, profile_id: int) -> bool:
     dropped; False also when a lock could not be had within
     ``DROP_LOCK_TIMEOUT_MS`` (logged), leaving the table for the next cleanup:
     ``drop_orphan_vector_tables`` sweeps every unreferenced vector table each
-    time it runs (after promote, prune and ``collection remove``), so a table
+    time it runs (after promote, which also prunes, and ``collection remove``), so a table
     skipped here is retried then.
     """
     try:

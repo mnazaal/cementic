@@ -196,8 +196,20 @@ def _model_identity(spec: EmbeddingRuntimeSpec) -> tuple[str, str]:
         return spec.model_identifier, spec.model_identifier
 
     resolved = resolve_llama_model_path(spec.model_identifier)
+    unreadable = EmbeddingModelUnreadableError(
+        f"Cannot read the embedding model at {resolved}; refusing to "
+        "create or select an embedding profile without its content digest. "
+        "Fix the file's path or permissions and retry."
+    )
+    # Decide "missing" before hashing, not after: a file unlinked between the
+    # hash's stat and its read would otherwise read as missing and persist the
+    # placeholder below, forking the profile.
+    try:
+        existed = resolved.exists()
+    except OSError as error:  # e.g. an unsearchable parent directory
+        raise unreadable from error
     digest = model_content_digest(spec.model_identifier)
-    if digest is None and not resolved.exists():
+    if digest is None and not existed:
         # Not downloaded yet, or a test/fixture path that never exists:
         # unchanged from before the digest fallback work. Production never
         # reaches this branch, because the daemon serving this model is
@@ -208,11 +220,7 @@ def _model_identity(spec: EmbeddingRuntimeSpec) -> tuple[str, str]:
         # be persisted: it forks the profile fingerprint, so the next revision
         # supersedes the one building and re-embeds the collection. Only the
         # daemon alias may fall back.
-        raise EmbeddingModelUnreadableError(
-            f"Cannot read the embedding model at {resolved}; refusing to "
-            "create or select an embedding profile without its content digest. "
-            "Fix the file's path or permissions and retry."
-        )
+        raise unreadable
     return resolved.name, digest
 
 

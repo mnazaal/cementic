@@ -553,3 +553,39 @@ def test_a_missing_model_keeps_the_placeholder_identity(tmp_path) -> None:
 
     assert label == "not-downloaded.gguf"
     assert digest == f"unreadable:{missing}"
+
+
+def test_a_model_unlinked_mid_hash_is_refused_not_placeholdered(tmp_path, monkeypatch) -> None:
+    """The file existed when identity was asked for and vanished between the
+    hash's stat and its read (a non-atomic model replacement). Reading that as
+    "missing" persisted the placeholder and forked the profile."""
+    import os
+
+    import pytest
+
+    from cementic import model_digest
+    from cementic.embedding_runtime import EmbeddingRuntimeSpec
+    from cementic.profiles import EmbeddingModelUnreadableError, _model_identity
+
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    model = tmp_path / "m.gguf"
+    model.write_bytes(b"x" * 100)
+    real = model_digest.sha256_file
+
+    def vanish(path):  # type: ignore[no-untyped-def]
+        os.unlink(path)
+        return real(path)
+
+    monkeypatch.setattr(model_digest, "sha256_file", vanish)
+    spec = EmbeddingRuntimeSpec(
+        provider="llama-cpp",
+        model_identifier=str(model),
+        embedding_dim=4,
+        distance_metric="cosine",
+        n_ctx=512,
+        n_gpu_layers=0,
+        verbose=False,
+    )
+
+    with pytest.raises(EmbeddingModelUnreadableError):
+        _model_identity(spec)
