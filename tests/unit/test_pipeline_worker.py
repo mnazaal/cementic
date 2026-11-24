@@ -2480,3 +2480,171 @@ class TestNoReadyTransitionMidScan:
             counts = compute_revision_counts(session, "revert", revision)
         assert revision_is_complete(counts) is True
         assert revision_is_complete(replace(counts, scan_in_progress=True)) is False
+
+
+class _PgError(Exception):
+    """Stands in for a psycopg error: the server's SQLSTATE rides on `.sqlstate`."""
+
+    def __init__(self, sqlstate: str | None, message: str = "db error") -> None:
+        super().__init__(message)
+        self.sqlstate = sqlstate
+
+
+def _db_error(sqlstate: str | None, kind: type = None):
+    from sqlalchemy import exc
+
+    kind = kind or exc.OperationalError
+    return kind("UPDATE ...", {}, _PgError(sqlstate))
+
+
+class TestWriteBackErrorClasses:
+    """B2b: which database failures during write-back retry the document.
+
+    A deadlock or statement timeout is a property of the moment, not of the
+    document, so stamping the document terminal for the run (B2) misreports it.
+    A data error is the document's own and stays terminal; a lost connection is
+    the database's and belongs to the loop's back-off.
+    """
+
+    @pytest.mark.parametrize("sqlstate", ["40001", "40P01", "57014", "55P03"])
+    def test_serialization_deadlock_and_timeouts_retry(self, sqlstate: str) -> None:
+        from cementic.pipeline_worker import classify_write_back_error
+
+        assert classify_write_back_error(_db_error(sqlstate)) == "transient"
+
+    @pytest.mark.parametrize("sqlstate", ["22021", "22P05", "23505", "54000", "42703"])
+    def test_data_and_schema_errors_are_the_documents(self, sqlstate: str) -> None:
+        from sqlalchemy import exc
+
+        from cementic.pipeline_worker import classify_write_back_error
+
+        assert classify_write_back_error(_db_error(sqlstate, exc.DataError)) == "data"
+
+    @pytest.mark.parametrize("sqlstate", ["08006", "08001", "57P01", "57P03", "53300", None])
+    def test_lost_connections_belong_to_the_loop(self, sqlstate: str | None) -> None:
+        from cementic.pipeline_worker import classify_write_back_error
+
+        assert classify_write_back_error(_db_error(sqlstate)) == "connectivity"
+
+    def test_pool_exhaustion_and_invalidated_connections_are_connectivity(self) -> None:
+        from sqlalchemy import exc
+
+        from cementic.pipeline_worker import classify_write_back_error
+
+        invalidated = _db_error("57P01")
+        invalidated.connection_invalidated = True
+        assert classify_write_back_error(invalidated) == "connectivity"
+        assert classify_write_back_error(exc.TimeoutError("pool")) == "connectivity"
+
+    def test_anything_that_is_not_a_database_error_is_the_documents(self) -> None:
+        from cementic.pipeline_worker import classify_write_back_error
+
+        assert classify_write_back_error(RuntimeError("deadlock detected")) == "data"
+        assert classify_write_back_error(ValueError("NUL")) == "data"
+
+
+class TestTransientWriteBackIsRetriedNotFailed:
+    @staticmethod
+    def _extract_ready(temp_dir: Path):
+        engine = create_engine("sqlite:///:memory:")
+        Base.metadata.create_all(engine)
+        session_factory = sessionmaker(bind=engine, expire_on_commit=False)
+        revision_id, extracted_id, chunked_id, _ = TestEveryPurgeReopensTheWork._seed(
+            session_factory
+        )
+        worker = TestEveryPurgeReopensTheWork._worker(temp_dir, session_factory)
+        with session_factory() as session:
+            session.get(SourceDocument, 1).file_hash = "file-B"
+            session.get(ExtractedDocument, extracted_id).status = "pending"
+            session.commit()
+        return session_factory, revision_id, extracted_id, chunked_id, worker
+
+    @staticmethod
+    def _step(worker, revision_id: int, error: Exception) -> None:
+        with (
+            patch("cementic.pipeline_worker.extract_document", return_value="text from B"),
+            patch("cementic.pipeline_worker.write_extracted_text", return_value="B"),
+            patch.object(worker, "_write_back_extraction", side_effect=error),
+        ):
+            worker._step_extract(revision_id)
+
+    def test_a_deadlock_returns_the_document_to_the_queue(self, temp_dir: Path) -> None:
+        session_factory, revision_id, extracted_id, _, worker = self._extract_ready(temp_dir)
+
+        self._step(worker, revision_id, _db_error("40P01"))
+
+        with session_factory() as session:
+            extracted = session.get(ExtractedDocument, extracted_id)
+            assert extracted.status == "pending"
+            assert extracted.attempts == 1
+        state = worker.state_manager.load()
+        assert state.retried_count == 1
+
+        # The retry succeeds: the same claim goes through and nothing was failed.
+        with (
+            patch("cementic.pipeline_worker.extract_document", return_value="text from B"),
+            patch("cementic.pipeline_worker.write_extracted_text", return_value="B"),
+        ):
+            worker._step_extract(revision_id)
+        with session_factory() as session:
+            assert session.get(ExtractedDocument, extracted_id).status == "done"
+
+    def test_a_document_that_keeps_deadlocking_is_failed_after_the_claim_cap(
+        self, temp_dir: Path
+    ) -> None:
+        from cementic.revisions import MAX_INTERRUPTED_CLAIMS
+
+        session_factory, revision_id, extracted_id, _, worker = self._extract_ready(temp_dir)
+
+        for _ in range(MAX_INTERRUPTED_CLAIMS):
+            self._step(worker, revision_id, _db_error("40001"))
+
+        with session_factory() as session:
+            extracted = session.get(ExtractedDocument, extracted_id)
+            assert extracted.status == "failed"
+            assert "40001" in (extracted.error_message or "")
+        assert worker.state_manager.load().retried_count == MAX_INTERRUPTED_CLAIMS - 1
+
+    def test_a_data_error_is_still_terminal_at_once(self, temp_dir: Path) -> None:
+        from sqlalchemy import exc
+
+        session_factory, revision_id, extracted_id, _, worker = self._extract_ready(temp_dir)
+
+        self._step(worker, revision_id, _db_error("22021", exc.DataError))
+
+        with session_factory() as session:
+            assert session.get(ExtractedDocument, extracted_id).status == "failed"
+        assert worker.state_manager.load().retried_count == 0
+
+    def test_a_lost_connection_reaches_the_loop_and_fails_nothing(self, temp_dir: Path) -> None:
+        session_factory, revision_id, extracted_id, _, worker = self._extract_ready(temp_dir)
+
+        with pytest.raises(Exception) as raised:
+            self._step(worker, revision_id, _db_error("08006"))
+        assert getattr(raised.value.orig, "sqlstate", None) == "08006"
+
+        with session_factory() as session:
+            assert session.get(ExtractedDocument, extracted_id).status != "failed"
+
+    def test_a_chunk_write_back_deadlock_is_retried_too(self, temp_dir: Path) -> None:
+        engine = create_engine("sqlite:///:memory:")
+        Base.metadata.create_all(engine)
+        session_factory = sessionmaker(bind=engine, expire_on_commit=False)
+        revision_id, extracted_id, chunked_id, _ = TestEveryPurgeReopensTheWork._seed(
+            session_factory
+        )
+        worker = TestEveryPurgeReopensTheWork._worker(temp_dir, session_factory)
+        with session_factory() as session:
+            session.get(ExtractedDocument, extracted_id).content_hash = "B"
+            session.commit()
+
+        with (
+            patch("cementic.pipeline_worker.read_extracted_text", return_value="text from B " * 40),
+            patch.object(PipelineWorker, "_write_back_chunks", side_effect=_db_error("40P01")),
+        ):
+            assert worker._step_chunk(revision_id) is True
+
+        with session_factory() as session:
+            chunked = session.get(ChunkedDocument, chunked_id)
+            assert chunked.status == "pending"
+        assert worker.state_manager.load().retried_count == 1

@@ -31,6 +31,13 @@ cannot stop the rest of the collection, until the file changes. If the embedding
 service becomes unreachable, affected chunks remain pending instead of becoming
 permanent failures.
 
+A database error while saving a document's result is classified first. A
+deadlock, serialization failure or statement or lock timeout puts the document
+back in the queue (up to three attempts, counted as `retried` in `cementic
+status`, not as failures); a lost connection goes to the worker's back-off; any
+other error fails the document. A revision does not become `ready` while the
+watcher's initial scan is still running.
+
 ## Long-running indexing
 
 For a multi-day import, run the watcher and worker under your platform's service
@@ -70,7 +77,8 @@ updating this page fails the suite.
   "pipeline_worker": {
     "process": "str", "state": "str", "pid": "str", "current_file": "str|null",
     "last_error": "str|null", "last_error_at": "str|null",
-    "current_activity": "str|null"
+    "current_activity": "str|null",
+    "retried": "int"
   },
   "health": {
     "db_reachable": "bool", "embedding_provider": "str",

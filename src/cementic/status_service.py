@@ -59,6 +59,9 @@ class WorkerStatus:
     #: Files the watcher refused to register, most recent last. They never
     #: become documents, so no pipeline count can show them.
     skipped_files: list[str] = field(default_factory=list)
+    #: Write-backs returned to the queue after a transient database error this
+    #: run. Not failures: those are counted per revision as ``failures``.
+    retried_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -175,6 +178,7 @@ def build_worker_status(state: WorkerState) -> WorkerStatus:
         last_error_at=state.last_error_at,
         current_activity=state.current_activity,
         skipped_files=list(state.skipped_files),
+        retried_count=state.retried_count,
     )
 
 

@@ -165,6 +165,12 @@ def print_status_summary(
             "indexed[/yellow]" + ("" if verbose else " (run with --verbose for paths)")
         )
 
+    if pipeline_worker_status.retried_count:
+        console.print(
+            f"{'retried':<11} {pipeline_worker_status.retried_count} write-back(s) hit a "
+            "transient database error and were queued again (not failures)"
+        )
+
     if not verbose:
         return
 
@@ -340,6 +346,7 @@ def build_status_document(
             "last_error": pipeline_worker_status.last_error,
             "last_error_at": pipeline_worker_status.last_error_at,
             "current_activity": pipeline_worker_status.current_activity,
+            "retried": pipeline_worker_status.retried_count,
         },
     }
 

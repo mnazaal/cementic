@@ -35,6 +35,7 @@ def _worker() -> SimpleNamespace:
         current_activity=None,
         processed_count=0,
         failed_count=0,
+        retried_count=0,
         skipped_files=[],
         last_error=None,
         last_error_at=None,
@@ -154,3 +155,21 @@ def test_table_lines(rows, aligns, seps, expected):
 
 def test_table_lines_indent():
     assert render.table_lines([["a", "b"]], "<<", ["-"], indent="") == ["a-b"]
+
+
+class TestStatusSeparatesRetriedFromFailed:
+    def test_retried_write_backs_get_their_own_line_and_no_failure_wording(self) -> None:
+        pipeline = _worker()
+        pipeline.retried_count = 3
+        config = Config()
+        with render.console.capture() as captured:
+            render.print_status_summary(
+                "test", [], _worker(), pipeline, _health(healthy=True, llama_daemon="running"),
+                False, config,
+            )
+        output = captured.get()
+        assert "retried" in output and "3 write-back(s)" in output
+        assert "not failures" in output
+
+    def test_no_retries_prints_nothing(self) -> None:
+        assert "retried" not in _summary(_health(healthy=True, llama_daemon="running"))

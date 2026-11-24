@@ -32,6 +32,11 @@ class WorkerState:
     watched_directories: list[str] = field(default_factory=list)
     processed_count: int = 0
     failed_count: int = 0
+    #: Write-backs the pipeline worker returned to the queue after a transient
+    #: database error (deadlock, serialization failure, timeout) this run. They
+    #: are not failures: the document is tried again, and only one that keeps
+    #: failing is stamped failed.
+    retried_count: int = 0
     current_file: str | None = None
     last_updated: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     pid: int | None = None
@@ -146,7 +151,12 @@ class StateManager:
             return state
 
     def increment(
-        self, *, processed: int = 0, failed: int = 0, current_file: Any = UNSET
+        self,
+        *,
+        processed: int = 0,
+        failed: int = 0,
+        retried: int = 0,
+        current_file: Any = UNSET,
     ) -> WorkerState:
         """Add to the counters atomically with respect to other threads.
 
@@ -159,6 +169,7 @@ class StateManager:
             state = self.load()
             state.processed_count += processed
             state.failed_count += failed
+            state.retried_count += retried
             if current_file is not UNSET:
                 state.current_file = current_file
             self.save(state)

@@ -15,6 +15,7 @@ from typing import Any, NoReturn
 
 import requests
 from sqlalchemy import and_, case, or_, select, text, update
+from sqlalchemy import exc as sa_exc
 from sqlalchemy.orm import Session
 
 from cementic.chunk import TextChunk, TokenizerUnavailableError, chunk_text, tokenizer
@@ -39,6 +40,7 @@ from cementic.extract import extract_document
 from cementic.index_strategies import index_dimension_error
 from cementic.redact import redact_text
 from cementic.revisions import (
+    MAX_INTERRUPTED_CLAIMS,
     chunk_scope,
     chunked_scope,
     claimed_attempts,
@@ -234,6 +236,54 @@ class _ShutdownRequestedError(Exception):
     `stop && start` restart. Raising unwinds to the claim's release path rather
     than returning a short result, which would stamp unembedded rows failed.
     """
+
+
+#: SQLSTATEs where the server abandoned one statement for a reason about the
+#: moment, not the data: serialization_failure, deadlock_detected,
+#: query_canceled (statement timeout) and lock_not_available (lock timeout).
+#: The same write is expected to succeed when tried again.
+_TRANSIENT_SQLSTATES = frozenset({"40001", "40P01", "57014", "55P03"})
+
+#: SQLSTATEs of a database that is gone or refusing connections (the class-08
+#: family is matched by prefix): admin_shutdown, crash_shutdown,
+#: cannot_connect_now and too_many_connections.
+_CONNECTIVITY_SQLSTATES = frozenset({"57P01", "57P02", "57P03", "53300"})
+
+
+def _sqlstate(error: BaseException) -> str | None:
+    """The SQLSTATE a driver error carries, or None (psycopg 3 ``sqlstate``)."""
+    orig = getattr(error, "orig", error)
+    state = getattr(orig, "sqlstate", None) or getattr(orig, "pgcode", None)
+    return state if isinstance(state, str) else None
+
+
+def classify_write_back_error(error: BaseException) -> str:
+    """How a failed write-back should end: ``transient``, ``connectivity`` or ``data`` (pure).
+
+    - ``transient``: a deadlock, serialization failure or statement/lock
+      timeout. The document is not at fault, so it is retried.
+    - ``connectivity``: the database is unreachable or restarting. Failing the
+      document would blame it for an outage; the processing loop's back-off owns
+      this case.
+    - ``data``: everything else, including a non-database error. The write
+      itself is wrong for this document, so it is stamped failed.
+    """
+    if isinstance(error, (sa_exc.TimeoutError, sa_exc.DisconnectionError)):
+        return "connectivity"
+    if not isinstance(error, sa_exc.DBAPIError):
+        return "data"
+    if error.connection_invalidated:
+        return "connectivity"
+    state = _sqlstate(error)
+    if state in _TRANSIENT_SQLSTATES:
+        return "transient"
+    if state is None:
+        # No server verdict: the statement never got one, so the link failed.
+        link_errors = (sa_exc.OperationalError, sa_exc.InterfaceError)
+        return "connectivity" if isinstance(error, link_errors) else "data"
+    if state.startswith("08") or state in _CONNECTIVITY_SQLSTATES:
+        return "connectivity"
+    return "data"
 
 
 def is_retryable_embed_error(error: BaseException) -> bool:
@@ -562,6 +612,7 @@ class PipelineWorker:
 
         self.state_manager.update(
             daemon_state=DaemonState.RUNNING,
+            retried_count=0,
             pid=os.getpid(),
             start_token=process_start_token(os.getpid()),
             current_file=None,
@@ -773,7 +824,7 @@ class PipelineWorker:
             # document every pass -- nothing else in the collection is ever
             # extracted. Stamp it terminal instead of letting it leak to the
             # processing loop's back-off-and-retry.
-            self._fail_artifact(
+            self._handle_write_back_failure(
                 ExtractedDocument,
                 extracted_id,
                 error,
@@ -821,6 +872,60 @@ class PipelineWorker:
                     # that no longer extracts, forever.
                     purge_all_chunks(session, extracted.id)
             session.commit()
+
+    def _handle_write_back_failure(
+        self,
+        model: type[Any],
+        artifact_id: int,
+        error: Exception,
+        stage: str,
+        *,
+        scope_hash_field: str,
+        scope_hash: str | None,
+    ) -> None:
+        """Retry, escalate or fail a document whose write-back raised.
+
+        ``classify_write_back_error`` decides. A transient database failure
+        returns the claim to ``pending`` and is counted as a retry, up to the
+        same ``MAX_INTERRUPTED_CLAIMS`` claims a document may take without
+        finishing; the claim already counted this attempt, so the cap needs no
+        new column. A lost connection is re-raised for the loop's back-off. Data
+        errors, and a transient one past the cap, take ``_fail_artifact``.
+        """
+        kind = classify_write_back_error(error)
+        if kind == "connectivity":
+            raise error
+        if kind == "transient":
+            with self.Session() as session:
+                artifact = session.get(model, artifact_id)
+                attempts = (artifact.attempts or 0) if artifact is not None else 0
+                if artifact is None:
+                    return
+                if attempts < MAX_INTERRUPTED_CLAIMS:
+                    artifact.status = "pending"
+                    artifact.error_message = (
+                        f"retrying after a transient database error ({_sqlstate(error)})"
+                    )
+                    session.commit()
+                    self._logger.warning(
+                        "%s write-back hit a transient database error (%s); "
+                        "returned to the queue, attempt %s of %s",
+                        stage, _sqlstate(error), attempts, MAX_INTERRUPTED_CLAIMS,
+                    )
+                    self.state_manager.increment(retried=1)
+                    return
+            error = RuntimeError(
+                f"gave up after {attempts} attempts; last database error "
+                f"({_sqlstate(error)}): {error}"
+            )
+        self._fail_artifact(
+            model,
+            artifact_id,
+            error,
+            stage,
+            scope_hash_field=scope_hash_field,
+            scope_hash=scope_hash,
+        )
 
     def _fail_artifact(
         self,
@@ -1009,7 +1114,7 @@ class PipelineWorker:
             # `processing`, and the chunk step re-claims the lowest-id row every
             # pass. A chunk PostgreSQL refuses (the NUL case) otherwise pins the
             # whole collection on one document indefinitely.
-            self._fail_artifact(
+            self._handle_write_back_failure(
                 ChunkedDocument,
                 chunked_id,
                 error,
