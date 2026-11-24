@@ -170,8 +170,9 @@ fingerprints are in full, not truncated to eight characters as in the table:
 probe (`status` and `doctor` own that). With `--check` it does probe: it runs
 the embedding checks `doctor` runs (daemon, server binary, model) and exits 1
 when `doctor` would fail any of them, which a stopped daemon with autostart on
-does not. The reason goes to stderr, and the JSON gains a `check` key; this is
-the one case where a nonzero exit still prints the document on stdout:
+does not. Without `--json` the reason goes to stderr. With `--json` nothing goes
+to stderr: the reason is in the `check` key of the document, which is printed on
+stdout even when the exit code is 1 (the one case where a nonzero exit does):
 
 <!-- json-shape: embedding_status -->
 ```json
@@ -180,8 +181,9 @@ the one case where a nonzero exit still prints the document on stdout:
 
 `embedding status --json --check` adds one key to that document:
 
+<!-- json-shape: embedding_status_check -->
 ```json
-"check": {"ok": "bool", "failed": [{"check": "daemon|embedding_server|model", "message": "str"}], "note": "str|null"}
+{"check": {"ok": "bool", "failed": [{"check": "daemon|embedding_server|model", "message": "str"}], "note": "str|null"}}
 ```
 
 `recovered` is true when the pid file was missing or stale and the daemon was

@@ -181,3 +181,29 @@ def test_embedding_status_state_matches_the_documented_shape_and_the_string() ->
 
 def test_search_result_fields_match_the_documented_shape() -> None:
     assert set(SearchResult.__annotations__) == set(_documented("search"))
+
+
+def test_embedding_status_check_matches_the_documented_shape_and_stays_off_stderr() -> None:
+    from typer.testing import CliRunner
+
+    from cementic.cli import app
+
+    config = Config()
+    config.llama_cpp.daemon_autostart = False
+    state = {"state": "stopped", "pid": None, "recovered": False, "error": None}
+    with (
+        patch("cementic.cli.cli_config", return_value=config),
+        patch("cementic.doctor._daemon_state", return_value=(False, True, "")),
+        patch("cementic.doctor._embedding_server_check", return_value={"status": "ok"}),
+        patch("cementic.doctor._model_check", return_value={"status": "ok"}),
+        patch("cementic.embedding_runtime.llama_daemon_state", return_value=state),
+    ):
+        result = CliRunner().invoke(app, ["embedding", "status", "--json", "--check"])
+
+    assert result.exit_code == 1
+    assert result.stderr == ""
+    check = json.loads(result.stdout)["check"]
+    documented = _documented("embedding_status_check")["check"]
+    assert _keys(check) == _keys(documented)
+    assert check["failed"], "the daemon check should have failed"
+    assert _keys(check["failed"][0]) == _keys(documented["failed"][0])
