@@ -1170,3 +1170,98 @@ class TestUnreachableDatabaseReadsAsOneLine:
         )
 
         assert "extensions: skipped (database not reachable)" in capsys.readouterr().out
+
+
+class TestProbeFailureWording:
+    """What each check says when a probe past `SELECT 1` fails or reads nothing."""
+
+    @staticmethod
+    def _conn(mock_get_engine):
+        conn = MagicMock()
+        mock_get_engine.return_value.connect.return_value.__enter__.return_value = conn
+        return conn
+
+    @patch("cementic.doctor._daemon_state", return_value=(True, True, "reachable"))
+    @patch("cementic.doctor.lexical_index_facts", return_value=None)
+    @patch("cementic.doctor._active_embedding_canaries", return_value=[])
+    @patch("cementic.doctor._active_extractor_profiles", return_value=[])
+    @patch("cementic.doctor._extension_check", return_value={"status": "ok"})
+    @patch("cementic.doctor.get_engine")
+    def test_unreadable_lexical_facts_do_not_point_at_a_healthy_database_check(
+        self, mock_get_engine, _ext, _prof, _canary, _lex, _daemon
+    ) -> None:
+        """The pg_index query failed and was swallowed: the database check is ok,
+        so "see the database check" sends the reader nowhere."""
+        self._conn(mock_get_engine)
+
+        checks = collect_doctor_report(Config())["checks"]
+
+        assert checks["database"]["status"] == "ok"
+        message = checks["lexical_index"]["message"]
+        assert "see the database check" not in message
+        assert "PostgreSQL" in message
+        assert "unreachable" not in message
+
+    @patch("cementic.doctor._daemon_state", return_value=(True, True, "reachable"))
+    @patch("cementic.doctor.lexical_index_facts", side_effect=RuntimeError("boom"))
+    @patch("cementic.doctor._active_embedding_canaries", return_value=[])
+    @patch("cementic.doctor._active_extractor_profiles", return_value=[])
+    @patch("cementic.doctor._extension_check", return_value={"status": "ok"})
+    @patch("cementic.doctor.get_engine")
+    def test_a_raising_lexical_probe_still_points_at_the_database_check(
+        self, mock_get_engine, _ext, _prof, _canary, _lex, _daemon
+    ) -> None:
+        self._conn(mock_get_engine)
+
+        checks = collect_doctor_report(Config())["checks"]
+
+        assert checks["database"]["status"] == "fail"
+        assert "see the database check" in checks["lexical_index"]["message"]
+
+    def test_an_unreachable_database_keeps_its_own_wording(self) -> None:
+        message = _lexical_index_check(None, hybrid=True)["message"]
+
+        assert "unreachable" in message
+        assert "PostgreSQL" in message
+
+    @patch("cementic.doctor._daemon_state", return_value=(True, True, "reachable"))
+    @patch("cementic.doctor.lexical_index_facts", return_value=None)
+    @patch("cementic.doctor._active_embedding_canaries", return_value=[])
+    @patch("cementic.doctor._active_extractor_profiles")
+    @patch("cementic.doctor._extension_check", return_value={"status": "ok"})
+    @patch("cementic.doctor.get_engine")
+    def test_profile_read_error_is_redacted(
+        self, mock_get_engine, _ext, mock_profiles, _canary, _lex, _daemon
+    ) -> None:
+        self._conn(mock_get_engine)
+        mock_profiles.side_effect = RuntimeError("bad conninfo host=h password=SENT_X1")
+
+        report = collect_doctor_report(Config())
+
+        assert "SENT_X1" not in json.dumps(report)
+        assert "password=***" in report["checks"]["extractor_profile"]["message"]
+
+    @patch("cementic.doctor._daemon_state", return_value=(True, True, "reachable"))
+    @patch("cementic.doctor.lexical_index_facts", return_value=None)
+    @patch("cementic.doctor._active_embedding_canaries", return_value=[])
+    @patch("cementic.doctor._active_extractor_profiles")
+    @patch("cementic.doctor._extension_check", side_effect=RuntimeError("inspection failed"))
+    @patch("cementic.doctor.get_engine")
+    def test_extension_failure_is_rolled_back_before_the_profile_read(
+        self, mock_get_engine, _ext, mock_profiles, _canary, _lex, _daemon
+    ) -> None:
+        """On PostgreSQL a failed statement aborts the transaction; without a
+        rollback the next probe reports "current transaction is aborted"."""
+        conn = self._conn(mock_get_engine)
+        rolled_back_at_read: list[bool] = []
+
+        def read(_conn):
+            rolled_back_at_read.append(conn.rollback.called)
+            return []
+
+        mock_profiles.side_effect = read
+
+        report = collect_doctor_report(Config())
+
+        assert rolled_back_at_read == [True]
+        assert "could not inspect extensions" in json.dumps(report["checks"]["extensions"])

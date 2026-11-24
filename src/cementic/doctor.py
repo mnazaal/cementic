@@ -235,6 +235,9 @@ def collect_doctor_report(config: Config) -> dict[str, Any]:
     extractor_profiles_error: str | None = None
     stranded_chunkings: int | None = None
     lexical_facts: LexicalIndexFacts | None = None
+    #: Set once `lexical_index_facts` returned, so a None result (its query
+    #: failed and was swallowed) is told apart from a probe that never ran.
+    lexical_probe_ran = False
     active_canaries: list[tuple[str, str, str, str, str | None]] | None = None
     #: The probe in flight once the server has answered, so a raise there can
     #: say which one failed instead of blaming the connection.
@@ -254,6 +257,9 @@ def collect_doctor_report(config: Config) -> dict[str, Any]:
                 extensions = {name: _extension_check(conn, name) for name in REQUIRED_DB_EXTENSIONS}
                 checks["extensions"] = extensions
             except Exception as extension_error:
+                # A failed statement aborts the PostgreSQL transaction; without
+                # this the profile read below reports "transaction is aborted".
+                conn.rollback()
                 checks["extensions"] = {
                     "(inspection)": {
                         "status": "fail",
@@ -274,6 +280,7 @@ def collect_doctor_report(config: Config) -> dict[str, Any]:
             stranded_chunkings = _stranded_chunkings(conn)
             failing_probe = "the lexical index inspection"
             lexical_facts = lexical_index_facts(conn)
+            lexical_probe_ran = True
     except Exception as error:
         # The driver's text runs to several lines plus a "Background on this
         # error" link. The human report gets its first line, like every other
@@ -311,7 +318,10 @@ def collect_doctor_report(config: Config) -> dict[str, Any]:
         stranded_chunkings, database_reachable=database_ok
     )
     checks["lexical_index"] = _lexical_index_check(
-        lexical_facts, hybrid=config.search.hybrid, database_reachable=database_ok
+        lexical_facts,
+        hybrid=config.search.hybrid,
+        database_reachable=database_ok,
+        probe_ran=lexical_probe_ran,
     )
     checks["chunk_budget"] = _chunk_budget_check(config)
     checks["tokenizer"] = _tokenizer_check()
@@ -868,7 +878,11 @@ def _stranded_chunkings_check(
 
 
 def _lexical_index_check(
-    facts: LexicalIndexFacts | None, *, hybrid: bool, database_reachable: bool = False
+    facts: LexicalIndexFacts | None,
+    *,
+    hybrid: bool,
+    database_reachable: bool = False,
+    probe_ran: bool = False,
 ) -> dict[str, Any]:
     """Report whether exact-word search has the index it silently depends on.
 
@@ -886,15 +900,15 @@ def _lexical_index_check(
     """
     repair = "`cementic collection reindex <collection>` builds it"
     if facts is None:
-        return {
-            "status": "warning",
-            "message": (
-                "could not be checked; the probe did not run or its result could "
-                "not be read (see the database check)"
-                if database_reachable
-                else "could not be checked; the database is unreachable or is not PostgreSQL"
-            ),
-        }
+        if not database_reachable:
+            reason = "the database is unreachable or is not PostgreSQL"
+        elif probe_ran:
+            # The probe ran and its pg_index query failed: the database check is
+            # ok, so pointing at it would send the reader nowhere.
+            reason = "the index catalog could not be read; the database may not be PostgreSQL"
+        else:
+            reason = "the probe did not run or its result could not be read (see the database check)"
+        return {"status": "warning", "message": f"could not be checked; {reason}"}
     if facts.present and facts.valid:
         return {
             "status": "ok",
