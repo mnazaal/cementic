@@ -455,7 +455,9 @@ def start_background(
         with file_lock(_get_start_lock_path(), timeout=0):
             _start_background_locked(directories, collection)
     except LockUnavailableError:
-        err_console.print("[yellow]Another `cementic start` or `cementic stop` is already in progress[/yellow]")
+        err_console.print(
+            "[yellow]Another `cementic start` or `cementic stop` is already in progress[/yellow]"
+        )
         raise typer.Exit(1)
 
 
