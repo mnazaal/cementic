@@ -313,8 +313,8 @@ def promote_ready_revision(
     if not force and revision_failure_total(counts) > 0:
         return PromotionOutcome("blocked_by_failures", revision=revision, counts=counts)
 
-    promote_revision(session, collection, revision)
     try:
+        promote_revision(session, collection, revision)
         session.commit()
     except IntegrityError as error:
         # The one-active-per-collection index caught a concurrent promote of a
@@ -332,6 +332,13 @@ def promote_ready_revision(
         if not _is_one_active_violation(error):
             raise
         return PromotionOutcome("lost_race", revision=revision, counts=counts)
+    except Exception:
+        # Any other failure of the promote/commit path (a dropped connection, an
+        # error while retiring the old revision) leaves the same stale queue.
+        session.rollback()
+        drain_pending_artifact_removals(session)
+        drain_pending_vector_table_drops(session)
+        raise
     # Only now that the promotion is durable are the superseded revisions'
     # artifact files safe to unlink, and their vector tables safe to drop --
     # the latter also because DROP TABLE takes its own transaction, which would

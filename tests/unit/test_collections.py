@@ -665,6 +665,41 @@ class TestPromoteReadyRevision:
         assert drain_pending_artifact_removals(session) == []
         assert drain_pending_vector_table_drops(session) == []
 
+    @pytest.mark.parametrize("failing", ["commit", "promote"])
+    @patch("cementic.collections.compute_revision_counts", return_value=_counts())
+    @patch("cementic.collections.promote_revision")
+    def test_any_failed_promote_discards_the_deferred_cleanup_it_queued(
+        self,
+        mock_promote: MagicMock,
+        _mock_counts: MagicMock,
+        failing: str,
+        _config: Config,
+    ) -> None:
+        """The drain is not specific to IntegrityError: a dropped connection at
+        commit (or an error mid-promote) leaves ``session.info`` naming rows that
+        still exist, and a later promote on the session would unlink them."""
+        session = MagicMock()
+        session.info = {}
+        session.query().filter_by().order_by().first.return_value = MagicMock(
+            spec=PipelineRevision
+        )
+
+        def _queue_cleanup(*_args: object) -> None:
+            _defer_artifact_removal(session, ["/artifacts/live.bin"])
+            _defer_vector_table_drops(session, [7])
+            if failing == "promote":
+                raise RuntimeError("connection lost")
+
+        mock_promote.side_effect = _queue_cleanup
+        if failing == "commit":
+            session.commit.side_effect = RuntimeError("connection lost")
+
+        with pytest.raises(RuntimeError, match="connection lost"):
+            promote_ready_revision(session, "c1", config=_config)
+
+        assert drain_pending_artifact_removals(session) == []
+        assert drain_pending_vector_table_drops(session) == []
+
     @patch("cementic.collections.compute_revision_counts", return_value=_counts())
     @patch("cementic.collections.promote_revision")
     def test_an_unrelated_integrity_error_still_surfaces(
