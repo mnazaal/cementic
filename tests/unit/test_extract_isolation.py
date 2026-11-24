@@ -24,7 +24,9 @@ def use_extractor(monkeypatch: pytest.MonkeyPatch, fn_name: str) -> Config:
     monkeypatch.setitem(
         extract_mod._EXTRACTORS, "pymupdf4llm", (spec, getattr(isolation_extractors, fn_name))
     )
-    monkeypatch.setenv("PYTHONPATH", str(REPO_ROOT))
+    # `src` so the child imports the code under test (not whatever editable
+    # install the venv holds); the repo root so `tests.unit` resolves.
+    monkeypatch.setenv("PYTHONPATH", os.pathsep.join([str(REPO_ROOT / "src"), str(REPO_ROOT)]))
     config = Config()
     config.extraction.timeout_seconds = 20
     config.extraction.memory_limit_mb = 512
@@ -260,6 +262,9 @@ def test_the_child_reads_no_config_file(monkeypatch, tmp_path):
     monkeypatch.setenv("CEMENTIC_CONFIG", str(valid))
     monkeypatch.chdir(tmp_path)
     config = use_extractor(monkeypatch, "dies_on_a")
+    # Children are cached by the extraction settings; an earlier test's child was
+    # started in another cwd, so it would pass whatever the code does.
+    extract_mod._close_children()
 
     assert extract_document("/x/b.pdf", config) == "extracted fine"
 
