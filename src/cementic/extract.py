@@ -299,6 +299,17 @@ _LIMIT_SHIM = (
 )
 
 
+def command_environment(environ: Mapping[str, str]) -> dict[str, str]:
+    """The environment a command extractor gets: the worker's, minus the database
+    credentials (`CEMENTIC_DB_*`, where every cementic secret lives; pure).
+
+    Whole, unlike the PDF child's allow-list, because the operator's wrapper
+    scripts may need their own variables. The scrub stops an accidental leak, not
+    a compromised same-user process, which can still read `/proc/<ppid>/environ`.
+    """
+    return {name: value for name, value in environ.items() if not name.startswith("CEMENTIC_DB_")}
+
+
 def _command_extractor(path: str, config: Config) -> str:
     """Run the configured command for this file type and take its stdout.
 
@@ -332,6 +343,7 @@ def _command_extractor(path: str, config: Config) -> str:
                 stdin=subprocess.DEVNULL,
                 stdout=out,
                 stderr=err,
+                env=command_environment(os.environ),
                 start_new_session=True,
             )
         except OSError as error:
@@ -345,6 +357,12 @@ def _command_extractor(path: str, config: Config) -> str:
                 f"extraction command timed out after {timeout:g}s: "
                 f"{shlex.join(rendered)}"
             )
+        except BaseException:
+            # Its own session means Ctrl-C no longer reaches it; kill the group
+            # on any exit from the wait, as `subprocess.run` did.
+            _kill_group(process)
+            process.wait()  # reap it; SIGKILL makes this prompt
+            raise
         if os.fstat(out.fileno()).st_size >= MAX_DOCUMENT_BYTES:
             raise RuntimeError(
                 f"extraction command output reached the {MAX_DOCUMENT_BYTES}-byte limit: "

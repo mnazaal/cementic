@@ -482,14 +482,18 @@ class TestCommandExtractor:
             extract_document(str(source), config)
 
     def test_a_timeout_kills_the_commands_grandchildren(self, tmp_path) -> None:
+        """Fails fast without the process group: the grandchild's 20 s sleep
+        outlives the timeout and holds the run open, so bound the elapsed time."""
         source = tmp_path / "a.txt"
         source.write_text("x")
         pidfile = tmp_path / "pid"
-        config = self._config(["sh", "-c", f"sleep 60 & echo $! > {pidfile}; wait"])
+        config = self._config(["sh", "-c", f"sleep 20 & echo $! > {pidfile}; wait"])
         config.extraction.timeout_seconds = 1
 
+        started = time.monotonic()
         with pytest.raises(RuntimeError, match="timed out"):
             extract_document(str(source), config)
+        assert time.monotonic() - started < 10
 
         pid = int(pidfile.read_text())
         for _ in range(100):
@@ -501,6 +505,73 @@ class TestCommandExtractor:
                 return
             time.sleep(0.05)
         raise AssertionError("grandchild survived the timeout")
+
+    def test_an_interrupt_while_waiting_kills_the_command(self, tmp_path, monkeypatch) -> None:
+        """Ctrl-C no longer reaches a command in its own session, so the worker
+        must kill the group itself on any exception, as `subprocess.run` did."""
+        import subprocess
+
+        source = tmp_path / "a.txt"
+        source.write_text("x")
+        started: list[int] = []
+        real_wait = subprocess.Popen.wait
+
+        def interrupted(self, timeout=None):
+            if started:  # only the first wait is interrupted; the reap is real
+                return real_wait(self, timeout)
+            started.append(self.pid)
+            raise KeyboardInterrupt
+
+        monkeypatch.setattr(subprocess.Popen, "wait", interrupted)
+        with pytest.raises(KeyboardInterrupt):
+            extract_document(str(source), self._config(["sleep", "30"]))
+
+        pid = started[0]
+        for _ in range(100):
+            try:
+                state = Path(f"/proc/{pid}/stat").read_text().split(") ")[-1][0]
+            except FileNotFoundError:
+                return
+            if state == "Z":
+                return
+            time.sleep(0.05)
+        raise AssertionError("the command outlived the interrupt")
+
+    def test_the_command_does_not_get_the_database_credentials(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """The command keeps the worker's env for operator wrappers, minus
+        `CEMENTIC_DB_*`."""
+        source = tmp_path / "a.txt"
+        source.write_text("x")
+        monkeypatch.setenv("CEMENTIC_DB_URL", "postgresql://sentinel-secret")
+        monkeypatch.setenv("CEMENTIC_DB_PASSWORD", "sentinel-secret")
+        monkeypatch.setenv("OPERATOR_WRAPPER_SETTING", "kept")
+
+        text = extract_document(str(source), self._config(["env"]))
+
+        assert "sentinel-secret" not in text
+        assert "CEMENTIC_DB_" not in text
+        assert "OPERATOR_WRAPPER_SETTING=kept" in text
+        assert "PATH=" in text
+
+    def test_the_file_size_limit_stops_the_command_itself(self, tmp_path, monkeypatch) -> None:
+        """RLIMIT_FSIZE, not the after-the-fact size check: the command never
+        reaches the line after its oversized write."""
+        source = tmp_path / "a.txt"
+        source.write_text("x")
+        marker = tmp_path / "survived"
+        monkeypatch.setattr(extract_mod, "MAX_DOCUMENT_BYTES", 10_000)
+        script = (
+            "import sys, pathlib\n"
+            "sys.stdout.write('x' * 1_000_000); sys.stdout.flush()\n"
+            f"pathlib.Path({str(marker)!r}).write_text('survived')\n"
+        )
+
+        with pytest.raises(RuntimeError):
+            extract_document(str(source), self._config(["python3", "-c", script]))
+
+        assert not marker.exists()
 
     def test_a_timeout_is_reported_as_one(self, tmp_path, monkeypatch) -> None:
         source = tmp_path / "a.txt"
@@ -600,6 +671,26 @@ def test_a_plaintext_file_beyond_the_cap_is_refused_at_every_entry(
         extract_document(str(big), Config())
     with pytest.raises(RuntimeError, match="50-byte limit"):
         _plaintext_extractor(str(big), Config())
+
+
+def test_the_stat_check_alone_refuses_an_oversized_file_for_a_command_extractor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A non-plaintext extractor reads nothing itself, so only the `os.stat`
+    check in `extract_document` can refuse the file."""
+    big = tmp_path / "big.txt"
+    big.write_text("x" * 100)
+    monkeypatch.setattr(extract_mod, "MAX_DOCUMENT_BYTES", 50)
+    config = Config(
+        extraction=ExtractionConfig(
+            backends={"txt": "command"},
+            commands={"txt": ["printf", "%s", "ok"]},
+            command_versions={"txt": ["true"]},
+        )
+    )
+
+    with pytest.raises(RuntimeError, match="document exceeds the 50-byte limit"):
+        extract_document(str(big), config)
 
 
 def test_plaintext_with_a_stray_latin1_byte_still_extracts(tmp_path: Path) -> None:

@@ -47,9 +47,18 @@ exhausts memory marks that one document failed instead of stopping the worker.
 `extraction.timeout_seconds` bounds one extraction, including a command
 extractor; unset, a PDF parser gets 3600 seconds and a command 900. And `extraction.memory_limit_mb` (default 8192, `0` for no
 limit) caps the address space of that child and of a command extractor. A
-command's stdout and any document read are capped at 512 MiB. The child gets an
-allow-listed environment (no `CEMENTIC_*` or credentials) and its own process
-group, which a timeout kills whole. Neither limit enters the extraction profile.
+command's stdout and any document read are capped at 512 MiB. Each extractor
+runs in its own process group, which a timeout (or an interrupt of the worker)
+kills whole. Neither limit enters the extraction profile.
+
+The two extractors get different environments. The PDF parser child gets an
+allow-list only (search path, home and temporary directories, locale, Python,
+and numeric-library settings): no `CEMENTIC_*` variable and no credentials, and
+it reads no config file. A command extractor gets the worker's whole
+environment except the `CEMENTIC_DB_*` variables (the database URL and
+password), so an operator's wrapper script still sees its own variables. The
+scrub prevents accidental leaks; it does not stop a compromised parser running
+as the same user, which can read the worker's `/proc/<pid>/environ`.
 
 Changing an extractor setting creates a replacement revision. See
 [Operations](operations.md#revisions).
