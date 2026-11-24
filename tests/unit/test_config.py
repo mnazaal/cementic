@@ -370,6 +370,21 @@ class TestConfig:
         big = Config(pipeline={"chunk_size": 512}, llama_cpp={"n_ctx": 1024})
         assert big.pipeline.chunk_size == 512
 
+    def test_the_chunk_fit_error_offers_only_achievable_fixes(self):
+        """C10: at n_ctx=8 the message said "Use chunk_size <= 0", which
+        chunk_size's own `ge=1` bound refuses. At a realistic window the
+        chunk_size advice is the useful half and stays."""
+        from cementic.embedding_runtime import TASK_PREFIX_TOKEN_ALLOWANCE
+
+        with pytest.raises(ValidationError) as tiny:
+            Config(llama_cpp={"n_ctx": TASK_PREFIX_TOKEN_ALLOWANCE})
+        assert "chunk_size <=" not in str(tiny.value)
+        assert "raise n_ctx" in str(tiny.value).lower()
+
+        with pytest.raises(ValidationError) as realistic:
+            Config(pipeline={"chunk_size": 512})
+        assert f"chunk_size <= {512 - TASK_PREFIX_TOKEN_ALLOWANCE}" in str(realistic.value)
+
     def test_chunk_size_that_only_costs_the_fast_path_is_allowed(self):
         """Regression: refusing the *likely*-truncation band made chunk_size=352
         -- measured to produce zero over-budget chunks on the live corpus, and

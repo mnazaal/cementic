@@ -932,15 +932,19 @@ class Config(BaseSettings):
 
         smallest_possible = self.pipeline.chunk_size + TASK_PREFIX_TOKEN_ALLOWANCE
         if smallest_possible > self.llama_cpp.n_ctx:
+            largest_chunk = self.llama_cpp.n_ctx - TASK_PREFIX_TOKEN_ALLOWANCE
+            # chunk_size is `ge=1`, so at a window no larger than the prefix
+            # the only achievable fix is the window (C10).
+            shrink = (
+                f"Use chunk_size <= {largest_chunk}, or raise" if largest_chunk >= 1 else "Raise"
+            )
             raise ValueError(
                 f"pipeline.chunk_size={self.pipeline.chunk_size} cannot fit "
                 f"llama_cpp.n_ctx={self.llama_cpp.n_ctx}: a full chunk plus its "
                 f"task prefix is at least {smallest_possible} tokens even if the "
                 "model tokenizes as coarsely as tiktoken, so it would embed "
-                "truncated. Use chunk_size <= "
-                f"{self.llama_cpp.n_ctx - TASK_PREFIX_TOKEN_ALLOWANCE}, or raise "
-                "n_ctx only if the model's real context length allows it (the "
-                "default Nomic model caps at 512)."
+                f"truncated. {shrink} n_ctx only if the model's real context "
+                "length allows it (the default Nomic model caps at 512)."
             )
         return self
 
