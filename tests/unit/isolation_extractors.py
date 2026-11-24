@@ -6,6 +6,7 @@ A module rather than lambdas because the child imports the function by name.
 import os
 import signal
 import time
+from pathlib import Path
 
 
 def hard_exit(path, config):
@@ -50,3 +51,15 @@ def slow(path, config):
 
 def big(path, config):
     return "x" * 20_000_000
+
+
+def report_environment(path, config):
+    return "\n".join(sorted(os.environ))
+
+
+def spawn_grandchild_then_hang(path, config):
+    import subprocess
+
+    grandchild = subprocess.Popen(["sleep", "60"])
+    Path(path + ".pid").write_text(str(grandchild.pid))
+    time.sleep(60)

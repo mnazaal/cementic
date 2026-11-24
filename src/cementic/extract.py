@@ -15,7 +15,7 @@ import sys
 import tempfile
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -524,6 +524,33 @@ def _run_in_process(fn: ExtractorFn, path: str, config: Config) -> str:
     return fn(path, config)
 
 
+#: Variables a parser child may inherit: the executable search path, home and
+#: temporary directories, locale and time zone, Python's own settings, and the
+#: library tuning knobs OCR and numeric code read. Everything else -- above all
+#: `CEMENTIC_DB_URL` and any other credential -- stays with the worker, because
+#: the child parses untrusted files.
+_CHILD_ENV_NAMES = frozenset(
+    {"PATH", "HOME", "USER", "LOGNAME", "LANG", "LANGUAGE", "TZ", "TMPDIR", "TEMP", "TMP"}
+    | {"VIRTUAL_ENV", "LD_LIBRARY_PATH", "TESSDATA_PREFIX", "SSL_CERT_FILE"}
+)
+_CHILD_ENV_PREFIXES = ("LC_", "PYTHON", "XDG_", "OMP_", "MKL_", "OPENBLAS_", "ORT_")
+
+
+def child_environment(environ: Mapping[str, str]) -> dict[str, str]:
+    """The environment an extraction child gets: an allow-list of `environ` (pure)."""
+    return {
+        name: value
+        for name, value in environ.items()
+        if name in _CHILD_ENV_NAMES or name.startswith(_CHILD_ENV_PREFIXES)
+    }
+
+
+def _kill_group(process: subprocess.Popen[bytes]) -> None:
+    """SIGKILL the child's whole process group, grandchildren included."""
+    with contextlib.suppress(ProcessLookupError, PermissionError):
+        os.killpg(process.pid, signal.SIGKILL)
+
+
 class _Child:
     """One long-lived extraction child (see `_run_isolated`)."""
 
@@ -540,6 +567,8 @@ class _Child:
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=self.stderr,
+            env=child_environment(os.environ),
+            start_new_session=True,  # its own process group, killed as one
         )
         self.pid = self.process.pid
 
@@ -579,7 +608,7 @@ class _Child:
         try:
             self.process.wait(timeout=2)
         except subprocess.TimeoutExpired:
-            self.process.kill()
+            _kill_group(self.process)
             self.process.wait()
         self.stderr.close()
 
@@ -654,7 +683,7 @@ def _run_isolated(fn: ExtractorFn, path: str, config: Config) -> str:
 def _drop(key: str) -> None:
     """Kill and forget the child for `key` (caller holds the lock)."""
     child = _children.pop(key)
-    child.process.kill()
+    _kill_group(child.process)
     child.close()
 
 

@@ -2,6 +2,7 @@
 
 import contextlib
 import os
+import time
 from pathlib import Path
 
 import pytest
@@ -235,3 +236,40 @@ def test_a_child_dies_with_a_killed_parent():
         os.close(write_end)
         with contextlib.suppress(OSError):
             os.kill(child_pid, signal.SIGKILL)
+
+
+def test_the_child_does_not_inherit_the_workers_secrets(monkeypatch):
+    """The child parses untrusted files; `CEMENTIC_DB_URL` and friends stay out of it."""
+    monkeypatch.setenv("CEMENTIC_DB_URL", "postgresql://sentinel-secret")
+    monkeypatch.setenv("SENTINEL_TOKEN", "sentinel-secret")
+    config = use_extractor(monkeypatch, "report_environment")
+
+    names = extract_document("/x/a.pdf", config).splitlines()
+
+    assert "CEMENTIC_DB_URL" not in names
+    assert "SENTINEL_TOKEN" not in names
+    assert "PATH" in names  # what a parser needs still arrives
+
+
+def test_a_timeout_kills_the_childs_whole_process_group(monkeypatch, tmp_path):
+    config = use_extractor(monkeypatch, "spawn_grandchild_then_hang")
+    config.extraction.timeout_seconds = 2
+    document = tmp_path / "a.pdf"
+
+    with pytest.raises(RuntimeError, match="timed out"):
+        extract_document(str(document), config)
+
+    grandchild = int((tmp_path / "a.pdf.pid").read_text())
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline and _alive(grandchild):
+        time.sleep(0.05)
+    assert not _alive(grandchild)
+
+
+def _alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    # A zombie awaiting its (dead) parent's reaper still answers signal 0.
+    return Path(f"/proc/{pid}/stat").read_text().split(") ")[-1][0] != "Z"
