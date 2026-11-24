@@ -476,7 +476,10 @@ class TestCommandBackendNeedsItsTables:
     def test_a_command_backend_without_a_command_is_rejected_at_load(self) -> None:
         """Rejected at load, naming the file type, instead of a KeyError in
         `doctor` (and a failure per document in the worker) later."""
-        with pytest.raises(ValidationError, match=r"extraction\.commands.*epub"):
+        # Matched in the message itself: pydantic's truncated input echo
+        # also contains "epub", which a looser pattern would match instead.
+        named = r"'command' extractor for epub, but extraction\.commands"
+        with pytest.raises(ValidationError, match=named):
             ExtractionConfig(backends={"epub": "command"})
 
     def test_the_template_example_reaches_the_command_extractor(
