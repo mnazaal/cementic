@@ -126,6 +126,43 @@ class TestExtensionFailureIsNotADatabaseFailure:
         )
         assert report["ok"] is False
 
+    @patch("cementic.doctor._daemon_state", return_value=(True, True, None))
+    @patch("cementic.doctor._extension_check", return_value={"status": "ok", "message": "ok"})
+    @patch("cementic.doctor._active_extractor_profiles", side_effect=RuntimeError("boom"))
+    @patch("cementic.doctor.get_engine")
+    def test_a_failure_after_the_extensions_passed_still_fails_the_report(
+        self, mock_get_engine, mock_profiles, mock_ext, mock_daemon, tmp_path
+    ) -> None:
+        """C11: the extensions were judged ok, then the profile read in the
+        same `try` raised. The handler replaced the extension results with a
+        nested `fail` while the flag the verdict read stayed True, so `doctor`
+        reported ok and exited 0 over a failed check it had just printed."""
+        conn = MagicMock()
+        mock_get_engine.return_value.connect.return_value.__enter__.return_value = conn
+
+        report = collect_doctor_report(_config_with_model_path(tmp_path, exists=True))
+
+        assert report["checks"]["extensions"]["(inspection)"]["status"] == "fail"
+        assert report["ok"] is False
+
+    @patch("cementic.doctor._daemon_state", return_value=(True, True, None))
+    @patch("cementic.doctor._extension_check", return_value={"status": "warning", "message": "w"})
+    @patch("cementic.doctor.get_engine")
+    def test_warnings_alone_leave_the_report_ok(
+        self, mock_get_engine, mock_ext, mock_daemon, tmp_path
+    ) -> None:
+        """The other half of C11's end condition: counting nested statuses
+        must not turn an intentional warning into a failure."""
+        conn = MagicMock()
+        mock_get_engine.return_value.connect.return_value.__enter__.return_value = conn
+
+        report = collect_doctor_report(_config_with_model_path(tmp_path, exists=True))
+
+        statuses = {name: check.get("status") for name, check in report["checks"].items()}
+        assert "fail" not in statuses.values(), statuses
+        assert "warning" in {item["status"] for item in report["checks"]["extensions"].values()}
+        assert report["ok"] is True
+
 
 class TestMissingPipelineTablesIsNotADatabaseFailure:
     @patch("cementic.doctor._daemon_state", return_value=(True, True, "reachable"))
@@ -588,9 +625,19 @@ class TestExtractorDriftCheck:
         mock_engine = MagicMock()
         mock_engine.connect.return_value.__enter__.return_value = mock_conn
 
-        with patch("cementic.doctor.get_engine", return_value=mock_engine):
+        # The one mocked row answers every query, so the canary and lexical
+        # probes, which expect other row shapes, raised on it. That printed
+        # `database: fail` beside `ok: True`, which only passed while the
+        # verdict ignored printed statuses (C11). They return "nothing
+        # recorded" here; this test is about the extractor profile.
+        with (
+            patch("cementic.doctor.get_engine", return_value=mock_engine),
+            patch("cementic.doctor._active_embedding_canaries", return_value=[]),
+            patch("cementic.doctor.lexical_index_facts", return_value=None),
+        ):
             report = collect_doctor_report(config)
 
+        assert report["checks"]["database"]["status"] == "ok"
         assert report["checks"]["extractor_profile"]["status"] == "warning"
         assert report["ok"] is True
 

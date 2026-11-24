@@ -146,7 +146,6 @@ def collect_doctor_report(config: Config) -> dict[str, Any]:
     }
 
     database_ok = False
-    extension_ok = False
     active_extractor_profiles: list[tuple[str, dict[str, Any]]] | None = None
     stranded_chunkings: int | None = None
     lexical_facts: LexicalIndexFacts | None = None
@@ -163,9 +162,6 @@ def collect_doctor_report(config: Config) -> dict[str, Any]:
             # a server that had just answered SELECT 1.
             try:
                 extensions = {name: _extension_check(conn, name) for name in REQUIRED_DB_EXTENSIONS}
-                extension_ok = all(
-                    item["status"] in {"ok", "warning"} for item in extensions.values()
-                )
                 checks["extensions"] = extensions
                 active_extractor_profiles = _active_extractor_profiles(conn)
             except Exception as extension_error:
@@ -203,7 +199,6 @@ def collect_doctor_report(config: Config) -> dict[str, Any]:
         llama_model_download_allowed(model_path)
     )
     model_auto_download = config.bootstrap.auto_download_llama_model
-    model_ok = model_exists or model_downloadable
     checks["model"] = {
         "status": "ok" if model_exists else "warning" if model_downloadable else "fail",
         "path": str(model_path),
@@ -250,27 +245,32 @@ def collect_doctor_report(config: Config) -> dict[str, Any]:
     checks["chunk_budget"] = _chunk_budget_check(config)
     checks["tokenizer"] = _tokenizer_check()
     checks["embedding_server"] = _embedding_server_check(config)
-    server_ok = checks["embedding_server"]["status"] != "fail"
     checks["ocr"] = _ocr_check(config)
-    ocr_ok = checks["ocr"]["status"] != "fail"
     checks["extraction_commands"] = _extraction_commands_check(config)
-    commands_ok = checks["extraction_commands"]["status"] != "fail"
     checks["extractor_profile"] = _extractor_profile_check(config, active_extractor_profiles)
     checks["embedding_canary"] = _embedding_canary_check(
         config, active_canaries, daemon_healthy=daemon_healthy
     )
 
-    ok = (
-        (config_error is None)
-        and database_ok
-        and extension_ok
-        and model_ok
-        and daemon_ok
-        and server_ok
-        and ocr_ok
-        and commands_ok
-    )
-    return {"ok": ok, "checks": checks}
+    return {"ok": not _any_failed(checks), "checks": checks}
+
+
+def _any_failed(checks: dict[str, Any]) -> bool:
+    """Whether any check, at any nesting depth, reports ``fail``.
+
+    The verdict is read off the statuses the report prints, not off flags kept
+    beside them: a conjunction of flags let `extensions` carry a nested
+    ``fail`` while its flag stayed True, so `doctor` said ok and exited 0 over
+    a failure it had just printed (C11, 2026-11-18). ``warning`` passes.
+    """
+    for check in checks.values():
+        if not isinstance(check, dict):
+            continue
+        if check.get("status") == "fail":
+            return True
+        if _any_failed(check):
+            return True
+    return False
 
 
 #: Long enough for a cold binary to load its libraries and print a version,
