@@ -45,14 +45,14 @@ a document that is by construction the answer, which is what makes the gold
 label free and the query set re-buildable on a different corpus.
 
 Usage:
-    python scripts/measure_retrieval_quality.py build -o eval/queries.json
-    python scripts/measure_retrieval_quality.py perturb -q eval/queries.json
-    python scripts/measure_retrieval_quality.py score -q eval/queries.json
-    python scripts/measure_retrieval_quality.py arms -q eval/queries.json
-    python scripts/measure_retrieval_quality.py ablate
-    python scripts/measure_retrieval_quality.py compare-models
-    python scripts/measure_retrieval_quality.py riders
-    python scripts/measure_retrieval_quality.py fuzzy
+    uv run python scripts/measure_retrieval_quality.py build -o eval/queries.json
+    uv run python scripts/measure_retrieval_quality.py perturb -q eval/queries.json
+    uv run python scripts/measure_retrieval_quality.py score -q eval/queries.json
+    uv run python scripts/measure_retrieval_quality.py arms -q eval/queries.json
+    uv run python scripts/measure_retrieval_quality.py ablate
+    uv run python scripts/measure_retrieval_quality.py compare-models
+    uv run python scripts/measure_retrieval_quality.py riders
+    uv run python scripts/measure_retrieval_quality.py fuzzy
 
 The database is not reachable from an agent sandbox; run these unsandboxed.
 """
@@ -73,11 +73,12 @@ import urllib.request
 from collections.abc import Iterator
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from typing import Any
 
-from sqlalchemy import text
+from sqlalchemy import Connection, text
 
 from cementic.chunk import chunk_text, tokenizer
-from cementic.config import get_config
+from cementic.config import Config, get_config
 from cementic.db import LEXICAL_TEXT_CONFIG, get_engine
 from cementic.embedding_text import (
     format_document_text_for_model,
@@ -710,7 +711,7 @@ def sign_test(better: int, worse: int) -> float:
     n = better + worse
     if n == 0:
         return 1.0
-    tail = sum(math.comb(n, k) for k in range(0, min(better, worse) + 1)) / 2**n
+    tail: float = sum(math.comb(n, k) for k in range(0, min(better, worse) + 1)) / 2**n
     return min(1.0, 2 * tail)
 
 
@@ -752,7 +753,7 @@ def paired_at_1(ranks: list[int], baseline: list[int]) -> tuple[int, int, float]
     return better, worse, sign_test(better, worse)
 
 
-def shared_pool(pools: list[list]) -> list[int]:
+def shared_pool(pools: list[list[Any]]) -> list[int]:
     """Indices every pool holds a vector for (pure).
 
     The pools are the arms of one granularity, row-aligned, with None where the
@@ -995,7 +996,7 @@ def fuzzy_report(
     return out
 
 
-def format_fuzzy(report: dict, counts: dict[str, int], depth: int) -> str:
+def format_fuzzy(report: dict[str, Any], counts: dict[str, int], depth: int) -> str:
     """Render `fuzzy_report` (pure)."""
     lines = []
     for kind, rows in report.items():
@@ -1051,7 +1052,7 @@ def rider_census(spans: list[str]) -> dict[str, int]:
 # --------------------------------------------------------------------------
 
 
-def matching_document_ids(conn, query: str, limit: int) -> list[int]:
+def matching_document_ids(conn: Connection, query: str, limit: int) -> list[int]:
     """Document ids of up to `limit` chunks matching `query`, GIN-driven.
 
     Deliberately *not* ``select distinct document_id ... limit n``. Measured
@@ -1075,7 +1076,7 @@ def matching_document_ids(conn, query: str, limit: int) -> list[int]:
     return [row[0] for row in rows]
 
 
-def is_known_item(conn, query: str, gold_id: int) -> bool:
+def is_known_item(conn: Connection, query: str, gold_id: int) -> bool:
     """Whether `query` identifies `gold_id` narrowly enough to be scorable.
 
     Two conditions, both necessary. The match set must be small, or the query
@@ -1087,21 +1088,23 @@ def is_known_item(conn, query: str, gold_id: int) -> bool:
     return 0 < len(distinct) <= MAX_MATCHING_DOCUMENTS and gold_id in distinct
 
 
-def sample_documents(conn, collection: str, rng: random.Random) -> list[tuple[int, str]]:
+def sample_documents(
+    conn: Connection, collection: str, rng: random.Random
+) -> list[tuple[int, str]]:
     """Every live document in the collection, shuffled."""
-    docs = conn.execute(
+    rows = conn.execute(
         text(
             "select id, source_path from source_documents "
             "where collection = :col and status <> 'deleted'"
         ),
         {"col": collection},
     ).fetchall()
-    docs = [(row[0], row[1]) for row in docs]
+    docs = [(row[0], row[1]) for row in rows]
     rng.shuffle(docs)
     return docs
 
 
-def build_rare_token_set(conn, docs, n: int) -> list[Query]:
+def build_rare_token_set(conn: Connection, docs: list[tuple[int, str]], n: int) -> list[Query]:
     """Set A: a rare capitalised token, answered by the document it came from.
 
     Candidates are sorted longest-first. Measured 2026-09-06: "Hochreiter"
@@ -1134,7 +1137,7 @@ def build_rare_token_set(conn, docs, n: int) -> list[Query]:
     return out
 
 
-def build_title_set(conn, docs, n: int) -> list[Query]:
+def build_title_set(conn: Connection, docs: list[tuple[int, str]], n: int) -> list[Query]:
     """Set B: the document's own title, answered by that document.
 
     No corpus probe: a title is a known-item query by construction. The
@@ -1151,7 +1154,7 @@ def build_title_set(conn, docs, n: int) -> list[Query]:
     return out
 
 
-def build_phrase_set(conn, docs, n: int) -> list[Query]:
+def build_phrase_set(conn: Connection, docs: list[tuple[int, str]], n: int) -> list[Query]:
     """Set E: a multi-word phrase from the body, answered by its own document.
 
     The bucket nothing has measured. Set A asks for a token a lexical index
@@ -1324,7 +1327,7 @@ def command_arms(args: argparse.Namespace) -> int:
     arm_limit = arm_fetch_limit(PRODUCTION_DEPTH)
     t0 = time.perf_counter()
 
-    records: list[dict] = []
+    records: list[dict[str, Any]] = []
     for i, query in enumerate(queries, start=1):
         candidates = searcher.candidates(
             query.query, top_k=PRODUCTION_DEPTH, collections=[collection]
@@ -1379,7 +1382,9 @@ def command_ablate(args: argparse.Namespace) -> int:
     return 0
 
 
-def compare_sample(conn, collection: str, n: int, rng: random.Random) -> dict:
+def compare_sample(
+    conn: Connection, collection: str, n: int, rng: random.Random
+) -> dict[str, Any]:
     """Draw papers, their stored span chunks and vectors, and the queries.
 
     Returns plain JSON-able data so the sample is written once and every model,
@@ -1387,7 +1392,7 @@ def compare_sample(conn, collection: str, n: int, rng: random.Random) -> dict:
     """
     revision = active_revision(conn, collection)
     table = vector_table_name(int(revision.embedding_profile_id))
-    candidates = conn.execute(
+    fetched = conn.execute(
         text(
             "select sd.id, sd.source_path, ed.artifact_path from source_documents sd "
             "join extracted_documents ed on ed.document_id = sd.id "
@@ -1397,7 +1402,7 @@ def compare_sample(conn, collection: str, n: int, rng: random.Random) -> dict:
         ),
         {"c": collection, "ex": revision.extractor_profile_id},
     ).fetchall()
-    candidates = sorted(tuple(row) for row in candidates)
+    candidates = sorted(tuple(row) for row in fetched)
     rng.shuffle(candidates)
 
     first, last = SPAN_SKIP_CHUNKS, SPAN_SKIP_CHUNKS + SPAN_CHUNKS - 1
@@ -1405,7 +1410,7 @@ def compare_sample(conn, collection: str, n: int, rng: random.Random) -> dict:
         STORED_CHUNK_SIZE, STORED_CHUNK_OVERLAP, SPAN_SKIP_CHUNKS, SPAN_CHUNKS
     )
     encoding = tokenizer()
-    papers: list[dict] = []
+    papers: list[dict[str, Any]] = []
     misaligned = 0
     for document_id, source_path, artifact in candidates:
         if len(papers) == n:
@@ -1462,7 +1467,7 @@ def compare_sample(conn, collection: str, n: int, rng: random.Random) -> dict:
     return {"collection": collection, "papers": papers, "misaligned": misaligned}
 
 
-def server_argv(config, spec: ModelSpec, port: int, models_dir: Path) -> list[str]:
+def server_argv(config: Config, spec: ModelSpec, port: int, models_dir: Path) -> list[str]:
     """The live daemon's binary and environment, serving `spec` on `port`.
 
     Taken from the configured `daemon_command` up to the executable, so every
@@ -1528,7 +1533,7 @@ def embed_all(
 
 
 @contextlib.contextmanager
-def serving(config, spec: ModelSpec, out_dir: Path, port: int) -> Iterator[str]:
+def serving(config: Config, spec: ModelSpec, out_dir: Path, port: int) -> Iterator[str]:
     """Run `spec`'s llama-server for the block and yield its base URL."""
     models_dir = Path(config.llama_cpp.model_path).expanduser().parent
     log = out_dir / f"server-{spec.name}.log"
@@ -1559,7 +1564,9 @@ def serving(config, spec: ModelSpec, out_dir: Path, port: int) -> Iterator[str]:
             server.kill()
 
 
-def run_model(config, spec: ModelSpec, sample: dict, out_dir: Path, port: int) -> None:
+def run_model(
+    config: Config, spec: ModelSpec, sample: dict[str, Any], out_dir: Path, port: int
+) -> None:
     """Embed every text this model needs, resuming from whatever is cached.
 
     Each finished step is written to a partial file at once, so a run killed
@@ -1572,7 +1579,7 @@ def run_model(config, spec: ModelSpec, sample: dict, out_dir: Path, port: int) -
         print(f"  {spec.name}: cached", flush=True)
         return
     partial = out_dir / f"{spec.name}.partial.json"
-    result: dict = (
+    result: dict[str, Any] = (
         json.loads(partial.read_text()) if partial.exists()
         else {"model": spec.name, "gguf": spec.gguf}
     )
@@ -1608,7 +1615,14 @@ def run_model(config, spec: ModelSpec, sample: dict, out_dir: Path, port: int) -
 
 
 def score_arm(
-    np, queries, query_docs, pool, pool_docs, keep: list[int] | None = None
+    # `np` is the numpy module, imported lazily by the caller; `Any` because
+    # numpy is not a declared dependency of the package.
+    np: Any,
+    queries: Any,
+    query_docs: Any,
+    pool: Any,
+    pool_docs: Any,
+    keep: list[int] | None = None,
 ) -> tuple[list[int], list[float]]:
     """Gold rank and margin per query for one (queries, pool) pair.
 
@@ -1730,7 +1744,7 @@ def command_compare_models(args: argparse.Namespace) -> int:
     return 0
 
 
-def active_revision(conn, collection: str):
+def active_revision(conn: Connection, collection: str) -> Any:
     """The collection's active pipeline revision row."""
     return conn.execute(
         text(
@@ -1759,7 +1773,9 @@ def fuzzy_scope(table: str) -> str:
     )
 
 
-def trigram_arms(conn, table: str, scope: dict, query: str) -> tuple[list[str], list[str]]:
+def trigram_arms(
+    conn: Connection, table: str, scope: dict[str, Any], query: str
+) -> tuple[list[str], list[str]]:
     """(similarity arm, word_similarity arm) over every chunk, as document keys.
 
     A sequential scan: no index backs these functions here. `word_similarity`
@@ -1788,7 +1804,9 @@ def trigram_arms(conn, table: str, scope: dict, query: str) -> tuple[list[str], 
     )
 
 
-def relaxed_arm(conn, table: str, scope: dict, query: str, limit: int) -> list[str]:
+def relaxed_arm(
+    conn: Connection, table: str, scope: dict[str, Any], query: str, limit: int
+) -> list[str]:
     """Document keys of chunks holding >= RELAXED_TERM_SHARE of the query's terms."""
     config = LEXICAL_TEXT_CONFIG
     lexemes = [

@@ -27,7 +27,7 @@ sent. Both signals below run against the whole chunk.
 Run with the daemon up (`cementic embedding start`), after changing chunk_size,
 n_ctx, or the embedding model:
 
-    python scripts/measure_chunk_context_fit.py
+    uv run python scripts/measure_chunk_context_fit.py
 """
 
 from __future__ import annotations
@@ -112,7 +112,9 @@ def main() -> int:
             variant_b = chunk[: -len(_TAIL_B)] + _TAIL_B
             tail_ignored = embed(formatted(variant_a)) == embed(formatted(variant_b))
         except Exception as error:
-            print(f"{name:<12} {cl100k:>7} {len(chunk):>7} {'-':>7} {'-':>6}  PROBE FAILED: {error}")
+            print(
+                f"{name:<12} {cl100k:>7} {len(chunk):>7} {'-':>7} {'-':>6}  PROBE FAILED: {error}"
+            )
             failures += 1
             continue
 

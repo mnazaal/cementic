@@ -51,8 +51,8 @@ PY
 # without the lock. A version bump that skips `uv lock` otherwise reaches local
 # tests but fails the locked jobs -- which is how v0.2.0 shipped red.
 run lockfile          uv lock --check
-run ruff              uv run --extra dev ruff check src/ tests/
-run mypy              uv run --extra dev mypy src/
+run ruff              uv run --extra dev ruff check src/ tests/ scripts/
+run mypy              uv run --extra dev mypy src/ scripts/
 run unit              uv run --extra dev pytest tests/unit -q
 run integration       uv run --extra dev pytest tests/integration -m "not pg" -q
 
