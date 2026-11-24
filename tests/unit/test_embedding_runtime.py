@@ -635,6 +635,66 @@ class TestAutostartChecksTheModelFirst:
         spawn.assert_not_called()
 
 
+class TestAliasFollowsDownloadedModel:
+    """The client's alias must be computed after the bootstrapper fetches the model.
+
+    Regression: on a machine with no model yet the client was built while the
+    file was missing (alias fell back to ``unreadable:<path>``), the bootstrapper
+    then downloaded it, the daemon launched with the real-digest alias, and the
+    readiness wait looked for the stale alias -- "serving a different model".
+    """
+
+    def test_client_expects_the_alias_the_daemon_is_launched_with(
+        self, temp_dir, monkeypatch
+    ) -> None:
+        from cementic import model_digest
+
+        monkeypatch.setattr(
+            model_digest,
+            "cementic_data_dir",
+            lambda *, ensure_exists=False: temp_dir / "data",
+        )
+        model = temp_dir / "models" / "m.gguf"
+        config = Config()
+        config.llama_cpp.model_path = str(model)
+        config.llama_cpp.daemon_pid_file = temp_dir / "d.pid"
+        config.llama_cpp.daemon_log_file = temp_dir / "d.log"
+
+        def download(self) -> None:
+            model.parent.mkdir(parents=True, exist_ok=True)
+            model.write_bytes(b"downloaded-weights")
+
+        launched: dict[str, str] = {}
+
+        def fake_start(cfg, spec=None) -> int:
+            launched["alias"] = build_llama_cpp_client(cfg, spec).expected_fingerprint
+            return 4242
+
+        waited: dict[str, str] = {}
+
+        def fake_wait(client, **kwargs) -> None:
+            waited["alias"] = client.expected_fingerprint
+
+        with (
+            patch(
+                "cementic.embedding_runtime.RemoteEmbeddingClient._list_models",
+                return_value=None,
+            ),
+            patch("cementic.embedding_runtime._daemon_pid_alive", return_value=False),
+            patch(
+                "cementic.bootstrap.Bootstrapper.ensure_embedding_runtime", download
+            ),
+            patch("cementic.embedding_runtime._stop_mismatched_llama_cpp_daemon"),
+            patch("cementic.embedding_runtime._start_llama_cpp_daemon", fake_start),
+            patch("cementic.embedding_runtime._wait_for_daemon_ready", fake_wait),
+            patch("cementic.embedding_runtime.process_start_token", return_value=None),
+        ):
+            client = get_llama_cpp_runtime_client(config=config, autostart=True)
+
+        assert waited["alias"] == launched["alias"]
+        assert client.expected_fingerprint == launched["alias"]
+
+
 class TestWaitForDaemon:
     """Tests for _wait_for_daemon_ready."""
 

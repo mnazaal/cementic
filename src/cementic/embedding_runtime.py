@@ -741,6 +741,10 @@ def get_llama_cpp_runtime_client(
     from cementic.bootstrap import Bootstrapper
 
     Bootstrapper(config).ensure_embedding_runtime()
+    # The bootstrapper may have just downloaded the model. The client's alias
+    # digests the model's bytes, so the one built above (model missing, path
+    # fallback) would wait for an alias the daemon is never launched with.
+    client = build_llama_cpp_client(config, runtime_spec)
 
     print(
         "starting embedding daemon (a cold start loads the model; this can take 30s+)...",
