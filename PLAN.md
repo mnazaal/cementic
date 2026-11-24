@@ -3,8 +3,10 @@
 <!-- session-handoff:begin (2026-11-17) -->
 ## Where the work stands
 
-**Entry point:** **Execution order — open items** below; **A3 is next** (A1, A2
-and B1-B4 are done and verified). The live corpus is untouched and clean; the
+**Entry point:** **Execution order — open items** below. *Corrected
+2026-11-24:* Wave A (A3 onward) is deferred by the user's call (decision log,
+"parallel-lanes interview"); Waves C and D and the rest of Wave B run as
+parallel agent lanes. (A1, A2 and B1-B4 are done and verified.) The live corpus is untouched and clean; the
 repairs change worker behaviour, so the next `cementic start` is what applies
 them.
 
@@ -222,6 +224,29 @@ carries it out.
   promise changes the lexical-lead ranking (18 of 60 rare-token gold ranks
   improve on the cached arms). Wave A's standing rule is that ranking does not
   change while it is being measured, and A3 is unmeasured.
+
+### 2026-11-24 — decisions from the parallel-lanes interview
+
+After the user's gate run on `claude/audit-wave-c` passed (lockfile, ruff,
+mypy, unit, integration and integration-pg all ok), the open items were
+split by what each needs to reach: the sandbox only, a scratch `*_test`
+PostgreSQL, or the daemon plus the live corpus.
+
+- **Wave A is deferred; A3 is no longer next.** The user chose "Defer Wave A"
+  over handing them scripts or authorising agents to start the daemon. That
+  deferral also parks the items that must wait for A3: A4, A5's decision, D10,
+  C7, the supervised tiny-corpus run and the rebuild decision. **Consequence:**
+  B1-B4's repairs reach the live corpus at the next `cementic start`, and the
+  closure rules' supervised run, which should come before that start, is
+  parked with Wave A. Until the run is done, starting the service applies
+  repairs that have no production check.
+- **Agents get PostgreSQL by a sandbox exclusion.** The user chose "Exclude
+  pytest -m pg" over writing PG tests blind or parking them. This unblocks D8
+  and C6 with failing-test-first evidence against `*_test` databases only.
+  *Accepted cost:* agent-written test code runs outside the sandbox.
+- **Lanes land as one stack.** The user chose "One integration branch":
+  reviewed lane branches are rebased in order onto `claude/audit-integration`,
+  and the user runs one gate and one `--ff-only` merge.
 
 ## Design principles
 
