@@ -32,7 +32,7 @@ from cementic.db import (
     get_session_factory,
     utc_now,
 )
-from cementic.extract import supported_extensions
+from cementic.extract import MAX_DOCUMENT_BYTES, supported_extensions
 from cementic.redact import redact_text
 from cementic.state import DaemonState, StateManager
 from cementic.supervisor import is_managed_process_alive, process_start_token
@@ -990,7 +990,7 @@ class SourceWatcher:
             return
         file_path = normalized_path
         # Guard against exceedingly large files
-        max_size_bytes = 512 * 1024 * 1024  # 512 MiB
+        max_size_bytes = MAX_DOCUMENT_BYTES
         try:
             stat_result = path.stat()
             file_size = stat_result.st_size

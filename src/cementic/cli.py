@@ -1,5 +1,6 @@
 """CLI interface for cementic using Typer."""
 
+import contextlib
 import json
 import os
 import shutil
@@ -454,7 +455,7 @@ def start_background(
         with file_lock(_get_start_lock_path(), timeout=0):
             _start_background_locked(directories, collection)
     except LockUnavailableError:
-        err_console.print("[yellow]Another `cementic start` is already in progress[/yellow]")
+        err_console.print("[yellow]Another `cementic start` or `cementic stop` is already in progress[/yellow]")
         raise typer.Exit(1)
 
 
@@ -813,9 +814,15 @@ def stop_background(
     # The lock `start` holds from its liveness check to its supervisor record.
     # Without it, a stop landing in that window reads no record, finds nothing
     # or only stale state, and clears the state files of workers `start` has
-    # just spawned. Waiting (no timeout) is right: a start holds the lock for
-    # seconds, and a SIGKILLed holder releases it with its descriptor.
-    with file_lock(_get_start_lock_path()):
+    # just spawned. Block rather than fail: `start` holds it through bootstrap,
+    # which on a first run includes the model download (minutes), so say so
+    # instead of sitting silent. A SIGKILLed holder releases it with its descriptor.
+    with contextlib.ExitStack() as stack:
+        try:
+            stack.enter_context(file_lock(_get_start_lock_path(), timeout=0))
+        except LockUnavailableError:
+            err_console.print("waiting for a `cementic start` in progress…")
+            stack.enter_context(file_lock(_get_start_lock_path()))
         _stop_background_locked(force)
 
 
@@ -1236,6 +1243,20 @@ def extract(path: str = typer.Argument(..., help="Path to a document file")) -> 
     typer.echo(markdown)
 
 
+def _read_capped(stream: Any) -> str:
+    """Read at most the document cap (in characters) from `stream`, or refuse."""
+    from cementic import extract as extract_mod
+
+    text: str = stream.read(extract_mod.MAX_DOCUMENT_BYTES + 1)
+    extract_mod._check_size(len(text))
+    return text
+
+
+def _read_capped_file(path: Path) -> str:
+    with open(path, encoding="utf-8") as handle:
+        return _read_capped(handle)
+
+
 @app.command(short_help="Chunk text from a file or stdin to JSONL on stdout")
 def chunk(
     path: str | None = typer.Argument(None, help="Text file to chunk (default: stdin)"),
@@ -1265,8 +1286,8 @@ def chunk(
             err_console.print("chunk failed: no PATH given and stdin is a terminal")
             raise typer.Exit(1)
         read_stdin = path is None or path == ""
-        text = sys.stdin.read() if read_stdin else Path(str(path)).read_text(encoding="utf-8")
-    except (OSError, ValueError) as error:
+        text = _read_capped(sys.stdin) if read_stdin else _read_capped_file(Path(str(path)))
+    except (OSError, ValueError, RuntimeError) as error:
         # ValueError covers UnicodeDecodeError: `chunk` takes text, and a binary
         # file should be a one-line error, not a traceback.
         err_console.print(f"chunk failed: {error}")

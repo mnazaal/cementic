@@ -3151,6 +3151,19 @@ class TestFilterCommands:
         assert result.stdout == ""
         assert result.stderr.strip() == "chunk failed: could not load the cl100k_base tokenizer"
 
+    def test_chunk_refuses_a_file_beyond_the_document_cap(self, tmp_path, monkeypatch):
+        from cementic import extract as extract_mod
+
+        monkeypatch.setattr(extract_mod, "MAX_DOCUMENT_BYTES", 50)
+        big = tmp_path / "big.txt"
+        big.write_text("x" * 100, encoding="utf-8")
+
+        result = runner.invoke(app, ["chunk", str(big)])
+
+        assert result.exit_code == 1
+        assert "chunk failed" in result.stderr
+        assert "50-byte limit" in result.stderr
+
     def test_chunk_reads_a_file(self, tmp_path):
         f = tmp_path / "doc.txt"
         f.write_text("some text to chunk", encoding="utf-8")

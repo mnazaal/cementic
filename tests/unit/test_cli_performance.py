@@ -255,6 +255,29 @@ def test_stop_waits_for_a_start_in_progress_before_reading_state() -> None:
     assert events == ["start-recorded-its-state", "stop-read-state"]
 
 
+def test_stop_says_it_is_waiting_for_a_start_in_progress() -> None:
+    """`start` holds the lock through bootstrap (a first-run model download), so a
+    silent block looks like a hang."""
+    import threading
+    import time
+
+    from cementic.cli import _get_start_lock_path
+    from cementic.filelock import file_lock
+
+    results: list[object] = []
+    with patch("cementic.cli.read_supervisor_state", return_value={"processes": []}):
+        with file_lock(_get_start_lock_path(), timeout=0):
+            stopper = threading.Thread(
+                target=lambda: results.append(runner.invoke(app, ["stop"]))
+            )
+            stopper.start()
+            time.sleep(0.5)
+            assert stopper.is_alive()
+        stopper.join(timeout=10)
+
+    assert "waiting for a `cementic start` in progress" in results[0].output
+
+
 def test_search_top_k_cap_matches_the_searcher_limit() -> None:
     """`cli` inlines the cap so it need not import `search` to build the option.
 
