@@ -370,6 +370,34 @@ class TestConfig:
         big = Config(pipeline={"chunk_size": 512}, llama_cpp={"n_ctx": 1024})
         assert big.pipeline.chunk_size == 512
 
+    def test_the_generated_template_names_every_setting(self):
+        """D1: `config init`'s template is documented as the complete
+        reference (docs/configuration.md, `config init --help`), so every
+        Config field must appear in it, set or commented out."""
+        import re
+        from importlib import resources
+
+        template = (resources.files("cementic") / "templates" / "config.toml").read_text(
+            encoding="utf-8"
+        )
+        named: dict[str, set[str]] = {}
+        section = None
+        for line in template.splitlines():
+            if header := re.match(r"^\[(\w+)\]", line):
+                section = header.group(1)
+            elif subtable := re.match(r"^#?\s*\[(\w+)\.(\w+)\]", line):
+                named.setdefault(subtable.group(1), set()).add(subtable.group(2))
+            elif section and (key := re.match(r"^#?\s*(\w+)\s*=", line)):
+                named.setdefault(section, set()).add(key.group(1))
+
+        missing = sorted(
+            f"{name}.{field}"
+            for name, info in Config.model_fields.items()
+            for field in info.annotation.model_fields  # type: ignore[union-attr]
+            if field not in named.get(name, set())
+        )
+        assert missing == []
+
     def test_the_chunk_fit_error_offers_only_achievable_fixes(self):
         """C10: at n_ctx=8 the message said "Use chunk_size <= 0", which
         chunk_size's own `ge=1` bound refuses. At a realistic window the

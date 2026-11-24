@@ -41,6 +41,9 @@ build_memory = "2GB"
 # Combine semantic and exact-word search.
 hybrid = true
 lexical_lead_max_documents = 20
+# Full-text matches fetched before ranking and the collection filter. Common
+# terms match more than this, so the pool is then a sample, not the best hits.
+lexical_candidate_pool = 2000
 
 [llama_cpp]
 # cementic starts and supervises an OpenAI-compatible embedding server. Point
@@ -72,6 +75,11 @@ daemon_autostart = true
 [extraction]
 # Enable OCR only with the layout-aware PDF extractor and optional rapidocr.
 use_ocr = false
+# Per-document wall-clock limit in seconds. Unset: 900 for a command, 3600 for
+# a PDF parser. A document that exceeds it is marked failed.
+# timeout_seconds = 900
+# Address-space limit (MiB) for the child process that parses a PDF; 0 removes it.
+memory_limit_mb = 8192
 # Use per-type tables for overrides. Unset types use the registry default.
 # [extraction.backends]
 # pdf = "pymupdf-raw" # The default is "pymupdf4llm".
