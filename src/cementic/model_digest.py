@@ -69,9 +69,9 @@ def model_content_digest(model_path: str) -> str | None:
     (``resolve_llama_model_path``), so the digest always describes the file
     that will actually be served.
 
-    Returns None -- never raises -- when the file does not exist or cannot be
-    stat'd, so profile construction never crashes on a model that has not
-    been downloaded yet (e.g. `cementic config show` before `start`). The
+    Returns None -- never raises -- when the file does not exist, cannot be
+    stat'd, cannot be read or hashed, or the cache lock cannot be taken, so profile construction never
+    crashes on a model that has not been downloaded yet (e.g. `cementic config show` before `start`). The
     real indexing/search call sites only reach here once the embedding daemon
     is already serving the model, so the file is always present there.
     """
@@ -84,12 +84,18 @@ def model_content_digest(model_path: str) -> str | None:
     key = _cache_key(resolved, stat.st_size, stat.st_mtime_ns)
     cache_file = _cache_path()
     lock_path = cache_file.with_name(f"{cache_file.name}.lock")
-    with file_lock(lock_path):
-        cache = _load_cache(cache_file)
-        cached = cache.get(key)
-        if cached is not None:
-            return cached
-        digest = sha256_file(resolved)
-        cache[key] = digest
-        _save_cache(cache_file, cache)
-        return digest
+    try:
+        with file_lock(lock_path):
+            cache = _load_cache(cache_file)
+            cached = cache.get(key)
+            if cached is not None:
+                return cached
+            digest = sha256_file(resolved)
+            cache[key] = digest
+            _save_cache(cache_file, cache)
+            return digest
+    except OSError:
+        # Unreadable model (stat worked, read did not) or an uncreatable data
+        # directory for the lock: callers fall back as for a missing file.
+        _logger.debug("Could not digest %s", resolved, exc_info=True)
+        return None

@@ -127,3 +127,35 @@ class TestDigestCache:
         digest = model_digest.model_content_digest(str(model_file))
 
         assert digest == model_digest.sha256_file(model_file)
+
+
+class TestFingerprintNeverRaises:
+    """Building a runtime fingerprint falls back instead of raising on I/O errors."""
+
+    def test_unreadable_model_falls_back(self, tmp_path: Path) -> None:
+        model_file = tmp_path / "embed.gguf"
+        model_file.write_bytes(b"payload")
+
+        with patch("cementic.model_digest.sha256_file", side_effect=PermissionError("denied")):
+            assert model_digest.model_content_digest(str(model_file)) is None
+
+    def test_uncreatable_data_dir_falls_back(self, tmp_path: Path) -> None:
+        model_file = tmp_path / "embed.gguf"
+        model_file.write_bytes(b"payload")
+
+        with patch(
+            "cementic.model_digest.file_lock", side_effect=FileNotFoundError("no data dir")
+        ):
+            assert model_digest.model_content_digest(str(model_file)) is None
+
+    def test_runtime_fingerprint_survives_both(self, tmp_path: Path) -> None:
+        from cementic.embedding_runtime import llama_cpp_runtime_fingerprint
+
+        model_file = tmp_path / "embed.gguf"
+        model_file.write_bytes(b"payload")
+
+        with patch("cementic.model_digest.sha256_file", side_effect=PermissionError("denied")):
+            first = llama_cpp_runtime_fingerprint(
+                model_path=str(model_file), n_ctx=1, n_batch=1, n_gpu_layers=0
+            )
+        assert len(first) == 64
