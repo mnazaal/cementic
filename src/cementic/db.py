@@ -410,6 +410,19 @@ class CollectionScan(Base):
     completed_at: Mapped[datetime | None] = mapped_column(nullable=True)
 
 
+def collection_scans_exist(session: Any) -> bool:
+    """Whether the ``collection_scans`` table exists (checked, not tried).
+
+    Only the watcher and worker run ``create_tables``, so an upgraded install
+    has no such table until its next ``cementic start``; every other reader
+    treats that as "no scan open". Asking the inspector avoids a failed
+    statement, which would leave a PostgreSQL transaction aborted.
+    """
+    from sqlalchemy import inspect as sa_inspect
+
+    return bool(sa_inspect(session.connection()).has_table(CollectionScan.__tablename__))
+
+
 class SearchActivity(Base):
     """Single-row lease recording when an interactive search last ran.
 

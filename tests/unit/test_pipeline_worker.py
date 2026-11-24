@@ -17,6 +17,7 @@ from cementic.db import (
     ChunkedDocument,
     ChunkEmbedding,
     ChunkProfile,
+    CollectionScan,
     EmbeddingProfile,
     ExtractedDocument,
     ExtractorProfile,
@@ -2481,6 +2482,46 @@ class TestNoReadyTransitionMidScan:
         assert revision_is_complete(counts) is True
         assert revision_is_complete(replace(counts, scan_in_progress=True)) is False
 
+    def _ready_with_open_scan(self, temp_dir: Path):
+        """A complete, ready revision whose collection has an open scan row."""
+        session_factory, revision_id, worker, watcher = self._setup(temp_dir)
+        with patch("cementic.pipeline_worker.ensure_revision_ann_index"):
+            worker._mark_revision_ready_if_complete(revision_id)
+        assert self._status(session_factory, revision_id) == "ready"
+        with session_factory() as session:
+            session.add(CollectionScan(collection="revert"))
+            session.commit()
+        return session_factory, revision_id
+
+    def test_an_open_scan_does_not_block_promoting_a_complete_ready_revision(
+        self, temp_dir: Path
+    ) -> None:
+        """The marker gates only building -> ready; every `cementic start` reopens it."""
+        from cementic.collections import promote_ready_revision
+
+        session_factory, _ = self._ready_with_open_scan(temp_dir)
+        config = Config()
+        config.storage.artifacts_path = temp_dir
+        with session_factory() as session:
+            outcome = promote_ready_revision(session, "revert", config=config)
+        assert outcome.status == "promoted"
+
+    def test_promote_and_remove_work_before_the_scan_table_exists(self, temp_dir: Path) -> None:
+        """An upgraded install has no `collection_scans` until the next start."""
+        from cementic.collections import delete_collection_records, promote_ready_revision
+
+        session_factory, revision_id, worker, _ = self._setup(temp_dir)
+        with patch("cementic.pipeline_worker.ensure_revision_ann_index"):
+            worker._mark_revision_ready_if_complete(revision_id)
+        engine = session_factory.kw["bind"]
+        CollectionScan.__table__.drop(engine)
+        config = Config()
+        config.storage.artifacts_path = temp_dir
+        with session_factory() as session:
+            assert promote_ready_revision(session, "revert", config=config).status == "promoted"
+        with session_factory() as session:
+            assert delete_collection_records(session, "revert") is not None
+
 
 class _PgError(Exception):
     """Stands in for a psycopg error: the server's SQLSTATE rides on `.sqlstate`."""
@@ -2525,6 +2566,19 @@ class TestWriteBackErrorClasses:
         from cementic.pipeline_worker import classify_write_back_error
 
         assert classify_write_back_error(_db_error(sqlstate)) == "connectivity"
+
+    @pytest.mark.parametrize("name", ["DiskFull", "OutOfMemory", "ConfigurationLimitExceeded"])
+    def test_server_resource_errors_are_the_servers_not_the_documents(self, name: str) -> None:
+        """Class 53 (disk full, out of memory) is an outage; the document is not at fault."""
+        import psycopg.errors
+        from sqlalchemy import exc
+
+        from cementic.pipeline_worker import classify_write_back_error
+
+        cls = getattr(psycopg.errors, name)
+        wrapped = exc.OperationalError("INSERT ...", {}, cls("server out of resources"))
+        assert wrapped.orig.sqlstate.startswith("53")
+        assert classify_write_back_error(wrapped) == "connectivity"
 
     def test_pool_exhaustion_and_invalidated_connections_are_connectivity(self) -> None:
         from sqlalchemy import exc

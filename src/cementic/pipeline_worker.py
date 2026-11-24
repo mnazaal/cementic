@@ -29,6 +29,7 @@ from cementic.db import (
     PipelineRevision,
     SearchActivity,
     SourceDocument,
+    collection_scans_exist,
     create_tables,
     get_engine,
     get_session_factory,
@@ -244,10 +245,10 @@ class _ShutdownRequestedError(Exception):
 #: The same write is expected to succeed when tried again.
 _TRANSIENT_SQLSTATES = frozenset({"40001", "40P01", "57014", "55P03"})
 
-#: SQLSTATEs of a database that is gone or refusing connections (the class-08
-#: family is matched by prefix): admin_shutdown, crash_shutdown,
-#: cannot_connect_now and too_many_connections.
-_CONNECTIVITY_SQLSTATES = frozenset({"57P01", "57P02", "57P03", "53300"})
+#: SQLSTATEs of a database that is gone or out of resources (the class-08 and
+#: class-53 families are matched by prefix): admin_shutdown, crash_shutdown and
+#: cannot_connect_now.
+_CONNECTIVITY_SQLSTATES = frozenset({"57P01", "57P02", "57P03"})
 
 
 def _sqlstate(error: BaseException) -> str | None:
@@ -261,10 +262,13 @@ def classify_write_back_error(error: BaseException) -> str:
     """How a failed write-back should end: ``transient``, ``connectivity`` or ``data`` (pure).
 
     - ``transient``: a deadlock, serialization failure or statement/lock
-      timeout. The document is not at fault, so it is retried.
-    - ``connectivity``: the database is unreachable or restarting. Failing the
-      document would blame it for an outage; the processing loop's back-off owns
-      this case.
+      timeout. The document is not at fault, so it is retried. A statement
+      timeout (57014) is retried at full cost, up to the retry limit, even when
+      the document's own statement is what runs long; that is accepted.
+    - ``connectivity``: the database is unreachable, restarting or out of
+      resources (class 53: disk full, out of memory). Failing the document
+      would blame it for an outage; the processing loop's back-off owns this
+      case.
     - ``data``: everything else, including a non-database error. The write
       itself is wrong for this document, so it is stamped failed.
     """
@@ -281,7 +285,7 @@ def classify_write_back_error(error: BaseException) -> str:
         # No server verdict: the statement never got one, so the link failed.
         link_errors = (sa_exc.OperationalError, sa_exc.InterfaceError)
         return "connectivity" if isinstance(error, link_errors) else "data"
-    if state.startswith("08") or state in _CONNECTIVITY_SQLSTATES:
+    if state.startswith(("08", "53")) or state in _CONNECTIVITY_SQLSTATES:
         return "connectivity"
     return "data"
 
@@ -402,9 +406,20 @@ def _purge_superseded_chunks(
 
 
 def compute_revision_counts(
-    session: Session, collection: str, revision: PipelineRevision
+    session: Session,
+    collection: str,
+    revision: PipelineRevision,
+    *,
+    include_scan_marker: bool = True,
 ) -> PipelineCounts:
-    """Query the database for current revision progress counts."""
+    """Query the database for current revision progress counts.
+
+    ``include_scan_marker`` reads the collection's open-scan row into
+    ``scan_in_progress``. The marker gates only the worker's building -> ready
+    transition; ``collection promote`` passes False, since a ready revision is
+    already complete and every ``cementic start`` reopens the row. A database
+    without the ``collection_scans`` table counts as no scan open.
+    """
     live = (SourceDocument.collection == collection, SourceDocument.status != "deleted")
     documents = session.query(SourceDocument).filter(*live).count()
     extracted_done = (
@@ -458,11 +473,15 @@ def compute_revision_counts(
         .filter(*embedding_conditions, ChunkEmbedding.status == "failed")
         .count()
     )
-    open_scan = (
-        session.query(CollectionScan)
-        .filter(CollectionScan.collection == collection, CollectionScan.completed_at.is_(None))
-        .count()
-    )
+    open_scan = 0
+    if include_scan_marker and collection_scans_exist(session):
+        open_scan = (
+            session.query(CollectionScan)
+            .filter(
+                CollectionScan.collection == collection, CollectionScan.completed_at.is_(None)
+            )
+            .count()
+        )
     return PipelineCounts(
         scan_in_progress=open_scan > 0,
         documents=documents,

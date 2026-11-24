@@ -19,6 +19,7 @@ from cementic.db import (
     PipelineRevision,
     SourceDocument,
     build_lexical_index,
+    collection_scans_exist,
     lexical_index_facts,
 )
 from cementic.pipeline_worker import (
@@ -174,9 +175,10 @@ def delete_collection_records(session: Session, collection: str) -> DeleteCollec
     session.query(PipelineRevision).filter_by(collection=collection).delete(
         synchronize_session=False
     )
-    session.query(CollectionScan).filter_by(collection=collection).delete(
-        synchronize_session=False
-    )
+    if collection_scans_exist(session):
+        session.query(CollectionScan).filter_by(collection=collection).delete(
+            synchronize_session=False
+        )
     deleted_docs = (
         session.query(SourceDocument)
         .filter_by(collection=collection)
@@ -306,7 +308,9 @@ def promote_ready_revision(
     if revision is None:
         return PromotionOutcome("no_ready")
 
-    counts = compute_revision_counts(session, collection, revision)
+    counts = compute_revision_counts(
+        session, collection, revision, include_scan_marker=False
+    )
     if counts.documents == 0:
         # Promotion retires whatever is currently active, so publishing an
         # empty revision removes search coverage rather than merely adding
