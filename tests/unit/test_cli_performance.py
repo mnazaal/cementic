@@ -145,6 +145,7 @@ def test_search_command_calls_backend_search_exactly_once(mock_searcher_class: M
         embedding_provider="llama-cpp",
         embedding_healthy=True,
         llama_daemon="running",
+        daemon_managed=True,
     ),
 )
 @patch("cementic.status_service.load_worker_statuses")

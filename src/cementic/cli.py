@@ -987,14 +987,33 @@ def stop_embedding_runtime() -> None:
 @embedding_app.command("status", short_help="Show embedding runtime status")
 def embedding_runtime_status(
     json_output: bool = typer.Option(False, "--json", help="Print one JSON document"),
+    check: bool = typer.Option(
+        False,
+        "--check",
+        help="Exit 1 when `cementic doctor` would fail the embedding daemon",
+    ),
 ) -> None:
     """Show configured embedding runtime service status."""
+    config = cli_config()
     if json_output:
         from cementic.embedding_runtime import llama_daemon_state
 
-        typer.echo(json.dumps(llama_daemon_state(cli_config()), indent=2))
-        return
-    console.print(f"embedding: {_llama_daemon_runtime_status()}")
+        typer.echo(json.dumps(llama_daemon_state(config), indent=2))
+    else:
+        console.print(f"embedding: {_llama_daemon_runtime_status()}")
+    if check:
+        # The same probe and verdict as `doctor`, so a script and the report
+        # cannot disagree. This one probes, which plain `status` does not.
+        from cementic.doctor import _daemon_state, daemon_check_status
+
+        healthy, repairable, message = _daemon_state(config)
+        verdict = daemon_check_status(
+            healthy, repairable, autostart=config.llama_cpp.daemon_autostart
+        )
+        if verdict == "fail":
+            if not json_output and message:
+                err_console.print(f"embedding check failed: {message}")
+            raise typer.Exit(1)
 
 
 @app.command(

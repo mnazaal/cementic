@@ -14,6 +14,7 @@ def _health(
     healthy: bool,
     llama_daemon: str,
     llama_daemon_health: DaemonHealth | None = DaemonHealth.DOWN,
+    daemon_managed: bool = True,
 ) -> SimpleNamespace:
     return SimpleNamespace(
         db_reachable=True,
@@ -21,6 +22,7 @@ def _health(
         embedding_healthy=healthy,
         llama_daemon=llama_daemon,
         llama_daemon_health=llama_daemon_health,
+        daemon_managed=daemon_managed,
     )
 
 
@@ -99,6 +101,20 @@ class TestEmbeddingRowDistinguishesRunningFromStopped:
         )
         assert "healthy" in output
         assert "serving a different model" not in output
+
+    def test_an_answering_server_cementic_does_not_manage_says_so(self) -> None:
+        """C5: `healthy` beside a stopped daemon read as a contradiction. Say
+        which one answered."""
+        output = _summary(
+            _health(
+                healthy=True,
+                llama_daemon="stopped",
+                llama_daemon_health=DaemonHealth.HEALTHY,
+                daemon_managed=False,
+            )
+        )
+        assert "healthy" in output
+        assert "not managed by cementic" in output
 
     def test_a_failed_probe_is_not_promised_an_autostart(self) -> None:
         """llama_daemon_health None means the probe itself failed (e.g. an

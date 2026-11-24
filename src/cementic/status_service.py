@@ -103,6 +103,10 @@ class HealthStatus:
     #: The probe's classification; None means the probe itself failed and
     #: ``llama_daemon`` carries the reason.
     llama_daemon_health: DaemonHealth | None = None
+    #: Whether the daemon cementic manages is running (a live pid). Separate
+    #: from ``embedding_healthy``, which asks only whether *something* answers
+    #: embeddings: an external server can answer while this is False.
+    daemon_managed: bool = False
 
 
 @dataclass(frozen=True)
@@ -446,9 +450,10 @@ def check_health(config: Config) -> HealthStatus:
 
     embedding_provider = config.pipeline.embedding_provider
 
-    from cementic.embedding_runtime import llama_daemon_status
+    from cementic.embedding_runtime import llama_daemon_state, llama_daemon_status
 
     llama_daemon = llama_daemon_status(config)
+    daemon_managed = llama_daemon_state(config)["state"] == "running"
 
     # One quick probe, no waiting. This used to build the client through
     # `create_provider`, whose own busy-poll blocks for up to two minutes -- and
@@ -500,6 +505,7 @@ def check_health(config: Config) -> HealthStatus:
         embedding_healthy=embedding_healthy,
         llama_daemon=llama_daemon,
         llama_daemon_health=llama_daemon_health,
+        daemon_managed=daemon_managed,
     )
 
 

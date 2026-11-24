@@ -109,6 +109,20 @@ def _daemon_state(config: Config) -> tuple[bool, bool, str]:
     return False, True, ""
 
 
+def daemon_check_status(healthy: bool, repairable: bool, *, autostart: bool) -> str:
+    """Doctor's verdict on the embedding daemon: ``ok``, ``warning`` or ``fail``.
+
+    One predicate for `doctor` and `embedding status --check`, so a script and
+    the report cannot disagree about whether the runtime is usable. Autostart
+    only excuses states it can actually repair: excusing every unhealthy state
+    let a wedged daemon pass at ok, the state behind the 21-hour incident the
+    two-stage probe exists to catch.
+    """
+    if healthy:
+        return "ok"
+    return "warning" if autostart and repairable else "fail"
+
+
 def collect_doctor_report(config: Config) -> dict[str, Any]:
     """Collect read-only readiness diagnostics.
 
@@ -153,12 +167,16 @@ def collect_doctor_report(config: Config) -> dict[str, Any]:
     stranded_chunkings: int | None = None
     lexical_facts: LexicalIndexFacts | None = None
     active_canaries: list[tuple[str, str, str, str, str | None]] | None = None
+    #: The probe in flight once the server has answered, so a raise there can
+    #: say which one failed instead of blaming the connection.
+    failing_probe = "connecting"
     try:
         engine = get_engine(config.database.url)
         with engine.connect() as conn:
             conn.execute(text("SELECT 1"))
             database_ok = True
             checks["database"] = {"status": "ok", "reachable": True}
+            failing_probe = "the canary lookup"
             # A failure past this point is about inspecting extensions, not
             # about the database: it used to fall into the handler below, which
             # reported an unreachable database (plus the init-postgres hint) for
@@ -181,7 +199,9 @@ def collect_doctor_report(config: Config) -> dict[str, Any]:
                 lines = str(profile_error).strip().splitlines()
                 extractor_profiles_error = lines[0] if lines else type(profile_error).__name__
             active_canaries = _active_embedding_canaries(conn)
+            failing_probe = "the stranded-chunking count"
             stranded_chunkings = _stranded_chunkings(conn)
+            failing_probe = "the lexical index inspection"
             lexical_facts = lexical_index_facts(conn)
     except Exception as error:
         # The driver's text runs to several lines plus a "Background on this
@@ -189,15 +209,26 @@ def collect_doctor_report(config: Config) -> dict[str, Any]:
         # command's one-line "database not reachable"; the JSON keeps it whole.
         error_text = redact_text(str(error), config.database.url)
         first_line = error_text.strip().splitlines()[0] if error_text.strip() else ""
+        if database_ok:
+            # The server answered `SELECT 1`: "not reachable" and the
+            # init-postgres hint would send the reader to the connection when
+            # one later probe is what failed. The verdict (`_any_failed`) is
+            # unchanged; only the words are.
+            message = (
+                f"the server answered, but {failing_probe} failed ({first_line}). "
+                "This is not a connection problem"
+            )
+        else:
+            message = (
+                f"not reachable ({first_line}). Run `cementic init postgres "
+                "./cementic-postgres` once and follow its README, or set "
+                "CEMENTIC_DB_URL to a Postgres with pgvector and pgvectorscale."
+            )
         checks["database"] = {
             "status": "fail",
             "reachable": database_ok,
             "error": error_text,
-            "message": (
-                f"not reachable ({first_line}). Run `cementic init postgres "
-                "./cementic-postgres` once and follow its README, or set "
-                "CEMENTIC_DB_URL to a Postgres with pgvector and pgvectorscale."
-            ),
+            "message": message,
         }
         checks["extensions"] = {}
 
@@ -233,9 +264,10 @@ def collect_doctor_report(config: Config) -> dict[str, Any]:
     # Autostart only excuses states it can actually repair. Excusing every
     # unhealthy state let a wedged daemon pass `doctor` at ok -- the exact
     # state behind the 21-hour incident the two-stage probe exists to catch.
-    daemon_ok = daemon_healthy or (daemon_autostart and daemon_repairable)
     checks["daemon"] = {
-        "status": "ok" if daemon_healthy else "warning" if daemon_ok else "fail",
+        "status": daemon_check_status(
+            daemon_healthy, daemon_repairable, autostart=daemon_autostart
+        ),
         "reachable": daemon_healthy,
         "autostart": daemon_autostart,
         "message": (

@@ -59,6 +59,7 @@ def _build(data: StatusData | None, error: str | None = None, **kwargs) -> dict:
             embedding_provider="llama-cpp",
             embedding_healthy=True,
             llama_daemon="running",
+            daemon_managed=True,
         ),
         None,
         kwargs.get("collection"),

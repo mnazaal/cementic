@@ -353,6 +353,7 @@ class TestRootHelp:
             embedding_provider="llama-cpp",
             embedding_healthy=True,
             llama_daemon="running, pid=333",
+            daemon_managed=True,
         )
         mock_session = MagicMock()
         mock_session.__enter__.return_value = mock_session
@@ -440,6 +441,35 @@ class TestEmbeddingCommands:
         assert "embedding: running, pid=123" in result.output
         mock_status.assert_called_once_with()
 
+
+    @pytest.mark.parametrize(
+        ("probe", "autostart", "exit_code"),
+        [
+            ((True, True, "reachable"), True, 0),
+            ((False, True, ""), True, 0),  # stopped, autostart repairs: doctor warns
+            ((False, True, ""), False, 1),  # stopped, nothing will start it: doctor fails
+            ((False, False, "found multiple processes"), True, 1),  # ambiguous
+            ((False, False, "not answering embeddings"), True, 1),  # wedged
+        ],
+    )
+    def test_embedding_status_check_exits_as_doctor_would(self, probe, autostart, exit_code):
+        config = Config()
+        config.llama_cpp.daemon_autostart = autostart
+        with (
+            patch("cementic.cli.cli_config", return_value=config),
+            patch("cementic.doctor._daemon_state", return_value=probe),
+            patch("cementic.cli._llama_daemon_runtime_status", return_value="stopped"),
+        ):
+            result = runner.invoke(app, ["embedding", "status", "--check"])
+
+        assert result.exit_code == exit_code
+        assert "embedding: stopped" in result.output
+
+    def test_embedding_status_without_check_still_exits_zero_when_stopped(self):
+        with patch("cementic.cli._llama_daemon_runtime_status", return_value="stopped"):
+            result = runner.invoke(app, ["embedding", "status"])
+
+        assert result.exit_code == 0
 
     def test_embedding_status_json_is_one_document(self):
         daemon = {"state": "running", "pid": 123, "recovered": False, "error": None}
@@ -602,6 +632,7 @@ def _healthy_health() -> SimpleNamespace:
         embedding_provider="llama-cpp",
         embedding_healthy=True,
         llama_daemon="running",
+        daemon_managed=True,
     )
 
 
@@ -1012,6 +1043,7 @@ class TestBackgroundCommands:
             embedding_provider="llama-cpp",
             embedding_healthy=True,
             llama_daemon="running, pid=333",
+            daemon_managed=True,
         )
         mock_session = MagicMock()
         mock_session.__enter__.return_value = mock_session
@@ -1121,6 +1153,7 @@ class TestBackgroundCommands:
             embedding_provider="llama-cpp",
             embedding_healthy=True,
             llama_daemon="running, pid=333",
+            daemon_managed=True,
         )
         mock_session = MagicMock()
         mock_session.__enter__.return_value = mock_session
@@ -1206,6 +1239,7 @@ class TestBackgroundCommands:
             embedding_provider="llama-cpp",
             embedding_healthy=True,
             llama_daemon="running, pid=333",
+            daemon_managed=True,
         )
         mock_load_pipeline_status.return_value = SimpleNamespace(
             documents=10,
@@ -1291,6 +1325,7 @@ class TestBackgroundCommands:
             embedding_provider="llama-cpp",
             embedding_healthy=True,
             llama_daemon="stopped",
+            daemon_managed=False,
         )
         mock_load_pipeline_status.return_value = SimpleNamespace(
             documents=0,
@@ -1368,6 +1403,7 @@ class TestBackgroundCommands:
             embedding_provider="llama-cpp",
             embedding_healthy=True,
             llama_daemon="running, pid=333",
+            daemon_managed=True,
         )
         mock_load_pipeline_status.return_value = SimpleNamespace(
             documents=1,
@@ -2235,7 +2271,7 @@ class TestStatusSurfacesWorkerErrors:
             mock_workers.return_value = (healthy, failing)
             mock_health.return_value = SimpleNamespace(
                 db_reachable=True, embedding_provider="llama-cpp",
-                embedding_healthy=True, llama_daemon="running",
+                embedding_healthy=True, llama_daemon="running", daemon_managed=True,
             )
             return runner.invoke(app, args)
 
@@ -2333,6 +2369,7 @@ class TestStatusExitCodes:
             embedding_provider="llama-cpp",
             embedding_healthy=False,
             llama_daemon="stopped",
+            daemon_managed=False,
             llama_daemon_health=DaemonHealth.DOWN,
         )
 
@@ -2352,6 +2389,7 @@ class TestStatusExitCodes:
                         embedding_provider="llama-cpp",
                         embedding_healthy=False,
                         llama_daemon="stopped",
+                        daemon_managed=False,
                         llama_daemon_health=DaemonHealth.DOWN,
                     )
                 },
@@ -2510,6 +2548,7 @@ class TestStatusEdgeCases:
                             embedding_provider="llama-cpp",
                             embedding_healthy=True,
                             llama_daemon="running, pid=333",
+                            daemon_managed=True,
                         )
                         with patch("cementic.db.get_session_factory") as mock_sf:
                             with patch("cementic.db.get_engine") as _mock_engine:
@@ -2578,6 +2617,7 @@ class TestStatusEdgeCases:
                             embedding_provider="llama-cpp",
                             embedding_healthy=True,
                             llama_daemon="running, pid=333",
+                            daemon_managed=True,
                         )
                         with patch("cementic.db.get_session_factory") as mock_sf:
                             with patch("cementic.db.get_engine") as _mock_engine:

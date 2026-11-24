@@ -834,6 +834,26 @@ class TestCheckHealth:
                     assert "running" in result.llama_daemon
                     assert "42" in result.llama_daemon
 
+    def test_an_external_server_answering_is_healthy_but_not_managed(self) -> None:
+        """C5: the answer to "does something answer" and the answer to "is it
+        the daemon cementic manages" are separate fields, so healthy beside a
+        stopped daemon is no longer a contradiction."""
+        config = Config()
+        config.pipeline.embedding_provider = "llama-cpp"
+        config.llama_cpp.daemon_pid_file = None
+
+        with patch("cementic.status_service.get_engine"):
+            with patch("cementic.embedding_runtime.build_llama_cpp_client") as mock_client:
+                client = MagicMock(spec=RemoteEmbeddingClient)
+                client.probe_served_runtime.return_value = True
+                client.probe_embedding.return_value = True
+                mock_client.return_value = client
+                result = check_health(config)
+
+        assert result.embedding_healthy is True
+        assert result.llama_daemon == "stopped"
+        assert result.daemon_managed is False
+
     def test_health_llama_daemon_stopped_no_pid_file(self) -> None:
         config = Config()
         config.pipeline.embedding_provider = "llama-cpp"

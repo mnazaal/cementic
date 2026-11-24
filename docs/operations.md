@@ -72,7 +72,7 @@ updating this page fails the suite.
   },
   "health": {
     "db_reachable": "bool", "embedding_provider": "str",
-    "embedding_healthy": "bool", "llama_daemon": "str"
+    "embedding_healthy": "bool", "llama_daemon": "str", "daemon_managed": "bool"
   },
   "collections": {
     "NAME": {

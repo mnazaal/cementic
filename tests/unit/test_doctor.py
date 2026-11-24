@@ -1095,6 +1095,31 @@ class TestUnreachableDatabaseReadsAsOneLine:
         assert database["message"].startswith("not reachable (connection to server")
         assert "sqlalche.me" in database["error"]
 
+    @patch("cementic.doctor._daemon_state", return_value=(True, True, "reachable"))
+    @patch("cementic.doctor.lexical_index_facts", side_effect=RuntimeError("boom"))
+    @patch("cementic.doctor._active_embedding_canaries", return_value=[])
+    @patch("cementic.doctor._active_extractor_profiles", return_value=[])
+    @patch("cementic.doctor._extension_check", return_value={"status": "ok"})
+    @patch("cementic.doctor.get_engine")
+    def test_a_probe_failing_after_select_1_does_not_say_unreachable(
+        self, mock_get_engine, _ext, _prof, _canary, _lex, _daemon
+    ) -> None:
+        """The server answered `SELECT 1`; saying "not reachable" misdirects the
+        reader to the connection when the failure is one later probe."""
+        mock_get_engine.return_value.connect.return_value.__enter__.return_value = MagicMock()
+
+        report = collect_doctor_report(Config())
+        database = report["checks"]["database"]
+
+        assert database["status"] == "fail"
+        assert report["ok"] is False
+        assert database["reachable"] is True
+        assert "not reachable" not in database["message"]
+        assert "init postgres" not in database["message"]
+        assert "answered" in database["message"]
+        assert "lexical index" in database["message"]
+        assert "boom" in database["message"]
+
     def test_skipped_extensions_say_why(self, capsys) -> None:
         from cementic.render import print_doctor_report
 

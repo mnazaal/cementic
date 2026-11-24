@@ -118,7 +118,12 @@ def print_status_summary(
         console.print(f"{'embedding':<11} [red]unknown (health check failed)[/red]")
     else:
         console.print(f"{'database':<11} {_state(health.db_reachable, 'reachable', 'unreachable')}")
-        if health.embedding_healthy:
+        if health.embedding_healthy and not health.daemon_managed:
+            # Something answers embeddings, but it is not the daemon cementic
+            # manages (that one is stopped). Plain "healthy" beside the
+            # verbose "embedding daemon: stopped" read as a contradiction.
+            embedding_text = "[green]healthy[/green] (server not managed by cementic)"
+        elif health.embedding_healthy:
             embedding_text = "[green]healthy[/green]"
         elif health.llama_daemon_health is not DaemonHealth.DOWN:
             # Unhealthy and not plainly stopped: wrong model, wedged, or a
@@ -344,6 +349,7 @@ def build_status_document(
             "embedding_provider": health.embedding_provider,
             "embedding_healthy": health.embedding_healthy,
             "llama_daemon": health.llama_daemon,
+            "daemon_managed": health.daemon_managed,
         }
     elif health_error is not None:
         # Same keys, nulled, plus the reason: replacing the whole object made
@@ -354,6 +360,7 @@ def build_status_document(
             "embedding_provider": None,
             "embedding_healthy": None,
             "llama_daemon": None,
+            "daemon_managed": None,
             "error": health_error,
         }
 
