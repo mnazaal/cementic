@@ -2341,6 +2341,60 @@ class TestStatusExitCodes:
         assert result.exit_code == 1
         assert "cementic init postgres" in result.output
 
+    @pytest.mark.parametrize(
+        "health_patch",
+        [
+            pytest.param({"side_effect": RuntimeError("probe crashed")}, id="probe-raised"),
+            pytest.param(
+                {
+                    "return_value": SimpleNamespace(
+                        db_reachable=False,
+                        embedding_provider="llama-cpp",
+                        embedding_healthy=False,
+                        llama_daemon="stopped",
+                        llama_daemon_health=DaemonHealth.DOWN,
+                    )
+                },
+                id="db-unreachable",
+            ),
+        ],
+    )
+    @patch("cementic.db.get_session_factory")
+    @patch("cementic.db.get_engine")
+    def test_json_and_human_status_agree_on_a_failed_health_probe(
+        self, mock_get_engine, mock_get_session_factory, health_patch
+    ):
+        """C2 regression: `status --json` exited 0 where `status` exited 1.
+
+        The database rows load here (mocked), so the only failure is health:
+        the JSON branch must not need a second, unrelated error to exit 1.
+        """
+        mock_session = MagicMock()
+        mock_session.__enter__.return_value = mock_session
+        mock_session.__exit__.return_value = False
+        mock_get_session_factory.return_value = lambda: mock_session
+        pipeline = PipelineStatus(**{name: 0 for name in PipelineStatus.__dataclass_fields__})
+
+        with (
+            patch("cementic.cli.read_supervisor_state", return_value={}),
+            patch("cementic.status_service.check_health", **health_patch),
+            patch(
+                "cementic.status_service.load_status_data",
+                return_value=StatusData(pipeline=pipeline),
+            ),
+            patch("cementic.status_service.list_collections", return_value=[]),
+        ):
+            human = runner.invoke(app, ["status"])
+            json_mode = runner.invoke(app, ["status", "--json"])
+
+        assert (human.exit_code, json_mode.exit_code) == (1, 1), (human.output, json_mode.output)
+        # The body stays parseable and still says what failed.
+        health = json.loads(json_mode.stdout)["health"]
+        if "side_effect" in health_patch:
+            assert health["error"] == "probe crashed"
+        else:
+            assert health["db_reachable"] is False
+
 
 class TestStatusEdgeCases:
     """Edge cases for the status command."""

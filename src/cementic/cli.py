@@ -565,6 +565,19 @@ def _start_background_locked(directories: list[str], collection: str) -> None:
     )
 
 
+def _health_failed(health: Any) -> bool:
+    """Whether `status` must exit 1 on health alone, in either output mode.
+
+    A probe that raised (``health is None``) leaves the database state unknown,
+    which is not the same as reachable, and an unreachable database fails every
+    other database-backed command. Exiting 0 on either let
+    `cementic status && deploy` proceed on a report missing the very rows it
+    would have failed on. One predicate, because the JSON branch once lacked
+    this rule and exited 0 where the human branch exited 1.
+    """
+    return health is None or not health.db_reachable
+
+
 @app.command(
     "status",
     short_help="Show worker status and indexing progress",
@@ -652,7 +665,7 @@ def status(
             file_limit,
         )
         failed = render.print_status_document(document)
-        if failed:
+        if failed or _health_failed(health):
             raise typer.Exit(1)
         return
 
@@ -668,16 +681,9 @@ def status(
     if health is None and health_error is not None:
         err_console.print(f"health: unavailable ({health_error})")
 
-    if health is None:
-        # A health probe that raised leaves the database state unknown, which is
-        # not the same as reachable: exiting 0 let `cementic status && deploy`
-        # proceed on a report that was missing the very rows it would have
-        # failed on.
-        raise typer.Exit(1)
-    if not health.db_reachable:
-        err_console.print(DB_HINT)
-        # Non-zero so `cementic status && ...` cannot succeed against a database
-        # cementic could not reach; every other database-backed command exits 1.
+    if _health_failed(health):
+        if health is not None:
+            err_console.print(DB_HINT)
         raise typer.Exit(1)
 
     with reporting_db_errors("status"):
