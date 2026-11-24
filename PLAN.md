@@ -495,11 +495,11 @@ a scratch dir. So deploying re-extracts, re-chunks and re-embeds nothing.
 | D6 (part) | non-object state file, three doc claims fixed | `a1cded9` |
 | D13 (part) | one version source, 3.13 classifier, promote drains deferred cleanup on any failure | `e3235d0` `597daa9` `cea4bf3` |
 
-**Still open from D6 and D13** (verified, not fixed): `source_watcher` keeps
+**Still open from D6 and D13** (verified, not fixed); the repository-visibility
+claim was fixed 2026-11-25: public, per the user): `source_watcher` keeps
 its own file hasher; `len(files) == limit` reports truncation at exactly `limit`
 files (`render.py`); the digest cache keeps a stale digest for a same-size
-replacement with restored mtime, and is never pruned; README and
-`docs/setup.md` disagree on whether the repository is private;
+replacement with restored mtime, and is never pruned;
 `scripts/measure_chunk_context_fit.py` probably calls a llama-cpp-python route
 (`/extras/tokenize/count`) that llama-server lacks (unrun, no daemon); 3.12 runs
 only the unit job in CI.

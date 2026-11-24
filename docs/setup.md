@@ -24,9 +24,6 @@ uv sync
 uv run cementic --help
 ```
 
-The repository is private. Clone it after obtaining access rather than trying to
-install directly from its URL.
-
 ## Start local Postgres
 
 Generate a self-contained Postgres setup directory, then start it once:
