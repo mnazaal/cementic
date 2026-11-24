@@ -214,10 +214,9 @@ def collect_doctor_report(config: Config) -> dict[str, Any]:
             # init-postgres hint would send the reader to the connection when
             # one later probe is what failed. The verdict (`_any_failed`) is
             # unchanged; only the words are.
-            message = (
-                f"the server answered, but {failing_probe} failed ({first_line}). "
-                "This is not a connection problem"
-            )
+            # Said as facts only: the usual route here is a probe's own
+            # rollback raising -- the connection dropping -- so no diagnosis.
+            message = f"the server answered SELECT 1; then {failing_probe} failed: {first_line}"
         else:
             message = (
                 f"not reachable ({first_line}). Run `cementic init postgres "
@@ -280,9 +279,11 @@ def collect_doctor_report(config: Config) -> dict[str, Any]:
         ),
     }
 
-    checks["stranded_chunkings"] = _stranded_chunkings_check(stranded_chunkings)
+    checks["stranded_chunkings"] = _stranded_chunkings_check(
+        stranded_chunkings, database_reachable=database_ok
+    )
     checks["lexical_index"] = _lexical_index_check(
-        lexical_facts, hybrid=config.search.hybrid
+        lexical_facts, hybrid=config.search.hybrid, database_reachable=database_ok
     )
     checks["chunk_budget"] = _chunk_budget_check(config)
     checks["tokenizer"] = _tokenizer_check()
@@ -293,9 +294,10 @@ def collect_doctor_report(config: Config) -> dict[str, Any]:
         config,
         active_extractor_profiles,
         read_error=extractor_profiles_error,
+        database_reachable=database_ok,
     )
     checks["embedding_canary"] = _embedding_canary_check(
-        config, active_canaries, daemon_healthy=daemon_healthy
+        config, active_canaries, daemon_healthy=daemon_healthy, database_reachable=database_ok
     )
 
     return {"ok": not _any_failed(checks), "checks": checks}
@@ -569,10 +571,25 @@ def _extractor_drift_check(
     }
 
 
+def _unread_reason(database_reachable: bool) -> str:
+    """Why a database-backed probe has no result to report.
+
+    `reachable: True` beside "database unreachable" contradicted itself: after
+    the server answered `SELECT 1`, a missing result means the probe did not
+    run or could not be read, which the `database` and `extensions` checks
+    explain.
+    """
+    if database_reachable:
+        return "the probe did not run or its result could not be read (see the database check)"
+    return "database unreachable"
+
+
 def _extractor_profile_check(
     config: Config,
     active_profiles: Sequence[tuple[str, dict[str, Any]]] | None,
     read_error: str | None = None,
+    *,
+    database_reachable: bool = False,
 ) -> dict[str, Any]:
     """The drift check, plus the three states in which it cannot run.
 
@@ -592,7 +609,7 @@ def _extractor_profile_check(
         return {
             "status": "ok",
             "drift": {},
-            "message": "database unreachable; extractor profiles not compared",
+            "message": f"{_unread_reason(database_reachable)}; extractor profiles not compared",
         }
     # Imported here rather than at module scope for the reason `_ocr_check`
     # gives: building the payload loads the PDF stack.
@@ -699,6 +716,7 @@ def _embedding_canary_check(
     canaries: Sequence[tuple[str, str, str, str, str | None]] | None,
     *,
     daemon_healthy: bool,
+    database_reachable: bool = False,
 ) -> dict[str, Any]:
     """The canary replay, plus the two states in which it cannot run.
 
@@ -709,7 +727,7 @@ def _embedding_canary_check(
         return {
             "status": "ok",
             "drift": {},
-            "message": "database unreachable; reference vectors not compared",
+            "message": f"{_unread_reason(database_reachable)}; reference vectors not compared",
         }
     if not daemon_healthy:
         return {
@@ -783,7 +801,9 @@ def _stranded_chunkings(conn: Any) -> int | None:
         return None
 
 
-def _stranded_chunkings_check(count: int | None) -> dict[str, Any]:
+def _stranded_chunkings_check(
+    count: int | None, *, database_reachable: bool = False
+) -> dict[str, Any]:
     """Report documents that are counted as chunked but hold no chunks.
 
     This is the class of failure that has now been found twice -- once from a
@@ -799,8 +819,11 @@ def _stranded_chunkings_check(count: int | None) -> dict[str, Any]:
         return {
             "status": "warning",
             "message": (
-                "could not be checked; the database is unreachable or has never "
-                "indexed anything"
+                "could not be checked; the database has never indexed anything or the "
+                "probe did not run"
+                if database_reachable
+                else "could not be checked; the database is unreachable or has "
+                "never indexed anything"
             ),
         }
     return {
@@ -816,7 +839,9 @@ def _stranded_chunkings_check(count: int | None) -> dict[str, Any]:
     }
 
 
-def _lexical_index_check(facts: LexicalIndexFacts | None, *, hybrid: bool) -> dict[str, Any]:
+def _lexical_index_check(
+    facts: LexicalIndexFacts | None, *, hybrid: bool, database_reachable: bool = False
+) -> dict[str, Any]:
     """Report whether exact-word search has the index it silently depends on.
 
     Same class of failure as `_stranded_chunkings_check` above, one layer down.
@@ -836,7 +861,10 @@ def _lexical_index_check(facts: LexicalIndexFacts | None, *, hybrid: bool) -> di
         return {
             "status": "warning",
             "message": (
-                "could not be checked; the database is unreachable or is not PostgreSQL"
+                "could not be checked; the probe did not run or its result could "
+                "not be read (see the database check)"
+                if database_reachable
+                else "could not be checked; the database is unreachable or is not PostgreSQL"
             ),
         }
     if facts.present and facts.valid:

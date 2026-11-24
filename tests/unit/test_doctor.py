@@ -1116,9 +1116,31 @@ class TestUnreachableDatabaseReadsAsOneLine:
         assert database["reachable"] is True
         assert "not reachable" not in database["message"]
         assert "init postgres" not in database["message"]
-        assert "answered" in database["message"]
+        assert "answered SELECT 1" in database["message"]
         assert "lexical index" in database["message"]
         assert "boom" in database["message"]
+        # Mostly reached when a probe's own rollback raised -- the connection
+        # dropped -- so the message states what is known, not a diagnosis.
+        assert "not a connection problem" not in database["message"]
+
+    @patch("cementic.doctor._daemon_state", return_value=(True, True, "reachable"))
+    @patch("cementic.doctor.lexical_index_facts", side_effect=RuntimeError("boom"))
+    @patch("cementic.doctor._active_embedding_canaries", side_effect=RuntimeError("dropped"))
+    @patch("cementic.doctor._active_extractor_profiles", return_value=[])
+    @patch("cementic.doctor._extension_check", return_value={"status": "ok"})
+    @patch("cementic.doctor.get_engine")
+    def test_sibling_checks_do_not_claim_an_unreachable_database(
+        self, mock_get_engine, _ext, _prof, _canary, _lex, _daemon
+    ) -> None:
+        """`reachable: True` beside "database unreachable" contradicts itself."""
+        mock_get_engine.return_value.connect.return_value.__enter__.return_value = MagicMock()
+
+        checks = collect_doctor_report(Config())["checks"]
+
+        assert checks["database"]["reachable"] is True
+        for name in ("embedding_canary", "lexical_index", "stranded_chunkings"):
+            assert "unreachable" not in checks[name]["message"], name
+        assert "did not run" in checks["embedding_canary"]["message"]
 
     def test_skipped_extensions_say_why(self, capsys) -> None:
         from cementic.render import print_doctor_report
