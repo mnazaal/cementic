@@ -127,15 +127,18 @@ class TestExtensionFailureIsNotADatabaseFailure:
         assert report["ok"] is False
 
     @patch("cementic.doctor._daemon_state", return_value=(True, True, None))
-    @patch("cementic.doctor._extension_check", return_value={"status": "ok", "message": "ok"})
-    @patch("cementic.doctor._active_extractor_profiles", side_effect=RuntimeError("boom"))
+    @patch(
+        "cementic.doctor._extension_check",
+        side_effect=[{"status": "ok", "message": "ok"}, RuntimeError("boom")],
+    )
     @patch("cementic.doctor.get_engine")
     def test_a_failure_after_the_extensions_passed_still_fails_the_report(
-        self, mock_get_engine, mock_profiles, mock_ext, mock_daemon, tmp_path
+        self, mock_get_engine, mock_ext, mock_daemon, tmp_path
     ) -> None:
-        """C11: the extensions were judged ok, then the profile read in the
-        same `try` raised. The handler replaced the extension results with a
-        nested `fail` while the flag the verdict read stayed True, so `doctor`
+        """C11: one extension was judged ok, then a later step in the same
+        `try` raised (originally the profile read, which now has its own
+        handler). The handler replaced the extension results with a nested
+        `fail` while the flag the verdict read stayed True, so `doctor`
         reported ok and exited 0 over a failed check it had just printed."""
         conn = MagicMock()
         mock_get_engine.return_value.connect.return_value.__enter__.return_value = conn
@@ -143,6 +146,24 @@ class TestExtensionFailureIsNotADatabaseFailure:
         report = collect_doctor_report(_config_with_model_path(tmp_path, exists=True))
 
         assert report["checks"]["extensions"]["(inspection)"]["status"] == "fail"
+        assert report["ok"] is False
+
+    @patch("cementic.doctor._daemon_state", return_value=(True, True, None))
+    @patch("cementic.doctor._extension_check", return_value={"status": "ok", "message": "ok"})
+    @patch("cementic.doctor._stranded_chunkings", side_effect=RuntimeError("boom"))
+    @patch("cementic.doctor.get_engine")
+    def test_a_probe_failing_after_select_1_fails_the_report(
+        self, mock_get_engine, mock_stranded, mock_ext, mock_daemon, tmp_path
+    ) -> None:
+        """C11's second instance: `SELECT 1` set the database flag, then a later
+        probe raised into the outer handler, which printed `database: fail`.
+        The verdict read the flag, so `doctor` said ok beside a printed fail."""
+        conn = MagicMock()
+        mock_get_engine.return_value.connect.return_value.__enter__.return_value = conn
+
+        report = collect_doctor_report(_config_with_model_path(tmp_path, exists=True))
+
+        assert report["checks"]["database"]["status"] == "fail"
         assert report["ok"] is False
 
     @patch("cementic.doctor._daemon_state", return_value=(True, True, None))
@@ -213,6 +234,64 @@ class TestMissingPipelineTablesIsNotADatabaseFailure:
 
         assert "(inspection)" not in report["checks"]["extensions"]
         assert report["checks"]["database"]["status"] == "ok"
+        assert report["ok"] is True, report["checks"]
+
+    @staticmethod
+    def _report_for(tmp_path, *statements: str) -> dict:
+        engine = create_engine(f"sqlite:///{tmp_path / 'tables.db'}")
+        with engine.begin() as conn:
+            for statement in statements:
+                conn.execute(text(statement))
+        with patch("cementic.doctor.get_engine", return_value=engine):
+            return collect_doctor_report(_config_with_model_path(tmp_path, exists=True))
+
+    @patch("cementic.doctor._daemon_state", return_value=(True, True, None))
+    @patch("cementic.doctor._extension_check", return_value={"status": "ok", "message": "ok"})
+    def test_a_failed_profile_read_warns_rather_than_reading_as_none(
+        self, mock_ext, mock_daemon, tmp_path
+    ) -> None:
+        """Only a missing table means "nothing indexed yet". The tables exist
+        here and the read still fails (a permission error or timeout on
+        PostgreSQL; a missing column stands in for it on SQLite). The guard
+        added for the fresh install read that as "no active revision" and
+        printed `extractor_profile: ok`, a comparison that never ran."""
+        report = self._report_for(
+            tmp_path,
+            "CREATE TABLE pipeline_revisions "
+            "(collection TEXT, extractor_profile_id INTEGER, status TEXT)",
+            "CREATE TABLE extractor_profiles (id INTEGER)",
+            "INSERT INTO pipeline_revisions VALUES ('papers', 1, 'active')",
+            "INSERT INTO extractor_profiles VALUES (1)",
+        )
+
+        profile = report["checks"]["extractor_profile"]
+        assert profile["status"] == "warning", profile
+        assert "could not read" in profile["message"]
+        assert report["checks"]["database"]["status"] == "ok"
+        assert "(inspection)" not in report["checks"]["extensions"]
+
+    @patch("cementic.doctor._daemon_state", return_value=(True, True, None))
+    @patch("cementic.doctor._extension_check", return_value={"status": "ok", "message": "ok"})
+    def test_a_corrupt_stored_profile_is_not_an_extension_failure(
+        self, mock_ext, mock_daemon, tmp_path
+    ) -> None:
+        """A stored payload that is not JSON used to raise inside the
+        extension inspection, so doctor printed "could not inspect extensions"
+        and failed, beside `extractor_profile` saying the database was
+        unreachable. It is a profile the check cannot read: a warning there."""
+        report = self._report_for(
+            tmp_path,
+            "CREATE TABLE pipeline_revisions "
+            "(collection TEXT, extractor_profile_id INTEGER, status TEXT)",
+            "CREATE TABLE extractor_profiles (id INTEGER, config_json TEXT)",
+            "INSERT INTO pipeline_revisions VALUES ('papers', 1, 'active')",
+            "INSERT INTO extractor_profiles VALUES (1, '{not json')",
+        )
+
+        profile = report["checks"]["extractor_profile"]
+        assert profile["status"] == "warning", profile
+        assert "could not read" in profile["message"]
+        assert "(inspection)" not in report["checks"]["extensions"]
         assert report["ok"] is True, report["checks"]
 
 

@@ -9,6 +9,7 @@ import subprocess
 from collections.abc import Sequence
 from typing import Any
 
+from sqlalchemy import inspect as sa_inspect
 from sqlalchemy import text
 
 from cementic.bootstrap import llama_model_download_allowed
@@ -147,6 +148,7 @@ def collect_doctor_report(config: Config) -> dict[str, Any]:
 
     database_ok = False
     active_extractor_profiles: list[tuple[str, dict[str, Any]]] | None = None
+    extractor_profiles_error: str | None = None
     stranded_chunkings: int | None = None
     lexical_facts: LexicalIndexFacts | None = None
     active_canaries: list[tuple[str, str, str, str, str | None]] | None = None
@@ -163,7 +165,6 @@ def collect_doctor_report(config: Config) -> dict[str, Any]:
             try:
                 extensions = {name: _extension_check(conn, name) for name in REQUIRED_DB_EXTENSIONS}
                 checks["extensions"] = extensions
-                active_extractor_profiles = _active_extractor_profiles(conn)
             except Exception as extension_error:
                 checks["extensions"] = {
                     "(inspection)": {
@@ -171,6 +172,12 @@ def collect_doctor_report(config: Config) -> dict[str, Any]:
                         "message": f"could not inspect extensions: {extension_error}",
                     }
                 }
+            try:
+                active_extractor_profiles = _active_extractor_profiles(conn)
+            except Exception as profile_error:
+                conn.rollback()
+                lines = str(profile_error).strip().splitlines()
+                extractor_profiles_error = lines[0] if lines else type(profile_error).__name__
             active_canaries = _active_embedding_canaries(conn)
             stranded_chunkings = _stranded_chunkings(conn)
             lexical_facts = lexical_index_facts(conn)
@@ -247,7 +254,11 @@ def collect_doctor_report(config: Config) -> dict[str, Any]:
     checks["embedding_server"] = _embedding_server_check(config)
     checks["ocr"] = _ocr_check(config)
     checks["extraction_commands"] = _extraction_commands_check(config)
-    checks["extractor_profile"] = _extractor_profile_check(config, active_extractor_profiles)
+    checks["extractor_profile"] = _extractor_profile_check(
+        config,
+        active_extractor_profiles,
+        read_error=extractor_profiles_error,
+    )
     checks["embedding_canary"] = _embedding_canary_check(
         config, active_canaries, daemon_healthy=daemon_healthy
     )
@@ -524,15 +535,24 @@ def _extractor_drift_check(
 
 
 def _extractor_profile_check(
-    config: Config, active_profiles: Sequence[tuple[str, dict[str, Any]]] | None
+    config: Config,
+    active_profiles: Sequence[tuple[str, dict[str, Any]]] | None,
+    read_error: str | None = None,
 ) -> dict[str, Any]:
-    """The drift check, plus the two states in which it cannot run.
+    """The drift check, plus the three states in which it cannot run.
 
     Building this install's payload can fail: a command extractor whose version
     probe cannot run raises from here, and doctor is the last place that may
     answer a fault with a traceback. `extraction_commands` reports that fault
-    as the failure it is; this reports only that it could not compare.
+    as the failure it is; this reports only that it could not compare. A stored
+    profile that could not be read (`read_error`) is the same kind of gap.
     """
+    if read_error is not None:
+        return {
+            "status": "warning",
+            "drift": {},
+            "message": f"could not read the active extractor profiles to compare: {read_error}",
+        }
     if active_profiles is None:
         return {
             "status": "ok",
@@ -557,23 +577,23 @@ def _extractor_profile_check(
 def _active_extractor_profiles(conn: Any) -> list[tuple[str, dict[str, Any]]]:
     """(collection, extractor payload) for every collection's active revision.
 
-    Guarded like `_active_embedding_canaries`: a fresh install has no
-    `pipeline_revisions` until `cementic start` creates it, and that is the
-    state the setup docs run `doctor` in. Unguarded, the raise landed in the
-    extension check's handler as "could not inspect extensions", and failed
-    the verdict once it counted nested failures (C11).
+    A fresh install has no `pipeline_revisions` until `cementic start` creates
+    it, and that is the state the setup docs run `doctor` in, so a missing
+    table reads as "no profiles". Only a missing table: any other failure (a
+    permission error, a timeout, a payload that is not JSON) raises, and the
+    caller reports it as a profile it could not read. Catching every error
+    here once printed `extractor_profile: ok` for a comparison that never ran.
     """
-    try:
-        rows = conn.execute(
-            text(
-                "SELECT r.collection, p.config_json FROM pipeline_revisions r "
-                "JOIN extractor_profiles p ON p.id = r.extractor_profile_id "
-                "WHERE r.status = 'active' ORDER BY r.collection"
-            )
-        ).fetchall()
-    except Exception:
-        conn.rollback()
+    inspector = sa_inspect(conn)
+    if not all(inspector.has_table(name) for name in ("pipeline_revisions", "extractor_profiles")):
         return []
+    rows = conn.execute(
+        text(
+            "SELECT r.collection, p.config_json FROM pipeline_revisions r "
+            "JOIN extractor_profiles p ON p.id = r.extractor_profile_id "
+            "WHERE r.status = 'active' ORDER BY r.collection"
+        )
+    ).fetchall()
     return [(str(collection), json.loads(payload)) for collection, payload in rows]
 
 
