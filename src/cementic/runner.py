@@ -14,7 +14,7 @@ from cementic.config import (
 )
 from cementic.config_diagnostics import ConfigError, render_config_error
 from cementic.pipeline_worker import PipelineWorker
-from cementic.redact import redact_text
+from cementic.redact import install_last_resort_redaction, redact_text
 from cementic.source_watcher import SourceWatcher
 from cementic.validation import validate_collection_name
 
@@ -83,7 +83,7 @@ def run_source_watcher(
         # e.g. every watch directory vanished between `cementic start`'s check
         # and here. A one-line reason on stderr lands in the background log the
         # CLI points at; a traceback would not explain anything.
-        err_console.print(f"[red]Source watcher failed: {e}[/red]")
+        err_console.print(f"[red]Source watcher failed: {redact_text(str(e))}[/red]")
         raise typer.Exit(1)
     # Outside the try: `typer.Exit` subclasses `RuntimeError`, so raising this
     # inside it would be caught by the handler above and reported as
@@ -130,7 +130,7 @@ def run_pipeline_worker(
         # Parity with the source watcher above: a startup RuntimeError (e.g. an
         # unindexable embedding dimension from _ensure_target_revision) reached
         # the background log as a traceback that explains nothing.
-        err_console.print(f"[red]Pipeline worker failed: {e}[/red]")
+        err_console.print(f"[red]Pipeline worker failed: {redact_text(str(e))}[/red]")
         raise typer.Exit(1)
     # A fatal startup failure (already running, DB lock held, embedding runtime
     # unreachable) returns normally from start(), so without this the process
@@ -143,6 +143,7 @@ def run_pipeline_worker(
 
 def main() -> None:
     """Runner entrypoint."""
+    install_last_resort_redaction()
     app()
 
 

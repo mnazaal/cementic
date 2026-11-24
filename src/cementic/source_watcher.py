@@ -780,7 +780,9 @@ class SourceWatcher:
             # the subtree, not just count it.
             self._logger.error("Could not read directory during scan: %s", error)
             failed_path = str(error.filename) if error.filename else str(directory)
-            self.state_manager.record_skipped(failed_path, f"unreadable during scan: {error}")
+            self.state_manager.record_skipped(
+                failed_path, redact_text(f"unreadable during scan: {error}")
+            )
 
         for dirpath, dirnames, filenames in os.walk(directory, onerror=_on_walk_error):
             # The scan can walk a large tree for minutes; without this a
@@ -831,7 +833,7 @@ class SourceWatcher:
             # Same reasoning as _on_file_detected above: without record_skipped
             # the deleted file kept "existing" in search with nothing visible
             # in `status` beyond a log line the user has to know to look for.
-            self.state_manager.record_skipped(file_path, f"deletion failed: {error}")
+            self.state_manager.record_skipped(file_path, redact_text(f"deletion failed: {error}"))
             self._record_error(error)
 
     def _on_file_moved(self, src_path: str, dest_path: str) -> None:
@@ -839,7 +841,7 @@ class SourceWatcher:
             self._mark_document_moved(src_path, dest_path)
         except Exception as error:
             self._logger.error("Failed to repath %s -> %s: %s", src_path, dest_path, error)
-            self.state_manager.record_skipped(src_path, f"rename failed: {error}")
+            self.state_manager.record_skipped(src_path, redact_text(f"rename failed: {error}"))
             self._record_error(error)
 
     def _on_directory_deleted(self, dir_path: str) -> None:
@@ -847,7 +849,9 @@ class SourceWatcher:
             self._mark_documents_deleted_under(dir_path)
         except Exception as error:
             self._logger.error("Failed to mark directory deleted %s: %s", dir_path, error)
-            self.state_manager.record_skipped(dir_path, f"directory deletion failed: {error}")
+            self.state_manager.record_skipped(
+                dir_path, redact_text(f"directory deletion failed: {error}")
+            )
             self._record_error(error)
 
     def _clear_error(self) -> None:

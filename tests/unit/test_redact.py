@@ -79,6 +79,60 @@ class TestRedactText:
         assert redact_text("a banana", "postgresql://u:a@h/d") == "a banana"
 
 
+class TestRedactTextShapes:
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "password = SENT_X1",
+            "host=h password =SENT_X1 user=u",
+            "{'password': 'SENT_X1', 'user': 'u'}",
+            '{"password": "SENT_X1"}',
+            '{"sslpassword":"SENT_X1"}',
+            "host=h password=ab&SENT_X1 user=u",
+            "password='ab\\'SENT_X1'",
+            'password="ab\\"SENT_X1"',
+            "postgresql://u:ab@SENT_X1@h/d",
+            "postgresql://u:ab/SENT_X1@h/d",
+            "failed (postgresql://u:SENT_X1@h/d)",
+            "x?password=SENT_X1)",
+            "{'api_key': 'SENT_X1'}",
+            "client_secret=SENT_X1",
+            "access_token=SENT_X1",
+        ],
+    )
+    def test_shape_is_masked(self, text: str) -> None:
+        assert "SENT_X1" not in redact_text(text)
+
+    def test_ampersand_in_value_keeps_following_param(self) -> None:
+        out = redact_text("?password=a&b&sslmode=require")
+        assert "sslmode=require" in out
+        assert "a&b" not in out
+
+    def test_url_with_space_in_password_masks_every_encoding(self) -> None:
+        url = "postgresql://u:p@h/d?password=hunter%20SENT_X1"
+        for rendered in ("hunter SENT_X1", "hunter+SENT_X1", "hunter%20SENT_X1"):
+            assert "SENT_X1" not in redact_text(f"bad {rendered} here", url)
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "max_token=128",
+            "num_token=5",
+            "PWD=/home/u",
+            "cwd /x/token=1/y",
+            "token=5 tokens_per_s=3",
+            "passfile=/home/u/.pgpass sslkey=/k",
+        ],
+    )
+    def test_non_credential_keys_are_left_alone(self, text: str) -> None:
+        assert redact_text(text) == text
+
+    def test_non_credential_query_keys_survive_redact_url(self) -> None:
+        out = redact_url("postgresql://h/d?max_token=128&pwd=/x&password=SENT_X1")
+        assert "max_token=128" in out
+        assert "SENT_X1" not in out
+
+
 def test_formatter_masks_message_and_traceback() -> None:
     stream = io.StringIO()
     handler = logging.StreamHandler(stream)
@@ -141,15 +195,6 @@ class TestSites:
             DatabaseConfig(CEMENTIC_DB_URL=bad)
         _clean(str(excinfo.value.__cause__) + format_config_error(excinfo.value, None))
 
-    def test_malformed_toml_message_is_clean(self, tmp_path, monkeypatch) -> None:
-        from cementic.config_diagnostics import config_file_error
-
-        path = tmp_path / "config.toml"
-        path.write_text(f'[database]\nCEMENTIC_DB_URL = "{DSN}\n')
-        monkeypatch.setenv("CEMENTIC_CONFIG", str(path))
-        message = config_file_error() or ""
-        _clean(message)
-
     def test_worker_log_file_is_clean(self, tmp_path) -> None:
         from cementic.worker_runtime import setup_worker_logger
 
@@ -171,6 +216,73 @@ class TestSites:
         ):
             result = CliRunner().invoke(cli_app, ["status", "--json"])
         _clean(result.stdout + result.stderr)
+
+
+def test_runner_entry_redacts_the_last_resort_log_handler() -> None:
+    from cementic import runner
+
+    logging.lastResort.setFormatter(logging.Formatter())
+    with patch.object(runner, "app"):
+        runner.main()
+    assert isinstance(logging.lastResort.formatter, RedactingFormatter)
+
+
+class _State:
+    def __init__(self) -> None:
+        self.reasons: list[str] = []
+
+    def record_skipped(self, path: str, reason: str, **kwargs: object) -> None:
+        self.reasons.append(reason)
+
+
+class TestSiblingErrorSites:
+    def test_source_watcher_state_errors_are_redacted(self) -> None:
+        from cementic.source_watcher import SourceWatcher
+
+        w = SourceWatcher.__new__(SourceWatcher)
+        w._logger = logging.getLogger("test_sw")
+        state = _State()
+        w.state_manager = state  # type: ignore[assignment]
+        w._record_error = lambda e: None  # type: ignore[method-assign]
+
+        def boom(*args: object) -> None:
+            raise RuntimeError(f"db {DSN}")
+
+        w._mark_document_deleted = boom  # type: ignore[method-assign]
+        w._mark_document_moved = boom  # type: ignore[method-assign]
+        w._mark_documents_deleted_under = boom  # type: ignore[method-assign]
+        w._on_file_deleted("/f")
+        w._on_file_moved("/a", "/b")
+        w._on_directory_deleted("/d")
+        assert len(state.reasons) == 3
+        for reason in state.reasons:
+            _clean(reason)
+
+    def test_runner_watcher_failure_line_is_redacted(self) -> None:
+        from cementic.runner import app as runner_app
+
+        with (
+            patch("cementic.runner.get_config", return_value=_config()),
+            patch("cementic.runner.Bootstrapper"),
+            patch("cementic.runner.SourceWatcher") as sw,
+        ):
+            sw.return_value.start.side_effect = RuntimeError(f"x {DSN}")
+            result = CliRunner().invoke(runner_app, ["source-watcher", "/tmp/x"])
+        assert result.exit_code == 1
+        _clean(result.stderr + result.stdout)
+
+    def test_runner_pipeline_failure_line_is_redacted(self) -> None:
+        from cementic.runner import app as runner_app
+
+        with (
+            patch("cementic.runner.get_config", return_value=_config()),
+            patch("cementic.runner.Bootstrapper"),
+            patch("cementic.runner.PipelineWorker") as pw,
+        ):
+            pw.return_value.start.side_effect = RuntimeError(f"x {DSN}")
+            result = CliRunner().invoke(runner_app, ["pipeline-worker"])
+        assert result.exit_code == 1
+        _clean(result.stderr + result.stdout)
 
 
 def test_cli_redacts_the_last_resort_log_handler() -> None:

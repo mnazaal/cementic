@@ -1,7 +1,6 @@
 """CLI interface for cementic using Typer."""
 
 import json
-import logging
 import os
 import shutil
 import sys
@@ -46,7 +45,7 @@ from cementic.config_diagnostics import config_path_error
 from cementic.embedding_text import describe_text_policy
 from cementic.filelock import LockUnavailableError, file_lock
 from cementic.hybrid import scores_explain_order
-from cementic.redact import RedactingFormatter, redact_text
+from cementic.redact import install_last_resort_redaction, redact_text
 from cementic.state import DaemonState, StateManager
 from cementic.supervisor import (
     ManagedProcess,
@@ -127,8 +126,7 @@ def _root(
     """
     # Library loggers with no handler (collections, bootstrap) fall to
     # logging.lastResort, which prints tracebacks raw.
-    if logging.lastResort is not None:
-        logging.lastResort.setFormatter(RedactingFormatter())
+    install_last_resort_redaction()
 
 
 def _default_config_toml() -> str:
@@ -520,7 +518,7 @@ def _start_background_locked(directories: list[str], collection: str) -> None:
         # unwritable log dir). Without this the survivor keeps running with no
         # supervisor record, so `cementic stop` could never find it again.
         _terminate_managed(spawned)
-        err_console.print(f"[red]cementic failed to start: {error}[/red]")
+        err_console.print(f"[red]cementic failed to start: {redact_text(str(error))}[/red]")
         raise typer.Exit(1)
 
     _save_supervisor_state(

@@ -10,34 +10,58 @@ error goes through here.
 import logging
 import re
 from typing import TYPE_CHECKING
-from urllib.parse import quote_plus
+from urllib.parse import quote, quote_plus
 
 if TYPE_CHECKING:
     from sqlalchemy.engine import URL
 
 MASK = "***"
 
-#: Query keys that carry a secret: libpq's ``password`` and ``sslpassword``,
-#: plus the usual spellings other drivers use. ``passfile`` and ``sslkey``
-#: name files, not secrets, so they stay readable.
-_SECRET_KEY = re.compile(r"(?i)\w*pass(?:word|wd)|pwd|\w*secret|\w*token")
+#: Key names that carry a secret, as a regex fragment: anything ending in
+#: ``password``/``passwd`` (``sslpassword`` is libpq's), plus names that are
+#: unambiguously credentials. A bare ``token`` or ``pwd`` is deliberately
+#: absent: ``max_token=128`` and ``PWD=/home/u`` are ordinary log text.
+#: ``passfile`` and ``sslkey`` name files, not secrets.
+_KEY_NAMES = (
+    r"\w*pass(?:word|wd)"
+    r"|\w*(?:access_token|refresh_token|auth_token|id_token|api_?key|secret|secret_key)"
+)
+_SECRET_KEY = re.compile(_KEY_NAMES, re.IGNORECASE)
 
-#: ``key=value`` in a URL query or a libpq conninfo string; the value may be
-#: quoted, in which case it runs to the closing quote.
+#: A value: quoted (backslash escapes allowed), or unquoted up to whitespace.
+#: An unquoted ``&`` ends the value only when a new ``key=`` follows, so a
+#: libpq password such as ``ab&X`` is masked whole while ``?password=B&sslmode=x``
+#: keeps ``sslmode``. Trailing ``) ] , ;`` punctuation is left outside.
+_VALUE = (
+    r"""(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'"""
+    r"""|(?:[^\s&"']|&(?!\w+=))+?(?=[),;\]]*(?:\s|$|&\w+=)))"""
+)
+
+#: ``key=value`` in a URL query or libpq conninfo (``password = x`` allowed),
+#: and ``'key': 'value'`` / ``"key": "value"`` in dict and JSON reprs.
 _KEY_VALUE = re.compile(
-    r"""(?ix)
-    (?P<key>\b\w*(?:pass(?:word|wd)|pwd|secret|token))
-    =
-    (?P<value>"[^"]*"|'[^']*'|[^\s&;,)\]"']+)
+    rf"""(?ix)
+    (?<![\w/.-])
+    (?P<q>["']?)
+    (?P<key>{_KEY_NAMES})
+    (?P=q)
+    (?P<sep>\s*[=:]\s*)
+    (?P<value>{_VALUE})
     """
 )
 
-#: ``scheme://user:password@`` inside free text.
-_AUTHORITY = re.compile(r"(?P<head>\b[\w+.-]+://[^:/?#\s@]*):(?P<pw>[^@/\s]+)@")
+#: ``scheme://user:password@`` inside free text. The password runs to the last
+#: ``@`` of the whitespace-free token, so a raw ``@`` or ``/`` inside it is
+#: covered; a password containing whitespace is not recognised by shape.
+_AUTHORITY = re.compile(r"(?P<head>\b[\w+.-]+://[^:/?#\s@]*):(?P<pw>\S+)@")
 
 #: Replacing a one- or two-character secret everywhere would destroy the
 #: surrounding message, so such values are matched by shape only.
 _MIN_LITERAL = 3
+
+
+def _variants(literal: str) -> list[str]:
+    return list({literal, quote_plus(literal), quote(literal, safe="")})
 
 
 def _secret_values(url: "URL") -> list[str]:
@@ -82,9 +106,19 @@ def redact_text(text: str, url: "str | URL | None" = None) -> str:
             literals = []
         for literal in sorted(literals, key=len, reverse=True):
             if len(literal) >= _MIN_LITERAL:
-                text = text.replace(literal, MASK).replace(quote_plus(literal), MASK)
-    text = _KEY_VALUE.sub(lambda m: f"{m['key']}={MASK}", text)
+                for variant in _variants(literal):
+                    text = text.replace(variant, MASK)
+    text = _KEY_VALUE.sub(lambda m: f"{m['q']}{m['key']}{m['q']}{m['sep']}{MASK}", text)
     return _AUTHORITY.sub(lambda m: f"{m['head']}:{MASK}@", text)
+
+
+def install_last_resort_redaction() -> None:
+    """Make ``logging.lastResort`` (handlerless library loggers) mask secrets.
+
+    Called by every process entry point: the CLI and the background runner.
+    """
+    if logging.lastResort is not None:
+        logging.lastResort.setFormatter(RedactingFormatter())
 
 
 class RedactingFormatter(logging.Formatter):
