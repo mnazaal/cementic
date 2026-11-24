@@ -157,11 +157,21 @@ fingerprints are in full, not truncated to eight characters as in the table:
 ```
 
 `embedding status --json`, from the pid file or a `/proc` scan, with no health
-probe (`status` and `doctor` own that):
+probe (`status` and `doctor` own that). With `--check` it does probe: it runs
+the embedding checks `doctor` runs (daemon, server binary, model) and exits 1
+when `doctor` would fail any of them, which a stopped daemon with autostart on
+does not. The reason goes to stderr, and the JSON gains a `check` key; this is
+the one case where a nonzero exit still prints the document on stdout:
 
 <!-- json-shape: embedding_status -->
 ```json
 {"state": "running|stopped|ambiguous", "pid": "int|null", "recovered": "bool", "error": "str|null"}
+```
+
+`embedding status --json --check` adds one key to that document:
+
+```json
+"check": {"ok": "bool", "failed": [{"check": "daemon|embedding_server|model", "message": "str"}], "note": "str|null"}
 ```
 
 `recovered` is true when the pid file was missing or stale and the daemon was

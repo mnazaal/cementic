@@ -442,6 +442,32 @@ class TestEmbeddingCommands:
         mock_status.assert_called_once_with()
 
 
+    @staticmethod
+    def _check(
+        probe, autostart, *, server_status="ok", model_status="ok", args=("--check",),
+        runtime_status="stopped",
+    ):
+        config = Config()
+        config.llama_cpp.daemon_autostart = autostart
+        with (
+            patch("cementic.cli.cli_config", return_value=config),
+            patch("cementic.doctor._daemon_state", return_value=probe),
+            patch(
+                "cementic.doctor._embedding_server_check",
+                return_value={"status": server_status, "message": "server says " + server_status},
+            ),
+            patch(
+                "cementic.doctor._model_check",
+                return_value={"status": model_status, "message": "model says " + model_status},
+            ),
+            patch("cementic.cli._llama_daemon_runtime_status", return_value=runtime_status),
+            patch(
+                "cementic.embedding_runtime.llama_daemon_state",
+                return_value={"state": "stopped", "pid": None, "recovered": False, "error": None},
+            ),
+        ):
+            return runner.invoke(app, ["embedding", "status", *args])
+
     @pytest.mark.parametrize(
         ("probe", "autostart", "exit_code"),
         [
@@ -453,17 +479,63 @@ class TestEmbeddingCommands:
         ],
     )
     def test_embedding_status_check_exits_as_doctor_would(self, probe, autostart, exit_code):
-        config = Config()
-        config.llama_cpp.daemon_autostart = autostart
-        with (
-            patch("cementic.cli.cli_config", return_value=config),
-            patch("cementic.doctor._daemon_state", return_value=probe),
-            patch("cementic.cli._llama_daemon_runtime_status", return_value="stopped"),
-        ):
-            result = runner.invoke(app, ["embedding", "status", "--check"])
+        result = self._check(probe, autostart)
 
         assert result.exit_code == exit_code
         assert "embedding: stopped" in result.output
+
+    @pytest.mark.parametrize(
+        ("server_status", "model_status", "reason"),
+        [
+            ("fail", "ok", "embedding_server: server says fail"),
+            ("ok", "fail", "model: model says fail"),
+        ],
+    )
+    def test_check_fails_for_every_embedding_runtime_check_doctor_fails(
+        self, server_status, model_status, reason
+    ):
+        """With autostart on and the daemon stopped the daemon check only warns;
+        a missing binary or model still makes `doctor` fail, so `--check` must."""
+        result = self._check(
+            (False, True, ""), True, server_status=server_status, model_status=model_status
+        )
+
+        assert result.exit_code == 1
+        assert reason in result.output
+
+    def test_check_failure_states_its_reason_on_stderr(self):
+        result = self._check((False, True, ""), False)
+
+        assert result.exit_code == 1
+        assert "embedding check failed: daemon:" in result.output
+        assert "daemon_autostart is disabled" in result.output
+
+    def test_check_json_carries_the_verdict_and_reason(self):
+        result = self._check((False, True, ""), False, args=("--json", "--check"))
+
+        assert result.exit_code == 1
+        document = json.loads(result.stdout)
+        assert document["state"] == "stopped"
+        assert document["check"]["ok"] is False
+        assert [f["check"] for f in document["check"]["failed"]] == ["daemon"]
+        assert "autostart" in document["check"]["failed"][0]["message"]
+
+    def test_check_json_when_healthy(self):
+        result = self._check((True, True, "reachable"), True, args=("--json", "--check"))
+
+        assert result.exit_code == 0
+        check = json.loads(result.stdout)["check"]
+        assert check["ok"] is True
+        assert check["failed"] == []
+        # The probe's daemon answered while the managed one is stopped.
+        assert "external server" in check["note"]
+
+    def test_check_explains_a_healthy_external_server_beside_a_stopped_daemon(self):
+        result = self._check((True, True, "reachable"), True)
+
+        assert result.exit_code == 0
+        assert "embedding: stopped" in result.output
+        assert "external server" in result.output
 
     def test_embedding_status_without_check_still_exits_zero_when_stopped(self):
         with patch("cementic.cli._llama_daemon_runtime_status", return_value="stopped"):

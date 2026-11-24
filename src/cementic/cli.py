@@ -990,30 +990,63 @@ def embedding_runtime_status(
     check: bool = typer.Option(
         False,
         "--check",
-        help="Exit 1 when `cementic doctor` would fail the embedding daemon",
+        help=(
+            "Exit 1 when `cementic doctor` would fail the embedding daemon, "
+            "server binary or model; the reason goes to stderr (a `check` field with --json)"
+        ),
     ),
 ) -> None:
     """Show configured embedding runtime service status."""
     config = cli_config()
+    document: dict[str, Any] | None = None
     if json_output:
         from cementic.embedding_runtime import llama_daemon_state
 
-        typer.echo(json.dumps(llama_daemon_state(config), indent=2))
+        document = dict(llama_daemon_state(config))
+        status_line = ""
     else:
-        console.print(f"embedding: {_llama_daemon_runtime_status()}")
+        status_line = f"embedding: {_llama_daemon_runtime_status()}"
+    failed: list[dict[str, str]] = []
+    note = ""
     if check:
-        # The same probe and verdict as `doctor`, so a script and the report
+        # The same checks and verdict as `doctor`, so a script and the report
         # cannot disagree. This one probes, which plain `status` does not.
-        from cementic.doctor import _daemon_state, daemon_check_status
+        from cementic.doctor import embedding_runtime_checks
 
-        healthy, repairable, message = _daemon_state(config)
-        verdict = daemon_check_status(
-            healthy, repairable, autostart=config.llama_cpp.daemon_autostart
-        )
-        if verdict == "fail":
-            if not json_output and message:
-                err_console.print(f"embedding check failed: {message}")
-            raise typer.Exit(1)
+        checks = embedding_runtime_checks(config)
+        failed = [
+            {"check": name, "message": str(result.get("message", ""))}
+            for name, result in checks.items()
+            if result.get("status") == "fail"
+        ]
+        if (
+            not failed
+            and checks["daemon"].get("reachable")
+            and (
+                document["state"] == "stopped"
+                if document is not None
+                else status_line.startswith("embedding: stopped")
+            )
+        ):
+            # Healthy, yet `stopped` is on screen: something other than the
+            # daemon cementic manages is answering embeddings.
+            note = (
+                "embedding check ok: an external server answers embeddings; "
+                "cementic's own daemon is not running"
+            )
+        if document is not None:
+            document["check"] = {"ok": not failed, "failed": failed, "note": note or None}
+    if document is not None:
+        typer.echo(json.dumps(document, indent=2))
+    else:
+        console.print(status_line)
+    if failed:
+        if not json_output:
+            reasons = "; ".join(f"{item['check']}: {item['message']}" for item in failed)
+            err_console.print(f"embedding check failed: {reasons}")
+        raise typer.Exit(1)
+    if note and not json_output:
+        err_console.print(note)
 
 
 @app.command(

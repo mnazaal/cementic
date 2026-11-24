@@ -123,6 +123,76 @@ def daemon_check_status(healthy: bool, repairable: bool, *, autostart: bool) -> 
     return "warning" if autostart and repairable else "fail"
 
 
+def _model_check(config: Config) -> dict[str, Any]:
+    """Whether the embedding model file is present, or fetchable on demand."""
+    model_path = resolve_llama_model_path(config.llama_cpp.model_path)
+    model_exists = model_path.is_file()
+    # Promising a download this path forbids is worse than reporting nothing:
+    # `cementic doctor` said ok and `cementic start` then died on it. The
+    # confinement rule is the bootstrapper's own, shared rather than restated.
+    model_downloadable = config.bootstrap.auto_download_llama_model and (
+        llama_model_download_allowed(model_path)
+    )
+    model_auto_download = config.bootstrap.auto_download_llama_model
+    return {
+        "status": "ok" if model_exists else "warning" if model_downloadable else "fail",
+        "path": str(model_path),
+        "exists": model_exists,
+        "auto_download": model_auto_download,
+        "url": config.bootstrap.llama_model_url,
+        "sha256_configured": bool(config.bootstrap.llama_model_sha256),
+        "message": (
+            "present"
+            if model_exists
+            else "missing; cementic will download it automatically when needed"
+            if model_downloadable
+            else "missing, and auto-download is refused: the path is outside the "
+            "cementic data directory, so cementic cannot write it there"
+            if model_auto_download
+            else "missing and auto_download_llama_model is disabled"
+        ),
+    }
+
+
+def _daemon_check(config: Config) -> dict[str, Any]:
+    """The embedding daemon's check: probe it, then apply the autostart verdict."""
+    daemon_healthy, daemon_repairable, daemon_message = _daemon_state(config)
+    daemon_autostart = config.llama_cpp.daemon_autostart
+    # Autostart only excuses states it can actually repair. Excusing every
+    # unhealthy state let a wedged daemon pass `doctor` at ok -- the exact
+    # state behind the 21-hour incident the two-stage probe exists to catch.
+    return {
+        "status": daemon_check_status(
+            daemon_healthy, daemon_repairable, autostart=daemon_autostart
+        ),
+        "reachable": daemon_healthy,
+        "autostart": daemon_autostart,
+        "message": (
+            daemon_message
+            or (
+                "not running; cementic can autostart it when needed"
+                if daemon_autostart
+                else "not running and daemon_autostart is disabled"
+            )
+        ),
+    }
+
+
+def embedding_runtime_checks(config: Config) -> dict[str, dict[str, Any]]:
+    """The checks that decide whether embedding can run: model, daemon, server binary.
+
+    One definition for `doctor` and `embedding status --check`, so the script
+    gate and the report cannot disagree. Gating on the daemon alone passed a
+    stopped daemon with autostart on even when the binary it would autostart
+    was missing, a state `doctor` fails.
+    """
+    return {
+        "model": _model_check(config),
+        "daemon": _daemon_check(config),
+        "embedding_server": _embedding_server_check(config),
+    }
+
+
 def collect_doctor_report(config: Config) -> dict[str, Any]:
     """Collect read-only readiness diagnostics.
 
@@ -130,7 +200,6 @@ def collect_doctor_report(config: Config) -> dict[str, Any]:
     models, write state/config, or perform container actions.
     """
     config_path = resolve_config_path()
-    model_path = resolve_llama_model_path(config.llama_cpp.model_path)
     # A malformed or unreadable config file is silently discarded and cementic
     # falls back to defaults. Reporting "ok" here -- while pointing at the very
     # file that is not being used -- was the one check that could never fail.
@@ -231,53 +300,10 @@ def collect_doctor_report(config: Config) -> dict[str, Any]:
         }
         checks["extensions"] = {}
 
-    model_exists = model_path.is_file()
-    # Promising a download this path forbids is worse than reporting nothing:
-    # `cementic doctor` said ok and `cementic start` then died on it. The
-    # confinement rule is the bootstrapper's own, shared rather than restated.
-    model_downloadable = config.bootstrap.auto_download_llama_model and (
-        llama_model_download_allowed(model_path)
-    )
-    model_auto_download = config.bootstrap.auto_download_llama_model
-    checks["model"] = {
-        "status": "ok" if model_exists else "warning" if model_downloadable else "fail",
-        "path": str(model_path),
-        "exists": model_exists,
-        "auto_download": model_auto_download,
-        "url": config.bootstrap.llama_model_url,
-        "sha256_configured": bool(config.bootstrap.llama_model_sha256),
-        "message": (
-            "present"
-            if model_exists
-            else "missing; cementic will download it automatically when needed"
-            if model_downloadable
-            else "missing, and auto-download is refused: the path is outside the "
-            "cementic data directory, so cementic cannot write it there"
-            if model_auto_download
-            else "missing and auto_download_llama_model is disabled"
-        ),
-    }
-
-    daemon_healthy, daemon_repairable, daemon_message = _daemon_state(config)
-    daemon_autostart = config.llama_cpp.daemon_autostart
-    # Autostart only excuses states it can actually repair. Excusing every
-    # unhealthy state let a wedged daemon pass `doctor` at ok -- the exact
-    # state behind the 21-hour incident the two-stage probe exists to catch.
-    checks["daemon"] = {
-        "status": daemon_check_status(
-            daemon_healthy, daemon_repairable, autostart=daemon_autostart
-        ),
-        "reachable": daemon_healthy,
-        "autostart": daemon_autostart,
-        "message": (
-            daemon_message
-            or (
-                "not running; cementic can autostart it when needed"
-                if daemon_autostart
-                else "not running and daemon_autostart is disabled"
-            )
-        ),
-    }
+    runtime = embedding_runtime_checks(config)
+    checks["model"] = runtime["model"]
+    checks["daemon"] = runtime["daemon"]
+    daemon_healthy = bool(runtime["daemon"]["reachable"])
 
     checks["stranded_chunkings"] = _stranded_chunkings_check(
         stranded_chunkings, database_reachable=database_ok
@@ -287,7 +313,7 @@ def collect_doctor_report(config: Config) -> dict[str, Any]:
     )
     checks["chunk_budget"] = _chunk_budget_check(config)
     checks["tokenizer"] = _tokenizer_check()
-    checks["embedding_server"] = _embedding_server_check(config)
+    checks["embedding_server"] = runtime["embedding_server"]
     checks["ocr"] = _ocr_check(config)
     checks["extraction_commands"] = _extraction_commands_check(config)
     checks["extractor_profile"] = _extractor_profile_check(
