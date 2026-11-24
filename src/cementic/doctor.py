@@ -907,7 +907,9 @@ def _lexical_index_check(
             # ok, so pointing at it would send the reader nowhere.
             reason = "the index catalog could not be read; the database may not be PostgreSQL"
         else:
-            reason = "the probe did not run or its result could not be read (see the database check)"
+            reason = (
+                "the probe did not run or its result could not be read (see the database check)"
+            )
         return {"status": "warning", "message": f"could not be checked; {reason}"}
     if facts.present and facts.valid:
         return {
