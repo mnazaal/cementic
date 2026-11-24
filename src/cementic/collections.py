@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any, cast
 
@@ -42,6 +43,7 @@ from cementic.storage import safe_remove_artifact
 from cementic.vector_store import (
     drop_vector_table_if_unreferenced,
     index_access_method,
+    unreferenced_vector_profile_ids,
     vector_index_name,
     vector_table_exists,
 )
@@ -113,13 +115,11 @@ def list_collections(session: Session) -> list[CollectionSummary]:
         .all()
     }
 
-    active_by_collection, ready_by_collection, building_by_collection = (
-        bucket_revisions_by_status(
-            session.query(PipelineRevision)
-            .filter(PipelineRevision.status.in_(["active", "building", "ready"]))
-            .order_by(PipelineRevision.collection, PipelineRevision.id.desc())
-            .all()
-        )
+    active_by_collection, ready_by_collection, building_by_collection = bucket_revisions_by_status(
+        session.query(PipelineRevision)
+        .filter(PipelineRevision.status.in_(["active", "building", "ready"]))
+        .order_by(PipelineRevision.collection, PipelineRevision.id.desc())
+        .all()
     )
 
     return [
@@ -197,9 +197,7 @@ def delete_collection_records(session: Session, collection: str) -> DeleteCollec
             .all()
         }
         # The same droppability rule pruning uses, not a re-derivation of it.
-        vector_profile_ids = unreferenced_profile_ids(
-            unique_profile_ids, remaining_by_profile
-        )
+        vector_profile_ids = unreferenced_profile_ids(unique_profile_ids, remaining_by_profile)
     session.commit()
     return DeleteCollectionResult(
         deleted_docs=deleted_docs,
@@ -228,8 +226,13 @@ def remove_artifacts(paths: list[str], *, config: Config) -> list[str]:
     return failures
 
 
-def drop_orphan_vector_tables(engine: Any, profile_ids: list[int]) -> int:
+def drop_orphan_vector_tables(engine: Any, profile_ids: Sequence[int] = ()) -> int:
     """Best-effort drop of vector tables no longer referenced by revisions.
+
+    A sweep: ``profile_ids`` (this operation's candidates) are joined by every
+    other unreferenced vector table in the database, so a drop that timed out
+    on a lock earlier is retried by whichever cleanup runs next. Each drop is
+    still the guarded one, which rechecks references under the profile lock.
 
     Per-table, like ``remove_artifacts`` above: one failing drop must not stop
     the remaining orphans from being attempted. The first error is re-raised at
@@ -238,7 +241,9 @@ def drop_orphan_vector_tables(engine: Any, profile_ids: list[int]) -> int:
     """
     errors: list[Exception] = []
     dropped = 0
-    for profile_id in profile_ids:
+    with engine.connect() as conn:
+        leftovers = unreferenced_vector_profile_ids(conn)
+    for profile_id in sorted({*profile_ids, *leftovers}):
         try:
             dropped += bool(drop_vector_table_if_unreferenced(engine, profile_id))
         except Exception as error:
@@ -311,9 +316,7 @@ def promote_ready_revision(
     if revision is None:
         return PromotionOutcome("no_ready")
 
-    counts = compute_revision_counts(
-        session, collection, revision, include_scan_marker=False
-    )
+    counts = compute_revision_counts(session, collection, revision, include_scan_marker=False)
     if counts.documents == 0:
         # Promotion retires whatever is currently active, so publishing an
         # empty revision removes search coverage rather than merely adding

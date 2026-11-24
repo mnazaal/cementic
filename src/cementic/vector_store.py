@@ -349,6 +349,33 @@ DROP_LOCK_TIMEOUT_MS = 5000
 _LOCK_NOT_AVAILABLE = "55P03"
 
 
+_VECTOR_TABLE_PATTERN = r"^embedding_vectors_p[0-9]+$"
+
+
+def unreferenced_vector_profile_ids(conn: Connection) -> list[int]:
+    """Profile ids whose vector table exists but that no revision references.
+
+    Found from the catalog by the ``vector_table_name`` scheme, so a table whose
+    guarded drop timed out (or whose cleanup never ran) is still found later.
+    A read-only snapshot: callers must still drop through
+    ``drop_vector_table_if_unreferenced``, which rechecks under the lock.
+    """
+    names = conn.execute(
+        text(
+            "SELECT relname FROM pg_class WHERE relkind IN ('r', 'p') "
+            "AND relname ~ :pattern AND pg_table_is_visible(oid)"
+        ),
+        {"pattern": _VECTOR_TABLE_PATTERN},
+    ).scalars()
+    existing = {int(name.rsplit("_p", 1)[1]) for name in names}
+    referenced = set(
+        conn.execute(text("SELECT DISTINCT embedding_profile_id FROM pipeline_revisions"))
+        .scalars()
+        .all()
+    )
+    return sorted(existing - referenced)
+
+
 def lock_vector_profile(conn: Connection, profile_id: int) -> None:
     """Hold the profile's reuse/drop lock until the connection's transaction ends.
 
@@ -376,7 +403,10 @@ def drop_vector_table_if_unreferenced(engine: Engine, profile_id: int) -> bool:
     so by then another collection may have started using the table. The check is
     repeated here under ``lock_vector_profile``. Returns whether the table was
     dropped; False also when a lock could not be had within
-    ``DROP_LOCK_TIMEOUT_MS`` (logged), leaving the table for a later cleanup.
+    ``DROP_LOCK_TIMEOUT_MS`` (logged), leaving the table for the next cleanup:
+    ``drop_orphan_vector_tables`` sweeps every unreferenced vector table each
+    time it runs (after promote, prune and ``collection remove``), so a table
+    skipped here is retried then.
     """
     try:
         with engine.begin() as conn:

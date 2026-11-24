@@ -219,3 +219,56 @@ def test_a_drop_blocked_by_an_open_reader_gives_up_and_a_later_drop_succeeds(
     assert drop_orphan_vector_tables(pg_engine, cleanup) == 1
     pg_session.expire_all()
     assert not vector_table_exists(pg_session.connection(), profile_id)
+
+
+@pytest.mark.pg
+def test_a_timed_out_drop_is_retried_by_the_next_sweep(pg_engine, pg_session, monkeypatch) -> None:
+    """The retry is real: the next cleanup names no candidate and still drops it."""
+    from cementic import vector_store
+
+    monkeypatch.setattr(vector_store, "DROP_LOCK_TIMEOUT_MS", 300)
+    profile_id, cleanup = _seed_and_delete(pg_session)
+    pg_session.commit()
+
+    reader = pg_engine.connect()
+    try:
+        reader.execute(text(f"SELECT count(*) FROM {vector_table_name(profile_id)}")).scalar_one()
+        assert drop_orphan_vector_tables(pg_engine, cleanup) == 0
+    finally:
+        reader.rollback()
+        reader.close()
+    assert vector_table_exists(pg_session.connection(), profile_id)
+    pg_session.commit()
+
+    assert drop_orphan_vector_tables(pg_engine) == 1  # no candidates: found from the catalog
+    pg_session.expire_all()
+    assert not vector_table_exists(pg_session.connection(), profile_id)
+
+
+@pytest.mark.pg
+def test_sweep_without_candidates_drops_a_true_orphan(pg_engine, pg_session) -> None:
+    profile_id, _ = _seed_and_delete(pg_session)
+
+    assert drop_orphan_vector_tables(pg_engine) == 1
+
+    pg_session.expire_all()
+    assert not vector_table_exists(pg_session.connection(), profile_id)
+
+
+@pytest.mark.pg
+def test_sweep_never_drops_a_referenced_table(pg_engine, pg_session) -> None:
+    cleanup_pg_tables(pg_session)
+    revision = seed_active_vector_collection(
+        pg_session,
+        collection="live",
+        source_path="/docs/live.pdf",
+        chunks=[("live", [1.0, 0.0, 0.0, 0.0])],
+    )
+    profile_id = revision.embedding_profile_id
+    pg_session.commit()
+
+    assert drop_orphan_vector_tables(pg_engine) == 0
+
+    pg_session.expire_all()
+    assert vector_table_exists(pg_session.connection(), profile_id)
+    assert _vector_rows(pg_session, profile_id) == 1

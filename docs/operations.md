@@ -116,7 +116,7 @@ Keys that change with the situation:
   "ok": "bool",
   "checks": {
     "config": {}, "database": {}, "extensions": {}, "model": {}, "daemon": {},
-    "stranded_chunkings": {}, "lexical_index": {}, "chunk_budget": {},
+    "stranded_chunkings": {}, "orphan_vector_tables": {}, "lexical_index": {}, "chunk_budget": {},
     "tokenizer": {}, "embedding_server": {}, "ocr": {},
     "extraction_commands": {}, "extractor_profile": {}, "embedding_canary": {}
   }

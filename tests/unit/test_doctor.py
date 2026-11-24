@@ -1265,3 +1265,23 @@ class TestProbeFailureWording:
 
         assert rolled_back_at_read == [True]
         assert "could not inspect extensions" in json.dumps(report["checks"]["extensions"])
+
+
+class TestOrphanVectorTablesCheck:
+    def test_clean(self) -> None:
+        from cementic.doctor import _orphan_vector_tables_check
+
+        assert _orphan_vector_tables_check([])["status"] == "ok"
+
+    def test_leftovers_warn_with_ids(self) -> None:
+        from cementic.doctor import _orphan_vector_tables_check
+
+        report = _orphan_vector_tables_check([3, 7])
+        assert report["status"] == "warning"
+        assert report["orphans"] == 2
+        assert "3, 7" in report["message"]
+
+    def test_unreadable_warns(self) -> None:
+        from cementic.doctor import _orphan_vector_tables_check
+
+        assert _orphan_vector_tables_check(None)["status"] == "warning"

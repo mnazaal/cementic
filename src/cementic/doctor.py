@@ -234,6 +234,7 @@ def collect_doctor_report(config: Config) -> dict[str, Any]:
     active_extractor_profiles: list[tuple[str, dict[str, Any]]] | None = None
     extractor_profiles_error: str | None = None
     stranded_chunkings: int | None = None
+    orphan_vector_tables: list[int] | None = None
     lexical_facts: LexicalIndexFacts | None = None
     #: Set once `lexical_index_facts` returned, so a None result (its query
     #: failed and was swallowed) is told apart from a probe that never ran.
@@ -278,6 +279,8 @@ def collect_doctor_report(config: Config) -> dict[str, Any]:
             active_canaries = _active_embedding_canaries(conn)
             failing_probe = "the stranded-chunking count"
             stranded_chunkings = _stranded_chunkings(conn)
+            failing_probe = "the orphan vector table scan"
+            orphan_vector_tables = _orphan_vector_tables(conn)
             failing_probe = "the lexical index inspection"
             lexical_facts = lexical_index_facts(conn)
             lexical_probe_ran = True
@@ -317,6 +320,7 @@ def collect_doctor_report(config: Config) -> dict[str, Any]:
     checks["stranded_chunkings"] = _stranded_chunkings_check(
         stranded_chunkings, database_reachable=database_ok
     )
+    checks["orphan_vector_tables"] = _orphan_vector_tables_check(orphan_vector_tables)
     checks["lexical_index"] = _lexical_index_check(
         lexical_facts,
         hybrid=config.search.hybrid,
@@ -874,6 +878,37 @@ def _stranded_chunkings_check(
             "match nothing in search; clear their chunkings' source_content_hash to "
             "re-open the work and let the worker re-chunk them"
         ),
+    }
+
+
+def _orphan_vector_tables(conn: Any) -> list[int] | None:
+    """Profile ids with a vector table no revision references, or None if unreadable."""
+    from cementic.vector_store import unreferenced_vector_profile_ids
+
+    try:
+        return unreferenced_vector_profile_ids(conn)
+    except Exception:
+        conn.rollback()
+        return None
+
+
+def _orphan_vector_tables_check(profile_ids: list[int] | None) -> dict[str, Any]:
+    """Warn about vector tables left behind by a cleanup that timed out or never ran.
+
+    The next promote, prune or `collection remove` sweeps them; the warning says
+    so rather than leaving full-size tables unexplained.
+    """
+    if profile_ids is None:
+        return {"status": "warning", "message": "could not be checked"}
+    if not profile_ids:
+        return {"status": "ok", "orphans": 0, "message": "every vector table has a revision"}
+    return {
+        "status": "warning",
+        "orphans": len(profile_ids),
+        "profile_ids": profile_ids,
+        "message": f"{len(profile_ids)} vector table(s) have no revision (profiles "
+        f"{', '.join(map(str, profile_ids))}); the next promote, prune or "
+        "`collection remove` drops them",
     }
 
 
