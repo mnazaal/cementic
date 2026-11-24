@@ -823,7 +823,7 @@ def stop_background(
         try:
             stack.enter_context(file_lock(_get_start_lock_path(), timeout=0))
         except LockUnavailableError:
-            err_console.print("waiting for a `cementic start` in progress…")
+            err_console.print("waiting for another `cementic start` or `cementic stop` in progress…")
             stack.enter_context(file_lock(_get_start_lock_path()))
         _stop_background_locked(force)
 
@@ -1246,16 +1246,21 @@ def extract(path: str = typer.Argument(..., help="Path to a document file")) -> 
 
 
 def _read_capped(stream: Any) -> str:
-    """Read at most the document cap (in characters) from `stream`, or refuse."""
+    """Read at most the document cap (in bytes) from `stream`, or refuse.
+
+    Reads the underlying byte stream (`stream.buffer` for a text stream such as
+    stdin) so the cap is exact for multi-byte text, then decodes as UTF-8 with
+    universal newlines, as the text-mode read it replaces did.
+    """
     from cementic import extract as extract_mod
 
-    text: str = stream.read(extract_mod.MAX_DOCUMENT_BYTES + 1)
-    extract_mod._check_size(len(text))
-    return text
+    data: bytes = getattr(stream, "buffer", stream).read(extract_mod.MAX_DOCUMENT_BYTES + 1)
+    extract_mod._check_size(len(data))
+    return data.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
 
 
 def _read_capped_file(path: Path) -> str:
-    with open(path, encoding="utf-8") as handle:
+    with open(path, "rb") as handle:
         return _read_capped(handle)
 
 

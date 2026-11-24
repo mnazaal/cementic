@@ -3189,6 +3189,24 @@ class TestFilterCommands:
         assert "chunk failed" in result.stderr
         assert "50-byte limit" in result.stderr
 
+    def test_the_document_cap_counts_bytes_not_characters(self, tmp_path, monkeypatch):
+        """30 two-byte characters are 60 bytes: over a 50-byte cap, under it as text."""
+        from cementic import extract as extract_mod
+
+        monkeypatch.setattr(extract_mod, "MAX_DOCUMENT_BYTES", 50)
+        multibyte = "\u00e9" * 30
+        big = tmp_path / "big.txt"
+        big.write_text(multibyte, encoding="utf-8")
+
+        from_file = runner.invoke(app, ["chunk", str(big)])
+        from_stdin = runner.invoke(app, ["chunk"], input=multibyte)
+
+        for result in (from_file, from_stdin):
+            assert result.exit_code == 1
+            assert "50-byte limit" in result.stderr
+        within = runner.invoke(app, ["chunk"], input="\u00e9" * 25)
+        assert within.exit_code == 0
+
     def test_chunk_reads_a_file(self, tmp_path):
         f = tmp_path / "doc.txt"
         f.write_text("some text to chunk", encoding="utf-8")

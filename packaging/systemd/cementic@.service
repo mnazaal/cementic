@@ -34,9 +34,9 @@
 # closed port means no embedding work, not a wedge. /embedding is llama.cpp's
 # native endpoint and takes no model id, so nothing here goes stale when the
 # embedding fingerprint changes. The port is read from the effective config
-# (`cementic config show`, key llama_cpp.daemon_port) when the unit starts, so
-# it follows the config file and CEMENTIC_LLAMA_DAEMON_PORT; the host is assumed
-# to be 127.0.0.1. `$$` is systemd's escape for a literal `$`.
+# (`get_config().llama_cpp.daemon_port`, read by the ExecStart shell) when the
+# unit starts, so it follows the config file and CEMENTIC_LLAMA_DAEMON_PORT; the
+# host is assumed to be 127.0.0.1. `$$` is systemd's escape for a literal `$`.
 #
 # /bin/bash, not /bin/sh: dash has no `wait -n`.
 #
