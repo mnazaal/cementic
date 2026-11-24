@@ -9,6 +9,7 @@ import json
 import os
 import select
 import shlex
+import shutil
 import signal
 import subprocess
 import sys
@@ -265,7 +266,37 @@ def _plaintext_extractor(path: str, config: Config) -> str:
     # stray 0xA0 in a .md failed the whole document with a decode traceback
     # (2026-10-22 audit). Valid UTF-8 extracts exactly as before, so no
     # document that succeeded before changes.
-    return Path(path).read_text(encoding="utf-8", errors="replace")
+    # The size cap is enforced here as well as in the watcher: this reader is
+    # reachable from any caller, and a file can grow between a stat and a read,
+    # so read at most one byte past the cap rather than trusting a stat.
+    with open(path, "rb") as handle:
+        data = handle.read(MAX_DOCUMENT_BYTES + 1)
+    _check_size(len(data))
+    return data.decode("utf-8", errors="replace")
+
+
+#: The largest document, in bytes, that any extractor reads, and the most
+#: stdout a command extractor may produce. The source watcher applies the same
+#: figure before it hashes a file.
+MAX_DOCUMENT_BYTES = 512 * 1024 * 1024
+
+
+def _check_size(size: int) -> None:
+    """Refuse a document or command output of `size` bytes if it passes the cap."""
+    if size > MAX_DOCUMENT_BYTES:
+        raise RuntimeError(f"document exceeds the {MAX_DOCUMENT_BYTES}-byte limit")
+
+
+#: Runs in a fresh interpreter between fork and the command, so no limit is set
+#: from the threaded worker's own forked child (`preexec_fn` is unsafe there).
+_LIMIT_SHIM = (
+    "import os, resource, sys\n"
+    "address_space, file_size, *argv = sys.argv[1:]\n"
+    "if int(address_space):\n"
+    "    resource.setrlimit(resource.RLIMIT_AS, (int(address_space),) * 2)\n"
+    "resource.setrlimit(resource.RLIMIT_FSIZE, (int(file_size),) * 2)\n"
+    "os.execvp(argv[0], argv)\n"
+)
 
 
 def _command_extractor(path: str, config: Config) -> str:
@@ -287,28 +318,48 @@ def _command_extractor(path: str, config: Config) -> str:
         )
     rendered = [argument.format_map({"path": path}) for argument in argv]
     timeout = extraction_timeout(config.extraction.timeout_seconds, isolated=False)
-    try:
-        completed = subprocess.run(
-            rendered,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-        )
-    except subprocess.TimeoutExpired:
-        raise RuntimeError(
-            f"extraction command timed out after {timeout:g}s: "
-            f"{shlex.join(rendered)}"
-        )
-    except OSError as error:
-        raise RuntimeError(f"extraction command could not run ({error}): {rendered[0]}")
-    if completed.returncode != 0:
-        detail = (completed.stderr or "").strip().splitlines()
-        raise RuntimeError(
-            f"extraction command exited {completed.returncode}"
-            + (f": {detail[-1]}" if detail else "")
-            + f" [{shlex.join(rendered)}]"
-        )
-    return completed.stdout
+    if shutil.which(rendered[0]) is None:
+        raise RuntimeError(f"extraction command could not run (not found): {rendered[0]}")
+    # Output goes to files, not pipes: RLIMIT_FSIZE then bounds it on disk, so a
+    # runaway tool cannot fill the worker's memory, and the address-space limit
+    # is the one the PDF child gets.
+    memory = config.extraction.memory_limit_mb * 1024 * 1024
+    with tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
+        try:
+            process = subprocess.Popen(
+                [sys.executable, "-I", "-c", _LIMIT_SHIM, str(memory),
+                 str(MAX_DOCUMENT_BYTES), *rendered],
+                stdin=subprocess.DEVNULL,
+                stdout=out,
+                stderr=err,
+                start_new_session=True,
+            )
+        except OSError as error:
+            raise RuntimeError(f"extraction command could not run ({error}): {rendered[0]}")
+        try:
+            returncode = process.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            _kill_group(process)
+            process.wait()
+            raise RuntimeError(
+                f"extraction command timed out after {timeout:g}s: "
+                f"{shlex.join(rendered)}"
+            )
+        if os.fstat(out.fileno()).st_size >= MAX_DOCUMENT_BYTES:
+            raise RuntimeError(
+                f"extraction command output reached the {MAX_DOCUMENT_BYTES}-byte limit: "
+                f"{shlex.join(rendered)}"
+            )
+        if returncode != 0:
+            err.seek(max(0, os.fstat(err.fileno()).st_size - 65536))
+            detail = err.read().decode("utf-8", errors="replace").strip().splitlines()
+            raise RuntimeError(
+                f"extraction command exited {returncode}"
+                + (f": {detail[-1]}" if detail else "")
+                + f" [{shlex.join(rendered)}]"
+            )
+        out.seek(0)
+        return out.read().decode("utf-8", errors="replace")
 
 
 #: The registry name that selects the external-command extractor. Named so
@@ -725,6 +776,8 @@ def extract_document(path: str, config: Config) -> str:
     if resolved is None:
         raise ValueError(f"no extractor for '{Path(path).suffix.lower() or '(none)'}'")
     name, fn = resolved
+    with contextlib.suppress(OSError):  # a missing file fails in its extractor
+        _check_size(os.stat(path).st_size)
     run = _run_isolated if _EXTRACTORS[name][0].isolated else _run_in_process
     content = strip_unstorable(run(fn, path, config))
     if extraction_is_empty(content):

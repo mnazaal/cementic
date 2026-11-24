@@ -46,7 +46,10 @@ PDF parsing runs in a child process, so a malformed PDF that crashes, hangs or
 exhausts memory marks that one document failed instead of stopping the worker.
 `extraction.timeout_seconds` bounds one extraction, including a command
 extractor; unset, a PDF parser gets 3600 seconds and a command 900. And `extraction.memory_limit_mb` (default 8192, `0` for no
-limit) caps the child's address space. Neither enters the extraction profile.
+limit) caps the address space of that child and of a command extractor. A
+command's stdout and any document read are capped at 512 MiB. The child gets an
+allow-listed environment (no `CEMENTIC_*` or credentials) and its own process
+group, which a timeout kills whole. Neither limit enters the extraction profile.
 
 Changing an extractor setting creates a replacement revision. See
 [Operations](operations.md#revisions).

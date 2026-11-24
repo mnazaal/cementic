@@ -1,6 +1,7 @@
 """Tests for the content-type extractor registry (Move 4)."""
 
 import re
+import time
 from dataclasses import replace
 from importlib import resources
 from pathlib import Path
@@ -460,6 +461,47 @@ class TestCommandExtractor:
         with pytest.raises(ValueError, match="extracted no text"):
             extract_document(str(source), self._config(["true"]))
 
+    def test_output_beyond_the_cap_fails_instead_of_filling_memory(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        source = tmp_path / "a.txt"
+        source.write_text("x")
+        monkeypatch.setattr(extract_mod, "MAX_DOCUMENT_BYTES", 10_000)
+        config = self._config(["python3", "-c", "print('x' * 1_000_000)"])
+
+        with pytest.raises(RuntimeError, match="output reached the 10000-byte limit"):
+            extract_document(str(source), config)
+
+    def test_the_memory_limit_applies_to_the_command(self, tmp_path) -> None:
+        source = tmp_path / "a.txt"
+        source.write_text("x")
+        config = self._config(["python3", "-c", "print(len(bytearray(2**30)))"])
+        config.extraction.memory_limit_mb = 256
+
+        with pytest.raises(RuntimeError, match="exited 1"):
+            extract_document(str(source), config)
+
+    def test_a_timeout_kills_the_commands_grandchildren(self, tmp_path) -> None:
+        source = tmp_path / "a.txt"
+        source.write_text("x")
+        pidfile = tmp_path / "pid"
+        config = self._config(["sh", "-c", f"sleep 60 & echo $! > {pidfile}; wait"])
+        config.extraction.timeout_seconds = 1
+
+        with pytest.raises(RuntimeError, match="timed out"):
+            extract_document(str(source), config)
+
+        pid = int(pidfile.read_text())
+        for _ in range(100):
+            try:
+                state = Path(f"/proc/{pid}/stat").read_text().split(") ")[-1][0]
+            except FileNotFoundError:
+                return
+            if state == "Z":
+                return
+            time.sleep(0.05)
+        raise AssertionError("grandchild survived the timeout")
+
     def test_a_timeout_is_reported_as_one(self, tmp_path, monkeypatch) -> None:
         source = tmp_path / "a.txt"
         source.write_text("x")
@@ -542,6 +584,22 @@ class TestCommandVersionProbe:
     def test_a_missing_tool_is_refused(self) -> None:
         with pytest.raises(RuntimeError, match="could not run"):
             command_version(["definitely-not-a-tool"])
+
+
+def test_a_plaintext_file_beyond_the_cap_is_refused_at_every_entry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The watcher's size check is not the only road to a read (D11)."""
+    from cementic.extract import _plaintext_extractor
+
+    big = tmp_path / "big.txt"
+    big.write_text("x" * 100)
+    monkeypatch.setattr(extract_mod, "MAX_DOCUMENT_BYTES", 50)
+
+    with pytest.raises(RuntimeError, match="50-byte limit"):
+        extract_document(str(big), Config())
+    with pytest.raises(RuntimeError, match="50-byte limit"):
+        _plaintext_extractor(str(big), Config())
 
 
 def test_plaintext_with_a_stray_latin1_byte_still_extracts(tmp_path: Path) -> None:

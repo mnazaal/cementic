@@ -635,9 +635,11 @@ class ExtractionConfig(_SectionSettings):
         default=8192,
         ge=0,
         description="Address-space limit (RLIMIT_AS) in MiB for the child "
-        "process that parses a PDF; 0 removes it. A document that needs more "
-        "is marked failed instead of exhausting the machine. Address space "
-        "counts mapped-but-untouched memory, so it runs above resident use.",
+        "process that parses a PDF and for a `command` extractor; 0 removes it. "
+        "A document that needs more is marked failed instead of exhausting "
+        "the machine. Address space counts mapped-but-untouched memory, so it "
+        "runs above resident use. A command extractor is also capped at 512 MiB "
+        "of stdout.",
     )
 
     @field_validator("commands", "command_versions")
