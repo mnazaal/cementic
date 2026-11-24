@@ -450,10 +450,12 @@ def check_health(config: Config) -> HealthStatus:
 
     embedding_provider = config.pipeline.embedding_provider
 
-    from cementic.embedding_runtime import llama_daemon_state, llama_daemon_status
+    from cementic.embedding_runtime import describe_daemon_state, llama_daemon_state
 
-    llama_daemon = llama_daemon_status(config)
-    daemon_managed = llama_daemon_state(config)["state"] == "running"
+    # One read: the string and `daemon_managed` must describe the same moment.
+    daemon_state = llama_daemon_state(config)
+    llama_daemon = describe_daemon_state(daemon_state)
+    daemon_managed = daemon_state["state"] == "running"
 
     # One quick probe, no waiting. This used to build the client through
     # `create_provider`, whose own busy-poll blocks for up to two minutes -- and

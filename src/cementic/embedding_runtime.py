@@ -1076,7 +1076,15 @@ def llama_daemon_status(config: Config) -> str:
     it's survivable via `/proc` recovery -- so a recovered daemon is reported
     as such rather than looking indistinguishable from the normal case.
     """
-    daemon = llama_daemon_state(config)
+    return describe_daemon_state(llama_daemon_state(config))
+
+
+def describe_daemon_state(daemon: dict[str, Any]) -> str:
+    """Render a `llama_daemon_state` result as the status string.
+
+    Split out so a caller holding one state read can also derive the string,
+    instead of reading the pid file a second time.
+    """
     if daemon["state"] == "ambiguous":
         return f"ambiguous: {daemon['error']}"
     if daemon["state"] == "stopped":

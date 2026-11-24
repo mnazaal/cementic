@@ -663,6 +663,7 @@ class TestPipelineWorkerErrorPaths:
                 embedding_provider="llama-cpp",
                 embedding_healthy=True,
                 llama_daemon="running",
+                daemon_managed=True,
             ),
         )
 

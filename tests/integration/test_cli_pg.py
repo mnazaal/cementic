@@ -117,6 +117,7 @@ def test_pg_cli_status_verbose_reports_real_collection(
             embedding_provider="llama-cpp",
             embedding_healthy=True,
             llama_daemon="running",
+            daemon_managed=True,
         ),
     )
     def _stopped_worker() -> WorkerStatus:

@@ -854,6 +854,23 @@ class TestCheckHealth:
         assert result.llama_daemon == "stopped"
         assert result.daemon_managed is False
 
+    def test_health_reads_the_daemon_state_once(self) -> None:
+        """Two reads could disagree (the daemon exits between them), leaving
+        the status string and `daemon_managed` describing different moments."""
+        config = Config()
+        config.pipeline.embedding_provider = "llama-cpp"
+        state = {"state": "running", "pid": 7, "recovered": False, "error": None}
+
+        with patch("cementic.status_service.get_engine"):
+            with patch("cementic.embedding_runtime.build_llama_cpp_client"):
+                with patch(
+                    "cementic.embedding_runtime.llama_daemon_state", return_value=state
+                ) as mock_state:
+                    result = check_health(config)
+
+        assert mock_state.call_count == 1
+        assert result.daemon_managed is True
+
     def test_health_llama_daemon_stopped_no_pid_file(self) -> None:
         config = Config()
         config.pipeline.embedding_provider = "llama-cpp"
