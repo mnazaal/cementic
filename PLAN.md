@@ -9,7 +9,9 @@ repairs change worker behaviour, so the next `cementic start` is what applies
 them.
 
 **State:** branch `pi/audit-handoff`, not merged or pushed. Baseline `main` @
-`ad9bf86`. Commits so far: the order replacement, the harness repair, and the
+`ad9bf86`. *Corrected 2026-11-24:* later work is on `claude/audit-wave-c`,
+stacked on `pi/audit-handoff` (the commit hook confines agent commits to
+`claude/*`), holding C1-C3, C10, C11, D1, D2 and A5's measurement. Commits so far: the order replacement, the harness repair, and the
 pipeline invalidation repair. No production database writes, model downloads,
 rebuilds or service changes.
 
@@ -205,6 +207,22 @@ carries it out.
   item done without its measurement — a builder with no number is the shape of
   defect A1 exists to catch. A3 is next for that reason alone.
 
+### 2026-11-24 — decisions from the sandbox session
+
+- **Why did C1-C3, C10, C11, D1 and D2 run before A3?** The agent session's
+  sandbox gives each command a private network, so PostgreSQL (127.0.0.1:5432,
+  connection refused) and the embedding server were unreachable, and A3 needs
+  both. User's call, answering the question "how should I proceed?" with
+  "Sandbox-safe fixes first (Recommended)". Each of these items had an executed
+  reproduction and needed only SQLite and CliRunner. *Rejected:* running A3's
+  commands outside the sandbox (the user would have to exclude them and start
+  the daemon); writing A3's builder without its number (the 2026-11-18 entry
+  above rejects that). A3 is still next.
+- **Why is A5 measured but not implemented?** Agent-decided. Honouring the tie
+  promise changes the lexical-lead ranking (18 of 60 rare-token gold ranks
+  improve on the cached arms). Wave A's standing rule is that ranking does not
+  change while it is being measured, and A3 is unmeasured.
+
 ## Design principles
 
 - **Functional core, imperative shell.** Pure functions (extraction, chunking,
@@ -339,7 +357,11 @@ technical detail is preserved below in "Closed execution record". One live
 order, because two of them answered "what next" twice.
 
 **Status.** Wave A's measurement controls and all of Wave B are repaired and
-verified (A1, A2, B1-B4). Everything else below is unrepaired. The 2026-11-17
+verified (A1, A2, B1-B4). On 2026-11-24, C1, C2, C3, C10, C11, D1 and D2 were
+repaired on `claude/audit-wave-c` and reviewed by an independent pass. One
+follow-up fix (`24afe1e`, under C11) is pending review. A5 was measured but not
+decided (see the decision log for why these ran before A3). Everything else
+below is unrepaired. The 2026-11-17
 audit re-ran the 11-13 findings on a green baseline, confirmed six of them,
 refuted two, and added seven; a 2026-11-18 second pass swept the six lane
 reports against this list and found **fifteen findings that had never been
@@ -473,6 +495,29 @@ that says the test file has read the problem and not tested it. Implement the
 promise with a test, or correct the docstring — decided against A2's paired
 ablation for lexical-lead queries, not by preference. **Ends when** code and
 docstring agree and a test pins the tie order.
+**Measured 2026-11-24, not yet decided.** The probe
+(`~/.cache/cementic-audit-2026-11-17/probe_a5_ties.py`) ran the cached arms
+(`~/.cache/cementic-lead-arms.json`, **2026-09-23, pre-fallback**). It compared
+`combine` against a variant that breaks exact ties by the leading arm's rank,
+and counted queries whose gold rank moved, paired:
+
+| set | lead | gold better | gold worse |
+| --- | --- | --- | --- |
+| rare-token (n=60) | shipped | 18 | 0 |
+| rare-token (n=60) | lexical | 18 | 0 |
+| phrase (n=60) | lexical | 2 | 0 |
+| phrase-dropped (n=60) | lexical | 6 | 0 |
+| phrase-reordered (n=60) | lexical | 2 | 0 |
+| title (n=26 with both arms) | lexical | 0 | 3 |
+| every set | vector | 0 | 0 |
+
+Vector-lead is unchanged by construction, since today's order already breaks
+ties toward the vector arm. Honouring the promise would therefore be a ranking
+change for lexical-lead queries, and Wave A's rule forbids that while A3 is
+unmeasured. The data favours implementing it, with two caveats. The rare-token
+set is answerable by construction, which is A3's objection. The arms predate
+the fallback. **Next:** decide after A3, or by the user's call; until then the
+docstring is still wrong.
 
 ### Wave B — stop the pipeline losing content
 
@@ -558,7 +603,9 @@ marker, not a timeout — with a regression that starts a scan and asserts no
   `require_known_collection` (`cli_shared.py:162-175`). **Executed** against a
   seeded scratch database: `remove no-such --force` → exit 0,
   `promote no-such` → exit 1. **Fix:** `raise typer.Exit(1)` in the not-found
-  branch. **Ends when** that branch exits 1 and a CLI test pins it.
+  branch. **Ends when** that branch exits 1 and a CLI test pins it. **Repaired 2026-11-24 (`95bd142`); an independent review found no defect.** Exit 1 with
+  `require_known_collection`'s stderr message; the unit and SQLite integration
+  tests that pinned exit 0 were rewritten and fail on the old source.
 - **C2 — `status --json` exits 0 where text `status` exits 1.** `cli.py:629-656`
   vs `:668-681`, failure signal at `render.py:414-417`; the human branch's own
   comment explains why exit 0 is wrong and the JSON branch never got the rule.
@@ -567,6 +614,8 @@ marker, not a timeout — with a regression that starts a scan and asserts no
   through `typer.testing.CliRunner` on `app`. **Fix:** share one failure predicate
   between the two modes' exit decisions, keep the JSON body parseable with
   `health.error` intact. **Ends when** both modes fail consistently.
+  **Repaired 2026-11-24 (`0a2f152`); an independent review found no defect.** `_health_failed` (probe raised, or database
+  unreachable) decides both exits; a parametrized test covers both states.
 - **C3 — `cementic doctor` crashes on a config it accepted.**
   `ExtractionConfig(backends={"epub": "command"})` loads, then `doctor.py:256` →
   `_extraction_commands_check` raises `KeyError: 'epub'` outside any `try`,
@@ -577,7 +626,11 @@ marker, not a timeout — with a regression that starts a scan and asserts no
   require both tables (`commands`, `command_versions`) at config load whenever a
   backend is `"command"`, naming the file type; fix the template example so it
   dispatches. **Ends when** that config raises at load and the template-derived
-  example reaches the command extractor.
+  example reaches the command extractor. **Repaired 2026-11-24 (`d219ada`); reviewed, and the review's one nit (the test's regex matched pydantic's input echo) is fixed in `18a5e55`.**
+  The validator requires a `commands` entry for every `"command"` backend; the
+  pair rule then requires its version. The template's example now selects
+  `epub = "command"`, and a test uncomments it and asserts dispatch. The
+  `badcmd.toml` repro now exits 1 with a config error and no traceback.
 - **C4 — query-string passwords are not masked.** `bootstrap.py:119` and
   `doctor.py:143` render `?password=` and `?sslpassword=` verbatim (authority
   passwords mask); `runner.py` puts bootstrap errors into the log (**executed**
@@ -641,7 +694,7 @@ marker, not a timeout — with a regression that starts a scan and asserts no
   unachievable (`ge=1`, `:450-455`) and only appears when
   `n_ctx <= TASK_PREFIX_TOKEN_ALLOWANCE`. Executed. **Ends when** the message
   suppresses the impossible branch at `n_ctx = 8` and keeps it at a realistic
-  one.
+  one. **Repaired 2026-11-24 (`ee35742`); an independent review found no defect.**
 
 - **C11 — `doctor` reports `ok` while a required check failed.** When the
   extension inspection throws *after* `extension_ok` was computed —
@@ -660,6 +713,14 @@ marker, not a timeout — with a regression that starts a scan and asserts no
   2026-11-17 lane reported as fixed; the lane's *read* lost to the execution.
   **Ends when** the verdict and the exit code both fail for a required failed
   check, counting nested statuses, while intentional warnings still pass.
+  **Repaired 2026-11-24 (`2f6f9d1`); the review found a regression, fixed in `24afe1e`, which is pending review.** The regression: a fresh install (Postgres reachable, no cementic tables) failed `doctor`, because `_active_extractor_profiles` alone did not guard a missing table, and its raise became a nested `fail`. It is now guarded, and a test runs `doctor` on a real empty SQLite database. The verdict is now "no check reports `fail` at
+  any depth" instead of a conjunction of flags. That exposed a second instance:
+  a probe raising after `SELECT 1` printed `database: fail` beside `ok: True`,
+  and `TestExtractorDriftCheck::test_a_warning_does_not_fail_the_overall_report`
+  passed only through it, because its single mocked row broke the canary and
+  lexical probes. That test now stubs both. Residual: such a raise still reads
+  "not reachable" for a reachable server; the verdict is now right, the message
+  is not.
 
 ### Wave D — contracts, docs, packaging, tests
 
@@ -669,12 +730,16 @@ marker, not a timeout — with a regression that starts a scan and asserts no
   `docs/configuration.md:12-13` and `cli.py:155` call it the source of truth
   (verified field-by-field 2026-11-17; two lanes independently). **Ends when** a
   test parses the template and asserts every `Config` field appears, counting
-  commented entries, red first on exactly those three.
+  commented entries, red first on exactly those three. **Repaired 2026-11-24 (`7737da0`); an independent review found no defect.**
 - **D2 — the pooling formula has no oracle.** `embedding_runtime.py:582`; the
   tests at `test_embedding_runtime.py:1647,1664` assert only `is not None` and
   `‖v‖ = 1`, which first-piece, mean and max-pool all satisfy. **Fix:** one
   assertion on the value — inputs `[[3,0],[0,4]]` pool to `[0.6, 0.8]`.
   **Ends when** that assertion pins the pooled value for known inputs.
+  **Repaired 2026-11-24 (`5b44cbd`); an independent review found no defect.** The suggested inputs could not do it: mean
+  and max pooling both normalise `[[3,0],[0,4]]` to `[0.6, 0.8]`. The test uses
+  `[[3,0],[1,2]]` → `(2,1)/√5`, where mean, max, first-piece and
+  normalise-then-mean all differ, and fails under a max-pool mutation.
 - **D3 — model and runtime identity.** The daemon alias hashes the model *path*,
   not its bytes (`embedding_runtime.py:160-174`; `model_content_digest` is used
   only at `profiles.py:195`), so replacing a GGUF in place reuses the old daemon
