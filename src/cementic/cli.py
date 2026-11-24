@@ -1,6 +1,7 @@
 """CLI interface for cementic using Typer."""
 
 import json
+import logging
 import os
 import shutil
 import sys
@@ -45,6 +46,7 @@ from cementic.config_diagnostics import config_path_error
 from cementic.embedding_text import describe_text_policy
 from cementic.filelock import LockUnavailableError, file_lock
 from cementic.hybrid import scores_explain_order
+from cementic.redact import RedactingFormatter, redact_text
 from cementic.state import DaemonState, StateManager
 from cementic.supervisor import (
     ManagedProcess,
@@ -123,6 +125,10 @@ def _root(
     builds a versioned extract -> chunk -> embed pipeline in Postgres (pgvector),
     then serves fast semantic search over the indexed chunks.
     """
+    # Library loggers with no handler (collections, bootstrap) fall to
+    # logging.lastResort, which prints tracebacks raw.
+    if logging.lastResort is not None:
+        logging.lastResort.setFormatter(RedactingFormatter())
 
 
 def _default_config_toml() -> str:
@@ -472,7 +478,8 @@ def _start_background_locked(directories: list[str], collection: str) -> None:
         bootstrapper.ensure_for_convert()
         bootstrapper.ensure_for_index()
     except RuntimeError as error:
-        err_console.print(f"[red]Bootstrap failed before background start: {error}[/red]")
+        message = escape(redact_text(str(error)))
+        err_console.print(f"[red]Bootstrap failed before background start: {message}[/red]")
         raise typer.Exit(1)
 
     base_cmd = [sys.executable, "-m", "cementic.runner"]
@@ -651,7 +658,9 @@ def status(
                     data, files=load_file_progress(cli_config(), collection, file_limit)
                 )
         except Exception as db_error:
-            status_error = NO_SCHEMA_HINT if is_schema_missing(db_error) else str(db_error)
+            status_error = (
+                NO_SCHEMA_HINT if is_schema_missing(db_error) else redact_text(str(db_error))
+            )
         document = render.build_status_document(
             supervisor_status,
             source_watcher_status,
@@ -735,7 +744,7 @@ def status(
                 # This used to be swallowed at exit 0 (and the database-unavailable
                 # case printed nothing at all), so a truncated report read as the
                 # complete answer.
-                err_console.print(f"files: could not be listed: {error}")
+                err_console.print(f"files: could not be listed: {redact_text(str(error))}")
                 raise typer.Exit(1)
             render.print_file_progress(files, file_limit)
 
@@ -1117,11 +1126,11 @@ def search(
         if json_output:
             # Diagnostics must not land on stdout, which is the JSONL stream.
             if is_database_unavailable(e):
-                err_console.print(f"search failed: database unavailable: {e}")
+                err_console.print(f"search failed: database unavailable: {redact_text(str(e))}")
             elif is_schema_missing(e):
                 err_console.print(f"search failed: {NO_SCHEMA_HINT}")
             else:
-                err_console.print(f"search failed: {e}")
+                err_console.print(f"search failed: {redact_text(str(e))}")
         else:
             report_db_error(e, "search")
         raise typer.Exit(1)

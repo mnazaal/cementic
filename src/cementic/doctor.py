@@ -34,6 +34,7 @@ from cementic.embedding_runtime import (
     describe_daemon_health,
     probe_daemon,
 )
+from cementic.redact import redact_text, redact_url
 
 
 def _status(ok: bool, *, warning: bool = False) -> str:
@@ -141,7 +142,7 @@ def collect_doctor_report(config: Config) -> dict[str, Any]:
         "config": {
             "status": "ok" if config_error is None else "fail",
             "path": str(config_path) if config_path is not None else None,
-            "database_url": config.database.url.render_as_string(hide_password=True),
+            "database_url": redact_url(config.database.url),
             "message": (_config_message(config_path, config_error)),
         }
     }
@@ -169,7 +170,8 @@ def collect_doctor_report(config: Config) -> dict[str, Any]:
                 checks["extensions"] = {
                     "(inspection)": {
                         "status": "fail",
-                        "message": f"could not inspect extensions: {extension_error}",
+                        "message": "could not inspect extensions: "
+                        + redact_text(str(extension_error), config.database.url),
                     }
                 }
             try:
@@ -185,11 +187,12 @@ def collect_doctor_report(config: Config) -> dict[str, Any]:
         # The driver's text runs to several lines plus a "Background on this
         # error" link. The human report gets its first line, like every other
         # command's one-line "database not reachable"; the JSON keeps it whole.
-        first_line = str(error).strip().splitlines()[0] if str(error).strip() else ""
+        error_text = redact_text(str(error), config.database.url)
+        first_line = error_text.strip().splitlines()[0] if error_text.strip() else ""
         checks["database"] = {
             "status": "fail",
             "reachable": database_ok,
-            "error": str(error),
+            "error": error_text,
             "message": (
                 f"not reachable ({first_line}). Run `cementic init postgres "
                 "./cementic-postgres` once and follow its README, or set "

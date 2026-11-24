@@ -26,6 +26,7 @@ from cementic.pipeline_worker import (
     revision_failure_total,
     revision_is_complete,
 )
+from cementic.redact import redact_text
 from cementic.revisions import (
     bucket_revisions_by_status,
     drain_pending_artifact_removals,
@@ -340,7 +341,7 @@ def promote_ready_revision(
         drop_orphan_vector_tables(session.get_bind(), drain_pending_vector_table_drops(session))
     except Exception as error:
         logger.warning("Cleanup after promoting %s failed", collection, exc_info=True)
-        cleanup_error = str(error)
+        cleanup_error = redact_text(str(error))
     return PromotionOutcome(
         "promoted",
         revision=revision,

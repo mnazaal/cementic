@@ -25,6 +25,7 @@ from cementic.config import (
 from cementic.db import get_engine
 from cementic.filelock import file_lock
 from cementic.hashing import sha256_file
+from cementic.redact import redact_text, redact_url
 
 _logger = logging.getLogger("cementic.bootstrap")
 
@@ -114,9 +115,12 @@ class Bootstrapper:
         error = self._database_error()
         if error is None:
             return
-        # URL.__str__ hides the password, so this is safe to print.
+        # URL.__str__ masks only the authority password; redact_* also masks
+        # ?password= / ?sslpassword= and anything the driver echoed.
+        url = self.config.database.url
         raise RuntimeError(
-            f"Cannot use Postgres at {self.config.database.url}: {error}. {_COMPOSE_HINT}"
+            f"Cannot use Postgres at {redact_url(url)}: "
+            f"{redact_text(str(error), url)}. {_COMPOSE_HINT}"
         )
 
     def _model_path_is_default(self) -> bool:

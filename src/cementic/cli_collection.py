@@ -19,6 +19,7 @@ from cementic.cli_shared import (
     supervisor_processes,
     validated_collection_name,
 )
+from cementic.redact import redact_text
 
 collection_app = CementicTyper(help="Inspect and manage collections")
 
@@ -81,7 +82,7 @@ def remove_collection(
         # on disk, not a failed removal. Exiting non-zero here contradicted both
         # the comment above and the documented behaviour, and told scripts the
         # collection had not been removed when it had.
-        console.print(f"warning: collection deleted but cleanup failed: {e}")
+        console.print(f"warning: collection deleted but cleanup failed: {redact_text(str(e))}")
         return
     _print_unremoved_artifacts(unremoved)
     console.print(f"vector_tables_dropped: {len(result.vector_profile_ids)}")

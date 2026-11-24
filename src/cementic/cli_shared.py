@@ -23,6 +23,7 @@ from cementic.config import (
     get_config,
 )
 from cementic.config_diagnostics import ConfigError, render_config_error
+from cementic.redact import redact_text
 from cementic.supervisor import (
     SupervisorState,
     is_managed_process_alive,
@@ -188,7 +189,7 @@ def report_db_error(error: Exception, action: str) -> None:
     elif is_schema_missing(error):
         err_console.print(NO_SCHEMA_HINT)
     else:
-        err_console.print(f"{action} failed: {error}")
+        err_console.print(f"{action} failed: {redact_text(str(error))}")
 
 
 @contextmanager

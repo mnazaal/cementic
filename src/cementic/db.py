@@ -24,6 +24,7 @@ from sqlalchemy.exc import IntegrityError, OperationalError, ProgrammingError
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship, sessionmaker
 
 from cementic.index_strategies import IndexParams, build_index_ddl
+from cementic.redact import redact_text
 from cementic.vector_store import (
     index_access_method,
     vector_index_name,
@@ -452,7 +453,8 @@ def ensure_vector_extensions(engine: Engine) -> None:
                 "as a user with CREATE EXTENSION privileges."
             )
             raise RuntimeError(
-                f"Failed to enable required Postgres extensions: {error}. {details}"
+                f"Failed to enable required Postgres extensions: {redact_text(str(error))}. "
+                f"{details}"
             ) from error
 
 

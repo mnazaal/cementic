@@ -31,6 +31,7 @@ from cementic.db import (
     get_session_factory,
 )
 from cementic.extract import supported_extensions
+from cementic.redact import redact_text
 from cementic.state import DaemonState, StateManager
 from cementic.supervisor import is_managed_process_alive, process_start_token
 from cementic.worker_runtime import handle_shutdown_signal, report_fatal, setup_worker_logger
@@ -818,7 +819,7 @@ class SourceWatcher:
             # became a document, so without the path in skipped_files the only
             # evidence was a log line the user has to know to look for.
             self.state_manager.record_skipped(
-                file_path, f"registration failed: {error}", current_file=None
+                file_path, redact_text(f"registration failed: {error}"), current_file=None
             )
             self._record_error(error)
 
@@ -869,7 +870,7 @@ class SourceWatcher:
         failure here was only visible in a log file the user has to know
         about.
         """
-        message = f"{type(error).__name__}: {error}"
+        message = redact_text(f"{type(error).__name__}: {error}")
         try:
             self.state_manager.update(
                 last_error=message[:500],

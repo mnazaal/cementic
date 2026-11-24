@@ -258,13 +258,17 @@ class DatabaseConfig(_SectionSettings):
         if value is None or not value.get_secret_value():
             return value
         from sqlalchemy.engine import make_url
+        from sqlalchemy.exc import ArgumentError
 
         try:
             url = make_url(value.get_secret_value())
-        except Exception as error:
-            # str(error) is safe: SQLAlchemy reports the failure without echoing
-            # the URL, which would carry the password.
+        except ArgumentError as error:
+            # Its message is a fixed sentence without the URL; any other parse
+            # failure (a bad port's int() error) quotes a fragment of the URL,
+            # which may be the password, so it gets no detail.
             raise ValueError(f"is not a valid SQLAlchemy URL ({error})") from None
+        except Exception:
+            raise ValueError("is not a valid SQLAlchemy URL") from None
         if url.drivername == "postgresql+psycopg2":
             raise ValueError(
                 "psycopg2 URLs are no longer supported; use postgresql+psycopg://"

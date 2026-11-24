@@ -36,6 +36,7 @@ from cementic.embedding_provider import EmbeddingProvider
 from cementic.embedding_runtime import create_provider, runtime_spec_from_config
 from cementic.extract import extract_document
 from cementic.index_strategies import index_dimension_error
+from cementic.redact import redact_text
 from cementic.revisions import (
     chunk_scope,
     chunked_scope,
@@ -636,7 +637,7 @@ class PipelineWorker:
 
     def _record_loop_error(self, error: Exception) -> None:
         """Publish a processing-loop failure to the worker state file."""
-        message = f"{type(error).__name__}: {error}"
+        message = redact_text(f"{type(error).__name__}: {error}")
         try:
             self.state_manager.update(
                 last_error=message[:500],

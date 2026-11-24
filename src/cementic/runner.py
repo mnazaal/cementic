@@ -14,6 +14,7 @@ from cementic.config import (
 )
 from cementic.config_diagnostics import ConfigError, render_config_error
 from cementic.pipeline_worker import PipelineWorker
+from cementic.redact import redact_text
 from cementic.source_watcher import SourceWatcher
 from cementic.validation import validate_collection_name
 
@@ -66,7 +67,7 @@ def run_source_watcher(
     try:
         bootstrapper.ensure_for_convert()
     except RuntimeError as e:
-        err_console.print(f"[red]Bootstrap failed: {e}[/red]")
+        err_console.print(f"[red]Bootstrap failed: {redact_text(str(e))}[/red]")
         raise typer.Exit(1)
 
     try:
@@ -115,7 +116,7 @@ def run_pipeline_worker(
     try:
         bootstrapper.ensure_for_index()
     except RuntimeError as e:
-        err_console.print(f"[red]Bootstrap failed: {e}[/red]")
+        err_console.print(f"[red]Bootstrap failed: {redact_text(str(e))}[/red]")
         raise typer.Exit(1)
 
     try:

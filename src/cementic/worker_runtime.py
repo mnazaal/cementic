@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Protocol
 
+from cementic.redact import RedactingFormatter
 from cementic.state import StateManager
 
 
@@ -22,7 +23,7 @@ def setup_worker_logger(name: str, log_file: Path | None, owner: str) -> logging
         raise RuntimeError(f"{owner} log file is not configured")
     logger = logging.getLogger(name)
     logger.setLevel(logging.INFO)
-    formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+    formatter = RedactingFormatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
     if not any(
         isinstance(handler, logging.FileHandler) and handler.baseFilename == str(log_file)
         for handler in logger.handlers
