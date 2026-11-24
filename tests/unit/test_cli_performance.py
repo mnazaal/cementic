@@ -275,7 +275,10 @@ def test_stop_says_it_is_waiting_for_a_start_in_progress() -> None:
             assert stopper.is_alive()
         stopper.join(timeout=10)
 
-    assert "waiting for another `cementic start` or `cementic stop` in progress" in results[0].output
+    assert (
+        "waiting for another `cementic start` or `cementic stop` in progress"
+        in results[0].output
+    )
 
 
 def test_search_top_k_cap_matches_the_searcher_limit() -> None:

@@ -1,8 +1,9 @@
 """Tests for profile fingerprinting and resolution helpers."""
 
-import pytest
 from pathlib import Path
 from unittest.mock import MagicMock
+
+import pytest
 
 from cementic import profiles as profiles_module
 from cementic.config import Config, ExtractionConfig

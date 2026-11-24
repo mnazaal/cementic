@@ -823,7 +823,9 @@ def stop_background(
         try:
             stack.enter_context(file_lock(_get_start_lock_path(), timeout=0))
         except LockUnavailableError:
-            err_console.print("waiting for another `cementic start` or `cementic stop` in progress…")
+            err_console.print(
+                "waiting for another `cementic start` or `cementic stop` in progress…"
+            )
             stack.enter_context(file_lock(_get_start_lock_path()))
         _stop_background_locked(force)
 
