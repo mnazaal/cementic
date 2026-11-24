@@ -75,6 +75,7 @@ use_ocr = false
 # Use per-type tables for overrides. Unset types use the registry default.
 # [extraction.backends]
 # pdf = "pymupdf-raw" # The default is "pymupdf4llm".
+# epub = "command" # Selects the command below; it runs only when selected.
 # [extraction.commands]
 # epub = ["your-extractor", "{path}"]
 # [extraction.command_versions]

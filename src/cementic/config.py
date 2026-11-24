@@ -673,6 +673,21 @@ class ExtractionConfig(_SectionSettings):
                 "enters the extraction fingerprint, so without it a tool upgrade "
                 "silently changes extracted text under an unchanged revision"
             )
+        from cementic.extract import COMMAND_EXTRACTOR_NAME
+
+        unconfigured = sorted(
+            file_type
+            for file_type, backend in self.backends.items()
+            if backend == COMMAND_EXTRACTOR_NAME and file_type not in self.commands
+        )
+        if unconfigured:
+            # Loaded, this crashed `doctor` with a KeyError and failed every
+            # document of the type in the worker (C3, 2026-11-17).
+            raise ValueError(
+                f"extraction.backends selects the '{COMMAND_EXTRACTOR_NAME}' extractor "
+                f"for {', '.join(unconfigured)}, but extraction.commands has no entry "
+                "for it; add the command and its extraction.command_versions entry"
+            )
         orphaned = sorted(set(self.command_versions) - set(self.commands))
         if orphaned:
             raise ValueError(

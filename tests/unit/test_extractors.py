@@ -1,6 +1,8 @@
 """Tests for the content-type extractor registry (Move 4)."""
 
+import re
 from dataclasses import replace
+from importlib import resources
 from pathlib import Path
 from unittest.mock import patch
 
@@ -466,6 +468,40 @@ class TestCommandExtractor:
 
         with pytest.raises(RuntimeError, match="timed out"):
             extract_document(str(source), config)
+
+
+class TestCommandBackendNeedsItsTables:
+    """C3: `backends = {epub = "command"}` loaded, then crashed `doctor`."""
+
+    def test_a_command_backend_without_a_command_is_rejected_at_load(self) -> None:
+        """Rejected at load, naming the file type, instead of a KeyError in
+        `doctor` (and a failure per document in the worker) later."""
+        with pytest.raises(ValidationError, match=r"extraction\.commands.*epub"):
+            ExtractionConfig(backends={"epub": "command"})
+
+    def test_the_template_example_reaches_the_command_extractor(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """Uncommenting the template's extraction example must give a config
+        that dispatches to the command extractor. It used to define the
+        command and its version but never select the backend, so the example
+        loaded and then silently did nothing."""
+        template = (resources.files("cementic") / "templates" / "config.toml").read_text(
+            encoding="utf-8"
+        )
+        block = template.split("[extraction]\n", 1)[1].split("\n[", 1)[0]
+        uncommented = [
+            line[2:] if re.match(r"# (\[|\w+ = )", line) else line
+            for line in block.splitlines()
+        ]
+        config_file = tmp_path / "cementic.toml"
+        config_file.write_text("[extraction]\n" + "\n".join(uncommented) + "\n")
+        monkeypatch.setenv("CEMENTIC_CONFIG", str(config_file))
+
+        resolved = extractor_for(str(tmp_path / "book.epub"), Config())
+
+        assert resolved is not None
+        assert resolved[0] == "command"
 
 
 class TestCommandVersionProbe:
