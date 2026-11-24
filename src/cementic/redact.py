@@ -24,28 +24,30 @@ MASK = "***"
 #: ``passfile`` and ``sslkey`` name files, not secrets.
 _KEY_NAMES = (
     r"\w*pass(?:word|wd)"
-    r"|\w*(?:access_token|refresh_token|auth_token|id_token|api_?key|secret|secret_key)"
+    r"|\w*(?:access_token|refresh_token|auth_token|id_token|api[-_]?key|secret|secret_key)"
 )
 _SECRET_KEY = re.compile(_KEY_NAMES, re.IGNORECASE)
 
 #: A value: quoted (backslash escapes allowed), or unquoted up to whitespace.
 #: An unquoted ``&`` ends the value only when a new ``key=`` follows, so a
 #: libpq password such as ``ab&X`` is masked whole while ``?password=B&sslmode=x``
-#: keeps ``sslmode``. Trailing ``) ] , ;`` punctuation is left outside.
+#: keeps ``sslmode``. Trailing ``) ] } , ; ' "`` punctuation is left outside, so
+#: the closing quote of ``'host=h password=x'`` survives; a quote followed by
+#: more value (``ab'x``) belongs to the value.
 _VALUE = (
     r"""(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'"""
-    r"""|(?:[^\s&"']|&(?!\w+=))+?(?=[),;\]]*(?:\s|$|&\w+=)))"""
+    r"""|(?:[^\s&]|&(?!\w+=))+?(?=[),;\]}'"]*(?:\s|$|&\w+=)))"""
 )
 
 #: ``key=value`` in a URL query or libpq conninfo (``password = x`` allowed),
 #: and ``'key': 'value'`` / ``"key": "value"`` in dict and JSON reprs.
 _KEY_VALUE = re.compile(
     rf"""(?ix)
-    (?<![\w/.-])
+    (?<!\w)
     (?P<q>["']?)
     (?P<key>{_KEY_NAMES})
     (?P=q)
-    (?P<sep>\s*[=:]\s*)
+    (?P<sep>[ \t]*[=:][ \t]*)
     (?P<value>{_VALUE})
     """
 )
@@ -53,6 +55,8 @@ _KEY_VALUE = re.compile(
 #: ``scheme://user:password@`` inside free text. The password runs to the last
 #: ``@`` of the whitespace-free token, so a raw ``@`` or ``/`` inside it is
 #: covered; a password containing whitespace is not recognised by shape.
+#: ``http://host:8080/a@b`` therefore masks ``8080/a``: it is structurally
+#: identical to a password containing ``/``, and masking is the safe side.
 _AUTHORITY = re.compile(r"(?P<head>\b[\w+.-]+://[^:/?#\s@]*):(?P<pw>\S+)@")
 
 #: Replacing a one- or two-character secret everywhere would destroy the

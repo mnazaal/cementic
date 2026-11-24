@@ -103,6 +103,53 @@ class TestRedactTextShapes:
     def test_shape_is_masked(self, text: str) -> None:
         assert "SENT_X1" not in redact_text(text)
 
+    @pytest.mark.parametrize(
+        "text",
+        [
+            # a value directly followed by a closing quote
+            '{"dsn": "host=h password=SENT_X1"}',
+            "{'url': 'postgresql://h/d?password=SENT_X1'}",
+            "connection failed: 'host=h password=SENT_X1'",
+            "input_value='postgresql://h/d?password=SENT_X1', input_type=str",
+            "['host=h password=SENT_X1']",
+            'OperationalError("host=h password=SENT_X1")',
+            # key preceded by - . /
+            "cmd: psql --password=SENT_X1 -h h",
+            "datasource.password=SENT_X1",
+            "db-password=SENT_X1",
+            "/etc/app/password=SENT_X1",
+            # quote inside an unquoted value
+            "password=ab'SENT_X1",
+            'password=ab"SENT_X1',
+            "api-key=SENT_X1",
+        ],
+    )
+    def test_reviewer_probe_shape_is_masked(self, text: str) -> None:
+        assert "SENT_X1" not in redact_text(text)
+
+    def test_closing_quote_is_kept(self) -> None:
+        assert redact_text("'host=h password=SENT_X1'") == "'host=h password=***'"
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "Enter password:\nnext_value here",
+            "password:\nnext_value",
+            "password=\nnext_value",
+            "fe_sendauth: no password supplied",
+            "llama-server --port 8080 --api-key-file /x",
+        ],
+    )
+    def test_separator_does_not_cross_a_line(self, text: str) -> None:
+        assert redact_text(text) == text
+
+    def test_prose_value_masks_one_token_on_the_same_line(self) -> None:
+        assert redact_text("secret: not set\nsecond line") == "secret: *** set\nsecond line"
+
+    def test_port_then_path_is_masked_like_a_password_with_a_slash(self) -> None:
+        # Structurally identical to ``u:ab/c@h``; masking is the safe side.
+        assert "8080" not in redact_text("see http://host:8080/a@b for details")
+
     def test_ampersand_in_value_keeps_following_param(self) -> None:
         out = redact_text("?password=a&b&sslmode=require")
         assert "sslmode=require" in out
