@@ -502,6 +502,12 @@ class TestDropOrphanVectorTables:
 
         assert mock_drop.call_args_list == [((engine, 3),), ((engine, 7),)]
 
+    @patch("cementic.collections.drop_vector_table_if_unreferenced")
+    def test_returns_the_number_actually_dropped(self, mock_drop: MagicMock) -> None:
+        mock_drop.side_effect = [True, False, True]
+
+        assert drop_orphan_vector_tables(MagicMock(), [3, 7, 9]) == 2
+
 
 class TestRemoveArtifacts:
     """Tests for remove_artifacts."""

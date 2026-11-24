@@ -630,7 +630,7 @@ _PENDING_ARTIFACT_REMOVALS = "cementic_pending_artifact_removals"
 
 #: Session key holding embedding-profile ids whose vector table should be
 #: dropped once the transaction commits. Same reasoning as the artifact list,
-#: plus one of its own: ``drop_vector_table`` opens its *own* transaction, so
+#: plus one of its own: ``drop_vector_table_if_unreferenced`` opens its *own* transaction, so
 #: running it inline would wait on the locks this session is still holding.
 _PENDING_VECTOR_TABLE_DROPS = "cementic_pending_vector_table_drops"
 

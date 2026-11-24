@@ -1980,6 +1980,31 @@ class TestCollectionCommands:
 
     @patch("cementic.db.get_session_factory")
     @patch("cementic.db.get_engine")
+    def test_collection_remove_reports_only_tables_actually_dropped(
+        self, mock_get_engine, mock_get_session_factory
+    ):
+        """Regression: every candidate was reported dropped, even a table the
+        guarded drop spared because another revision now uses it."""
+        mock_session = MagicMock()
+        mock_session.__enter__.return_value = mock_session
+        mock_session.__exit__.return_value = False
+        mock_get_session_factory.return_value = lambda: mock_session
+        deletion = SimpleNamespace(
+            deleted_docs=1, deleted_chunks=2, artifact_paths=[], vector_profile_ids=[3, 7]
+        )
+        with (
+            patch("cementic.collections.delete_collection_records", return_value=deletion),
+            patch("cementic.collections.remove_artifacts", return_value=[]),
+            patch("cementic.collections.drop_orphan_vector_tables", return_value=1),
+            patch("cementic.cli_collection.read_supervisor_state", return_value={}),
+        ):
+            result = runner.invoke(app, ["collection", "remove", "mycol", "--force"])
+
+        assert result.exit_code == 0
+        assert "vector_tables_dropped: 1" in result.output
+
+    @patch("cementic.db.get_session_factory")
+    @patch("cementic.db.get_engine")
     def test_collection_remove_warns_when_workers_still_running(
         self, mock_get_engine, mock_get_session_factory
     ):

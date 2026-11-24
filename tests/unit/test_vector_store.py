@@ -1,10 +1,14 @@
 """Tests for the pure SQL builders in vector_store."""
 
+from unittest.mock import MagicMock
+
 import pytest
+from sqlalchemy.exc import OperationalError
 
 from cementic.vector_store import (
     create_table_sql,
     drop_table_sql,
+    drop_vector_table_if_unreferenced,
     parse_extension_version,
     query_tuning_statements,
     supports_hnsw_iterative_scan,
@@ -138,3 +142,30 @@ class TestIterativeScanGating:
             diskann_query_rescore=50,
             hnsw_iterative_scan="'; DROP TABLE chunks_v2; --",
         ) == ["SET LOCAL hnsw.ef_search = 40"]
+
+
+def _lock_not_available() -> OperationalError:
+    orig = MagicMock()
+    orig.sqlstate = "55P03"
+    return OperationalError("DROP TABLE", {}, orig)
+
+
+def test_guarded_drop_gives_up_when_the_lock_times_out(caplog) -> None:
+    """A blocked DROP reports not-dropped instead of queueing everyone behind it."""
+    engine = MagicMock()
+    conn = engine.begin.return_value.__enter__.return_value
+    conn.execute.side_effect = [None, _lock_not_available()]  # SET LOCAL, then the lock
+
+    assert drop_vector_table_if_unreferenced(engine, 3) is False
+    assert "lock_timeout" in str(conn.execute.call_args_list[0].args[0]).lower()
+
+
+def test_guarded_drop_reraises_other_database_errors() -> None:
+    engine = MagicMock()
+    conn = engine.begin.return_value.__enter__.return_value
+    other = MagicMock()
+    other.sqlstate = "42P01"
+    conn.execute.side_effect = OperationalError("x", {}, other)
+
+    with pytest.raises(OperationalError):
+        drop_vector_table_if_unreferenced(engine, 3)

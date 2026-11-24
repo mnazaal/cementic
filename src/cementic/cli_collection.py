@@ -76,7 +76,7 @@ def remove_collection(
 
     try:
         unremoved = remove_artifacts(result.artifact_paths, config=cli_config())
-        drop_orphan_vector_tables(engine, result.vector_profile_ids)
+        dropped = drop_orphan_vector_tables(engine, result.vector_profile_ids)
     except Exception as e:
         # The delete is already committed, so this is a warning about leftovers
         # on disk, not a failed removal. Exiting non-zero here contradicted both
@@ -85,7 +85,7 @@ def remove_collection(
         console.print(f"warning: collection deleted but cleanup failed: {redact_text(str(e))}")
         return
     _print_unremoved_artifacts(unremoved)
-    console.print(f"vector_tables_dropped: {len(result.vector_profile_ids)}")
+    console.print(f"vector_tables_dropped: {dropped}")
 
 
 @collection_app.command("list", short_help="List known collections")

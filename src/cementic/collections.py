@@ -228,22 +228,25 @@ def remove_artifacts(paths: list[str], *, config: Config) -> list[str]:
     return failures
 
 
-def drop_orphan_vector_tables(engine: Any, profile_ids: list[int]) -> None:
+def drop_orphan_vector_tables(engine: Any, profile_ids: list[int]) -> int:
     """Best-effort drop of vector tables no longer referenced by revisions.
 
     Per-table, like ``remove_artifacts`` above: one failing drop must not stop
     the remaining orphans from being attempted. The first error is re-raised at
-    the end so callers still report the cleanup failure.
+    the end so callers still report the cleanup failure. Returns how many tables
+    were actually dropped: a table another revision now uses is spared.
     """
     errors: list[Exception] = []
+    dropped = 0
     for profile_id in profile_ids:
         try:
-            drop_vector_table_if_unreferenced(engine, profile_id)
+            dropped += bool(drop_vector_table_if_unreferenced(engine, profile_id))
         except Exception as error:
             logger.exception("Failed to drop orphan vector table p%s", profile_id)
             errors.append(error)
     if errors:
         raise errors[0]
+    return dropped
 
 
 def find_ready_revision(session: Session, collection: str) -> PipelineRevision | None:

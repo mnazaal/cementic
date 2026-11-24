@@ -8,14 +8,18 @@ builders are unit-testable without a database; the shells just execute them.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Sequence
 
 from sqlalchemy import text
 from sqlalchemy.engine import Connection, Engine
+from sqlalchemy.exc import OperationalError
 
 from cementic.index_strategies import HNSW_ITERATIVE_SCAN_MODES
 
 _MAX_EMBEDDING_DIM = 8192
+
+logger = logging.getLogger(__name__)
 
 
 def _validate_profile_id(profile_id: int) -> int:
@@ -329,20 +333,29 @@ def index_access_method(conn: Connection, index_name: str) -> str | None:
     return str(row) if row is not None else None
 
 
-def drop_vector_table(engine: Engine, profile_id: int) -> None:
-    """Drop the profile's vector table if it exists, whoever still uses it."""
-    with engine.begin() as conn:
-        conn.execute(text(drop_table_sql(profile_id)))
-
-
 #: First key of the two-integer advisory lock that serialises reusing a vector
 #: table (a revision taking the profile) against dropping it. The two-key form
 #: is a different key space from the single-bigint locks used elsewhere.
 _PROFILE_LOCK_NAMESPACE = 0x63656D  # "cem"
 
+#: How long a guarded drop waits for any lock before giving up (milliseconds).
+#: ``DROP TABLE`` needs ACCESS EXCLUSIVE on the vector table and on ``chunks_v2``
+#: and, while it waits, every new reader and ``ensure_revision_vector_table``
+#: queues behind it. Five seconds outlasts the short transactions that normally
+#: hold those locks (a search, an upsert batch), yet bounds the stall a long
+#: reader can cause. Giving up is safe: the table is only deferred cleanup.
+DROP_LOCK_TIMEOUT_MS = 5000
+
+_LOCK_NOT_AVAILABLE = "55P03"
+
 
 def lock_vector_profile(conn: Connection, profile_id: int) -> None:
     """Hold the profile's reuse/drop lock until the connection's transaction ends.
+
+    Lock order: take this lock *before* touching ``chunks_v2`` or the vector
+    table. A caller that reads chunks first and then asks for this lock can
+    deadlock against a pending drop, which holds this lock and waits for
+    ACCESS EXCLUSIVE on ``chunks_v2`` (PostgreSQL reports DeadlockDetected).
 
     A revision that starts using a profile takes this before it creates the
     table or commits its row; ``drop_vector_table_if_unreferenced`` takes it
@@ -362,20 +375,33 @@ def drop_vector_table_if_unreferenced(engine: Engine, profile_id: int) -> bool:
     Deletion and pruning decide droppability before they commit and drop after,
     so by then another collection may have started using the table. The check is
     repeated here under ``lock_vector_profile``. Returns whether the table was
-    dropped.
+    dropped; False also when a lock could not be had within
+    ``DROP_LOCK_TIMEOUT_MS`` (logged), leaving the table for a later cleanup.
     """
-    with engine.begin() as conn:
-        lock_vector_profile(conn, profile_id)
-        in_use = conn.execute(
-            text(
-                "SELECT EXISTS (SELECT 1 FROM pipeline_revisions WHERE embedding_profile_id = :p)"
-            ),
-            {"p": profile_id},
-        ).scalar_one()
-        if in_use:
-            return False
-        conn.execute(text(drop_table_sql(profile_id)))
-        return True
+    try:
+        with engine.begin() as conn:
+            conn.execute(text(f"SET LOCAL lock_timeout = {int(DROP_LOCK_TIMEOUT_MS)}"))
+            lock_vector_profile(conn, profile_id)
+            in_use = conn.execute(
+                text(
+                    "SELECT EXISTS "
+                    "(SELECT 1 FROM pipeline_revisions WHERE embedding_profile_id = :p)"
+                ),
+                {"p": profile_id},
+            ).scalar_one()
+            if in_use:
+                return False
+            conn.execute(text(drop_table_sql(profile_id)))
+            return True
+    except OperationalError as error:
+        if getattr(error.orig, "sqlstate", None) != _LOCK_NOT_AVAILABLE:
+            raise
+        logger.warning(
+            "Skipped dropping vector table p%s: still locked after %d ms",
+            profile_id,
+            DROP_LOCK_TIMEOUT_MS,
+        )
+        return False
 
 
 def upsert_vectors(

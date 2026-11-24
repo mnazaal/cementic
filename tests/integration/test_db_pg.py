@@ -146,7 +146,8 @@ class TestVectorExtensions:
 
 
 def _cleanup(pg_engine, emb_prof_id: int) -> None:
-    vector_store.drop_vector_table(pg_engine, emb_prof_id)
+    with pg_engine.begin() as conn:
+        conn.execute(text(vector_store.drop_table_sql(emb_prof_id)))
     with pg_engine.connect() as conn:
         for table in [
             "chunk_embeddings", "chunks_v2", "chunked_documents",

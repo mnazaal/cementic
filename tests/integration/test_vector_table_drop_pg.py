@@ -177,3 +177,45 @@ def test_a_drop_waits_for_an_uncommitted_reuse_and_then_spares_the_table(
 
     pg_session.expire_all()
     assert vector_table_exists(pg_session.connection(), profile_id)
+
+
+@pytest.mark.pg
+def test_a_drop_blocked_by_an_open_reader_gives_up_and_a_later_drop_succeeds(
+    pg_engine, pg_session, monkeypatch
+) -> None:
+    """DROP TABLE waits on any open transaction that touched the table.
+
+    Without a lock timeout it would hold the profile lock and queue every new
+    reader behind it. The drop must give up, leave the table, and succeed once
+    the blocker is gone.
+    """
+    import time
+
+    import cementic
+    from cementic import vector_store
+
+    print("cementic imported from", cementic.__file__)
+    monkeypatch.setattr(vector_store, "DROP_LOCK_TIMEOUT_MS", 500)
+    profile_id, cleanup = _seed_and_delete(pg_session)
+    pg_session.commit()  # release this session's own locks
+
+    reader = pg_engine.connect()
+    try:
+        reader.execute(
+            text(f"SELECT count(*) FROM {vector_table_name(profile_id)}")
+        ).scalar_one()  # the open transaction now holds ACCESS SHARE
+        started = time.monotonic()
+        dropped = vector_store.drop_vector_table_if_unreferenced(pg_engine, profile_id)
+        elapsed = time.monotonic() - started
+    finally:
+        reader.rollback()
+        reader.close()
+
+    assert dropped is False
+    assert elapsed < 5.0
+    assert vector_table_exists(pg_session.connection(), profile_id)
+    pg_session.commit()
+
+    assert drop_orphan_vector_tables(pg_engine, cleanup) == 1
+    pg_session.expire_all()
+    assert not vector_table_exists(pg_session.connection(), profile_id)
