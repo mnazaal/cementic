@@ -706,6 +706,42 @@ class TestPromoteReadyRevision:
         assert drain_pending_artifact_removals(session) == []
         assert drain_pending_vector_table_drops(session) == []
 
+    @pytest.mark.parametrize("failure", ["integrity", "other"])
+    @patch("cementic.collections.compute_revision_counts", return_value=_counts())
+    @patch("cementic.collections.promote_revision")
+    def test_a_failing_rollback_does_not_skip_the_drains(
+        self,
+        mock_promote: MagicMock,
+        _mock_counts: MagicMock,
+        failure: str,
+        _config: Config,
+    ) -> None:
+        """If ``rollback()`` itself raises (connection already gone), the queued
+        cleanup must still be discarded, or a later promote unlinks live rows."""
+        session = MagicMock()
+        session.info = {}
+        session.query().filter_by().order_by().first.return_value = MagicMock(
+            spec=PipelineRevision
+        )
+
+        def _queue_cleanup(*_args: object) -> None:
+            _defer_artifact_removal(session, ["/artifacts/live.bin"])
+            _defer_vector_table_drops(session, [7])
+
+        mock_promote.side_effect = _queue_cleanup
+        session.commit.side_effect = (
+            IntegrityError("stmt", {}, Exception("some other violation"))
+            if failure == "integrity"
+            else RuntimeError("connection lost")
+        )
+        session.rollback.side_effect = RuntimeError("rollback failed")
+
+        with pytest.raises(RuntimeError, match="rollback failed"):
+            promote_ready_revision(session, "c1", config=_config)
+
+        assert drain_pending_artifact_removals(session) == []
+        assert drain_pending_vector_table_drops(session) == []
+
     @patch("cementic.collections.compute_revision_counts", return_value=_counts())
     @patch("cementic.collections.promote_revision")
     def test_an_unrelated_integrity_error_still_surfaces(

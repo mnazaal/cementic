@@ -337,21 +337,30 @@ def promote_ready_revision(
         # activation. Losing that race is an ordinary outcome, not a database
         # fault -- reporting it as one dumped the raw database unique-violation,
         # SQL and parameters included, at the user.
-        session.rollback()
         # ``session.info`` outlives a rollback. What the rolled-back promote
         # queued names rows that still exist, so left pending a later promote
-        # on this session would unlink their artifacts.
-        drain_pending_artifact_removals(session)
-        drain_pending_vector_table_drops(session)
+        # on this session would unlink their artifacts. Drain even when the
+        # rollback itself raises, and each queue even when the other drain does.
+        try:
+            session.rollback()
+        finally:
+            try:
+                drain_pending_artifact_removals(session)
+            finally:
+                drain_pending_vector_table_drops(session)
         if not _is_one_active_violation(error):
             raise
         return PromotionOutcome("lost_race", revision=revision, counts=counts)
     except Exception:
         # Any other failure of the promote/commit path (a dropped connection, an
         # error while retiring the old revision) leaves the same stale queue.
-        session.rollback()
-        drain_pending_artifact_removals(session)
-        drain_pending_vector_table_drops(session)
+        try:
+            session.rollback()
+        finally:
+            try:
+                drain_pending_artifact_removals(session)
+            finally:
+                drain_pending_vector_table_drops(session)
         raise
     # Only now that the promotion is durable are the superseded revisions'
     # artifact files safe to unlink, and their vector tables safe to drop --
