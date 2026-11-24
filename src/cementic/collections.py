@@ -40,7 +40,7 @@ from cementic.revisions import (
 )
 from cementic.storage import safe_remove_artifact
 from cementic.vector_store import (
-    drop_vector_table,
+    drop_vector_table_if_unreferenced,
     index_access_method,
     vector_index_name,
     vector_table_exists,
@@ -238,7 +238,7 @@ def drop_orphan_vector_tables(engine: Any, profile_ids: list[int]) -> None:
     errors: list[Exception] = []
     for profile_id in profile_ids:
         try:
-            drop_vector_table(engine, profile_id)
+            drop_vector_table_if_unreferenced(engine, profile_id)
         except Exception as error:
             logger.exception("Failed to drop orphan vector table p%s", profile_id)
             errors.append(error)

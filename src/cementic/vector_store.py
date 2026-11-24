@@ -330,9 +330,52 @@ def index_access_method(conn: Connection, index_name: str) -> str | None:
 
 
 def drop_vector_table(engine: Engine, profile_id: int) -> None:
-    """Drop the profile's vector table if it exists."""
+    """Drop the profile's vector table if it exists, whoever still uses it."""
     with engine.begin() as conn:
         conn.execute(text(drop_table_sql(profile_id)))
+
+
+#: First key of the two-integer advisory lock that serialises reusing a vector
+#: table (a revision taking the profile) against dropping it. The two-key form
+#: is a different key space from the single-bigint locks used elsewhere.
+_PROFILE_LOCK_NAMESPACE = 0x63656D  # "cem"
+
+
+def lock_vector_profile(conn: Connection, profile_id: int) -> None:
+    """Hold the profile's reuse/drop lock until the connection's transaction ends.
+
+    A revision that starts using a profile takes this before it creates the
+    table or commits its row; ``drop_vector_table_if_unreferenced`` takes it
+    before deciding. A decision made without it can be overtaken by a revision
+    committed a moment later, and a recheck alone cannot see one that has not
+    committed yet.
+    """
+    conn.execute(
+        text("SELECT pg_advisory_xact_lock(:ns, :profile)"),
+        {"ns": _PROFILE_LOCK_NAMESPACE, "profile": _validate_profile_id(profile_id)},
+    )
+
+
+def drop_vector_table_if_unreferenced(engine: Engine, profile_id: int) -> bool:
+    """Drop the profile's vector table unless a revision references the profile.
+
+    Deletion and pruning decide droppability before they commit and drop after,
+    so by then another collection may have started using the table. The check is
+    repeated here under ``lock_vector_profile``. Returns whether the table was
+    dropped.
+    """
+    with engine.begin() as conn:
+        lock_vector_profile(conn, profile_id)
+        in_use = conn.execute(
+            text(
+                "SELECT EXISTS (SELECT 1 FROM pipeline_revisions WHERE embedding_profile_id = :p)"
+            ),
+            {"p": profile_id},
+        ).scalar_one()
+        if in_use:
+            return False
+        conn.execute(text(drop_table_sql(profile_id)))
+        return True
 
 
 def upsert_vectors(

@@ -494,7 +494,7 @@ class TestDeleteCollectionRecords:
 class TestDropOrphanVectorTables:
     """Tests for vector table cleanup shell."""
 
-    @patch("cementic.collections.drop_vector_table")
+    @patch("cementic.collections.drop_vector_table_if_unreferenced")
     def test_drops_each_orphan_profile_table(self, mock_drop: MagicMock) -> None:
         engine = MagicMock()
 

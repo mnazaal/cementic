@@ -33,6 +33,7 @@ from cementic.profiles import (
 from cementic.vector_store import (
     delete_vectors_for_collection_sql,
     ensure_vector_table_schema,
+    lock_vector_profile,
     vector_table_exists,
     vector_table_has_rows,
 )
@@ -556,6 +557,11 @@ def ensure_revision_vector_table(session: Session, revision: PipelineRevision) -
         raise RuntimeError("Session is not bound to an engine")
     if bind.dialect.name != "postgresql":
         return
+    # Held until this transaction commits, so a deferred drop of this profile's
+    # table (collection removal, pruning) cannot decide "unreferenced" in the
+    # window before the revision row is visible, and then drop what this
+    # revision is about to use.
+    lock_vector_profile(session.connection(), revision.embedding_profile_id)
     ensure_vector_table_schema(
         session.connection(),
         revision.embedding_profile_id,
