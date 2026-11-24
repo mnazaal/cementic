@@ -79,10 +79,11 @@ Wants=cementic-postgres.service
 [Service]
 EnvironmentFile=%h/.config/cementic/%i.dirs.env
 ExecStart=/bin/bash -c '\
+  PORT=$$("$CEMENTIC_CHECKOUT/.venv/bin/python" -c "from cementic.config import get_config; print(get_config().llama_cpp.daemon_port)") \
+    && test -n "$$PORT" \
+    || { echo "cementic: cannot read llama_cpp.daemon_port from config" >&2; exit 1; }; \
   "$CEMENTIC_CHECKOUT/.venv/bin/cementic" run watcher --collection %i -- $CEMENTIC_DIRS & \
   "$CEMENTIC_CHECKOUT/.venv/bin/cementic" run worker --collection %i & \
-  PORT=$$("$CEMENTIC_CHECKOUT/.venv/bin/cementic" config show | grep daemon_port | tr -dc 0-9); \
-  test -n "$$PORT" || exit 1; \
   while sleep 300; do \
     curl -sf -m 5 -o /dev/null http://127.0.0.1:$$PORT/health || continue; \
     curl -sf -m 90 -o /dev/null -X POST http://127.0.0.1:$$PORT/embedding \
