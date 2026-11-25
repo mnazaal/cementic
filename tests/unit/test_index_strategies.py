@@ -91,3 +91,11 @@ class TestDimensionLimits:
         """768 (nomic) and 1024 (bge-m3) must keep working."""
         assert index_dimension_error("hnsw", 768) is None
         assert index_dimension_error("hnsw", 1024) is None
+
+
+def test_an_unknown_method_has_no_dimension_answer() -> None:
+    """An unregistered method is refused, not read as "no dimension limit"."""
+    with pytest.raises(ValueError, match="Unknown index method"):
+        max_indexable_dim("ivfflat")
+    with pytest.raises(ValueError, match="Unknown index method"):
+        index_dimension_error("ivfflat", 4096)

@@ -581,7 +581,7 @@ class IndexConfig(_SectionSettings):
     @classmethod
     def _validate_method(cls, value: str) -> str:
         # Ask the index-strategy registry rather than repeating its contents, so
-        # adding a method stays a single-entry change as its module claims.
+        # a method added there is accepted here without a second edit.
         supported = supported_index_methods()
         if value not in supported:
             raise ValueError(f"index method must be one of: {', '.join(sorted(supported))}")

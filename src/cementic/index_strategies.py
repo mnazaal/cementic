@@ -1,8 +1,11 @@
 """Pure builders for ANN index DDL, selected by method name (data-driven).
 
-Adding an index method is one entry in ``_INDEX_STRATEGIES`` plus a pure builder
-function — no branching at call sites. This is the functional core; executing the
-DDL is the caller's (imperative) job.
+Each index method is one entry in ``_INDEX_METHODS``: its pure DDL builder and
+the largest dimension it can index. Two per-method facts live elsewhere, beside
+the code that acts on them: ``vector_store.query_tuning_statements`` (query-time
+settings) and ``db._ensure_ann_access_method`` (which methods need an extension
+checked first). This is the functional core; executing the DDL is the caller's
+(imperative) job.
 """
 
 from __future__ import annotations
@@ -50,31 +53,44 @@ def _diskann_ddl(
     )
 
 
-_INDEX_STRATEGIES: dict[str, Callable[[str, str, str, str, IndexParams], str]] = {
-    "hnsw": _hnsw_ddl,
-    "diskann": _diskann_ddl,
+@dataclass(frozen=True)
+class _IndexMethod:
+    ddl: Callable[[str, str, str, str, IndexParams], str]
+    #: Largest vector dimension the method can actually index, None when
+    #: unbounded. pgvector stores up to 16000 dimensions in a `vector` column
+    #: but its HNSW index stops at 2000; pgvectorscale's DiskANN documents no
+    #: limit of its own. Storage limit and index limit are different facts --
+    #: `vector_store` guards the column, this guards the index.
+    max_dim: int | None
+
+
+_INDEX_METHODS: dict[str, _IndexMethod] = {
+    "hnsw": _IndexMethod(_hnsw_ddl, max_dim=2000),
+    "diskann": _IndexMethod(_diskann_ddl, max_dim=None),
 }
 
 
-#: Largest vector dimension each method can actually index. pgvector stores up
-#: to 16000 dimensions in a `vector` column but its HNSW index stops at 2000;
-#: pgvectorscale's DiskANN documents no limit of its own. Storage limit and
-#: index limit are different facts, so they live apart -- `vector_store` guards
-#: the column, this guards the index.
-_MAX_INDEXABLE_DIM: dict[str, int | None] = {
-    "hnsw": 2000,
-    "diskann": None,
-}
+def _index_method(method: str) -> _IndexMethod:
+    try:
+        return _INDEX_METHODS[method]
+    except KeyError:
+        raise ValueError(
+            f"Unknown index method: {method}. Available: {sorted(_INDEX_METHODS)}"
+        ) from None
 
 
 def supported_index_methods() -> tuple[str, ...]:
     """Return the registered index method names."""
-    return tuple(_INDEX_STRATEGIES)
+    return tuple(_INDEX_METHODS)
 
 
 def max_indexable_dim(method: str) -> int | None:
-    """Largest dimension ``method`` can index, or None when unbounded (pure)."""
-    return _MAX_INDEXABLE_DIM.get(method)
+    """Largest dimension ``method`` can index, or None when unbounded (pure).
+
+    Raises ValueError for an unregistered method rather than reading it as
+    unbounded.
+    """
+    return _index_method(method).max_dim
 
 
 def index_dimension_error(method: str, embedding_dim: int) -> str | None:
@@ -110,10 +126,4 @@ def build_index_ddl(
         opclass = _DISTANCE_TO_OPCLASS[metric]
     except KeyError:
         raise ValueError(f"Unsupported distance metric: {metric}") from None
-    try:
-        builder = _INDEX_STRATEGIES[method]
-    except KeyError:
-        raise ValueError(
-            f"Unknown index method: {method}. Available: {sorted(_INDEX_STRATEGIES)}"
-        ) from None
-    return builder(index_name, table, column, opclass, params)
+    return _index_method(method).ddl(index_name, table, column, opclass, params)
