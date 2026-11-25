@@ -93,6 +93,11 @@ def _try_acquire_pipeline_worker_lock(engine: Any, collection: str) -> Any | Non
             {"lock_key": _pipeline_worker_lock_key(collection)},
         ).scalar()
     )
+    # End the transaction the SELECT opened. The session lock survives COMMIT;
+    # the transaction left open held a snapshot xmin for the worker's whole
+    # life, so VACUUM could remove no row deleted after the worker started
+    # (live corpus, 2026-11-25: 67,516 dead rows left in chunks_v2).
+    connection.commit()
     if not acquired:
         connection.close()
         return None

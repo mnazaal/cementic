@@ -505,6 +505,9 @@ class TestPipelineWorkerStart:
 
         assert _try_acquire_pipeline_worker_lock(engine, "default") is connection
         connection.close.assert_not_called()
+        # The lock is session-scoped; the transaction that took it must not
+        # stay open and pin VACUUM's horizon for the worker's lifetime.
+        connection.commit.assert_called_once_with()
 
     def test_start_rejects_when_database_worker_lock_is_held(self, temp_dir: Path) -> None:
         config = Config()

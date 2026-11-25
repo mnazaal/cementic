@@ -1514,6 +1514,33 @@ def test_advisory_lock_is_released_not_just_returned_to_the_pool(pg_engine) -> N
     assert locks_held() == 0
 
 
+def test_worker_lock_connection_holds_no_transaction_open(pg_engine) -> None:
+    """Regression (live corpus, 2026-11-25): the lock connection sat "idle in
+    transaction" for the worker's whole life, holding a snapshot xmin, so
+    VACUUM could remove no row deleted after the worker started -- 67,516 dead
+    rows survived a manual VACUUM of chunks_v2, and `status` slowed as they
+    piled up. A session advisory lock survives COMMIT, so the transaction that
+    took it need not stay open."""
+    key = _pipeline_worker_lock_key("xminprobe")
+    connection = _try_acquire_pipeline_worker_lock(pg_engine, "xminprobe")
+    assert connection is not None
+    try:
+        with pg_engine.connect() as conn:
+            holder = conn.execute(
+                text(
+                    "SELECT a.state, a.backend_xmin IS NOT NULL AS holds_xmin "
+                    "FROM pg_locks l JOIN pg_stat_activity a ON a.pid = l.pid "
+                    "WHERE l.locktype = 'advisory' "
+                    "AND ((l.classid::bigint << 32) | l.objid::bigint) = :key"
+                ),
+                {"key": key},
+            ).one()
+        assert holder.state == "idle", holder.state
+        assert not holder.holds_xmin
+    finally:
+        _release_pipeline_worker_lock(connection, "xminprobe")
+
+
 class TestChunksLostToAFailedReExtraction:
     """A document must not end up permanently chunk-less and still read as done.
 
