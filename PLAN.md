@@ -939,6 +939,18 @@ marker, not a timeout — with a regression that starts a scan and asserts no
   only check I would run before the next `cementic start` applies the repair.
   **Ends when** each path that deletes `Chunk` rows asserts on PostgreSQL that
   embeddings and vector rows went with them.
+- **D9 (part fixed 2026-11-25): the worker pinned VACUUM's horizon.** Its
+  lock connection stayed "idle in transaction" with a snapshot xmin for the
+  worker's life (since `6d6e8b8`, 2026-06-30); a manual `VACUUM (ANALYZE)` of
+  the five pipeline tables still left 67,516 dead rows in `chunks_v2`, and took
+  `status`'s warm collection counts from 2.06-2.40 s to 1.23-1.28 s (executed on
+  the live corpus). Fixed in `e7c5cb5` (commit after taking the session lock;
+  PG regression reads the holder's state from `pg_stat_activity`), reviewed with
+  no defects. **Still unexplained:** `autovacuum_count` is 0 on all five tables
+  since the server started 2026-11-13, although `chunk_embeddings` passed its
+  threshold (115,488 dead rows); a held xmin stops removal, not the run. Re-check
+  with `~/.cache/cementic-autovacuum-check.py` a day after deploying `e7c5cb5`;
+  if still 0, read the Postgres log for cancelled autovacuum tasks.
 - **D9 — index maintenance and recall are unmeasured.** No `VACUUM`, `REINDEX` or
   `ANALYZE` anywhere in `src/`; HNSW tombstones left by churn are never measured
   for recall (`db.py:840-901` builds once, `collections.py:400-420` rebuilds only
