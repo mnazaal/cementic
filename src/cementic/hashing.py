@@ -1,9 +1,10 @@
 """Shared file-hashing helper.
 
 One hasher, reused wherever cementic needs a file's content identity:
-``bootstrap.py`` verifies a downloaded model against its pinned checksum, and
+``bootstrap.py`` verifies a downloaded model against its pinned checksum,
 ``model_digest.py`` fingerprints a configured model by content rather than by
-the path string that happens to resolve to it.
+the path string that happens to resolve to it, and ``source_watcher.py``
+records each source document's ``file_hash``.
 """
 
 from __future__ import annotations

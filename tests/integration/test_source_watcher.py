@@ -192,9 +192,9 @@ class TestRestartWithoutRehashing:
         doc = temp_dir / "paper.md"
         doc.write_text("content", encoding="utf-8")
         sw = self._watcher(watcher_config, session_factory, temp_dir)
-        real = source_watcher._file_sha256
+        real = source_watcher.sha256_file
 
-        with patch.object(source_watcher, "_file_sha256", side_effect=real) as hashed:
+        with patch.object(source_watcher, "sha256_file", side_effect=real) as hashed:
             sw._register_document(str(doc), reuse_stored_hash=True)
             assert hashed.call_count == 1  # first start: the file is new
             # second start: nothing changed
@@ -205,7 +205,7 @@ class TestRestartWithoutRehashing:
             row = session.query(SourceDocument).one()
             stat = doc.stat()
             assert (row.size_bytes, row.mtime_ns) == (stat.st_size, stat.st_mtime_ns)
-            assert row.file_hash == real(str(doc))
+            assert row.file_hash == real(doc)
 
     def test_changed_file_is_hashed_and_its_hash_replaced(
         self, watcher_config: Config, watcher_db, temp_dir: Path
@@ -220,7 +220,7 @@ class TestRestartWithoutRehashing:
         doc.write_text("CONTENT", encoding="utf-8")
         os.utime(doc, ns=(doc.stat().st_atime_ns, doc.stat().st_mtime_ns + 5_000_000_000))
         with patch.object(
-            source_watcher, "_file_sha256", side_effect=source_watcher._file_sha256
+            source_watcher, "sha256_file", side_effect=source_watcher.sha256_file
         ) as hashed:
             sw._register_document(str(doc))
 
@@ -244,7 +244,7 @@ class TestRestartWithoutRehashing:
             session.commit()
 
         with patch.object(
-            source_watcher, "_file_sha256", side_effect=source_watcher._file_sha256
+            source_watcher, "sha256_file", side_effect=source_watcher.sha256_file
         ) as hashed:
             sw._register_document(str(doc), reuse_stored_hash=True)
 

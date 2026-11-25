@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import logging
 import os
 import signal
@@ -33,6 +32,7 @@ from cementic.db import (
     utc_now,
 )
 from cementic.extract import MAX_DOCUMENT_BYTES, supported_extensions
+from cementic.hashing import sha256_file
 from cementic.redact import redact_text
 from cementic.state import DaemonState, StateManager
 from cementic.supervisor import is_managed_process_alive, process_start_token
@@ -155,15 +155,6 @@ def _merge_prior_root_document(
     session.flush()
     prior.source_path = file_path
     return prior
-
-
-def _file_sha256(file_path: str) -> str:
-    """SHA-256 of a file's bytes, read in 8 KiB blocks."""
-    sha256 = hashlib.sha256()
-    with open(file_path, "rb") as handle:
-        for block in iter(lambda: handle.read(8192), b""):
-            sha256.update(block)
-    return sha256.hexdigest()
 
 
 def _reusable_hash(
@@ -1020,7 +1011,7 @@ class SourceWatcher:
                 None if known is None else (known.file_hash, known.size_bytes, known.mtime_ns)
             )
         reused = _reusable_hash(stored, file_size, mtime_ns) if reuse_stored_hash else None
-        file_hash = reused or _file_sha256(file_path)
+        file_hash = reused or sha256_file(Path(file_path))
 
         self._publish_current_file(file_path)
         # Read-then-insert is not atomic, and the initial scan runs on the main
