@@ -769,9 +769,10 @@ class TestFreshDatabaseConcurrency:
     def test_concurrent_create_tables_on_a_fresh_database_all_succeed(self, pg_engine):
         """Regression (supervised trial run, 2026-11-25): on a fresh database the
         watcher died at start with UniqueViolation on pg_extension_name_index.
-        `CREATE EXTENSION IF NOT EXISTS` (and `CREATE TABLE IF NOT EXISTS`, as
-        `create_all` issues it) checks the catalog before taking a lock, so two
-        processes both pass the check and the second insert collides."""
+        `CREATE EXTENSION IF NOT EXISTS` checks the catalog before taking a lock,
+        and `create_all` checks for each table before a plain `CREATE TABLE`, so
+        two processes both pass the check and the second insert collides (on
+        pg_extension, then on pg_type for the tables)."""
         import threading
 
         from sqlalchemy import create_engine

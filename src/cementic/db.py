@@ -477,10 +477,11 @@ def _lock_schema(conn: Connection) -> None:
     """Wait for any other process's schema setup; released at commit/rollback.
 
     The watcher and the worker `cementic start` spawns both set up the schema.
-    `CREATE EXTENSION IF NOT EXISTS` and `CREATE TABLE IF NOT EXISTS` check the
-    catalog before they take a lock, so on a fresh database both processes pass
-    the check and the second insert into the catalog fails with a duplicate
-    key. Holding this lock, the second process finds everything already there.
+    `CREATE EXTENSION IF NOT EXISTS` checks the catalog before it takes a lock,
+    and `create_all` checks for each table before issuing a plain `CREATE
+    TABLE`, so on a fresh database both processes pass the check and the second
+    insert into the catalog fails with a duplicate key. Holding this lock, the
+    second process finds everything already there.
     """
     conn.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": _SCHEMA_LOCK_KEY})
 
@@ -490,8 +491,10 @@ def ensure_vector_extensions(engine: Engine) -> None:
     if engine.dialect.name != "postgresql":
         return
     with engine.connect() as conn:
+        # Outside the try: a failed lock wait (statement_timeout, a dropped
+        # connection) is not a missing extension, and must not say so.
+        _lock_schema(conn)
         try:
-            _lock_schema(conn)
             for extension in REQUIRED_DB_EXTENSIONS:
                 conn.execute(text(f"CREATE EXTENSION IF NOT EXISTS {extension}"))
             conn.commit()
