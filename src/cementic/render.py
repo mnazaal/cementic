@@ -277,8 +277,23 @@ def print_collection_detail(collection: str, pipeline_status: Any) -> None:
         console.print(f"{'failures':<11} {', '.join(failures)}")
 
 
+def _cap_files(files: list[Any], file_limit: int | None) -> tuple[list[Any], bool]:
+    """The files to show and whether the cap left any out.
+
+    The caller loads one row past ``file_limit``: that extra row is the only
+    proof more exist, since a collection can hold exactly ``file_limit`` files.
+    """
+    if file_limit is None or len(files) <= file_limit:
+        return files, False
+    return files[:file_limit], True
+
+
 def print_file_progress(files: list[Any], file_limit: int | None) -> None:
-    """Print the --verbose per-file listing under a collection summary."""
+    """Print the --verbose per-file listing under a collection summary.
+
+    ``files`` holds up to ``file_limit + 1`` rows; see `_cap_files`.
+    """
+    files, truncated = _cap_files(files, file_limit)
     if not files:
         console.print("files: none")
         return
@@ -294,7 +309,7 @@ def print_file_progress(files: list[Any], file_limit: int | None) -> None:
         if f.error_message:
             status_line += f" | error: {f.error_message[:80]}"
         console.print(status_line)
-    if file_limit is not None and len(files) == file_limit:
+    if truncated:
         # Saying so is the whole point of having a cap. An unannounced
         # truncation is the same defect as a swallowed exception: a partial
         # listing that reads as the complete answer.
@@ -319,7 +334,8 @@ def build_status_document(
     """Build the `status --json` document from already-loaded data.
 
     ``data`` is status_service.StatusData, or None when loading it failed with
-    ``error``. Print with `print_status_document`.
+    ``error``. Its ``files`` hold up to ``file_limit + 1`` rows; see
+    `_cap_files`. Print with `print_status_document`.
     """
     output: dict[str, Any] = {
         "supervisor": {
@@ -382,10 +398,9 @@ def build_status_document(
         else:
             output["pipeline"] = {"collection": collection, **asdict(data.pipeline)}
             if data.files is not None:
-                output["files"] = [asdict(f) for f in data.files]
-                output["files_truncated"] = (
-                    file_limit is not None and len(data.files) == file_limit
-                )
+                files, truncated = _cap_files(data.files, file_limit)
+                output["files"] = [asdict(f) for f in files]
+                output["files_truncated"] = truncated
     if error is not None:
         output["error"] = error
 

@@ -631,6 +631,9 @@ def status(
         collection = validated_collection_name(collection)
     # 0 is the escape hatch, and None is how the query layer spells "no LIMIT".
     file_limit = limit or None
+    # One row past the cap, so render can tell a cut listing from a collection
+    # holding exactly `file_limit` files.
+    file_rows = file_limit + 1 if file_limit is not None else None
 
     state = read_supervisor_state()
     source_watcher_status, pipeline_worker_status = load_worker_statuses(cli_config())
@@ -656,7 +659,7 @@ def status(
                 # Loaded after `data` is bound, so a failed listing still
                 # reports the pipeline block beside the error.
                 data = replace(
-                    data, files=load_file_progress(cli_config(), collection, file_limit)
+                    data, files=load_file_progress(cli_config(), collection, file_rows)
                 )
         except Exception as db_error:
             status_error = (
@@ -740,7 +743,7 @@ def status(
         render.print_collection_detail(collection, pipeline_status)
         if verbose and collection:
             try:
-                files = load_file_progress(cli_config(), collection, file_limit)
+                files = load_file_progress(cli_config(), collection, file_rows)
             except Exception as error:
                 # This used to be swallowed at exit 0 (and the database-unavailable
                 # case printed nothing at all), so a truncated report read as the

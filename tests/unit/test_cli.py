@@ -23,7 +23,7 @@ from cementic.config import Config, default_config_path
 from cementic.embedding_runtime import DaemonHealth
 from cementic.pipeline_worker import PipelineCounts, PipelineWorker
 from cementic.state import StateManager
-from cementic.status_service import PipelineStatus, StatusData, WorkerStatus
+from cementic.status_service import FileProgress, PipelineStatus, StatusData, WorkerStatus
 from cementic.supervisor import ManagedProcess
 
 runner = CliRunner()
@@ -911,6 +911,53 @@ class TestSearchCommand:
         else:
             assert "documents" in result.output
             assert "files: could not be listed: boom" in result.output
+
+    @pytest.mark.parametrize("stored", [2, 3])
+    @patch("cementic.db.get_session_factory")
+    @patch("cementic.db.get_engine")
+    def test_status_verbose_reports_truncation_only_when_files_were_left_out(
+        self, mock_get_engine, mock_get_session_factory, stored
+    ):
+        """A collection holding exactly `--limit` files is listed in full.
+
+        Regression: truncation was inferred from `len(files) == limit`, so a
+        complete listing of exactly `limit` files was reported as capped.
+        """
+        mock_session = MagicMock()
+        mock_session.__enter__.return_value = mock_session
+        mock_session.__exit__.return_value = False
+        mock_get_session_factory.return_value = lambda: mock_session
+        pipeline = PipelineStatus(
+            **{name: 0 for name in PipelineStatus.__dataclass_fields__} | {"documents": stored}
+        )
+        on_disk = [
+            FileProgress(f"/docs/{index}.md", "done", "done", 1, 0, 1) for index in range(stored)
+        ]
+
+        def load_file_progress(_config, _collection, limit=None):
+            return on_disk if limit is None else on_disk[:limit]
+
+        with (
+            patch("cementic.collections.collection_exists", return_value=True),
+            patch("cementic.status_service.check_health", return_value=_healthy_health()),
+            patch("cementic.status_service.load_pipeline_status", return_value=pipeline),
+            patch(
+                "cementic.status_service.load_status_data",
+                return_value=StatusData(pipeline=pipeline),
+            ),
+            patch("cementic.status_service.load_file_progress", side_effect=load_file_progress),
+        ):
+            human = runner.invoke(app, ["status", "-c", "work", "--verbose", "--limit", "2"])
+            as_json = runner.invoke(
+                app, ["status", "-c", "work", "--verbose", "--limit", "2", "--json"]
+            )
+
+        assert human.exit_code == as_json.exit_code == 0
+        parsed = json.loads(as_json.output)
+        assert [f["source_path"] for f in parsed["files"]] == ["/docs/0.md", "/docs/1.md"]
+        assert human.output.count("- /docs/") == 2
+        assert parsed["files_truncated"] is (stored > 2)
+        assert ("capped at 2" in human.output) is (stored > 2)
 
     @patch("cementic.search.Searcher")
     def test_human_and_json_modes_agree_on_the_unknown_collection_exit_code(

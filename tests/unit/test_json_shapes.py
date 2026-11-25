@@ -84,14 +84,18 @@ def test_status_json_matches_the_documented_shape() -> None:
 
 
 def test_status_document_for_one_collection_lists_files_and_flags_truncation() -> None:
-    data = StatusData(pipeline=_pipeline(), files=[_file("a"), _file("b")])
+    # The caller loads one row past the cap; that row proves more exist.
+    data = StatusData(pipeline=_pipeline(), files=[_file("a"), _file("b"), _file("c")])
 
     capped = _build(data, collection="NAME", file_limit=2)
+    exact = _build(data, collection="NAME", file_limit=3)
     uncapped = _build(data, collection="NAME", file_limit=None)
 
     assert capped["pipeline"]["collection"] == "NAME"
     assert [f["source_path"] for f in capped["files"]] == ["a", "b"]
     assert capped["files_truncated"] is True
+    assert len(exact["files"]) == 3
+    assert exact["files_truncated"] is False
     assert uncapped["files_truncated"] is False
     assert "collections" not in capped
 
