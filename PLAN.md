@@ -495,14 +495,35 @@ a scratch dir. So deploying re-extracts, re-chunks and re-embeds nothing.
 | D6 (part) | non-object state file, three doc claims fixed | `a1cded9` |
 | D13 (part) | one version source, 3.13 classifier, promote drains deferred cleanup on any failure | `e3235d0` `597daa9` `cea4bf3` |
 
-**Still open from D6 and D13** (verified, not fixed); the repository-visibility
-claim was fixed 2026-11-25: public, per the user): `source_watcher` keeps
-its own file hasher; `len(files) == limit` reports truncation at exactly `limit`
-files (`render.py`); the digest cache keeps a stale digest for a same-size
-replacement with restored mtime, and is never pruned;
-`scripts/measure_chunk_context_fit.py` probably calls a llama-cpp-python route
-(`/extras/tokenize/count`) that llama-server lacks (unrun, no daemon); 3.12 runs
-only the unit job in CI.
+**D6 and D13 closed 2026-11-25** on `claude/leftovers` (`90f131e` shared file
+hasher, stored hashes byte-identical; `72d81cf` truncation reported only when a
+row past `--limit` exists; `2144326` one registry entry per index method, DDL
+identical; `bb7fcd0` two subsumed CLI tests removed; `1408aab` SQLite
+integration job on 3.12 too, unrun in CI), reviewed with no defects; the rest
+were already fixed by the commits in the table. **Still open:**
+`scripts/measure_chunk_context_fit.py` calls `/extras/tokenize/count`, which
+llama-server answers with HTTP 404 (executed in the trial run below; `/tokenize`
+answers 200), and its identity and tail-detection flaws need a daemon to fix.
+**Awaiting the user:** whether the model-digest cache is pruned (the lane's
+recommendation: leave it; it grows one short entry per model-file change, and
+any pruning rule can change a returned digest).
+
+**Supervised tiny-corpus trial, 2026-11-25** (`~/.cache/cementic-trial/run.sh`,
+isolated: `cementic_trial_test`, its own data dir, daemon port 11556). The first
+run, on `1408aab`, failed at `cementic start`: on a fresh database the watcher
+and worker both ran `CREATE EXTENSION IF NOT EXISTS`, which checks the catalog
+before locking, and the watcher died on a duplicate key. Present since the
+extension step was written, not from this round; existing databases never hit
+it. Fixed on `claude/schema-race` (`13298db`, `36f11a7`): extension and table
+creation hold the schema advisory lock the retrofit pass already used; the PG
+regression (4 concurrent `create_tables` on a fresh `*_test` database, 3 rounds)
+failed 3 of 4 before the fix, and fails on `pg_type` with only the table-step
+lock removed. Both commits reviewed with no defects. The re-run on `36f11a7`
+passed all 12 checks: start→ready→promote, four paraphrased searches each
+ranking its file first (one PDF), `status`, `doctor`, `embedding status`, and
+`collection remove` dropping its vector table with no orphan left. This
+satisfies the closure rules' supervised run for every worker and runtime repair
+on this branch.
 
 **Deploy consequences** (all executed or read in review):
 - Every running daemon's alias changes once, so the next start restarts it.
