@@ -2274,18 +2274,6 @@ class TestRemovePrompt:
 class TestCollectionCommandsEdgeCases:
     """Edge cases for collection commands."""
 
-    @patch("cementic.db.get_session_factory")
-    @patch("cementic.db.get_engine")
-    def test_list_empty_collections(self, mock_get_engine, mock_get_session_factory):
-        """list_collection_command prints 'none' when no collections."""
-        mock_session = MagicMock()
-        mock_session.__enter__.return_value = mock_session
-        mock_get_session_factory.return_value = lambda: mock_session
-        with patch("cementic.collections.list_collections", return_value=[]):
-            result = runner.invoke(app, ["collection", "list"])
-        assert result.exit_code == 0
-        assert "(none)" in result.output
-
     @patch("cementic.collections.list_collections", side_effect=ValueError("something broke"))
     @patch("cementic.db.get_session_factory")
     @patch("cementic.db.get_engine")
@@ -2297,24 +2285,6 @@ class TestCollectionCommandsEdgeCases:
         result = runner.invoke(app, ["collection", "list"])
         assert result.exit_code == 1
         assert "collection list failed" in result.output
-
-    @patch("cementic.db.get_session_factory")
-    @patch("cementic.db.get_engine")
-    def test_promote_no_ready_revision(self, mock_get_engine, mock_get_session_factory):
-        """Nothing was promoted, so the exit code says so.
-
-        Regression: this was the one promoted-nothing outcome that exited 0
-        (empty, incomplete and blocked all exit 1), so a script chaining
-        `promote && search` proceeded as if a revision had been published.
-        """
-        mock_session = MagicMock()
-        mock_session.__enter__.return_value = mock_session
-        mock_get_session_factory.return_value = lambda: mock_session
-        outcome = PromotionOutcome(status="no_ready")
-        with patch("cementic.collections.promote_ready_revision", return_value=outcome):
-            result = runner.invoke(app, ["collection", "promote", "mycol"])
-        assert result.exit_code == 1
-        assert "no ready revision" in result.output
 
     @patch("cementic.collections.promote_ready_revision", side_effect=ValueError("boom"))
     @patch("cementic.db.get_session_factory")
@@ -3434,6 +3404,12 @@ class TestRefusalsUseStderr:
     def test_promote_with_no_ready_revision_explains_itself_on_stderr(
         self, mock_engine, mock_session_factory
     ):
+        """Nothing was promoted, so the exit code says so.
+
+        Regression: this was the one promoted-nothing outcome that exited 0
+        (empty, incomplete and blocked all exit 1), so a script chaining
+        `promote && search` proceeded as if a revision had been published.
+        """
         mock_session = MagicMock()
         mock_session.__enter__.return_value = mock_session
         mock_session.__exit__.return_value = False
