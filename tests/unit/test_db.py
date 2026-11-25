@@ -81,16 +81,18 @@ class TestEnsureVectorExtensions:
         assert REQUIRED_DB_EXTENSIONS == ("vector", "vectorscale")
 
     def test_postgres_creates_required_extensions(self) -> None:
-        """Postgres setup should create both required extensions before tables."""
-        engine = _make_engine_conn_mock([None, None])
+        """Postgres setup should create both required extensions before tables,
+        holding the schema lock so a second process starting at the same time
+        waits instead of colliding in the catalog."""
+        engine = _make_engine_conn_mock([None, None, None])
         engine.dialect.name = "postgresql"
 
         ensure_vector_extensions(engine)
 
-        assert engine.connect.return_value.__enter__.return_value.execute.call_count == 2
+        assert engine.connect.return_value.__enter__.return_value.execute.call_count == 3
         execute_calls = engine.connect.return_value.__enter__.return_value.execute.call_args_list
-        first = str(execute_calls[0][0][0])
-        second = str(execute_calls[1][0][0])
+        lock, first, second = (str(call[0][0]) for call in execute_calls)
+        assert "pg_advisory_xact_lock" in lock
         assert "CREATE EXTENSION IF NOT EXISTS vector" in first
         assert "CREATE EXTENSION IF NOT EXISTS vectorscale" in second
         engine.connect.return_value.__enter__.return_value.commit.assert_called_once()
@@ -104,7 +106,7 @@ class TestEnsureVectorExtensions:
         engine.connect.assert_not_called()
 
     def test_extension_create_failure_is_actionable(self) -> None:
-        engine = _make_engine_conn_mock([RuntimeError("permission denied")])
+        engine = _make_engine_conn_mock([None, RuntimeError("permission denied")])
         engine.dialect.name = "postgresql"
 
         with pytest.raises(Exception):

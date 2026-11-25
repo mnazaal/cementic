@@ -759,3 +759,60 @@ class TestSchemaRetrofitPass:
             thread.join()
 
         assert outcomes == ["ok", "ok"], outcomes
+
+
+@pytest.mark.pg
+class TestFreshDatabaseConcurrency:
+    """`cementic start` on a brand-new database runs `create_tables` in the
+    watcher and the worker at once, so the whole schema setup must tolerate it."""
+
+    def test_concurrent_create_tables_on_a_fresh_database_all_succeed(self, pg_engine):
+        """Regression (supervised trial run, 2026-11-25): on a fresh database the
+        watcher died at start with UniqueViolation on pg_extension_name_index.
+        `CREATE EXTENSION IF NOT EXISTS` (and `CREATE TABLE IF NOT EXISTS`, as
+        `create_all` issues it) checks the catalog before taking a lock, so two
+        processes both pass the check and the second insert collides."""
+        import threading
+
+        from sqlalchemy import create_engine
+
+        from tests.integration.conftest import _PG_CONNECT_ARGS, _pg_url
+
+        fresh = _pg_url().set(database="cementic_fresh_schema_test")
+        assert fresh.database.endswith("_test")
+        admin = create_engine(
+            fresh.set(database="postgres"),
+            isolation_level="AUTOCOMMIT",
+            connect_args=_PG_CONNECT_ARGS,
+        )
+        try:
+            for _round in range(3):
+                with admin.connect() as conn:
+                    conn.execute(text(f'DROP DATABASE IF EXISTS "{fresh.database}" WITH (FORCE)'))
+                    conn.execute(text(f'CREATE DATABASE "{fresh.database}"'))
+                engines = [
+                    create_engine(fresh, connect_args=_PG_CONNECT_ARGS) for _ in range(4)
+                ]
+                outcomes: list[str] = []
+                barrier = threading.Barrier(len(engines))
+
+                def run(engine) -> None:
+                    barrier.wait()
+                    try:
+                        create_tables(engine)
+                        outcomes.append("ok")
+                    except Exception as error:  # noqa: BLE001 - the failure is the point
+                        outcomes.append(f"{type(error).__name__}: {str(error)[:120]}")
+
+                threads = [threading.Thread(target=run, args=(e,)) for e in engines]
+                for thread in threads:
+                    thread.start()
+                for thread in threads:
+                    thread.join()
+                for engine in engines:
+                    engine.dispose()
+                assert outcomes == ["ok"] * len(engines), outcomes
+        finally:
+            with admin.connect() as conn:
+                conn.execute(text(f'DROP DATABASE IF EXISTS "{fresh.database}" WITH (FORCE)'))
+            admin.dispose()

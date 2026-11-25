@@ -468,12 +468,30 @@ def get_engine(database_url: str | URL) -> Engine:
     return engine
 
 
+#: Key of the transaction-scoped advisory lock that serialises schema setup
+#: (extensions, tables, retrofits) across processes.
+_SCHEMA_LOCK_KEY = 0x63656D656E746963  # "cementic"
+
+
+def _lock_schema(conn: Connection) -> None:
+    """Wait for any other process's schema setup; released at commit/rollback.
+
+    The watcher and the worker `cementic start` spawns both set up the schema.
+    `CREATE EXTENSION IF NOT EXISTS` and `CREATE TABLE IF NOT EXISTS` check the
+    catalog before they take a lock, so on a fresh database both processes pass
+    the check and the second insert into the catalog fails with a duplicate
+    key. Holding this lock, the second process finds everything already there.
+    """
+    conn.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": _SCHEMA_LOCK_KEY})
+
+
 def ensure_vector_extensions(engine: Engine) -> None:
     """Ensure vector-related PostgreSQL extensions are enabled."""
     if engine.dialect.name != "postgresql":
         return
     with engine.connect() as conn:
         try:
+            _lock_schema(conn)
             for extension in REQUIRED_DB_EXTENSIONS:
                 conn.execute(text(f"CREATE EXTENSION IF NOT EXISTS {extension}"))
             conn.commit()
@@ -693,7 +711,12 @@ def _lexical_index_is_valid(engine: Engine) -> bool:
 def create_tables(engine: Engine) -> None:
     """Create all tables required by the versioned pipeline schema."""
     ensure_vector_extensions(engine)
-    Base.metadata.create_all(engine)
+    if engine.dialect.name == "postgresql":
+        with engine.begin() as conn:
+            _lock_schema(conn)
+            Base.metadata.create_all(conn)
+    else:
+        Base.metadata.create_all(engine)
     _retrofit_schema(engine)
     ensure_lexical_index(engine)
     try:
@@ -735,10 +758,6 @@ _RETIRED_INDEXES = ("ix_source_documents_collection", "ix_chunk_embeddings_profi
 _SCOPE_COLUMNS = ("collection", "extractor_profile_id", "chunk_profile_id")
 
 
-#: Key of the advisory lock that serialises the retrofit pass across processes.
-_RETROFIT_LOCK_KEY = 0x63656D656E746963  # "cementic"
-
-
 def _retrofit_schema(engine: Engine) -> None:
     """Run the in-place schema retrofits, one process at a time.
 
@@ -755,7 +774,7 @@ def _retrofit_schema(engine: Engine) -> None:
     steps = ((_add_missing_columns, _drop_retired_indexes), (_require_scope_columns_not_null,))
     for group in steps:
         with engine.begin() as conn:
-            conn.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": _RETROFIT_LOCK_KEY})
+            _lock_schema(conn)
             for retrofit in group:
                 retrofit(conn)
 
