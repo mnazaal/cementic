@@ -946,11 +946,16 @@ marker, not a timeout — with a regression that starts a scan and asserts no
   `status`'s warm collection counts from 2.06-2.40 s to 1.23-1.28 s (executed on
   the live corpus). Fixed in `e7c5cb5` (commit after taking the session lock;
   PG regression reads the holder's state from `pg_stat_activity`), reviewed with
-  no defects. **Still unexplained:** `autovacuum_count` is 0 on all five tables
-  since the server started 2026-11-13, although `chunk_embeddings` passed its
-  threshold (115,488 dead rows); a held xmin stops removal, not the run. Re-check
-  with `~/.cache/cementic-autovacuum-check.py` a day after deploying `e7c5cb5`;
-  if still 0, read the Postgres log for cancelled autovacuum tasks.
+  no defects; on 2026-11-26 the live database showed no open transaction.
+  **Autovacuum is not broken** (2026-11-26, `~/.cache/cementic-autovacuum-check.py`):
+  the launcher runs and last worked in this database 2026-11-17. Its trigger
+  scales with `reltuples` (~2.4M rows, so ~485k dead rows on `chunks_v2` and
+  `chunk_embeddings`), not with the reset `n_live_tup` the 2026-11-25 reading
+  compared against, so 115,488 dead rows were below it and 0 runs is correct.
+  Consequence: on these tables autovacuum runs only after ~20% churn, so
+  `chunks_v2` keeps the 67,516 dead rows the pinned horizon left until a manual
+  `VACUUM`. A per-table `autovacuum_vacuum_scale_factor` is the lever if dead
+  rows ever matter again; not set, since `status` is back to ~1.2 s warm.
 - **D9 — index maintenance and recall are unmeasured.** No `VACUUM`, `REINDEX` or
   `ANALYZE` anywhere in `src/`; HNSW tombstones left by churn are never measured
   for recall (`db.py:840-901` builds once, `collections.py:400-420` rebuilds only
