@@ -1,43 +1,65 @@
 # cementic — architecture & design
 
-<!-- session-handoff:begin (2026-11-17) -->
+<!-- session-handoff:begin (2026-11-26) -->
 ## Where the work stands
 
-**Entry point:** **Execution order — open items** below. *Corrected
-2026-11-24:* Wave A (A3 onward) is deferred by the user's call (decision log,
-"parallel-lanes interview"); Waves C and D and the rest of Wave B run as
-parallel agent lanes. (A1, A2 and B1-B4 are done and verified.) The live corpus is untouched and clean; the
-repairs change worker behaviour, so the next `cementic start` is what applies
-them.
+**Entry point:** **Wave A plan, 2026-11-26** (under "Wave A" in the
+execution order). Next action: Phase 1 of that plan, the four code lanes,
+started only after the user confirms it in the new session. The user asked
+for the plan and then for this handoff, so no Wave A code exists yet.
 
-**State:** branch `pi/audit-handoff`, not merged or pushed. Baseline `main` @
-`ad9bf86`. *Corrected 2026-11-24:* later work is on `claude/audit-wave-c`,
-stacked on `pi/audit-handoff` (the commit hook confines agent commits to
-`claude/*`), holding C1-C3, C10, C11, D1, D2 and A5's measurement.
-*Corrected 2026-11-25:* everything since is on `claude/audit-integration`,
-stacked on `claude/audit-wave-c`; see **Lane outcomes, 2026-11-25** below. Commits so far: the order replacement, the harness repair, and the
-pipeline invalidation repair. No production database writes, model downloads,
-rebuilds or service changes.
+**State:** `main` @ `a73fa70`, the same as `origin/main`. Every audit repair,
+the two post-deploy fixes and the docs are merged and pushed. No unmerged
+agent work. One stale branch is left, `claude/leftovers` (in `main`); delete it
+with `git branch -d claude/leftovers`. The live service `cementic@papers` runs
+`main`'s code. It was restarted 2026-11-25 after `e7c5cb5` (later commits are
+docs only). It is healthy: `status` and `doctor` were clean on 2026-11-25, and
+on 2026-11-26 no connection held a transaction open.
 
-**Corrected by this audit:** the 11-13 framing still holds for its items, with
-three changes. Its two headline pipeline findings were graded source-traced in
-the lane reports and are now executed (B1, B2). One lane's claim that config
-cross-field validation was sound is refuted by check (C3). The 392 stranded
-chunkings chased on 2026-11-17 are deleted sources, not loss. The PG suite runs
-here (77 passed), so "deselected" is no longer a limit.
+**Before Phase 2 can run (user action, not yet confirmed done):**
+    /sandbox exclude "uv run python scripts/measure_retrieval_quality.py *"
+Run it bare from the main checkout. The exclusion matches only that exact
+command shape, with no `cd`, pipe or env prefix. It runs `main`'s merged
+script and nothing else.
 
-**Evidence and limits:** the baseline table, per-item grades, reproduce
-snippets, fixes and proof conditions are all in the order section; PLAN.md is
-the single source of truth for what to fix and how to prove it. Nothing was verified against the live corpus beyond
-read-only queries, and no retrieval number was re-measured — no embedding daemon
-was started.
+**Corrections to read before trusting older sections:**
+- "Wave A is deferred" (2026-11-24 decision log) is superseded: the user
+  resumed it 2026-11-26.
+- Wave A's intro still says A1-A3 decide whether the ~108 h rebuild is worth
+  running. In fact Wave D is EMPTY: the riders failed 2026-10-23. The rebuild
+  comes back only if Phase 1's re-check finds that A1's scoring fix overturns
+  that verdict.
+- `eval/queries.json` is public now that the repository is public. New query
+  sets stay outside the repo (decision log 2026-11-26).
+
+**Environment quirks (agent sessions, found 2026-11-24/26):**
+- The commit hook refuses any ref an agent creates outside `claude/*`. Cloning
+  or `git init` + fetch creates `main`, or re-checks old commits that carry a
+  `Co-Authored-By` trailer, and is refused. What works:
+  `git branch claude/<topic> main` in the repo, then
+  `git clone -b claude/<topic> <repo> $TMPDIR/<dir>`, commit there, then
+  `git fetch <dir> claude/<topic>:claude/<topic>` back.
+- The sandbox cannot reach Postgres or keep a daemon up between commands.
+  Run tests with the main `.venv/bin/python`, `PYTHONPATH=<tree>/src` and
+  `TIKTOKEN_CACHE_DIR=$HOME/.local/share/cementic/tiktoken`. A tree also needs
+  a `models` symlink to the main checkout's `models/`. Run PG tests bare from
+  the main checkout:
+  `uv run pytest -m pg <abs tree>/tests/integration -q -p no:cacheprovider -o pythonpath=<abs tree>/src`.
+
+**Durable artifacts outside the repo** (user-readable, under `~/.cache/`):
+- `cementic-status-timing.py`, `cementic-vacuum.py`, `cementic-autovacuum-check.py`:
+  read-only diagnostics, plus a one-off `VACUUM (ANALYZE)`, from 2026-11-25/26.
+- `cementic-trial/run.sh` is the isolated supervised-trial script; set
+  `CEMENTIC_TRIAL_SRC` to run a clone's code.
+- `cementic-lanes/` holds lane briefs and gate logs from the audit lanes. It is
+  stale; delete it when convenient.
 
 **Resume checks:**
 ```bash
-git branch --show-current
-git log -1 --oneline
-git status --short
-.venv/bin/python -c 'import cementic; print(cementic.__file__)'
+git -C ~/projects/cementic log -1 --oneline main      # expect a73fa70 or later
+git -C ~/projects/cementic branch --no-merged main    # expect nothing
+cementic status && cementic doctor                    # expect workers running, doctor ok
+~/projects/cementic/.venv/bin/python ~/.cache/cementic-autovacuum-check.py   # expect no open transactions
 ```
 <!-- session-handoff:end -->
 
@@ -234,7 +256,8 @@ mypy, unit, integration and integration-pg all ok), the open items were
 split by what each needs to reach: the sandbox only, a scratch `*_test`
 PostgreSQL, or the daemon plus the live corpus.
 
-- **Wave A is deferred; A3 is no longer next.** The user chose "Defer Wave A"
+- **Wave A is deferred; A3 is no longer next.** *Superseded 2026-11-26: the
+  user resumed Wave A (decision log, "Wave A interview").* The user chose "Defer Wave A"
   over handing them scripts or authorising agents to start the daemon. That
   deferral also parks the items that must wait for A3: A4, A5's decision, D10,
   C7, the supervised tiny-corpus run and the rebuild decision. **Consequence:**
@@ -283,6 +306,39 @@ user would most likely have accepted.
   recommended by the lane with evidence: the first would change the documented
   search JSON shape for a display nicety, and the second has three test fakes
   and seven annotated modules.
+
+### 2026-11-26 — decisions from the Wave A interview
+
+Wave A resumes. The user chose "(b)" (2026-11-26, "lets go with (b) but before
+making any changes please make a comprehensive plan"). That option was
+described as: the agent runs the measurement script against the live corpus
+itself, under a sandbox exclusion, rather than handing the user each run.
+
+- **Only merged code runs outside the sandbox.** The user chose "Main checkout
+  only" over a dedicated clone the agent keeps. The exclusion covers
+  `scripts/measure_retrieval_quality.py` in the user's checkout, so every new
+  measurement subcommand is reviewed and merged before its first live run.
+  **Consequence:** the plan batches all measurement code into one merge, and
+  ranking changes are measured as variants inside the script, so the "after"
+  numbers need no production change merged first. *Rejected:* a dedicated
+  clone, which saves merge round trips but runs unreviewed code unsandboxed.
+- **New query sets live outside the repo.** The user chose "Outside the repo
+  (Recommended)": they go in `~/.local/share/cementic/eval/`, and PLAN.md
+  records each file's SHA-256, seed and per-kind counts. The repository is
+  public and `eval/queries.json` already publishes 360 queries from the user's
+  library. *Rejected:* committing them, which publishes more titles, filenames
+  and phrases; untracking `queries.json`, which removes nothing from history.
+  *Accepted cost:* no one but the user can reproduce Wave A's numbers.
+- **Paraphrased titles are written by a blind agent, plus rules.** The user
+  chose "Blind agent, plus rules (Recommended)": a separate agent sees only
+  each title (no paper text, no search results) and writes one paraphrase, and
+  rule-based variants sit alongside. *Rejected:* rule-based only (measures word
+  overlap, not recall from memory); the user writing about 20 (realistic but
+  too few for a sign test).
+- **Agent-decided, recorded for review:** every live connection the script
+  opens is read-only (`default_transaction_read_only`), so Postgres refuses
+  writes. `fuzzy`, which needs `CREATE EXTENSION pg_trgm`, therefore refuses
+  to run, and a trigram index needs its own user approval.
 
 ## Design principles
 
@@ -424,8 +480,9 @@ follow-up `24afe1e` was reviewed too (its one finding fixed in `b93402e`).
 A5 was measured but not decided. On 2026-11-24/25 parallel agent lanes
 repaired C4-C6, C8, C9, the C11 residual, B2b, B4, B5, D3-D5, D7, D8, D11,
 D12 and parts of D6 and D13 on `claude/audit-integration`; see **Lane
-outcomes, 2026-11-25**. Still open: Wave A from A3 on (deferred by the user),
-C7, D9, D10, and the D6/D13 remainders listed there. The 2026-11-17
+outcomes, 2026-11-25**. Still open (2026-11-26): Wave A from A3 on, resumed
+by the user and planned in **Wave A plan, 2026-11-26**; C7 and D10, which that
+plan carries; D9's index-recall half; and the context-fit script's route. The 2026-11-17
 audit re-ran the 11-13 findings on a green baseline, confirmed six of them,
 refuted two, and added seven; a 2026-11-18 second pass swept the six lane
 reports against this list and found **fifteen findings that had never been
@@ -554,6 +611,59 @@ placeholder, as on `main`; refusing it would break the fixture-driven PG
 tests that rely on a missing model.
 
 ### Wave A — repair the retrieval evidence before reading it
+
+**Wave A plan, 2026-11-26** (agreed with the user; decisions in the decision
+log, "Wave A interview"). Ranking and candidate changes are measured as
+variants inside the script before any production code changes. The user is
+the only wait: one merge after Phase 1, one merge plus a restart after
+Phase 3.
+
+*Phase 1 — tools, in parallel sandbox lanes, one reviewed integration branch,
+merged by the user.* Each lane starts from `main` on a `claude/*` branch,
+writes failing tests first, and has an independent review. PG tests run under
+the existing `uv run pytest -m pg *` exclusion, against `*_test` databases
+only.
+1. Query builders (A3): new kinds, i.e. identifier variants (`InstantNGP` /
+   "instant ngp"), 1-2-word typos, phrases the text configuration cannot
+   match, and a `paraphrase` kind loaded from a file. Output goes to
+   `~/.local/share/cementic/eval/`. A builder test runs on a scratch
+   database.
+2. Diagnostics and variants (C7, D10, context-fit):
+   - a `ties` subcommand, D10's settle-first count;
+   - an `explain` subcommand, C7's `EXPLAIN (ANALYZE, BUFFERS)` of the current
+     versus the scope-filtered lexical query;
+   - `score` variants for C7's scoped lexical arm and D10's secondary sort
+     key;
+   - the read-only connection guard;
+   - `scripts/measure_chunk_context_fit.py` switched to `/tokenize`. The trial
+     run 2026-11-25 got HTTP 200 there and 404 on `/extras/tokenize/count`.
+3. Tie order (A5): the leading-arm tie-break as an `ablate` policy, so it is
+   decided offline from the arms cache.
+4. Re-embed re-check: does A1's `UNRANKED` scoring fix change the 2026-10-23
+   rider FAIL? Work from `~/.cache/cementic-waves/` (`rider-arm.log` and the
+   caches beside it). If a live re-run is needed, it joins Phase 2.
+
+The pre-registered rules land in the same merge, before any data: A4's typo
+fallback, A5's tie order, and C7 and D10 are each adopted only if they beat
+the shipped path by a paired sign test at p < 0.01 on their target set and do
+not lose on the other sets.
+
+*Phase 2 — live runs, by the agent, serial, a few hours.* Every run is read-only
+and uses the live daemon on port 11555.
+1. Baseline: `score` on `eval/queries.json` at HEAD. The cached arms date from
+   2026-09-23, before the lexical fallback.
+2. `build` the new sets, then the blind paraphrase agent, then record each
+   file's SHA-256.
+3. `score` every set; `arms`; `ties`; `explain`.
+4. Each variant scored on the same files; `ablate` offline.
+
+*Phase 3 — decisions and fixes.* Each verdict is written here, under its item,
+against its rule. Passing items get production fixes in parallel reviewed
+lanes, then a merge and a service restart. A live re-score then checks that
+the deployed code matches the variant.
+
+*Parked, each needing its own approval:* the ~108 h re-embed (unless item 4
+reopens it), D9's churned-versus-fresh index recall, and any trigram index.
 
 A1-A3 are hours of work and they decide whether the Phase-2 rebuild (2.3M
 vectors, ~108 h) is worth running at all. The rule already in force stands: fix
