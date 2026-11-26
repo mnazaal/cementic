@@ -94,6 +94,16 @@ If you configure another location, place the model file there before running
 cementic. Changing the embedding model or runtime profile creates a replacement
 revision. Choose the intended runtime before a bulk import.
 
+cementic identifies the model by a SHA-256 hash of the file's contents, not by
+its path. Replacing the file at the same path with different bytes is a model
+change: the next start creates a replacement revision and re-embeds every chunk.
+Hashing a large model takes seconds, so the hash is cached in
+`model_digest_cache.json` in the user-data directory, keyed by the file's path,
+size and modification time. A replacement that keeps all three (a file of the
+same size copied with `cp -p` or `rsync -t`) is not noticed and keeps the old
+identity. Delete that cache file after such a swap to force a re-hash. The
+cache is never pruned; it grows by one short entry per model file change.
+
 ## Inspect search behavior
 
 Hybrid search combines semantic retrieval with PostgreSQL full-text search. It

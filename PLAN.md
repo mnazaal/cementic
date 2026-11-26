@@ -504,9 +504,12 @@ were already fixed by the commits in the table. **Still open:**
 `scripts/measure_chunk_context_fit.py` calls `/extras/tokenize/count`, which
 llama-server answers with HTTP 404 (executed in the trial run below; `/tokenize`
 answers 200), and its identity and tail-detection flaws need a daemon to fix.
-**Awaiting the user:** whether the model-digest cache is pruned (the lane's
-recommendation: leave it; it grows one short entry per model-file change, and
-any pruning rule can change a returned digest).
+**Decided by the user 2026-11-26: the model-digest cache is never pruned**
+("ok sure (a)"): it grows one short entry per model-file change, and any
+pruning rule can change a returned digest, which forks the embedding profile.
+The limitation it carries, a same-size swap with a restored mtime keeping the
+old identity, is documented for users in `docs/configuration.md` ("Choose an
+embedding runtime") with the remedy (delete the cache file).
 
 **Supervised tiny-corpus trial, 2026-11-25** (`~/.cache/cementic-trial/run.sh`,
 isolated: `cementic_trial_test`, its own data dir, daemon port 11556). The first
